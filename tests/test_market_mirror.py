@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from autosport.domain import MarketEvent
-from autosport.market_mirror import MarketMirror, MirrorUpdate
+from autosport.market_mirror import MarketMirror, MarketMirrorRevisionChanged, MirrorUpdate
 from autosport.storage import SQLiteMarketStore
 
 
@@ -617,6 +617,47 @@ class MarketMirrorTests(unittest.TestCase):
                     tuple(event.selection_id for event in replay.events),
                     ("wanted",),
                 )
+            finally:
+                store.close()
+
+
+    def test_revision_guard_blocks_reentrant_live_mutation(self) -> None:
+        mirror = MarketMirror()
+        first = self.event(sequence=1, odds="2.00")
+        second = self.event(sequence=2, odds="2.20")
+        mirror.apply(first)
+
+        with mirror.hold_revision(1):
+            with self.assertRaisesRegex(
+                MarketMirrorRevisionChanged,
+                "mutation is blocked during decision publication",
+            ):
+                mirror.apply(second)
+
+        self.assertEqual(mirror.revision, 1)
+        self.assertEqual(mirror.snapshot(), (first,))
+
+    def test_revision_guard_blocks_durable_append_before_it_can_outrun_mirror(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            mirror = MarketMirror()
+            first = self.event(sequence=1, odds="2.00")
+            second = self.event(sequence=2, odds="2.20")
+            try:
+                applied = mirror.persist_and_apply(store, first)
+                self.assertEqual(applied.status, MirrorUpdate.APPLIED)
+                self.assertEqual(len(store.events()), 1)
+
+                with mirror.hold_revision(1):
+                    with self.assertRaisesRegex(
+                        MarketMirrorRevisionChanged,
+                        "persistence is blocked during decision publication",
+                    ):
+                        mirror.persist_and_apply(store, second)
+
+                self.assertEqual(mirror.revision, 1)
+                self.assertEqual(mirror.snapshot(), (first,))
+                self.assertEqual(store.events(), [first])
             finally:
                 store.close()
 

@@ -4,7 +4,9 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from autosport.agent_loop import AgentLoopPhase
@@ -12,10 +14,12 @@ from autosport.champion_agent_episode import (
     ChampionAgentEpisode,
     ChampionAgentEpisodeError,
 )
+from autosport.learning_environment import EnvironmentIdentity
 from autosport.paper_campaign_episode_handoff import (
     PaperCampaignEpisodeHandoff,
     PaperCampaignEpisodeHandoffError,
 )
+from autosport.policy_deployment import ActivationBinding, DeploymentScope
 from autosport.scientific_registry import ScientificRegistry
 from autosport.strategy_model_factory import FactoryArtifactStore
 from autosport.transparent_bandit_policy import BanditPolicyState
@@ -74,6 +78,7 @@ class PaperCampaignEpisodeHandoffTests(unittest.TestCase):
         root: Path,
         environment,
         parent_snapshot,
+        **deployment_inputs,
     ):
         return handoff.start_next_episode(
             root / "child-agent-loop.json",
@@ -90,6 +95,7 @@ class PaperCampaignEpisodeHandoffTests(unittest.TestCase):
             risk_fingerprint=parent_snapshot.risk_fingerprint,
             source_sha256=parent_snapshot.source_sha256,
             at=_legacy.T4,
+            **deployment_inputs,
         )
 
     def test_sealed_campaign_checkpoint_starts_distinct_champion_episode_once(self) -> None:
@@ -231,6 +237,145 @@ class PaperCampaignEpisodeHandoffTests(unittest.TestCase):
                     source_sha256=parent_snapshot.source_sha256,
                     at=_legacy.T4,
                 )
+
+
+    def test_deployment_bound_parent_preserves_generation_at_episode_boundary(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, runtime, _finalization = self._terminal_parent(root)
+            parent_snapshot = runtime.agent_loop.snapshot()
+            training = EnvironmentIdentity(
+                source_id=environment.identity.source_id,
+                config_id=environment.identity.config_id,
+                data_id="campaign-training-data",
+                protocol_id=environment.identity.protocol_id,
+                cutoff_ts="2026-09-20T02:59:00Z",
+                seed=environment.identity.seed,
+            )
+            policy = BanditPolicyState.initial(
+                environment_id=training.environment_id,
+                protocol_id=training.protocol_id,
+                config_sha256=parent_snapshot.config_sha256,
+                seed=training.seed,
+                action_types=frozenset({"PAPER_PROPOSAL"}),
+            )
+            scope = DeploymentScope(
+                canonical_strategy_id="campaign-champion",
+                sport_domain="table_tennis",
+                competition_scope="campaign-fixture",
+                market_semantics_id="winner-v1",
+                provider_source_class="paper",
+                feature_schema_id="campaign-feature-v1",
+                protocol_id=training.protocol_id,
+                action_semantics_id="paper-proposal-v1",
+                reward_definition_id="paper-net-reward-v1",
+                config_sha256=parent_snapshot.config_sha256,
+            )
+            binding = ActivationBinding(
+                policy_id=policy.policy_id,
+                policy_artifact_sha256="1" * 64,
+                training_environment_id=training.environment_id,
+                training_data_id=training.data_id,
+                training_dataset_record_sha256="2" * 64,
+                training_cutoff_ts=training.cutoff_ts,
+                promotion_decision_id="campaign-promotion",
+                promotion_decision_record_sha256="3" * 64,
+                promotion_evidence_id="4" * 64,
+                promotion_evidence_record_sha256="5" * 64,
+                evaluation_bundle_id="campaign-evaluation",
+                evaluation_bundle_record_sha256="6" * 64,
+                deployment_scope_id=scope.scope_id,
+                deployment_environment_id=environment.environment_id,
+                deployment_data_id=environment.identity.data_id,
+                deployment_dataset_record_sha256="7" * 64,
+                deployment_cutoff_ts=environment.identity.cutoff_ts,
+                snapshot_available_at=_legacy.T2,
+                activation_at=_legacy.T2,
+                admissible_actions=("PAPER_PROPOSAL",),
+                economic_goal_fingerprint=parent_snapshot.economic_goal_fingerprint,
+                risk_fingerprint=parent_snapshot.risk_fingerprint,
+                dataset_lineage_proof_sha256="8" * 64,
+            )
+            bound_parent = replace(
+                parent_snapshot,
+                activation_binding_id=binding.binding_id,
+            )
+            authority = SimpleNamespace(
+                scope=scope,
+                binding=binding,
+                training_identity=training,
+                deployment_identity=environment.identity,
+            )
+            handoff = PaperCampaignEpisodeHandoff(runtime)
+
+            with patch.object(
+                runtime.agent_loop,
+                "snapshot",
+                return_value=bound_parent,
+            ):
+                with self.assertRaisesRegex(
+                    PaperCampaignEpisodeHandoffError,
+                    "requires canonical deployment resolver inputs",
+                ):
+                    self._call(
+                        handoff,
+                        root,
+                        environment,
+                        bound_parent,
+                    )
+
+            semantic_inputs = object()
+            market_store = object()
+            runtime_store = object()
+            with (
+                patch.object(
+                    runtime.agent_loop,
+                    "snapshot",
+                    return_value=bound_parent,
+                ),
+                patch(
+                    "autosport.paper_campaign_episode_handoff.load_deployment_authority",
+                    return_value=authority,
+                ) as load_authority,
+                patch(
+                    "autosport.champion_agent_episode._require_canonical_inputs",
+                    return_value=(semantic_inputs, market_store, runtime_store),
+                ),
+                patch(
+                    "autosport.champion_agent_episode.load_champion_policy",
+                    return_value=policy,
+                ) as load_policy,
+                patch(
+                    "autosport.champion_agent_episode.validate_canonical_activation_binding",
+                    return_value=SimpleNamespace(deployment_scope=scope),
+                ),
+            ):
+                result = self._call(
+                    handoff,
+                    root,
+                    environment,
+                    bound_parent,
+                    semantic_inputs=semantic_inputs,
+                    market_store=market_store,
+                    runtime_authority_store=runtime_store,
+                )
+
+            load_authority.assert_called_once_with(
+                runtime.agent_loop.path,
+                expected_binding_id=binding.binding_id,
+            )
+            assert load_policy.call_args.kwargs["as_of"] == binding.activation_at
+            assert result.episode.activation_binding == binding
+            assert (
+                result.episode.agent_loop.snapshot().activation_binding_id
+                == binding.binding_id
+            )
+            assert (
+                result.episode.agent_loop.snapshot().activation_binding_id
+                == bound_parent.activation_binding_id
+            )
 
 
 if __name__ == "__main__":  # pragma: no cover

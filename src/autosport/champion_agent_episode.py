@@ -30,6 +30,7 @@ from .policy_deployment import (
 from .policy_deployment_semantic_bridge import (
     CrossSessionSemanticInputs,
     PolicyDeploymentSemanticBridgeError,
+    SemanticResolutionInput,
     validate_canonical_activation_binding,
 )
 from .scientific_registry import ScientificRegistry
@@ -75,15 +76,13 @@ def _require_canonical_inputs(
     canonical re-resolution itself on every initialize/resume.
     """
 
-    if not isinstance(semantic_inputs, CrossSessionSemanticInputs):
-        raise ChampionAgentEpisodeError(
-            "cross-session activation requires canonical semantic resolver inputs"
-        )
-    if not isinstance(market_store, SQLiteMarketStore):
-        raise ChampionAgentEpisodeError(
-            "cross-session activation requires canonical semantic resolver inputs"
-        )
-    if not isinstance(runtime_authority_store, DeploymentRuntimeAuthorityStore):
+    if (
+        type(semantic_inputs) is not CrossSessionSemanticInputs
+        or type(semantic_inputs.training) is not SemanticResolutionInput
+        or type(semantic_inputs.deployment) is not SemanticResolutionInput
+        or type(market_store) is not SQLiteMarketStore
+        or type(runtime_authority_store) is not DeploymentRuntimeAuthorityStore
+    ):
         raise ChampionAgentEpisodeError(
             "cross-session activation requires canonical semantic resolver inputs"
         )
@@ -234,11 +233,11 @@ class ChampionAgentEpisode:
                     runtime_authority_store=runtime_authority_store,
                 )
             )
-            if _instant(activation_binding.activation_at, "activation_at") != _instant(
+            if _instant(activation_binding.activation_at, "activation_at") > _instant(
                 at, "at"
             ):
                 raise ChampionAgentEpisodeError(
-                    "activation binding time must equal AgentLoop initialization"
+                    "activation binding cannot postdate AgentLoop initialization"
                 )
             authority_identity = training_identity
             authority_as_of = activation_binding.activation_at
@@ -496,20 +495,11 @@ class ChampionAgentEpisode:
             )
         admitted = frozenset(self.environment.episode.admissible_actions)
         action_type = self.policy.choose(admissible_actions=admitted)
-        effective_parameters = parameters
-        if self.activation_binding is not None:
-            if any(key == "activation_binding_id" for key, _ in parameters):
-                raise ChampionAgentEpisodeError(
-                    "caller cannot override activation_binding_id"
-                )
-            effective_parameters = tuple(
-                sorted(
-                    (
-                        *parameters,
-                        ("activation_binding_id", self.activation_binding.binding_id),
-                    )
-                )
+        if any(key == "activation_binding_id" for key, _ in parameters):
+            raise ChampionAgentEpisodeError(
+                "caller cannot override activation_binding_id"
             )
+        effective_parameters = self.agent_loop.bind_action_parameters(parameters)
         return self.environment.act(
             observation,
             action_type=action_type,

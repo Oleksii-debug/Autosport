@@ -1544,12 +1544,7 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
     return _cancel_effect(api, current_run_id)
 
 
-def main(
-    argv: list[str] | None = None,
-    *,
-    _cancel_effect=_cancel_run_or_defer_active_conflict,
-    _cancel_effect_code=_cancel_run_or_defer_active_conflict.__code__,
-) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pr-number", type=int, required=True)
     parser.add_argument(
@@ -1563,8 +1558,6 @@ def main(
     parser.add_argument("--current-run-id", type=int, required=True)
     args = parser.parse_args(argv)
     try:
-        if getattr(_cancel_effect, "__code__", None) is not _cancel_effect_code:
-            raise CancellationError("canonical cancel effect authority changed")
         api = WorkflowScopedGitHubApi(
             repository=os.environ.get("GITHUB_REPOSITORY", ""),
             token=os.environ.get("GITHUB_TOKEN", ""),
@@ -1608,8 +1601,6 @@ def main(
             workflow_name=args.workflow_name,
             current_run_id=current_run_id,
             runs=sweep_runs,
-            _cancel_effect=_cancel_effect,
-            _cancel_effect_code=_cancel_effect_code,
         )
         if trigger_pr_number is None and snapshot_trigger_pr_number is not None:
             trigger_pr_number = snapshot_trigger_pr_number
@@ -1628,8 +1619,6 @@ def main(
         )
         orphan_cancelled = api.cancel_historical_unbound_runs(
             exclude_run_ids=orphan_excluded_run_ids,
-            _cancel_effect=_cancel_effect,
-            _cancel_effect_code=_cancel_effect_code,
         )
 
         if trigger_pr_number is not None:
@@ -1651,8 +1640,6 @@ def main(
                     event_head_sha=event_head_sha,
                     current_run_id=current_run_id,
                     qualification=trigger_qualification,
-                    _cancel_effect=_cancel_effect,
-                    _cancel_effect_code=_cancel_effect_code,
                 )
     except CancellationError as exc:
         print(f"superseded-run cancellation failed: {exc}", file=sys.stderr)

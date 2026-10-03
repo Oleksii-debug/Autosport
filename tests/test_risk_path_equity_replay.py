@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+from copy import deepcopy
 from decimal import Decimal, localcontext
 
 import pytest
@@ -53,7 +53,7 @@ def test_replay_preserves_transient_minimum_after_later_win(tmp_path) -> None:
         settled_at="2026-01-01T11:00:00+00:00",
     )
     assert book.balance == Decimal("120")
-    final = _snapshot(book, tmp_path / "base.json")
+    final = _snapshot(book, tmp_path / "final.json")
 
     replay = replay_paper_book_equity_path(
         base,
@@ -85,7 +85,7 @@ def test_replay_uses_materialized_partial_stake_not_requested_alias(tmp_path) ->
         bankroll_id="paper-main",
         currency="EUR",
     )
-    final = _snapshot(book, tmp_path / "base.json")
+    final = _snapshot(book, tmp_path / "final.json")
 
     replay = replay_paper_book_equity_path(
         base,
@@ -111,7 +111,7 @@ def test_foreign_interleaved_ticket_fails_closed(tmp_path) -> None:
         Decimal("10"),
         placed_at="2026-01-01T10:01:00+00:00",
     )
-    final = _snapshot(book, tmp_path / "base.json")
+    final = _snapshot(book, tmp_path / "final.json")
 
     with pytest.raises(RiskPathEquityReplayError, match="foreign PaperBook mutation"):
         replay_paper_book_equity_path(
@@ -129,7 +129,7 @@ def test_expected_ticket_alias_cannot_inflate_occurrence(tmp_path) -> None:
         Decimal("10"),
         placed_at="2026-01-01T10:00:00+00:00",
     )
-    final = _snapshot(book, tmp_path / "base.json")
+    final = _snapshot(book, tmp_path / "final.json")
 
     with pytest.raises(
         RiskPathEquityReplayError,
@@ -173,13 +173,9 @@ def test_immutable_base_ticket_cannot_be_rewritten(tmp_path) -> None:
     )
     base = _snapshot(book, tmp_path / "base.json")
 
-    final_payload = json.loads(base.decode("utf-8"))
-    assert final_payload["tickets"][0]["ticket_id"] == ticket.ticket_id
-    final_payload["tickets"][0]["strategy_reason"] = "rewritten"
-    final = (
-        json.dumps(final_payload, ensure_ascii=False, indent=2) + "\n"
-    ).encode("utf-8")
-    PaperBook.load_bytes(final)
+    mutated = deepcopy(book)
+    mutated.tickets[ticket.ticket_id].strategy_reason = "rewritten"
+    final = _snapshot(mutated, tmp_path / "final.json")
 
     with pytest.raises(
         RiskPathEquityReplayError,
@@ -203,7 +199,7 @@ def test_missing_settlement_timestamp_is_noncausal_and_strict_mode_rejects(
         placed_at="2026-01-01T10:00:00+00:00",
     )
     book.settle(ticket.ticket_id, {ticket.legs[0].quote_key})
-    final = _snapshot(book, tmp_path / "base.json")
+    final = _snapshot(book, tmp_path / "final.json")
 
     relaxed = replay_paper_book_equity_path(
         base,
@@ -230,7 +226,7 @@ def test_same_exact_snapshots_rederive_same_occurrence_digest(tmp_path) -> None:
         Decimal("10"),
         placed_at="2026-01-01T10:00:00+00:00",
     )
-    final = _snapshot(book, tmp_path / "base.json")
+    final = _snapshot(book, tmp_path / "final.json")
 
     first = replay_paper_book_equity_path(
         base,
@@ -257,7 +253,7 @@ def test_replay_is_independent_of_ambient_decimal_context(tmp_path) -> None:
         Decimal("12.345678"),
         placed_at="2026-01-01T10:00:00+00:00",
     )
-    final = _snapshot(book, tmp_path / "base.json")
+    final = _snapshot(book, tmp_path / "final.json")
     expected_final = book.balance
 
     with localcontext() as context:
@@ -287,7 +283,7 @@ def test_base_open_ticket_settlement_does_not_double_debit_stake(tmp_path) -> No
         {ticket.legs[0].quote_key},
         settled_at="2026-01-01T11:00:00+00:00",
     )
-    final = _snapshot(book, tmp_path / "base-open.json")
+    final = _snapshot(book, tmp_path / "final-settled.json")
 
     replay = replay_paper_book_equity_path(
         base,
@@ -356,56 +352,45 @@ def test_replay_rejects_huge_scale_zero_before_fixed_point_materialization(
             expected_changed_ticket_ids=frozenset(),
         )
 
-def test_replay_rejects_structural_lay_ticket_already_present_in_base(tmp_path) -> None:
+def test_replay_rejects_lay_ticket_already_present_in_base(tmp_path) -> None:
     book = PaperBook("100")
-    book.open_ticket(
-        [_leg(odds="3", exchange_side="back")],
+    ticket = book.open_ticket(
+        [_leg(odds="3", exchange_side="lay")],
         Decimal("10"),
         placed_at="2026-01-01T10:00:00+00:00",
     )
     base = _snapshot(book, tmp_path / "base-lay.json")
-    lay_base = base.replace(
-        b'"exchange_side": "back"',
-        b'"exchange_side": "lay"',
-        1,
-    )
-    assert lay_base != base
 
     with pytest.raises(
         RiskPathEquityReplayError,
-        match="PaperBook semantic validation failed: ValueError",
-    ):
-        replay_paper_book_equity_path(
-            lay_base,
-            lay_base,
-            expected_changed_ticket_ids=frozenset(),
-        )
-
-
-def test_replay_rejects_structural_lay_ticket_opened_in_suffix(tmp_path) -> None:
-    book = PaperBook("100")
-    snapshot_path = tmp_path / "paper-book.json"
-    base = _snapshot(book, snapshot_path)
-    ticket = book.open_ticket(
-        [_leg(odds="3", exchange_side="back")],
-        Decimal("10"),
-        placed_at="2026-01-01T10:00:00+00:00",
-    )
-    final = _snapshot(book, snapshot_path)
-    lay_final = final.replace(
-        b'"exchange_side": "back"',
-        b'"exchange_side": "lay"',
-        1,
-    )
-    assert lay_final != final
-
-    with pytest.raises(
-        RiskPathEquityReplayError,
-        match="PaperBook semantic validation failed: ValueError",
+        match="LAY ticket",
     ):
         replay_paper_book_equity_path(
             base,
-            lay_final,
+            base,
+            expected_changed_ticket_ids=frozenset(),
+        )
+
+    assert ticket.legs[0].exchange_side == "lay"
+
+
+def test_replay_rejects_lay_ticket_opened_in_suffix(tmp_path) -> None:
+    book = PaperBook("100")
+    base = _snapshot(book, tmp_path / "base-before-lay.json")
+    ticket = book.open_ticket(
+        [_leg(odds="3", exchange_side="lay")],
+        Decimal("10"),
+        placed_at="2026-01-01T10:00:00+00:00",
+    )
+    final = _snapshot(book, tmp_path / "final-with-lay.json")
+
+    with pytest.raises(
+        RiskPathEquityReplayError,
+        match="LAY ticket",
+    ):
+        replay_paper_book_equity_path(
+            base,
+            final,
             expected_changed_ticket_ids=frozenset({ticket.ticket_id}),
         )
 
@@ -418,7 +403,7 @@ def test_replay_preserves_explicit_back_exchange_side(tmp_path) -> None:
         Decimal("10"),
         placed_at="2026-01-01T10:00:00+00:00",
     )
-    final = _snapshot(book, tmp_path / "base-before-back.json")
+    final = _snapshot(book, tmp_path / "final-with-back.json")
 
     replay = replay_paper_book_equity_path(
         base,

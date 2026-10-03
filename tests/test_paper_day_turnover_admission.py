@@ -1650,6 +1650,208 @@ def test_authority_instance_state_class_shadow_fails_closed_before_read(
     assert set(persisted.tickets) == set(book.tickets)
 
 
+def test_carrier_executable_witness_inventory_is_complete():
+    observed = {
+        economic_admission.RiskDecision: tuple(
+            name
+            for name, _descriptor, _function, _code in (
+                economic_admission._RISK_DECISION_EXECUTABLE_WITNESSES
+            )
+        ),
+        economic_admission.ProposedTicketRiskContext: tuple(
+            name
+            for name, _descriptor, _function, _code in (
+                economic_admission._PROPOSED_CONTEXT_EXECUTABLE_WITNESSES
+            )
+        ),
+        economic_admission.TicketLeg: tuple(
+            name
+            for name, _descriptor, _function, _code in (
+                economic_admission._TICKET_LEG_EXECUTABLE_WITNESSES
+            )
+        ),
+        economic_admission.MarketEvent: tuple(
+            name
+            for name, _descriptor, _function, _code in (
+                economic_admission._MARKET_EVENT_EXECUTABLE_WITNESSES
+            )
+        ),
+        economic_admission.EconomicGoalContract: tuple(
+            name
+            for name, _descriptor, _function, _code in (
+                economic_admission._ECONOMIC_GOAL_EXECUTABLE_WITNESSES
+            )
+        ),
+        economic_admission.PaperTicket: tuple(
+            name
+            for name, _descriptor, _function, _code in (
+                economic_admission._PAPER_TICKET_EXECUTABLE_WITNESSES
+            )
+        ),
+    }
+    assert observed == {
+        economic_admission.RiskDecision: ("__init__",),
+        economic_admission.ProposedTicketRiskContext: ("__init__", "__post_init__"),
+        economic_admission.TicketLeg: ("__eq__", "quote_key"),
+        economic_admission.MarketEvent: (
+            "__eq__",
+            "quote_key",
+            "to_dict",
+            "from_dict",
+        ),
+        economic_admission.EconomicGoalContract: (
+            "__init__",
+            "__post_init__",
+            "__eq__",
+        ),
+        economic_admission.PaperTicket: ("__init__", "__eq__"),
+    }
+
+    day_observed = {
+        owner: tuple(
+            name for name, _descriptor, _function, _code in witnesses
+        )
+        for owner, witnesses in (
+            economic_admission._DAY_AUTHORITY_EXECUTABLE_DESCRIPTOR_WITNESSES
+        )
+    }
+    assert day_observed == {
+        economic_admission._PaperDayTurnoverSnapshot: ("__init__",),
+        economic_admission._ProductDayAdmissionAuthority: ("__init__",),
+        economic_admission.PaperDayTurnoverEvidence: ("__init__", "__post_init__"),
+        economic_admission.ProductDayRiskWindow: (
+            "__init__",
+            "__post_init__",
+            "__eq__",
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    ("owner", "descriptor_name", "outcome"),
+    (
+        (economic_admission.RiskDecision, "__init__", "risk-decision-error"),
+        (
+            economic_admission.ProposedTicketRiskContext,
+            "__post_init__",
+            "risk-deny",
+        ),
+        (economic_admission.TicketLeg, "quote_key", "risk-deny"),
+        (economic_admission.MarketEvent, "from_dict", "risk-deny"),
+        (economic_admission.EconomicGoalContract, "__eq__", "risk-deny"),
+        (economic_admission.PaperTicket, "__eq__", "risk-deny"),
+        (
+            economic_admission._ProductDayAdmissionAuthority,
+            "__init__",
+            "day-error",
+        ),
+        (
+            economic_admission.PaperDayTurnoverEvidence,
+            "__init__",
+            "day-error",
+        ),
+        (
+            economic_admission.ProductDayRiskWindow,
+            "__eq__",
+            "day-error",
+        ),
+    ),
+)
+def test_carrier_executable_descriptor_rebind_fails_closed_before_dispatch(
+    tmp_path,
+    owner,
+    descriptor_name,
+    outcome,
+):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg(f"carrier-executable-{descriptor_name}")
+    context = _context(candidate, _timestamp(now))
+    policy = _policy(goal)
+    original = owner.__dict__[descriptor_name]
+    hostile_called = False
+
+    def forged(*args, **kwargs):
+        nonlocal hostile_called
+        del args, kwargs
+        hostile_called = True
+        return True
+
+    if type(original) is property:
+        replacement = property(forged)
+    elif type(original) is classmethod:
+        replacement = classmethod(forged)
+    elif type(original) is staticmethod:
+        replacement = staticmethod(forged)
+    else:
+        replacement = forged
+
+    try:
+        setattr(owner, descriptor_name, replacement)
+        if outcome == "risk-decision-error":
+            with pytest.raises(
+                RuntimeError,
+                match="economic admission risk decision executable authority changed",
+            ):
+                admit_paper_ticket(
+                    workspace=tmp_path,
+                    book=book,
+                    risk_policy=policy,
+                    stake=Decimal("0.01"),
+                    legs=(candidate,),
+                    reason="mutated carrier executable must fail closed",
+                    placed_at=_timestamp(now),
+                    context=context,
+                    provider_source_ids=("provider-1",),
+                    bankroll_id="paper-bankroll",
+                    currency="USD",
+                )
+        elif outcome == "day-error":
+            with pytest.raises(
+                RuntimeError,
+                match="economic admission day authority executable descriptor changed",
+            ):
+                admit_paper_ticket(
+                    workspace=tmp_path,
+                    book=book,
+                    risk_policy=policy,
+                    stake=Decimal("0.01"),
+                    legs=(candidate,),
+                    reason="mutated day carrier executable must fail closed",
+                    placed_at=_timestamp(now),
+                    context=context,
+                    provider_source_ids=("provider-1",),
+                    bankroll_id="paper-bankroll",
+                    currency="USD",
+                )
+        else:
+            result = admit_paper_ticket(
+                workspace=tmp_path,
+                book=book,
+                risk_policy=policy,
+                stake=Decimal("0.01"),
+                legs=(candidate,),
+                reason="mutated risk carrier executable must fail closed",
+                placed_at=_timestamp(now),
+                context=context,
+                provider_source_ids=("provider-1",),
+                bankroll_id="paper-bankroll",
+                currency="USD",
+            )
+            assert result.admitted is False
+            assert result.risk.reason == "virtual bankroll risk helper authority is invalid"
+    finally:
+        setattr(owner, descriptor_name, original)
+
+    assert hostile_called is False
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert set(persisted.tickets) == set(book.tickets)
+
+
 def test_risk_policy_limit_descriptor_rebind_cannot_widen_ticket_cap(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)

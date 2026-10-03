@@ -477,7 +477,7 @@ class CampaignInceptionReceipt:
         if cls is not CampaignInceptionReceipt:
             raise TypeError("CampaignInceptionReceipt issuer requires exact canonical class")
         if type(values) is not dict:
-            values = dict(values)
+            raise TypeError("campaign inception receipt values must be exact dict")
         if set(values) != set(_CAMPAIGN_RECEIPT_FIELD_NAMES):
             raise CampaignInceptionIntegrityError(
                 "campaign inception receipt fields are not canonical"

@@ -1251,6 +1251,21 @@ def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
             f"BETDAQ economic response is not the exact {method}Result wrapper"
         )
     result = response_children[0]
+
+    def require_known_attributes(
+        element: ET.Element,
+        allowed: tuple[str, ...],
+        context: str,
+    ) -> None:
+        unexpected = tuple(
+            sorted(name for name in element.attrib if name not in allowed)
+        )
+        if unexpected:
+            raise BetdaqEconomicReadbackError(
+                f"{context} contains unexpected provider attribute: "
+                + ", ".join(unexpected)
+            )
+
     statuses = [
         child
         for child in result
@@ -1260,6 +1275,11 @@ def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
         raise BetdaqEconomicReadbackError(
             "BETDAQ economic result must contain exactly one ReturnStatus"
         )
+    require_known_attributes(
+        statuses[0],
+        ("Code", "Description", "CallId"),
+        "BETDAQ ReturnStatus",
+    )
     raw_code = statuses[0].attrib.get("Code")
     if (
         type(raw_code) is not str
@@ -1297,20 +1317,6 @@ def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
         raise BetdaqEconomicReadbackError(
             f"BETDAQ economic {method} result contains unexpected element"
         )
-
-    def require_known_attributes(
-        element: ET.Element,
-        allowed: tuple[str, ...],
-        context: str,
-    ) -> None:
-        unexpected = tuple(
-            sorted(name for name in element.attrib if name not in allowed)
-        )
-        if unexpected:
-            raise BetdaqEconomicReadbackError(
-                f"{context} contains unexpected provider attribute: "
-                + ", ".join(unexpected)
-            )
 
     if method == "GetOrderDetails":
         require_known_attributes(
@@ -1391,6 +1397,11 @@ def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
         for container in result:
             if container.tag != orders_tag:
                 continue
+            require_known_attributes(
+                container,
+                (),
+                "BETDAQ postings Orders",
+            )
             for posting in container:
                 if posting.tag == order_tag:
                     require_known_attributes(

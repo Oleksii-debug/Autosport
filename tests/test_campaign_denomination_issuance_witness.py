@@ -8,6 +8,7 @@ import os
 
 import pytest
 
+import autosport._campaign_denomination_witness_root_pin as denomination_root_pin_module
 import autosport.campaign_economic_authority as campaign_authority_module
 from autosport.campaign_economic_authority import (
     CampaignEconomicAuthorityError,
@@ -257,3 +258,27 @@ def test_root_preserving_cache_write_verifies_registry_before_root_side_effect(
         assert not attacker_root.exists()
     finally:
         fixture.doCleanups()
+
+
+def test_root_record_digest_rejects_before_creating_selected_directory(tmp_path) -> None:
+    registry_path = tmp_path / "workspace" / "scientific-registry.json"
+    attacker_root = tmp_path / "must-not-be-created-from-bad-root-record"
+    attacker_root_text = os.path.normcase(os.path.abspath(attacker_root.resolve()))
+    record = {
+        "schema": "autosport.campaign_denomination_witness_root",
+        "schema_version": 1,
+        "registry_identity": campaign_authority_module._registry_identity(registry_path),
+        "root": attacker_root_text,
+        "root_sha256": "0" * 64,
+    }
+
+    with pytest.raises(
+        CampaignEconomicAuthorityError,
+        match="campaign denomination witness root digest mismatch",
+    ):
+        denomination_root_pin_module._validated_root_record(
+            record,
+            registry_path=registry_path,
+        )
+
+    assert not attacker_root.exists()

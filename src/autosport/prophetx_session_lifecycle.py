@@ -644,12 +644,21 @@ class ProphetXSessionLifecycle:
         attempt_id: str,
         now: datetime,
         access_expires_at: datetime,
+        provider_session_slot_preservation_proven: bool,
     ) -> ProphetXSessionSnapshot:
-        """Apply exact provider refresh expiry without changing session lineage."""
+        """Apply refresh only when provider-slot preservation is proven."""
 
         attempt = _sha256_hex(attempt_id, "attempt_id")
         timestamp = _aware_utc(now, "now")
         expires = _aware_utc(access_expires_at, "access_expires_at")
+        if type(provider_session_slot_preservation_proven) is not bool:
+            raise ProphetXSessionLifecycleError(
+                "provider_session_slot_preservation_proven must be an exact bool"
+            )
+        if not provider_session_slot_preservation_proven:
+            raise ProphetXSessionLifecycleError(
+                "renewal success requires proven provider-session slot preservation"
+            )
         if expires <= timestamp:
             raise ProphetXSessionLifecycleError(
                 "provider renewal access_expires_at must follow completion"

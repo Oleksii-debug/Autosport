@@ -8,6 +8,7 @@ import json
 import pytest
 
 import autosport.betfair_account_readonly as betfair_readonly
+import autosport.provider_account_headroom_admission as headroom_module
 from autosport.account_snapshot_acquisition import BetfairAccountSnapshotAcquirer
 from autosport.betfair_account_readonly import BetfairSessionCredentials
 from autosport.bookmaker_capability import BookmakerCapability
@@ -372,6 +373,36 @@ class _SequencedDateTime(datetime):
                 value.microsecond,
             )
         return cls.fromtimestamp(value.timestamp(), tz=tz)
+
+
+def test_headroom_clock_rebinding_cannot_mint_fresh_balance(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("a1", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
+    hostile_calls = []
+
+    def hostile_clock():
+        hostile_calls.append(True)
+        assert acquired.snapshot.balance is not None
+        return datetime.fromisoformat(acquired.snapshot.balance.observed_at)
+
+    monkeypatch.setattr(headroom_module, "_utc_now", hostile_clock)
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="headroom clock authority changed",
+    ):
+        assess_provider_account_headroom(
+            ledger,
+            acquired,
+            plan_id="p1",
+            action_id="a1",
+        )
+
+    assert hostile_calls == []
 
 
 def test_freshness_is_bound_to_balance_observation_not_later_snapshot_time(

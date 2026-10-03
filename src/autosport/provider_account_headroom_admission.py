@@ -91,6 +91,7 @@ _ASSERT_CAPITAL_ISSUED_CURRENT_CODE = getattr(
     None,
 )
 _ECONOMIC_GOAL_STORE_TYPE = EconomicGoalStore
+_ECONOMIC_GOAL_STORE_FILE_NAME = EconomicGoalStore.FILE_NAME
 _ECONOMIC_GOAL_STORE_INIT = EconomicGoalStore.__init__
 _ECONOMIC_GOAL_STORE_INIT_CODE = getattr(_ECONOMIC_GOAL_STORE_INIT, "__code__", None)
 _ECONOMIC_GOAL_STORE_LOAD = EconomicGoalStore.load
@@ -262,6 +263,7 @@ def _canonical_ledger_workspace(
 def _canonical_denomination_dispatch(
     *,
     _store_type=_ECONOMIC_GOAL_STORE_TYPE,
+    _store_file_name=_ECONOMIC_GOAL_STORE_FILE_NAME,
     _store_init=_ECONOMIC_GOAL_STORE_INIT,
     _store_init_code=_ECONOMIC_GOAL_STORE_INIT_CODE,
     _store_load=_ECONOMIC_GOAL_STORE_LOAD,
@@ -311,6 +313,7 @@ def _canonical_denomination_dispatch(
     if (
         live_store_type is not _store_type
         or globals().get("EconomicGoalStore") is not _store_type
+        or vars(live_store_type).get("FILE_NAME") != _store_file_name
         or live_store_init is not _store_init
         or getattr(_store_init, "__code__", None) is not _store_init_code
         or live_store_load is not _store_load
@@ -1160,6 +1163,18 @@ def _current_economic_goal_denomination(
     )
     workspace = _canonical_ledger_workspace(ledger)
     store = store_type(workspace)
+    expected_store_path = workspace / _ECONOMIC_GOAL_STORE_FILE_NAME
+    store_workspace = getattr(store, "workspace", None)
+    store_path = getattr(store, "path", None)
+    if (
+        type(store_workspace) is not type(workspace)
+        or store_workspace != workspace
+        or type(store_path) is not type(expected_store_path)
+        or store_path != expected_store_path
+    ):
+        raise ProviderAccountHeadroomError(
+            "canonical economic-goal store path authority changed"
+        )
     try:
         goal = store_load(store)
         goal_sha256 = derive_provenance(goal).contract_sha256

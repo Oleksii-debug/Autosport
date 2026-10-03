@@ -749,6 +749,14 @@ def test_outer_resolver_authority_and_witness_bundle_cannot_be_coherently_rewrit
         frozen.args = forged_args
     with pytest.raises(AttributeError, match="readonly attribute"):
         object.__setattr__(frozen, "args", forged_args)
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        frozen.args[0] = forged_resolver
+
+    expected_closure_values = frozen.args[3]
+    assert type(expected_closure_values) is tuple
+    assert expected_closure_values
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        expected_closure_values[0] = forged_resolver
 
     assert frozen.args is original_args
     assert frozen.args[0] is canonical_resolver

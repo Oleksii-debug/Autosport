@@ -27,7 +27,7 @@ from .ingestion_health import IngestionPolicy, SourceHealthStore
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .live_observation import poll_open_market_store_once
-from .market_mirror import MarketMirror, MirrorSnapshot
+from .market_mirror import MarketMirror, MarketMirrorRevisionChanged, MirrorSnapshot
 from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependency,
@@ -1163,6 +1163,11 @@ class PersistentLiveDecisionLoop:
                 affected_input_ids=refresh_input_ids,
                 detail=str(exc),
             )
+        captured_mirror_revision = (
+            None
+            if not snapshots
+            else next(iter(snapshots.values())).revision
+        )
         current_market_sha = self._market_state_sha256(registered_input_ids)
 
         clean_committed_restart = (
@@ -1200,6 +1205,7 @@ class PersistentLiveDecisionLoop:
                 expected_decision_context_sha256=decision_context_sha256,
                 expected_registered_input_ids=registered_input_ids,
                 expected_previous_progress=expected_previous_progress,
+                expected_mirror_revision=captured_mirror_revision,
             )
         except _ConcurrentDecisionSnapshot as exc:
             return LiveCycleResult(
@@ -1766,7 +1772,16 @@ class PersistentLiveDecisionLoop:
         affected = self.dependencies.input_ids
         decision_context_sha256 = self._decision_context_sha256()
         try:
-            self._capture_input_views(affected, now, incremental=False)
+            gap_snapshots = self._capture_input_views(
+                affected,
+                now,
+                incremental=False,
+            )
+            captured_mirror_revision = (
+                None
+                if not gap_snapshots
+                else next(iter(gap_snapshots.values())).revision
+            )
             market_sha = self._market_state_sha256(affected)
             decision_book = self._write_pending(
                 decision_ts=decision_ts,
@@ -1776,6 +1791,7 @@ class PersistentLiveDecisionLoop:
                 expected_decision_context_sha256=decision_context_sha256,
                 expected_registered_input_ids=affected,
                 expected_previous_progress=expected_previous_progress,
+                expected_mirror_revision=captured_mirror_revision,
             )
         except _ConcurrentDecisionSnapshot as exc:
             self._needs_cache_rebuild = True
@@ -2081,6 +2097,7 @@ class PersistentLiveDecisionLoop:
         expected_decision_context_sha256: str,
         expected_registered_input_ids: tuple[str, ...],
         expected_previous_progress: _Progress | None,
+        expected_mirror_revision: int | None,
     ) -> PaperBook:
         _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
         self.intent_provenance.assert_available_at(decision_time)
@@ -2092,6 +2109,13 @@ class PersistentLiveDecisionLoop:
             type(input_id) is not str for input_id in expected_registered_input_ids
         ):
             raise TypeError("expected_registered_input_ids must be a tuple of strings")
+        if expected_mirror_revision is not None and (
+            type(expected_mirror_revision) is not int
+            or expected_mirror_revision < 0
+        ):
+            raise TypeError(
+                "expected_mirror_revision must be a non-negative integer or None"
+            )
         with WorkspaceEconomicLock(self.workspace):
             durable_previous_progress = self._load_progress()
             if durable_previous_progress != expected_previous_progress:
@@ -2207,7 +2231,19 @@ class PersistentLiveDecisionLoop:
                 ledger_offset=None,
                 gate=gate,
             )
-            atomic_write_json(self.progress_path, pending.to_dict())
+            if expected_mirror_revision is None:
+                atomic_write_json(self.progress_path, pending.to_dict())
+            else:
+                try:
+                    with self.mirror_updates.mirror.hold_revision(
+                        expected_mirror_revision
+                    ):
+                        atomic_write_json(self.progress_path, pending.to_dict())
+                except MarketMirrorRevisionChanged as exc:
+                    raise _ConcurrentDecisionSnapshot(
+                        "market revision advanced after decision snapshot capture; "
+                        "retrying before economic action"
+                    ) from exc
         self._progress = pending
         return durable_pre_action
 

@@ -15,6 +15,11 @@ from autosport.account_snapshot_acquisition import (
 )
 from autosport.betfair_account_readonly import BetfairSessionCredentials
 from autosport.bookmaker_capability import BookmakerCapability
+from autosport.economic_goal import EconomicGoalContract
+from autosport.economic_goal_provenance import provenance_for
+from autosport.economic_goal_store import EconomicGoalStore
+import autosport.supervised_execution as supervised_execution
+from autosport.supervised_execution import BoundSupervisedExecutionPlan
 from autosport.provider_account_headroom_admission import (
     HeadroomDecision,
     ProductInternalHeadroomReservation,
@@ -150,22 +155,116 @@ def _action(
     )
 
 
-def _plan(plan_id: str, action: ExecutionAction) -> ExecutionPlan:
-    return ExecutionPlan(
-        plan_id=plan_id,
+_HEADROOM_GOAL = EconomicGoalContract(
+    goal_id="headroom-test-goal",
+    revision=1,
+    bankroll_id="headroom-test-bankroll",
+    currency="GBP",
+)
+_HEADROOM_GOAL_SHA256 = provenance_for(_HEADROOM_GOAL).contract_sha256
+
+
+def _plan(
+    plan_id: str,
+    action: ExecutionAction,
+    *,
+    economic_goal_contract_sha256: str = _HEADROOM_GOAL_SHA256,
+) -> tuple[str, BoundSupervisedExecutionPlan]:
+    template = ExecutionPlan(
+        plan_id="pending-supervised-plan-id",
         bookmaker_profile_version="profile-v1",
         decision_id=f"decision-{plan_id}",
         approval_id=f"approval-{plan_id}",
         created_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
         actions=(action,),
     )
+    portfolio_plan_sha256 = "1" * 64
+    intent_id = f"intent-{plan_id}"
+    intent_sha256 = "2" * 64
+    approval_fingerprint = "3" * 64
+    profile_bindings = ()
+    constraints = ()
+    binding_sha256 = supervised_execution._bound_binding_sha256(
+        template,
+        portfolio_plan_sha256,
+        economic_goal_contract_sha256,
+        intent_id,
+        intent_sha256,
+        approval_fingerprint,
+        profile_bindings,
+        constraints,
+    )
+    execution_plan = replace(
+        template,
+        plan_id=f"supervised-v2-{binding_sha256}",
+    )
+    bound = BoundSupervisedExecutionPlan(
+        execution_plan=execution_plan,
+        portfolio_plan_sha256=portfolio_plan_sha256,
+        economic_goal_contract_sha256=economic_goal_contract_sha256,
+        intent_id=intent_id,
+        intent_sha256=intent_sha256,
+        approval_fingerprint=approval_fingerprint,
+        profile_bindings=profile_bindings,
+        constraints=constraints,
+    )
+    return plan_id, bound
 
 
-def _ledger_with_plans(tmp_path, *plans: ExecutionPlan) -> RealExecutionLedger:
+def _ledger_with_plans(
+    tmp_path,
+    *plans: tuple[str, BoundSupervisedExecutionPlan],
+    economic_goal: EconomicGoalContract = _HEADROOM_GOAL,
+) -> RealExecutionLedger:
+    store = EconomicGoalStore(tmp_path)
+    if not store.path.exists():
+        store.initialize_owner(economic_goal)
     ledger = RealExecutionLedger(tmp_path / "real-ledger.jsonl")
-    for item in plans:
-        ledger.reserve_plan(item)
+    logical_ids: dict[str, str] = {}
+    bounds: list[BoundSupervisedExecutionPlan] = []
+    for logical_id, bound in plans:
+        logical_ids[logical_id] = bound.execution_plan.plan_id
+        bounds.append(bound)
+        ledger.reserve_plan(bound.execution_plan)
+    ledger._test_logical_plan_ids = logical_ids
+    ledger._test_bound_plans = tuple(bounds)
     return ledger
+
+
+def _actual_plan_id(ledger: RealExecutionLedger, logical_plan_id: str) -> str:
+    return ledger._test_logical_plan_ids[logical_plan_id]
+
+
+def _assess(
+    ledger: RealExecutionLedger,
+    acquired: AuthoritativeAccountSnapshot,
+    *,
+    plan_id: str,
+    action_id: str,
+):
+    return assess_provider_account_headroom(
+        ledger,
+        acquired,
+        plan_id=_actual_plan_id(ledger, plan_id),
+        action_id=action_id,
+        bound_plans=ledger._test_bound_plans,
+    )
+
+
+def _reserve(
+    ledger: RealExecutionLedger,
+    acquired: AuthoritativeAccountSnapshot,
+    assessment,
+    *,
+    attempt_id: str,
+):
+    return reserve_observed_provider_headroom(
+        ledger,
+        acquired,
+        assessment,
+        attempt_id=attempt_id,
+        bound_plans=ledger._test_bound_plans,
+    )
 
 
 def test_liability_plan_enumeration_reads_canonical_ledger_envelopes(tmp_path) -> None:
@@ -178,7 +277,14 @@ def test_liability_plan_enumeration_reads_canonical_ledger_envelopes(tmp_path) -
     )
     snapshot = ledger.verified_snapshot()
 
-    assert headroom_module._ledger_plan_ids(snapshot.payload) == ("p1", "p2")
+    assert headroom_module._ledger_plan_ids(snapshot.payload) == tuple(
+        sorted(
+            (
+                _actual_plan_id(ledger, "p1"),
+                _actual_plan_id(ledger, "p2"),
+            )
+        )
+    )
 
 
 def test_provider_exposure_is_not_double_subtracted(monkeypatch, tmp_path) -> None:
@@ -186,7 +292,7 @@ def test_provider_exposure_is_not_double_subtracted(monkeypatch, tmp_path) -> No
     action = _action("a1", "95")
     ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
 
-    assessment = assess_provider_account_headroom(
+    assessment = _assess(
         ledger,
         acquired,
         plan_id="p1",
@@ -215,17 +321,17 @@ def test_same_snapshot_two_writer_race_only_one_reserves(monkeypatch, tmp_path) 
         _plan("p2", second_action),
     )
 
-    first = assess_provider_account_headroom(
+    first = _assess(
         ledger, acquired, plan_id="p1", action_id="a1"
     )
-    second_from_same_generation = assess_provider_account_headroom(
+    second_from_same_generation = _assess(
         ledger, acquired, plan_id="p2", action_id="a2"
     )
     assert first.ledger_snapshot_sha256 == second_from_same_generation.ledger_snapshot_sha256
     assert first.decision is HeadroomDecision.SUFFICIENT_LOWER_BOUND
     assert second_from_same_generation.decision is HeadroomDecision.SUFFICIENT_LOWER_BOUND
 
-    reserved = reserve_observed_provider_headroom(
+    reserved = _reserve(
         ledger,
         acquired,
         first,
@@ -239,14 +345,14 @@ def test_same_snapshot_two_writer_race_only_one_reserves(monkeypatch, tmp_path) 
         ProviderAccountHeadroomStale,
         match="execution ledger changed",
     ):
-        reserve_observed_provider_headroom(
+        _reserve(
             ledger,
             acquired,
             second_from_same_generation,
             attempt_id="attempt-2",
         )
 
-    recomputed = assess_provider_account_headroom(
+    recomputed = _assess(
         ledger, acquired, plan_id="p2", action_id="a2"
     )
     assert recomputed.definitely_unreflected_product_liability == Decimal("80")
@@ -273,10 +379,10 @@ def test_capital_risk_authority_rebinding_cannot_erase_existing_liability(
         _plan("p1", first_action),
         _plan("p2", second_action),
     )
-    first = assess_provider_account_headroom(
+    first = _assess(
         ledger, acquired, plan_id="p1", action_id="a1"
     )
-    reserve_observed_provider_headroom(
+    _reserve(
         ledger, acquired, first, attempt_id="attempt-1"
     )
     hostile_calls = []
@@ -304,7 +410,7 @@ def test_capital_risk_authority_rebinding_cannot_erase_existing_liability(
         ProviderAccountHeadroomError,
         match="capital-at-risk headroom authority changed",
     ):
-        assess_provider_account_headroom(
+        _assess(
             ledger, acquired, plan_id="p2", action_id="a2"
         )
 
@@ -323,15 +429,15 @@ def test_submitted_liability_with_unknown_balance_coverage_forces_wait(
         _plan("p1", first_action),
         _plan("p2", second_action),
     )
-    first = assess_provider_account_headroom(
+    first = _assess(
         ledger, acquired, plan_id="p1", action_id="a1"
     )
-    reserve_observed_provider_headroom(
+    _reserve(
         ledger, acquired, first, attempt_id="attempt-1"
     )
     ledger.mark_submitted("attempt-1")
 
-    second = assess_provider_account_headroom(
+    second = _assess(
         ledger, acquired, plan_id="p2", action_id="a2"
     )
     assert second.definitely_unreflected_product_liability == 0
@@ -361,7 +467,7 @@ def test_live_snapshot_object_mutation_revokes_headroom_authority(
         ProviderAccountHeadroomError,
         match="lacks live canonical provider-origin authority",
     ):
-        assess_provider_account_headroom(
+        _assess(
             ledger,
             acquired,
             plan_id="p1",
@@ -400,7 +506,7 @@ def test_account_authority_alias_rebinding_cannot_forge_available_balance(
         ProviderAccountHeadroomError,
         match="account snapshot headroom authority changed",
     ):
-        assess_provider_account_headroom(
+        _assess(
             ledger,
             forged,
             plan_id="p1",
@@ -419,7 +525,7 @@ def test_other_provider_account_cannot_donate_headroom(monkeypatch, tmp_path) ->
         ProviderAccountHeadroomUnsupported,
         match="provider/account mismatches live balance acquisition",
     ):
-        assess_provider_account_headroom(
+        _assess(
             ledger, acquired, plan_id="p1", action_id="a1"
         )
 
@@ -428,7 +534,7 @@ def test_caller_reconstructed_assessment_cannot_reserve(monkeypatch, tmp_path) -
     acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
     action = _action("a1", "10")
     ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
-    assessment = assess_provider_account_headroom(
+    assessment = _assess(
         ledger, acquired, plan_id="p1", action_id="a1"
     )
     forged = replace(assessment)
@@ -437,7 +543,7 @@ def test_caller_reconstructed_assessment_cannot_reserve(monkeypatch, tmp_path) -
         ProviderAccountHeadroomError,
         match="not canonically issued",
     ):
-        reserve_observed_provider_headroom(
+        _reserve(
             ledger, acquired, forged, attempt_id="attempt-1"
         )
 
@@ -449,7 +555,7 @@ def test_module_attempt_state_rebinding_cannot_bypass_headroom_gate(
     acquired, _ = _acquire_balance(monkeypatch, tmp_path, "5")
     action = _action("a1", "10")
     ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
-    assessment = assess_provider_account_headroom(
+    assessment = _assess(
         ledger,
         acquired,
         plan_id="p1",
@@ -472,7 +578,7 @@ def test_module_attempt_state_rebinding_cannot_bypass_headroom_gate(
         ProviderAccountHeadroomError,
         match="execution ledger headroom authority changed",
     ):
-        reserve_observed_provider_headroom(
+        _reserve(
             ledger,
             acquired,
             assessment,
@@ -507,10 +613,10 @@ def test_copied_or_mutated_internal_reservation_loses_product_proof(
     acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
     action = _action("a1", "10")
     ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
-    assessment = assess_provider_account_headroom(
+    assessment = _assess(
         ledger, acquired, plan_id="p1", action_id="a1"
     )
-    issued = reserve_observed_provider_headroom(
+    issued = _reserve(
         ledger, acquired, assessment, attempt_id="attempt-issued"
     )
 
@@ -530,14 +636,14 @@ def test_exact_attempt_retry_is_idempotent_after_reservation(monkeypatch, tmp_pa
     acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
     action = _action("a1", "10")
     ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
-    assessment = assess_provider_account_headroom(
+    assessment = _assess(
         ledger, acquired, plan_id="p1", action_id="a1"
     )
 
-    first = reserve_observed_provider_headroom(
+    first = _reserve(
         ledger, acquired, assessment, attempt_id="attempt-1"
     )
-    second = reserve_observed_provider_headroom(
+    second = _reserve(
         ledger, acquired, assessment, attempt_id="attempt-1"
     )
 
@@ -566,10 +672,10 @@ def test_instance_shadow_cannot_bypass_snapshot_or_reservation_cas(
     ledger.verified_snapshot = fake_snapshot
     ledger.begin_attempt = fake_begin_attempt
 
-    assessment = assess_provider_account_headroom(
+    assessment = _assess(
         ledger, acquired, plan_id="p1", action_id="a1"
     )
-    reserved = reserve_observed_provider_headroom(
+    reserved = _reserve(
         ledger, acquired, assessment, attempt_id="attempt-1"
     )
 
@@ -620,7 +726,7 @@ def test_headroom_clock_rebinding_cannot_mint_fresh_balance(
         ProviderAccountHeadroomError,
         match="headroom clock authority changed",
     ):
-        assess_provider_account_headroom(
+        _assess(
             ledger,
             acquired,
             plan_id="p1",
@@ -652,7 +758,7 @@ def test_headroom_clock_kwdefault_mutation_cannot_mint_fresh_balance(
         ProviderAccountHeadroomError,
         match="headroom clock authority changed",
     ):
-        assess_provider_account_headroom(
+        _assess(
             ledger,
             acquired,
             plan_id="p1",
@@ -685,7 +791,7 @@ def test_freshness_is_bound_to_balance_observation_not_later_snapshot_time(
         ProviderAccountHeadroomStale,
         match="provider balance observation exceeds",
     ):
-        assess_provider_account_headroom(
+        _assess(
             ledger,
             acquired,
             plan_id="p1",
@@ -719,13 +825,13 @@ def test_unrelated_provider_attempt_does_not_block_betfair_account_scope(
         _plan("foreign-plan", foreign),
     )
     ledger.begin_attempt(
-        plan_id="foreign-plan",
+        plan_id=_actual_plan_id(ledger, "foreign-plan"),
         action_id="foreign",
         attempt_id="foreign-attempt",
     )
     ledger.mark_submitted("foreign-attempt")
 
-    assessment = assess_provider_account_headroom(
+    assessment = _assess(
         ledger,
         acquired,
         plan_id="target-plan",
@@ -746,20 +852,20 @@ def test_recomputed_insufficient_assessment_can_resolve_exact_existing_attempt(
     acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
     action = _action("a1", "100")
     ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
-    initial = assess_provider_account_headroom(
+    initial = _assess(
         ledger,
         acquired,
         plan_id="p1",
         action_id="a1",
     )
-    first = reserve_observed_provider_headroom(
+    first = _reserve(
         ledger,
         acquired,
         initial,
         attempt_id="attempt-1",
     )
 
-    recomputed = assess_provider_account_headroom(
+    recomputed = _assess(
         ledger,
         acquired,
         plan_id="p1",
@@ -768,7 +874,7 @@ def test_recomputed_insufficient_assessment_can_resolve_exact_existing_attempt(
     assert recomputed.decision is HeadroomDecision.INSUFFICIENT_UPPER_BOUND
     assert recomputed.definitely_unreflected_product_liability == Decimal("100")
 
-    replay = reserve_observed_provider_headroom(
+    replay = _reserve(
         ledger,
         acquired,
         recomputed,

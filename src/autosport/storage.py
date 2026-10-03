@@ -776,6 +776,8 @@ class SQLiteMarketStore:
         # The causal companion schema and baseline backfill are one crash-atomic
         # migration. A hard failure cannot leave both tables durable but empty and
         # thereby strand pre-v1 history without commit-generation witnesses.
+        bootstrap_append_authority: MonotonicWorkspaceAuthority | None = None
+        bootstrap_append_prepared: tuple[str, str] | None = None
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             commit_order_state = _schema_object(
@@ -832,8 +834,47 @@ class SQLiteMarketStore:
                 _validate_canonical_table(self.connection, table_name)
             _ensure_canonical_secondary_indexes(self.connection)
             self._validate_causal_replay_state()
-        except Exception:
+            if initialize_causal_replay:
+                bootstrap_rows = self._validated_replay_append_rows()
+                bootstrap_state_sha256 = _replay_append_state_sha256(
+                    bootstrap_rows
+                )
+                if bootstrap_state_sha256 is not None:
+                    bootstrap_append_authority = self._replay_append_authority()
+                    bootstrap_binding_sha256 = _replay_append_binding_sha256(
+                        bootstrap_rows
+                    )
+                    bootstrap_tx_id = (
+                        f"market-append-bootstrap-{uuid.uuid4().hex}"
+                    )
+                    bootstrap_append_authority.prepare(
+                        tx_id=bootstrap_tx_id,
+                        observed_state_sha256=None,
+                        intended_state_sha256=bootstrap_state_sha256,
+                        semantic_binding_sha256=bootstrap_binding_sha256,
+                    )
+                    bootstrap_append_prepared = (
+                        bootstrap_tx_id,
+                        bootstrap_binding_sha256,
+                    )
+        except Exception as exc:
             self.connection.rollback()
+            if (
+                bootstrap_append_authority is not None
+                and bootstrap_append_prepared is not None
+            ):
+                tx_id, binding_sha256 = bootstrap_append_prepared
+                try:
+                    bootstrap_append_authority.abort(
+                        tx_id=tx_id,
+                        observed_state_sha256=None,
+                        semantic_binding_sha256=binding_sha256,
+                    )
+                except Exception as abort_error:
+                    exc.add_note(
+                        "append-authority bootstrap PREPARE could not be aborted "
+                        f"cleanly: {type(abort_error).__name__}: {abort_error}"
+                    )
             raise
         else:
             self.connection.commit()
@@ -941,20 +982,19 @@ class SQLiteMarketStore:
             """SELECT c.append_generation, m.dedupe_key, m.payload_json
                FROM market_event_commit_order AS c
                JOIN market_events AS m ON m.dedupe_key = c.dedupe_key
-               WHERE c.append_generation > 0
                ORDER BY c.append_generation, m.dedupe_key"""
         ).fetchall()
         rows: list[tuple[int, str, str]] = []
         for generation, dedupe_key, payload_json in raw_rows:
             if (
                 type(generation) is not int
-                or generation <= 0
+                or generation < 0
                 or type(dedupe_key) is not str
                 or not dedupe_key
                 or type(payload_json) is not str
             ):
                 raise ValueError(
-                    "market event positive append authority is invalid"
+                    "market event append authority is invalid"
                 )
             event = _event_from_history_row(
                 self.connection.execute(
@@ -965,7 +1005,7 @@ class SQLiteMarketStore:
             )
             if _canonical_payload(event) != payload_json:
                 raise ValueError(
-                    "market event positive append payload is not canonical"
+                    "market event append payload is not canonical"
                 )
             rows.append((generation, dedupe_key, payload_json))
         return tuple(rows)

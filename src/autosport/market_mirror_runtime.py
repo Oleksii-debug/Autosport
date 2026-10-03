@@ -451,7 +451,7 @@ class FocusedMirrorDependencyIndex:
             dependency.input_id: MirrorSnapshot(
                 revision=captured.revision,
                 events=tuple(
-                    event
+                    MarketMirror._snapshot_event(event)
                     for event in captured.events
                     if dependency.matches(event)
                 ),

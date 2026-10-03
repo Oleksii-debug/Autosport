@@ -100,6 +100,32 @@ def test_runtime_authority_bindings_are_write_once(
     assert len(store.records()) == 1
 
 
+def test_runtime_authority_write_once_guard_cannot_be_shadowed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    original_path = store.path
+
+    with pytest.raises(
+        AttributeError,
+        match="authority bindings are write-once",
+    ):
+        store._WRITE_ONCE_AUTHORITY_BINDINGS = frozenset()
+    with pytest.raises(
+        AttributeError,
+        match="authority bindings are write-once",
+    ):
+        store.path = tmp_path / "redirected-runtime-authority.json"
+
+    assert store.path == original_path
+    _append(store, 0)
+    assert len(store.records()) == 1
+
+
 def test_runtime_authority_store_rejects_subclass_constructor_dispatch(
     tmp_path: Path,
 ) -> None:

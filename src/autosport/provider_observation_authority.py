@@ -1315,11 +1315,51 @@ def _seal_provider_evidence_store_dispatch() -> None:
     )
     expected_authority_methods = tuple(
         _surface_witness(MonotonicWorkspaceAuthority, name)
-        for name in ("prepare", "commit", "recover", "read_history")
+        for name in (
+            "__init__",
+            "prepare",
+            "commit",
+            "abort",
+            "recover",
+            "read_history",
+            "_validate_authority_root_selection",
+            "_ensure_authority_root_bound",
+            "_validate_authority_root_activation",
+            "_ensure_authority_root_activated",
+            "_validate_workspace_binding",
+            "_ensure_workspace_bound",
+            "_load_bound_history",
+            "_latest_record_for_tx",
+            "_require_same_transaction",
+            "_validate_prepare_retry",
+            "_new_record",
+            "_new_terminal_record",
+            "_payload",
+            "_namespace_payload",
+            "_ensure_namespace_marker",
+            "_validate_namespace_marker",
+            "_append_record",
+            "_load_history",
+            "_decode_record",
+        )
     )
     expected_lock_methods = tuple(
         _surface_witness(WorkspaceEconomicLock, name)
-        for name in ("__init__", "__enter__", "__exit__")
+        for name in (
+            "__init__",
+            "acquire",
+            "release",
+            "__enter__",
+            "__exit__",
+            "_open_lock_handle",
+            "_open_new_lock_handle",
+            "_validate_existing_lock_path",
+            "_validate_open_handle_identity",
+            "_require_regular_file",
+            "_require_single_link",
+            "_lock_handle",
+            "_unlock_handle",
+        )
     )
     expected_snapshot_methods = tuple(
         _surface_witness(CompleteGameBoardSnapshot, name)

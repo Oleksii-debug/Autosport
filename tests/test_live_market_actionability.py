@@ -17,6 +17,7 @@ from autosport.live_market_actionability import (
 from autosport.market_mirror import MarketMirror
 from autosport.market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
+    FocusedMirrorDependency,
     FocusedMirrorDependencyIndex,
 )
 
@@ -233,6 +234,41 @@ def test_weakest_component_blocks_multi_component_registered_input() -> None:
     by_selection = {item.quote_key: item for item in result.components}
     assert len(by_selection) == 2
     assert sum(not item.wait_reasons for item in result.components) == 1
+
+
+def test_forged_dependency_identity_and_selector_container_fail_closed() -> None:
+    mirror = MarketMirror()
+    updates = BoundedMirrorInvalidationBuffer(mirror)
+    dependencies = FocusedMirrorDependencyIndex(mirror)
+    dependencies.register("input-1", source_ids="provider-a")
+
+    dependencies._dependencies["input-1"] = FocusedMirrorDependency(
+        input_id="other-input",
+        source_ids=frozenset({"provider-a"}),
+        sports=None,
+        event_ids=None,
+        market_ids=None,
+        selection_ids=None,
+    )
+    with pytest.raises(
+        LiveMarketActionabilityError,
+        match="dependency identity is inconsistent",
+    ):
+        _evaluate(updates, dependencies)
+
+    dependencies._dependencies["input-1"] = FocusedMirrorDependency(
+        input_id="input-1",
+        source_ids=("provider-a",),  # type: ignore[arg-type]
+        sports=None,
+        event_ids=None,
+        market_ids=None,
+        selection_ids=None,
+    )
+    with pytest.raises(
+        LiveMarketActionabilityError,
+        match="source_ids selector is not canonical",
+    ):
+        _evaluate(updates, dependencies)
 
 
 def test_dependency_selectors_are_bound_into_evidence_identity() -> None:

@@ -621,6 +621,7 @@ def execute_paper_plan(
         config=config,
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspension_set,
     )
     assert existing is not None
     if existing.completed:
@@ -733,6 +734,7 @@ def execute_paper_plan(
                 config=config,
                 started_at=started_at,
                 observation_evidence_ids=observation_evidence_ids,
+                suspended_action_ids=suspension_set,
             )
             assert result is not None
             return result

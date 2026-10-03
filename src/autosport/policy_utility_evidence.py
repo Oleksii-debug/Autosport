@@ -307,7 +307,11 @@ class PolicyUtilityEvidence:
             "decision_kind": self.decision_kind.value,
             "available_at": _datetime_text(self.available_at),
             "currency": self.currency,
-            "utility_value": None if self.utility_value is None else _decimal_text(self.utility_value),
+            "utility_value": (
+                None
+                if self.utility_value is None
+                else _decimal_text(self.utility_value)
+            ),
             "authority_refs": [item.to_dict() for item in self.authority_refs],
             "denominator_ref": (
                 None if self.denominator_ref is None else self.denominator_ref.to_dict()

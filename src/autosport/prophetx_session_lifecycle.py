@@ -145,6 +145,27 @@ def _nonnegative_int(value: object, field: str) -> int:
     return value
 
 
+def _strict_json_object_pairs(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    """Reject ambiguous persisted objects instead of applying last-key-wins."""
+
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ProphetXSessionLifecycleError(
+                f"ProphetX session state contains duplicate JSON key: {key}"
+            )
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json_constant(value: str) -> object:
+    raise ProphetXSessionLifecycleError(
+        f"ProphetX session state contains non-standard JSON constant: {value}"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ProphetXSessionScope:
     """Secret-free identity for one provider access-key session pool."""
@@ -1330,7 +1351,11 @@ class ProphetXSessionLifecycle:
                 raise ProphetXSessionLifecycleError(
                     "ProphetX session state exceeds the bounded file-size contract"
                 )
-            payload = json.loads(raw)
+            payload = json.loads(
+                raw,
+                object_pairs_hook=_strict_json_object_pairs,
+                parse_constant=_reject_nonfinite_json_constant,
+            )
         except ProphetXSessionLifecycleError:
             raise
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:

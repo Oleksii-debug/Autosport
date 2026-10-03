@@ -1289,3 +1289,42 @@ def test_admission_rejects_attempt_id_on_non_effect_action(tmp_path):
             snapshot=active,
             attempt_id="a" * 64,
         )
+
+
+def test_state_file_duplicate_json_key_fails_closed_before_schema_use(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    lifecycle.begin_login(now=NOW, access_token_available=False)
+    raw = lifecycle.state_path.read_text(encoding="utf-8").rstrip()
+    duplicate = raw[:-1] + ',"provider":"prophetx"}\n'
+    lifecycle.state_path.write_text(duplicate, encoding="utf-8")
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="duplicate JSON key: provider",
+    ):
+        lifecycle.read_snapshot()
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="duplicate JSON key: provider",
+    ):
+        lifecycle.begin_login(
+            now=NOW + timedelta(seconds=1),
+            access_token_available=False,
+        )
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_state_file_nonstandard_json_constant_fails_closed(tmp_path, constant):
+    lifecycle = _lifecycle(tmp_path)
+    lifecycle.begin_login(now=NOW, access_token_available=False)
+    raw = lifecycle.state_path.read_text(encoding="utf-8")
+    poisoned = raw.replace('"generation":0', f'"generation":{constant}', 1)
+    assert poisoned != raw
+    lifecycle.state_path.write_text(poisoned, encoding="utf-8")
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="non-standard JSON constant",
+    ):
+        lifecycle.read_snapshot()

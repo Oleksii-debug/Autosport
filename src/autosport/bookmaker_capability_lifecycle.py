@@ -821,19 +821,27 @@ class CapabilityEvidenceJournal:
         return journal
 
     def latest_evidence_id_for(
-        self, evidence: CapabilityEvidence
+        self,
+        evidence: CapabilityEvidence,
+        *,
+        as_of: str | None = None,
     ) -> str | None:
-        """Return the exact latest evidence id for the candidate capability/scope."""
+        """Return latest exact-scope evidence, optionally at one historical cutoff."""
 
         if type(evidence) is not CapabilityEvidence:
             raise CapabilityEvidenceError(
                 "latest evidence query requires exact CapabilityEvidence"
             )
+        cutoff = None if as_of is None else _time(as_of, "as_of")
         candidates = [
             (evidence_id, other)
             for evidence_id, other in self._evidence.items()
             if other.capability is evidence.capability
             and _scope_key(other.scope) == _scope_key(evidence.scope)
+            and (
+                cutoff is None
+                or _time(other.committed_at, "committed_at") <= cutoff
+            )
         ]
         if not candidates:
             return None

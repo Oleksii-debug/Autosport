@@ -24,6 +24,11 @@ class _HostileMetadataAndTextError(RuntimeError, metaclass=_HostileTypeNameMeta)
         raise RuntimeError("exception stringification failed")
 
 
+class _HostileRenderedText(str):
+    def __len__(self) -> int:
+        raise RuntimeError("rendered text truthiness failed")
+
+
 def _wait_for_terminal(
     worker: OneShotObservationWorker,
     *,
@@ -155,6 +160,24 @@ def test_renderer_invalid_return_uses_secret_free_terminal_fallback() -> None:
     assert message.result is None
     assert message.error == "BaseException: exception details unavailable"
     assert worker.busy is False
+
+def test_renderer_hostile_str_subclass_uses_secret_free_terminal_fallback() -> None:
+    worker = OneShotObservationWorker()
+
+    def task():
+        raise RuntimeError("provider-timeout")
+
+    with mock.patch(
+        "autosport.live_observation.safe_exception_text",
+        return_value=_HostileRenderedText("provider-timeout"),
+    ):
+        assert worker.start(task) is True
+        message = _wait_for_terminal(worker)
+
+    assert message.result is None
+    assert message.error == "BaseException: exception details unavailable"
+    assert worker.busy is False
+
 
 def test_task_error_is_redacted_before_localized_live_presentation() -> None:
     worker = OneShotObservationWorker()

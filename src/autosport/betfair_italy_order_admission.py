@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from decimal import Decimal, localcontext
 from enum import Enum
 from fractions import Fraction
+from operator import attrgetter
 
 MAX_PLACE_INSTRUCTIONS = 50
 BACK_MIN_STAKE_EUR = Decimal("2.00")
@@ -67,8 +68,58 @@ class ItalianLimitInstruction:
             )
 
 
+def _build_italian_limit_batch_admission_meta():
+    """Seal hard-false provider/execution claims on diagnostic results."""
+
+    sealed_classes: set[type] = set()
+    protected_names = frozenset(
+        {
+            "__dataclass_fields__",
+            "__init__",
+            "__post_init__",
+            "admissible",
+            "jurisdiction_bound",
+            "account_currency_bound",
+            "current_provider_rules_proven",
+            "execution_authorized",
+            "real_money_execution",
+            "_admissible_constant",
+            "_jurisdiction_bound_constant",
+            "_account_currency_bound_constant",
+            "_current_provider_rules_proven_constant",
+            "_execution_authorized_constant",
+            "_real_money_execution_constant",
+        }
+    )
+
+    class _ItalianLimitBatchAdmissionMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "Italian LIMIT diagnostic authority surface is sealed: " + name
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name: str) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "Italian LIMIT diagnostic authority surface is sealed: " + name
+                )
+            super().__delattr__(name)
+
+        @classmethod
+        def seal(mcls, cls: type) -> None:
+            sealed_classes.add(cls)
+
+    return _ItalianLimitBatchAdmissionMeta
+
+
+_ItalianLimitBatchAdmissionMeta = _build_italian_limit_batch_admission_meta()
+del _build_italian_limit_batch_admission_meta
+
+
 @dataclass(frozen=True, slots=True)
-class ItalianLimitBatchAdmission:
+class ItalianLimitBatchAdmission(metaclass=_ItalianLimitBatchAdmissionMeta):
     """Result for represented rule checks, never a provider admission token."""
 
     state: ItalianLimitAdmissionState
@@ -118,30 +169,28 @@ class ItalianLimitBatchAdmission:
             is ItalianLimitAdmissionState.RULESET_SATISFIED_UNBOUND
         )
 
-    @property
-    def admissible(self) -> bool:
-        """No result from this unbound ruleset is provider admission."""
-        return False
+    # These claims are intentionally hard-false. Keep their getters out of
+    # mutable Python bytecode and their backing values off instance slots.
+    _admissible_constant = False
+    _jurisdiction_bound_constant = False
+    _account_currency_bound_constant = False
+    _current_provider_rules_proven_constant = False
+    _execution_authorized_constant = False
+    _real_money_execution_constant = False
 
-    @property
-    def jurisdiction_bound(self) -> bool:
-        return False
+    admissible = property(attrgetter("_admissible_constant"))
+    jurisdiction_bound = property(attrgetter("_jurisdiction_bound_constant"))
+    account_currency_bound = property(
+        attrgetter("_account_currency_bound_constant")
+    )
+    current_provider_rules_proven = property(
+        attrgetter("_current_provider_rules_proven_constant")
+    )
+    execution_authorized = property(attrgetter("_execution_authorized_constant"))
+    real_money_execution = property(attrgetter("_real_money_execution_constant"))
 
-    @property
-    def account_currency_bound(self) -> bool:
-        return False
 
-    @property
-    def current_provider_rules_proven(self) -> bool:
-        return False
-
-    @property
-    def execution_authorized(self) -> bool:
-        return False
-
-    @property
-    def real_money_execution(self) -> bool:
-        return False
+_ItalianLimitBatchAdmissionMeta.seal(ItalianLimitBatchAdmission)
 
 
 def evaluate_italian_limit_batch(
@@ -171,7 +220,7 @@ def evaluate_italian_limit_batch(
             ("EMPTY_BATCH",),
             (),
         )
-    if len(instructions) > MAX_PLACE_INSTRUCTIONS:
+    if len(instructions) > 50:
         reasons.append("TOO_MANY_INSTRUCTIONS")
 
     sides = {instruction.side for instruction in instructions}
@@ -188,16 +237,16 @@ def evaluate_italian_limit_batch(
             continue
 
         if instruction.side == "BACK":
-            if instruction.size < BACK_MIN_STAKE_EUR:
+            if instruction.size < Decimal("2.00"):
                 reasons.append(prefix + "BACK_STAKE_BELOW_EUR_2")
             if not _is_multiple(
-                instruction.size, BACK_STAKE_INCREMENT_EUR
+                instruction.size, Decimal("0.50")
             ):
                 reasons.append(
                     prefix + "BACK_STAKE_NOT_EUR_0_50_INCREMENT"
                 )
         else:
-            if instruction.size < LAY_MIN_BACKER_STAKE_EUR:
+            if instruction.size < Decimal("0.50"):
                 reasons.append(
                     prefix + "LAY_BACKER_STAKE_BELOW_EUR_0_50"
                 )
@@ -208,7 +257,7 @@ def evaluate_italian_limit_batch(
             instruction.size, instruction.price
         )
         returns.append(preselected_return)
-        if preselected_return > MAX_PRESELECTED_RETURN_EUR:
+        if preselected_return > Decimal("10000.00"):
             reasons.append(
                 prefix + "PRESELECTED_RETURN_EXCEEDS_EUR_10000"
             )

@@ -2,6 +2,7 @@ from decimal import Decimal, localcontext
 
 import pytest
 
+import autosport.betfair_italy_order_admission as italy_guard
 from autosport.betfair_italy_order_admission import (
     ItalianLimitAdmissionState,
     ItalianLimitBatchAdmission,
@@ -266,3 +267,74 @@ def test_caller_cannot_relabel_unbound_ruleset_result_as_admissible():
             reason_codes=("forged_reason",),
             preselected_returns_eur=(Decimal("4"),),
         )
+
+
+def test_ruleset_checks_ignore_public_threshold_rebinding(monkeypatch):
+    monkeypatch.setattr(italy_guard, "MAX_PLACE_INSTRUCTIONS", 1000)
+    monkeypatch.setattr(italy_guard, "BACK_MIN_STAKE_EUR", Decimal("0.01"))
+    monkeypatch.setattr(
+        italy_guard,
+        "BACK_STAKE_INCREMENT_EUR",
+        Decimal("0.01"),
+    )
+    monkeypatch.setattr(
+        italy_guard,
+        "LAY_MIN_BACKER_STAKE_EUR",
+        Decimal("0.01"),
+    )
+    monkeypatch.setattr(
+        italy_guard,
+        "MAX_PRESELECTED_RETURN_EUR",
+        Decimal("999999999"),
+    )
+
+    too_many = tuple(I(selection_id=i + 1) for i in range(51))
+    assert (
+        evaluate_italian_limit_batch(too_many).reason_codes[0]
+        == "TOO_MANY_INSTRUCTIONS"
+    )
+    assert "I0:BACK_STAKE_BELOW_EUR_2" in evaluate_italian_limit_batch(
+        (I(size="1.50"),)
+    ).reason_codes
+    assert "I0:BACK_STAKE_NOT_EUR_0_50_INCREMENT" in evaluate_italian_limit_batch(
+        (I(size="2.25"),)
+    ).reason_codes
+    assert "I0:LAY_BACKER_STAKE_BELOW_EUR_0_50" in evaluate_italian_limit_batch(
+        (I(side="LAY", size="0.49"),)
+    ).reason_codes
+    assert "I0:PRESELECTED_RETURN_EXCEEDS_EUR_10000" in evaluate_italian_limit_batch(
+        (I(size="10.50", price="1000"),)
+    ).reason_codes
+
+
+def test_hard_false_admission_authority_surface_is_sealed():
+    result = evaluate_italian_limit_batch((I(),))
+    hard_false_names = (
+        "admissible",
+        "jurisdiction_bound",
+        "account_currency_bound",
+        "current_provider_rules_proven",
+        "execution_authorized",
+        "real_money_execution",
+    )
+
+    for name in hard_false_names:
+        descriptor = ItalianLimitBatchAdmission.__dict__[name]
+        assert isinstance(descriptor, property)
+        assert descriptor.fget is not None
+        assert not hasattr(descriptor.fget, "__code__")
+        assert getattr(result, name) is False
+
+    with pytest.raises(TypeError, match="authority surface is sealed"):
+        ItalianLimitBatchAdmission.execution_authorized = property(
+            lambda _self: True
+        )
+
+    with pytest.raises(TypeError, match="authority surface is sealed"):
+        ItalianLimitBatchAdmission._execution_authorized_constant = True
+
+    with pytest.raises(AttributeError):
+        object.__setattr__(result, "_execution_authorized_constant", True)
+
+    with pytest.raises(AttributeError):
+        object.__setattr__(result, "real_money_execution", True)

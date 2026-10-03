@@ -744,20 +744,30 @@ def _verify_pristine_runtime_without_checkpoint(
     re-authorized by recreating a checkpoint.
     """
 
-    try:
-        orphan = SportMemoryRuntime(
-            Path(runtime_path),
-            verified_opponent,
-            authority_generation_sha256=authority.generation_sha256,
-        )
-    except Exception as exc:
-        raise SportMemoryCheckpointError(
-            "sport-memory runtime exists without canonical authority checkpoint"
-        ) from exc
-    if orphan._artifacts or orphan._consumptions:
-        raise SportMemoryCheckpointError(
-            "non-pristine sport-memory runtime exists without canonical authority checkpoint"
-        )
+    runtime = Path(runtime_path)
+    with durable_path_lock(runtime):
+        if not runtime.is_file():
+            raise SportMemoryCheckpointError(
+                "sport-memory runtime disappeared during checkpoint recovery"
+            )
+        try:
+            orphan = SportMemoryRuntime(
+                runtime,
+                verified_opponent,
+                authority_generation_sha256=authority.generation_sha256,
+            )
+        except Exception as exc:
+            raise SportMemoryCheckpointError(
+                "sport-memory runtime exists without canonical authority checkpoint"
+            ) from exc
+        if not runtime.is_file():
+            raise SportMemoryCheckpointError(
+                "sport-memory runtime disappeared during checkpoint recovery"
+            )
+        if orphan._artifacts or orphan._consumptions:
+            raise SportMemoryCheckpointError(
+                "non-pristine sport-memory runtime exists without canonical authority checkpoint"
+            )
 
 
 def initialize_sport_memory_authority_checkpoint(
@@ -904,27 +914,36 @@ def initialize_or_open_bound_sport_memory_runtime(
                     authority, verified_opponent = _capture_checkpoint_and_opponent(
                         identity_registry, opponent_store
                     )
-                    if runtime.exists():
-                        _verify_pristine_runtime_without_checkpoint(
-                            runtime,
-                            authority,
-                            verified_opponent,
-                        )
-                    else:
-                        _new_bound_runtime(
-                            runtime,
+                    # Keep runtime recovery/publication and checkpoint publication in
+                    # one runtime-path critical section.  Otherwise a cooperating
+                    # runtime writer/remover could invalidate the verified crash
+                    # prefix after inspection but before the checkpoint commits.
+                    with durable_path_lock(runtime):
+                        if runtime.exists():
+                            _verify_pristine_runtime_without_checkpoint(
+                                runtime,
+                                authority,
+                                verified_opponent,
+                            )
+                        else:
+                            _new_bound_runtime(
+                                runtime,
+                                checkpoint,
+                                identity_registry,
+                                opponent_store,
+                                authority,
+                                verified_opponent,
+                            )
+                        if not runtime.is_file():
+                            raise SportMemoryCheckpointError(
+                                "sport-memory runtime disappeared before authority checkpoint publication"
+                            )
+                        authority, verified_opponent = _persist_captured_checkpoint(
                             checkpoint,
+                            authority,
                             identity_registry,
                             opponent_store,
-                            authority,
-                            verified_opponent,
                         )
-                    authority, verified_opponent = _persist_captured_checkpoint(
-                        checkpoint,
-                        authority,
-                        identity_registry,
-                        opponent_store,
-                    )
 
     return _open_existing_bound_runtime(
         runtime,

@@ -7,6 +7,7 @@ from pathlib import Path
 
 _MACHINE_MODE_ARITY = {
     "--diagnostic-output": 2,
+    "--first-run-storage-audit-output": 2,
     "--accessibility-audit-output": 2,
     "--keyboard-audit-output": 2,
     "--restart-recovery-audit-output": 2,
@@ -201,6 +202,10 @@ def main(argv: list[str] | None = None) -> int:
         from autosport.diagnostic import run_machine_diagnostic
 
         return run_machine_diagnostic(args[1])
+    if args and args[0] == "--first-run-storage-audit-output":
+        from autosport.first_run_storage_audit import run_first_run_storage_audit
+
+        return run_first_run_storage_audit(args[1])
     if args and args[0] == "--accessibility-audit-output":
         from autosport.windows_webview_audit import run_accessibility_audit
 

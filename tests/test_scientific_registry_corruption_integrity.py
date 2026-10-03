@@ -5,7 +5,11 @@ import json
 
 import pytest
 
-from autosport.monotonic_workspace_authority import MonotonicAuthorityRollbackError
+import autosport.integrity as integrity
+from autosport.monotonic_workspace_authority import (
+    MonotonicAuthorityRollbackError,
+    MonotonicWorkspaceAuthority,
+)
 from autosport.scientific_registry import Hypothesis, ResearchQuestion, ScientificRegistry
 
 
@@ -337,3 +341,108 @@ def test_current_authoritative_registry_reopen_is_byte_idempotent(tmp_path):
             "hypothesis-1",
         )
         assert path.read_bytes() == committed_bytes
+
+
+def _transplanted_registry_path(tmp_path):
+    source_path = tmp_path / "dispatch-source" / "scientific_registry.json"
+    source = ScientificRegistry.initialize_pristine(source_path)
+    source.append(_question())
+    target_path = tmp_path / "dispatch-target" / "scientific_registry.json"
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(source_path.read_bytes())
+    return target_path
+
+
+def test_transplant_rejects_monotonic_read_history_class_replacement(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    target_path = _transplanted_registry_path(tmp_path)
+    hostile_calls: list[object] = []
+
+    def hostile_read_history(self: object) -> tuple[object, ...]:
+        hostile_calls.append(self)
+        return (object(),)
+
+    monkeypatch.setattr(
+        MonotonicWorkspaceAuthority,
+        "read_history",
+        hostile_read_history,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="ScientificRegistry monotonic read/recovery dispatch changed",
+    ):
+        ScientificRegistry(target_path)
+
+    assert hostile_calls == []
+
+
+def test_transplant_rejects_monotonic_recover_class_replacement(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    target_path = _transplanted_registry_path(tmp_path)
+    hostile_calls: list[object] = []
+
+    def hostile_recover(self: object, **kwargs: object) -> object:
+        hostile_calls.append((self, kwargs))
+        return object()
+
+    monkeypatch.setattr(
+        MonotonicWorkspaceAuthority,
+        "recover",
+        hostile_recover,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="ScientificRegistry monotonic read/recovery dispatch changed",
+    ):
+        ScientificRegistry(target_path)
+
+    assert hostile_calls == []
+
+
+def test_transplant_rejects_monotonic_read_history_instance_shadow(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    target_path = _transplanted_registry_path(tmp_path)
+    original_factory = integrity._scientific_registry_authority
+    hostile_calls: list[object] = []
+
+    def hostile_read_history() -> tuple[object, ...]:
+        hostile_calls.append(None)
+        return (object(),)
+
+    def shadowing_factory(destination):
+        authority = original_factory(destination)
+        monkeypatch.setattr(authority, "read_history", hostile_read_history)
+        return authority
+
+    monkeypatch.setattr(
+        integrity,
+        "_scientific_registry_authority",
+        shadowing_factory,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="ScientificRegistry monotonic read/recovery instance dispatch changed",
+    ):
+        ScientificRegistry(target_path)
+
+    assert hostile_calls == []
+
+
+def test_transplant_rejects_monotonic_constructor_alias_replacement(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    target_path = _transplanted_registry_path(tmp_path)
+
+    monkeypatch.setattr(integrity, "MonotonicWorkspaceAuthority", object)
+    with pytest.raises(
+        RuntimeError,
+        match="ScientificRegistry monotonic authority constructor changed",
+    ):
+        ScientificRegistry(target_path)

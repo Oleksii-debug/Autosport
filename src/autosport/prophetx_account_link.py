@@ -214,7 +214,6 @@ class AccountLinkPublicSnapshot:
     can_verify_two_factor: bool
     can_import_approved_api_token: bool
     credential_present: bool
-    credential_ref: str | None
     resend_after_ms: int
     direct_key_generation_available: bool
     execution_enabled: bool
@@ -232,7 +231,6 @@ class AccountLinkPublicSnapshot:
             "can_verify_two_factor": self.can_verify_two_factor,
             "can_import_approved_api_token": self.can_import_approved_api_token,
             "credential_present": self.credential_present,
-            "credential_ref": self.credential_ref,
             "resend_after_ms": self.resend_after_ms,
             "direct_key_generation_available": self.direct_key_generation_available,
             "execution_enabled": self.execution_enabled,
@@ -548,7 +546,6 @@ class ProphetXAccountLinkController:
             ),
             can_import_approved_api_token=True,
             credential_present=self._credential_ref is not None,
-            credential_ref=self._credential_ref,
             resend_after_ms=int(resend_after_ms),
             direct_key_generation_available=False,
             execution_enabled=False,

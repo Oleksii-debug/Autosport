@@ -67,6 +67,30 @@ def _canonical_hash(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _provider_logical_scope(
+    provider: ParlayApiTableTennisProvider,
+) -> tuple[str, str, str, tuple[object, ...], tuple[object, ...]]:
+    return (
+        provider.sport_key,
+        provider.source_id,
+        provider.base_url,
+        tuple(provider.regions),
+        tuple(provider.markets),
+    )
+
+
+def _require_provider_logical_scope(
+    provider: ParlayApiTableTennisProvider,
+    expected: tuple[str, str, str, tuple[object, ...], tuple[object, ...]],
+    *,
+    phase: str,
+) -> None:
+    if _provider_logical_scope(provider) != expected:
+        raise ProviderPayloadError(
+            f"historical acquisition provider logical scope changed {phase}"
+        )
+
+
 def _require_staged_digest(path: Path, expected_sha256: str, *, field: str) -> str:
     actual_sha256 = sha256_file(path)
     if actual_sha256 != expected_sha256:
@@ -544,15 +568,27 @@ def capture_historical_acquisition_bundle(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     expected_coverage_sport_key = "table_tennis"
-    if provider.sport_key != expected_coverage_sport_key:
+    expected_provider_scope = _provider_logical_scope(provider)
+    if expected_provider_scope[0] != expected_coverage_sport_key:
         raise ProviderPayloadError(
             "historical acquisition requires canonical table-tennis sport scope"
         )
+    if expected_provider_scope[1] != "parlayapi:table_tennis":
+        raise ProviderPayloadError(
+            "historical acquisition requires canonical provider source identity"
+        )
+    if type(expected_provider_scope[2]) is not str or not expected_provider_scope[2]:
+        raise ProviderPayloadError(
+            "historical acquisition provider base_url must be text"
+        )
+
     coverage_report = provider.historical_coverage(coverage_from, coverage_to)
-    if (
-        provider.sport_key != expected_coverage_sport_key
-        or coverage_report.sport_key != expected_coverage_sport_key
-    ):
+    _require_provider_logical_scope(
+        provider,
+        expected_provider_scope,
+        phase="during coverage preflight",
+    )
+    if coverage_report.sport_key != expected_coverage_sport_key:
         raise ProviderPayloadError("historical coverage preflight sport_key mismatch")
     if coverage_report.date_from != coverage_from:
         raise ProviderPayloadError("historical coverage preflight date_from mismatch")
@@ -590,16 +626,28 @@ def capture_historical_acquisition_bundle(
         "redistribution_verified": False,
     }
 
+    _require_provider_logical_scope(
+        provider,
+        expected_provider_scope,
+        phase="before request identity",
+    )
     results_request_url = historical_match_request_url(
         provider,
         requested_date=canonical_results_date,
         priced_only=results_priced_only,
     )
+    _require_provider_logical_scope(
+        provider,
+        expected_provider_scope,
+        phase="while deriving request identity",
+    )
     request_scope = {
         "provider": "parlayapi",
+        "source_id": expected_provider_scope[1],
+        "provider_base_url": expected_provider_scope[2],
         "sport_key": expected_coverage_sport_key,
-        "regions": list(provider.regions),
-        "markets": list(provider.markets),
+        "regions": list(expected_provider_scope[3]),
+        "markets": list(expected_provider_scope[4]),
         "requested_snapshot_timestamps": list(canonical_requests),
         "coverage_preflight": coverage_request,
         "match_results": {
@@ -623,11 +671,21 @@ def capture_historical_acquisition_bundle(
             evidence_relative = Path("snapshots") / f"{index:04d}-evidence.json"
             market_path = staging / market_relative
             evidence_path = staging / evidence_relative
+            _require_provider_logical_scope(
+                provider,
+                expected_provider_scope,
+                phase=f"before snapshot[{index}]",
+            )
             snapshot_report = capture_historical_snapshot(
                 provider,
                 requested_at=instant,
                 output_path=market_path,
                 evidence_path=evidence_path,
+            )
+            _require_provider_logical_scope(
+                provider,
+                expected_provider_scope,
+                phase=f"during snapshot[{index}]",
             )
             snapshot_reports.append(snapshot_report)
             snapshot_entries.append(
@@ -641,12 +699,22 @@ def capture_historical_acquisition_bundle(
         result_evidence_relative = Path("match-results.evidence.json")
         result_path = staging / result_relative
         result_evidence_path = staging / result_evidence_relative
+        _require_provider_logical_scope(
+            provider,
+            expected_provider_scope,
+            phase="before match-result capture",
+        )
         result_report = capture_historical_matches(
             provider,
             requested_date=canonical_results_date,
             output_path=result_path,
             evidence_path=result_evidence_path,
             priced_only=results_priced_only,
+        )
+        _require_provider_logical_scope(
+            provider,
+            expected_provider_scope,
+            phase="during match-result capture",
         )
 
         # Re-resolve every child byte set at the bundle publication boundary.

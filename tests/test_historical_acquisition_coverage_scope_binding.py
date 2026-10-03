@@ -140,6 +140,54 @@ class HistoricalAcquisitionCoverageScopeBindingTests(unittest.TestCase):
             with self.subTest(changes=changes):
                 self._assert_forged_report_rejected(**changes)
 
+    def test_complete_provider_scope_cannot_change_during_coverage_preflight(self) -> None:
+        mutations = (
+            ("source_id", "parlayapi:other"),
+            ("base_url", "https://other-provider.example"),
+            ("regions", ("eu",)),
+            ("markets", ("totals",)),
+        )
+        for field, value in mutations:
+            with self.subTest(field=field):
+                raw_transport = _CoverageOnlyTransport()
+                provider: ParlayApiTableTennisProvider | None = None
+
+                def mutating_transport(
+                    url: str,
+                    headers: dict[str, str],
+                    timeout: float,
+                    *,
+                    field: str = field,
+                    value: object = value,
+                ) -> HttpJsonResponse:
+                    response = raw_transport(url, headers, timeout)
+                    assert provider is not None
+                    setattr(provider, field, value)
+                    return response
+
+                provider = ParlayApiTableTennisProvider(
+                    "unit-test-key",
+                    transport=mutating_transport,
+                    clock=lambda: "2026-09-13T03:00:00+00:00",
+                    sleeper=lambda _: None,
+                )
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp) / "acquisition"
+                    with self.assertRaisesRegex(
+                        ProviderPayloadError,
+                        "provider logical scope changed during coverage preflight",
+                    ):
+                        capture_historical_acquisition_bundle(
+                            provider,
+                            requested_at=("2026-09-12T10:03:00Z",),
+                            results_date="2026-09-10",
+                            output_dir=root,
+                        )
+                    self.assertFalse(root.exists())
+
+                self.assertEqual(len(raw_transport.urls), 1)
+                self.assertTrue(urlparse(raw_transport.urls[0]).path.endswith("/coverage"))
+
     def test_provider_sport_scope_cannot_change_during_coverage_preflight(self) -> None:
         transport = _CoverageOnlyTransport()
         provider = self._provider(transport)

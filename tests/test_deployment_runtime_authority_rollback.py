@@ -234,6 +234,32 @@ def test_runtime_authority_direct_authority_key_rebinding_fails_closed(
         store.records()
 
 
+def test_coordinated_workspace_rebinding_cannot_transfer_authority(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+
+    foreign_workspace = tmp_path.parent / f"{tmp_path.name}-foreign-workspace"
+    foreign_workspace.mkdir()
+    foreign_path = foreign_workspace / path.name
+    foreign_path.write_bytes(path.read_bytes())
+
+    object.__setattr__(store, "_binding_path", foreign_path)
+    object.__setattr__(store, "_binding_workspace", foreign_workspace)
+    object.__setattr__(store._authority, "workspace", foreign_workspace)
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="binding integrity mismatch",
+    ):
+        store.records()
+
+
 def test_runtime_authority_rebinding_cannot_prepare_new_generation(
     tmp_path: Path,
 ) -> None:

@@ -786,6 +786,11 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
     expected_authorize_code = expected_authorize.__code__
     expected_inspect = inspect
     expected_getattr_static = inspect.getattr_static
+    expected_internal_callables = _INTERNAL_CALLABLES
+    expected_captured_callables = _CAPTURED_CALLABLES
+    expected_provider_callables = _PROVIDER_UNIVERSE_CALLABLES
+    expected_provider_values = _PROVIDER_UNIVERSE_VALUES
+    expected_provider_value_items = tuple(expected_provider_values.items())
 
     def require_sealed_surface() -> None:
         if (
@@ -794,6 +799,20 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
         ):
             raise expected_error(
                 "campaign forward-cycle integrity guard changed"
+            )
+        if (
+            module_globals.get("_INTERNAL_CALLABLES") is not expected_internal_callables
+            or module_globals.get("_CAPTURED_CALLABLES")
+            is not expected_captured_callables
+            or module_globals.get("_PROVIDER_UNIVERSE_CALLABLES")
+            is not expected_provider_callables
+            or module_globals.get("_PROVIDER_UNIVERSE_VALUES")
+            is not expected_provider_values
+            or tuple(expected_provider_values.items())
+            != expected_provider_value_items
+        ):
+            raise expected_error(
+                "campaign forward-cycle witness tables changed"
             )
         if (
             module_globals.get("inspect") is not expected_inspect

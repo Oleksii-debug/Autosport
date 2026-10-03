@@ -3109,3 +3109,98 @@ def test_imported_provider_scope_guard_captures_type_and_getattr_primitives(
     binding_module._PROVIDER_EVIDENCE_SCOPE(locator, provider_store)
 
     assert hostile_calls == []
+
+
+
+def test_imported_scope_captures_remaining_builtin_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, _store, _spec, provider_store = _setup(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append("builtin")
+        raise AssertionError("hostile builtin executed")
+
+    monkeypatch.setattr(capture_module, "any", hostile, raising=False)
+    monkeypatch.setattr(capture_module, "set", hostile, raising=False)
+    monkeypatch.setattr(capture_module, "dict", hostile, raising=False)
+    monkeypatch.setattr(capture_module, "TypeError", hostile, raising=False)
+
+    binding_module._PROVIDER_EVIDENCE_SCOPE(locator, provider_store)
+
+    assert hostile_calls == []
+
+
+def test_public_capture_rejects_shadowed_tuple_before_hostile_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    capture = capture_module.capture_campaign_complete_game_board
+    hostile_calls: list[str] = []
+
+    def hostile_tuple(*_args, **_kwargs):
+        hostile_calls.append("tuple")
+        raise AssertionError("hostile tuple executed")
+
+    monkeypatch.setattr(capture_module, "tuple", hostile_tuple, raising=False)
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="campaign provider-cycle builtin dispatch shadowed",
+    ):
+        capture(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+
+    assert hostile_calls == []
+
+
+def test_clock_cannot_shadow_any_before_provider_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    hostile_calls: list[str] = []
+    provider_calls: list[str] = []
+
+    def hostile_any(*_args, **_kwargs):
+        hostile_calls.append("any")
+        raise AssertionError("hostile any executed")
+
+    def mutating_clock() -> str:
+        monkeypatch.setattr(capture_module, "any", hostile_any, raising=False)
+        return "2100-01-01T06:00:00+00:00"
+
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda *_args, **_kwargs: provider_calls.append("provider"),
+    )
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="campaign provider-cycle builtin dispatch shadowed: any",
+    ):
+        capture_module.capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=mutating_clock,
+        )
+
+    assert hostile_calls == []
+    assert provider_calls == []

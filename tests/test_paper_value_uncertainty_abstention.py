@@ -659,6 +659,57 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
                 )
             )
 
+    def test_canonical_sizing_rejects_net_payoff_above_executable_gross_quote(
+        self,
+    ) -> None:
+        goal = self._goal()
+        event = self._event(decimal_odds=Decimal("2"))
+        forecast = self._forecast(event, uncertainty=Decimal("0.01"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authorized_ref = self._resolver_authorized_ref(root, event, forecast)
+            evidence = self._sizing_evidence(
+                event,
+                forecast,
+                net_win_profit_per_stake=Decimal("2"),
+            )
+            policy = self._sizing_policy()
+
+            # The standalone generic evaluator cannot know this executable quote's
+            # payoff boundary and therefore considers the forged upside eligible.
+            # PaperValue composition must bind sizing economics to execution truth.
+            generic = self._sizing_decision(
+                goal,
+                event,
+                forecast,
+                evidence,
+                policy,
+            )
+            self.assertEqual(generic.action, SizingAction.ELIGIBLE)
+            self.assertGreater(
+                evidence.net_win_profit_per_stake,
+                event.decimal_odds - Decimal("1"),
+            )
+
+            context, ledger_path = self._context(root, event)
+            self._agent(
+                goal,
+                forecast,
+                predictive_ref=authorized_ref,
+                sizing_evidence=evidence,
+                sizing_policy=policy,
+            ).on_market_event(event, context)
+
+            self.assertEqual(context.paper_book.tickets, {})
+            self.assertFalse(ledger_path.exists())
+            self.assertTrue(
+                any(
+                    "payoff exceeds current executable gross quote payoff" in note
+                    for note in context.notes
+                )
+            )
+
     def test_canonical_sizing_width_policy_can_abstain_despite_positive_point_edge(
         self,
     ) -> None:

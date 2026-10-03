@@ -356,6 +356,20 @@ class PaperValueAgent:
             )
             return None
 
+        # The sizing evidence describes all-in *net* profit on one winning BACK
+        # stake, while #623 executes the exact current quote. Net payoff cannot
+        # exceed that quote's gross win profit unless a separate product authority
+        # proves an external rebate/promotion cashflow; no such authority is part of
+        # this PaperValue route. Fail closed rather than let payoff evidence inflate
+        # conservative EV or the Kelly-derived stake ceiling.
+        gross_win_profit_per_stake = event.decimal_odds - Decimal("1")
+        if evidence.net_win_profit_per_stake > gross_win_profit_per_stake:
+            context.notes.append(
+                "paper-value material action withheld: uncertainty sizing all-in "
+                "payoff exceeds current executable gross quote payoff"
+            )
+            return None
+
         evaluator = _UNCERTAINTY_SIZING_EVALUATOR
         if (
             evaluate_uncertainty_sizing is not evaluator

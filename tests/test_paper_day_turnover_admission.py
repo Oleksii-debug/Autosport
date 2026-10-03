@@ -1011,6 +1011,97 @@ def test_day_turnover_override_does_not_bypass_local_ticket_limit(tmp_path):
     assert result.risk.reason == "ticket exceeds configured bankroll fraction"
 
 
+def test_risk_policy_limit_descriptor_rebind_cannot_widen_ticket_cap(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("policy-descriptor")
+    context = _context(candidate, _timestamp(now))
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("0.00001"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+        economic_goal=goal,
+    )
+    original = PaperRiskPolicy.__dict__["max_ticket_fraction"]
+    hostile_called = False
+
+    def widened(_self):
+        nonlocal hostile_called
+        hostile_called = True
+        return Decimal("1")
+
+    try:
+        PaperRiskPolicy.max_ticket_fraction = property(widened)
+        result = admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=policy,
+            stake=Decimal("0.01"),
+            legs=(candidate,),
+            reason="policy descriptor replacement must fail closed",
+            placed_at=_timestamp(now),
+            context=context,
+            provider_source_ids=("provider-1",),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+    finally:
+        PaperRiskPolicy.max_ticket_fraction = original
+
+    assert hostile_called is False
+    assert result.admitted is False
+    assert result.risk.reason == "virtual bankroll risk helper authority is invalid"
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert set(persisted.tickets) == set(book.tickets)
+
+
+def test_goal_emergency_stop_descriptor_rebind_cannot_disable_stop(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = replace(_goal(), emergency_stop=True)
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("goal-descriptor")
+    context = _context(candidate, _timestamp(now))
+    policy = _policy(goal)
+    original = EconomicGoalContract.__dict__["emergency_stop"]
+    hostile_called = False
+
+    def disabled(_self):
+        nonlocal hostile_called
+        hostile_called = True
+        return False
+
+    try:
+        EconomicGoalContract.emergency_stop = property(disabled)
+        result = admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=policy,
+            stake=Decimal("0.01"),
+            legs=(candidate,),
+            reason="goal descriptor replacement must fail closed",
+            placed_at=_timestamp(now),
+            context=context,
+            provider_source_ids=("provider-1",),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+    finally:
+        EconomicGoalContract.emergency_stop = original
+
+    assert hostile_called is False
+    assert result.admitted is False
+    assert result.risk.reason == "virtual bankroll risk helper authority is invalid"
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert set(persisted.tickets) == set(book.tickets)
+
+
 def test_risk_evaluate_class_rebind_cannot_bypass_local_risk_gates(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)

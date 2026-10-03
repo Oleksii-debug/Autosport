@@ -2485,7 +2485,7 @@ def test_bound_binding_sha_rebinding_cannot_make_goal_binding_tautological(
     assert hostile_calls == []
 
 
-def test_bound_plan_witness_rebinding_cannot_retain_stale_issuance(
+def test_bound_plan_witness_rebinding_is_outside_headroom_structural_authority(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -2496,7 +2496,7 @@ def test_bound_plan_witness_rebinding_cannot_retain_stale_issuance(
 
     def hostile_witness(bound):
         hostile_calls.append(bound)
-        return bound.execution_plan.plan_id.removeprefix("supervised-v2-")
+        raise AssertionError("process-local product issuance witness must not execute")
 
     monkeypatch.setattr(
         headroom_module._supervised_execution,
@@ -2504,18 +2504,47 @@ def test_bound_plan_witness_rebinding_cannot_retain_stale_issuance(
         hostile_witness,
     )
 
-    with pytest.raises(
-        ProviderAccountHeadroomError,
-        match="canonical monetary denomination authority changed",
-    ):
-        _assess(
-            ledger,
-            acquired,
-            plan_id="target",
-            action_id="target-action",
-        )
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
 
     assert hostile_calls == []
+    assert assessment.decision is HeadroomDecision.SUFFICIENT_LOWER_BOUND
+    assert assessment.execution_authority is False
+
+
+def test_supervised_process_issuance_assertion_rebinding_is_inert_for_headroom(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_assert(bound):
+        hostile_calls.append(bound)
+        raise AssertionError("process-local product issuance assertion must not execute")
+
+    monkeypatch.setattr(
+        headroom_module._supervised_execution,
+        "assert_bound_supervised_execution_plan_authoritative",
+        hostile_assert,
+    )
+
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
+
+    assert hostile_calls == []
+    assert assessment.decision is HeadroomDecision.SUFFICIENT_LOWER_BOUND
+    assert assessment.real_money_readiness is False
 
 
 def test_bound_plan_digest_rebinding_cannot_forge_denomination_identity(

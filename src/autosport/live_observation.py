@@ -103,7 +103,17 @@ class OneShotObservationWorker:
             # never publish/release a slot while a prior non-daemon helper is alive.
             cancelled.set()
             start_gate.set()
-            self._reap_ambiguous_start(thread)
+            try:
+                self._reap_ambiguous_start(thread)
+            except BaseException:
+                # Ambiguous-start cleanup can itself be interrupted after the helper
+                # has been cancelled but before it is reaped. Publish the original
+                # setup disposition while retaining _thread/_busy ownership so a
+                # later poll can finish the reap instead of stranding the slot.
+                self._messages.put_nowait(
+                    ObservationWorkerMessage(error=self._safe_terminal_error(exc))
+                )
+                raise
             if isinstance(exc, Exception):
                 self._publish_setup_failure(exc)
                 return True

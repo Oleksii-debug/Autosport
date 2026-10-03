@@ -280,7 +280,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             (
                 f"CREATE TRIGGER {_EVENT_PAYLOAD_RETENTION_DELETE_TRIGGER}",
                 f"BEFORE DELETE ON {_EVENT_PAYLOAD_TABLE}",
-                "WHEN NOT EXISTS (SELECT 1 FROM collector_delta_tombstones_v1",
+                "WHEN EXISTS (SELECT 1 FROM collector_deltas WHERE delta_id=OLD.delta_id)",
+                "OR NOT EXISTS (SELECT 1 FROM collector_delta_tombstones_v1",
                 "WHERE delta_id=OLD.delta_id AND source_id=OLD.source_id",
                 "AND stream_epoch=OLD.stream_epoch)",
                 "BEGIN SELECT RAISE(ABORT, 'collector event payload deletion requires retention tombstone'); END",
@@ -371,13 +372,14 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 connection.execute(
                     f"CREATE TRIGGER {_EVENT_PAYLOAD_RETENTION_DELETE_TRIGGER} "
                     f"BEFORE DELETE ON {_EVENT_PAYLOAD_TABLE} "
-                    "WHEN NOT EXISTS (SELECT 1 FROM collector_delta_tombstones_v1 "
+                    "WHEN EXISTS (SELECT 1 FROM collector_deltas WHERE delta_id=OLD.delta_id) "
+                    "OR NOT EXISTS (SELECT 1 FROM collector_delta_tombstones_v1 "
                     "WHERE delta_id=OLD.delta_id AND source_id=OLD.source_id "
                     "AND stream_epoch=OLD.stream_epoch) BEGIN "
                     "SELECT RAISE(ABORT, 'collector event payload deletion requires retention tombstone'); END"
                 )
                 connection.execute(
-                    "INSERT INTO collector_meta(key, value) VALUES(?, '2')",
+                    "INSERT INTO collector_meta(key, value) VALUES(?, '3')",
                     (_EVENT_PAYLOAD_SCHEMA_META_KEY,),
                 )
             elif event_schema_marker[0] == "1":
@@ -388,17 +390,63 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 connection.execute(
                     f"CREATE TRIGGER {_EVENT_PAYLOAD_RETENTION_DELETE_TRIGGER} "
                     f"BEFORE DELETE ON {_EVENT_PAYLOAD_TABLE} "
-                    "WHEN NOT EXISTS (SELECT 1 FROM collector_delta_tombstones_v1 "
+                    "WHEN EXISTS (SELECT 1 FROM collector_deltas WHERE delta_id=OLD.delta_id) "
+                    "OR NOT EXISTS (SELECT 1 FROM collector_delta_tombstones_v1 "
                     "WHERE delta_id=OLD.delta_id AND source_id=OLD.source_id "
                     "AND stream_epoch=OLD.stream_epoch) BEGIN "
                     "SELECT RAISE(ABORT, 'collector event payload deletion requires retention tombstone'); END"
                 )
                 connection.execute(
-                    "UPDATE collector_meta SET value='2' WHERE key=?",
+                    "UPDATE collector_meta SET value='3' WHERE key=?",
+                    (_EVENT_PAYLOAD_SCHEMA_META_KEY,),
+                )
+            elif event_schema_marker[0] == "2":
+                if event_object_names != required_event_objects:
+                    raise ValueError(
+                        "collector event payload schema integrity guard is missing"
+                    )
+                delete_trigger = connection.execute(
+                    "SELECT type, tbl_name, sql FROM sqlite_master WHERE name=?",
+                    (_EVENT_PAYLOAD_RETENTION_DELETE_TRIGGER,),
+                ).fetchone()
+                expected_v2_delete_trigger_sql = " ".join(
+                    (
+                        f"CREATE TRIGGER {_EVENT_PAYLOAD_RETENTION_DELETE_TRIGGER}",
+                        f"BEFORE DELETE ON {_EVENT_PAYLOAD_TABLE}",
+                        "WHEN NOT EXISTS (SELECT 1 FROM collector_delta_tombstones_v1",
+                        "WHERE delta_id=OLD.delta_id AND source_id=OLD.source_id",
+                        "AND stream_epoch=OLD.stream_epoch)",
+                        "BEGIN SELECT RAISE(ABORT, 'collector event payload deletion requires retention tombstone'); END",
+                    )
+                )
+                if (
+                    delete_trigger is None
+                    or delete_trigger["type"] != "trigger"
+                    or delete_trigger["tbl_name"] != _EVENT_PAYLOAD_TABLE
+                    or " ".join(str(delete_trigger["sql"]).split())
+                    != expected_v2_delete_trigger_sql
+                ):
+                    raise ValueError(
+                        "collector event payload schema integrity guard is missing"
+                    )
+                connection.execute(
+                    f"DROP TRIGGER {_EVENT_PAYLOAD_RETENTION_DELETE_TRIGGER}"
+                )
+                connection.execute(
+                    f"CREATE TRIGGER {_EVENT_PAYLOAD_RETENTION_DELETE_TRIGGER} "
+                    f"BEFORE DELETE ON {_EVENT_PAYLOAD_TABLE} "
+                    "WHEN EXISTS (SELECT 1 FROM collector_deltas WHERE delta_id=OLD.delta_id) "
+                    "OR NOT EXISTS (SELECT 1 FROM collector_delta_tombstones_v1 "
+                    "WHERE delta_id=OLD.delta_id AND source_id=OLD.source_id "
+                    "AND stream_epoch=OLD.stream_epoch) BEGIN "
+                    "SELECT RAISE(ABORT, 'collector event payload deletion requires retention tombstone'); END"
+                )
+                connection.execute(
+                    "UPDATE collector_meta SET value='3' WHERE key=?",
                     (_EVENT_PAYLOAD_SCHEMA_META_KEY,),
                 )
             elif (
-                event_schema_marker[0] != "2"
+                event_schema_marker[0] != "3"
                 or event_object_names != required_event_objects
             ):
                 raise ValueError(

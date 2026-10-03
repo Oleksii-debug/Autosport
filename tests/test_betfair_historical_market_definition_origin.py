@@ -496,5 +496,80 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
         self.assertEqual(len(bound.evidence_sha256), 64)
 
 
+    def test_record_extractor_rebinding_fails_before_fabricated_origin_issuance(
+        self,
+    ) -> None:
+        raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
+        witness = self.witness(raw)
+        hostile_calls: list[bool] = []
+
+        def hostile(record, *, market_id):
+            del record, market_id
+            hostile_calls.append(True)
+            return self.definition(status="CLOSED", version=999)
+
+        with patch.object(
+            origin_module,
+            "_definition_in_record",
+            new=hostile,
+        ), patch.object(
+            HistoricalProviderOriginWitness,
+            "assert_authoritative",
+            autospec=True,
+            return_value=None,
+        ):
+            with self.assertRaisesRegex(
+                BetfairHistoricalMarketDefinitionOriginError,
+                "derivation dispatch was replaced",
+            ):
+                bind_betfair_historical_market_definition_origin(
+                    witness=witness,
+                    raw_bytes=raw,
+                    market_id=self.MARKET_ID,
+                    cutoff_pt_ms=1000,
+                    package_tier=HistoricalPackageTier.PRO,
+                )
+
+        self.assertEqual(hostile_calls, [])
+
+    def test_record_extractor_in_place_code_replacement_fails_closed(self) -> None:
+        raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
+        witness = self.witness(raw)
+        target = origin_module._definition_in_record
+        original_code = target.__code__
+        hostile_calls: list[bool] = []
+
+        def hostile(record, *, market_id):
+            del record, market_id
+            hostile_calls.append(True)
+            return None
+
+        self.assertEqual(original_code.co_freevars, ())
+        self.assertEqual(hostile.__code__.co_freevars, ())
+        target.__code__ = hostile.__code__
+        try:
+            with patch.object(
+                HistoricalProviderOriginWitness,
+                "assert_authoritative",
+                autospec=True,
+                return_value=None,
+            ):
+                with self.assertRaisesRegex(
+                    BetfairHistoricalMarketDefinitionOriginError,
+                    "derivation dispatch was replaced",
+                ):
+                    bind_betfair_historical_market_definition_origin(
+                        witness=witness,
+                        raw_bytes=raw,
+                        market_id=self.MARKET_ID,
+                        cutoff_pt_ms=1000,
+                        package_tier=HistoricalPackageTier.PRO,
+                    )
+        finally:
+            target.__code__ = original_code
+
+        self.assertEqual(hostile_calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -269,7 +270,7 @@ class ProfileBinding:
     profile_sha256: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class BoundSupervisedExecutionPlan:
     execution_plan: ExecutionPlan
     portfolio_plan_sha256: str
@@ -380,12 +381,28 @@ def _bound_plan_witness(value: BoundSupervisedExecutionPlan) -> str:
 
 def _make_bound_plan_authority_registry():
     lock = threading.RLock()
-    issued: dict[int, tuple[BoundSupervisedExecutionPlan, str]] = {}
+    issued: dict[
+        int,
+        tuple[weakref.ReferenceType[BoundSupervisedExecutionPlan], str],
+    ] = {}
 
     def issue(value: BoundSupervisedExecutionPlan) -> BoundSupervisedExecutionPlan:
         witness = _bound_plan_witness(value)
+        identity = id(value)
+
+        def clear(
+            ref: weakref.ReferenceType[BoundSupervisedExecutionPlan],
+            *,
+            _identity: int = identity,
+        ) -> None:
+            with lock:
+                record = issued.get(_identity)
+                if record is not None and record[0] is ref:
+                    issued.pop(_identity, None)
+
+        ref = weakref.ref(value, clear)
         with lock:
-            issued[id(value)] = (value, witness)
+            issued[identity] = (ref, witness)
         return value
 
     def assert_authoritative(value: BoundSupervisedExecutionPlan) -> None:
@@ -399,7 +416,7 @@ def _make_bound_plan_authority_registry():
             record = issued.get(id(value))
         if (
             record is None
-            or record[0] is not value
+            or record[0]() is not value
             or record[1] != witness
         ):
             raise SupervisedExecutionError(

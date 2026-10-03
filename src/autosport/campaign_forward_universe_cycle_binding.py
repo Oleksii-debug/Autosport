@@ -679,6 +679,10 @@ _CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS = tuple(
 
 def _require_dispatch_integrity() -> None:
     module_globals = _CANONICAL_MODULE_GLOBALS
+    if "type" in module_globals or "getattr" in module_globals:
+        raise CampaignForwardUniverseCycleBindingError(
+            "campaign forward-cycle builtin dispatch shadowed"
+        )
     if module_globals.get("_CANONICAL_MODULE_GLOBALS") is not module_globals:
         raise CampaignForwardUniverseCycleBindingError(
             "campaign forward-cycle module authority mapping changed"
@@ -1016,6 +1020,10 @@ def resolve_campaign_forward_universe_cycle_authority(
     expected_provider_universe_module = _provider_universe_module
 
     def require_stable_integrity() -> None:
+        if "type" in module_globals or "getattr" in module_globals:
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle builtin dispatch shadowed"
+            )
         if (
             module_globals.get("_require_dispatch_integrity") is not integrity_guard
             or integrity_guard.__code__ is not integrity_guard_code
@@ -1331,6 +1339,10 @@ def authorize_campaign_forward_source_receipts(
     expected_provider_universe_module = _provider_universe_module
 
     def require_stable_authorization_dispatch() -> None:
+        if "type" in module_globals or "getattr" in module_globals:
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle builtin dispatch shadowed"
+            )
         if (
             module_globals.get("_require_dispatch_integrity") is not integrity_guard
             or integrity_guard.__code__ is not integrity_guard_code
@@ -1656,6 +1668,10 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
     expected_provider_value_items = tuple(expected_provider_values.items())
 
     def require_sealed_surface() -> None:
+        if "type" in module_globals or "getattr" in module_globals:
+            raise expected_error(
+                "campaign forward-cycle builtin dispatch shadowed"
+            )
         if (
             module_globals.get("_require_dispatch_integrity") is not expected_guard
             or expected_guard.__code__ is not expected_guard_code

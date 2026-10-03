@@ -831,6 +831,8 @@ def test_class_rebound_ledger_method_fails_before_hostile_dispatch(
         "_digest",
         "_time",
         "_sha",
+        "_text",
+        "assert_verified_provider_evidence_authoritative",
         "_require_bound_plan_structure",
         "_require_approval",
         "_require_durable_approval",
@@ -890,6 +892,105 @@ def test_supervised_composition_helper_code_replacement_fails_before_mutation(
 
     monkeypatch.setattr(target, "__code__", hostile.__code__)
     ledger = RealExecutionLedger(tmp_path / f"helper-code-{helper_name}.jsonl")
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical supervised execution composition changed",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    with pytest.raises(KeyError):
+        ledger.saga(bound.execution_plan.plan_id)
+
+
+
+@pytest.mark.parametrize(
+    ("owner_name", "attribute_name"),
+    (
+        ("bound_plan", "action_for"),
+        ("bound_plan", "constraint_for"),
+        ("bound_plan", "profile_for"),
+        ("approval", "require_active"),
+        ("approval", "fingerprint"),
+        ("approval", "ledger_identity"),
+        ("execution_plan", "fingerprint"),
+    ),
+)
+def test_supervised_composition_descriptor_rebinding_fails_before_mutation(
+    monkeypatch,
+    tmp_path,
+    owner_name,
+    attribute_name,
+) -> None:
+    bound, approval, _, _ = _bound()
+    owners = {
+        "bound_plan": type(bound),
+        "approval": type(approval),
+        "execution_plan": type(bound.execution_plan),
+    }
+
+    def hostile(*args, **kwargs):
+        raise AssertionError("hostile descriptor executed")
+
+    monkeypatch.setattr(owners[owner_name], attribute_name, hostile)
+    ledger = RealExecutionLedger(
+        tmp_path / f"descriptor-{owner_name}-{attribute_name}.jsonl"
+    )
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical supervised execution composition changed",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    with pytest.raises(KeyError):
+        ledger.saga(bound.execution_plan.plan_id)
+
+
+@pytest.mark.parametrize(
+    "object_name",
+    (
+        "SupervisedApproval",
+        "VerifiedProviderEffectEvidence",
+        "VerifiedProviderAbsenceEvidence",
+        "ExternalAcknowledgement",
+        "ExternalEffectReconciliation",
+        "ReconciliationSnapshot",
+        "AcknowledgementStatus",
+        "AttemptState",
+    ),
+)
+def test_supervised_composition_type_alias_rebinding_fails_before_mutation(
+    monkeypatch,
+    tmp_path,
+    object_name,
+) -> None:
+    bound, approval, _, _ = _bound()
+    monkeypatch.setattr(supervised_execution, object_name, object())
+    ledger = RealExecutionLedger(tmp_path / f"type-alias-{object_name}.jsonl")
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical supervised execution composition changed",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    with pytest.raises(KeyError):
+        ledger.saga(bound.execution_plan.plan_id)
+
+
+def test_supervised_approval_property_code_replacement_fails_before_mutation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    descriptor = vars(type(approval))["fingerprint"]
+
+    def hostile(self):
+        raise AssertionError("hostile approval fingerprint executed")
+
+    monkeypatch.setattr(descriptor.fget, "__code__", hostile.__code__)
+    ledger = RealExecutionLedger(tmp_path / "approval-property-code.jsonl")
 
     with pytest.raises(
         SupervisedExecutionError,

@@ -573,9 +573,12 @@ class DeploymentRuntimeAuthorityRecord:
 
 
 _CANONICAL_RECORD_TYPE: Final = DeploymentRuntimeAuthorityRecord
+_CANONICAL_ENVIRONMENT_IDENTITY_TYPE: Final = EnvironmentIdentity
+_CANONICAL_EPISODE_TYPE: Final = Episode
 _CANONICAL_RECORD_HELPERS: Final = (
     ("_text", _text, _text.__code__),
     ("_sha", _sha, _sha.__code__),
+    ("_instant", _instant, _instant.__code__),
     ("_timestamp", _timestamp, _timestamp.__code__),
     ("_digest", _digest, _digest.__code__),
     ("_environment_payload", _environment_payload, _environment_payload.__code__),
@@ -618,6 +621,13 @@ def _assert_canonical_record_codec() -> None:
     if DeploymentRuntimeAuthorityRecord is not _CANONICAL_RECORD_TYPE:
         raise DeploymentRuntimeAuthorityError(
             "runtime authority record type dispatch was replaced"
+        )
+    if (
+        EnvironmentIdentity is not _CANONICAL_ENVIRONMENT_IDENTITY_TYPE
+        or Episode is not _CANONICAL_EPISODE_TYPE
+    ):
+        raise DeploymentRuntimeAuthorityError(
+            "runtime authority semantic type dispatch was replaced"
         )
     namespace = globals()
     for name, expected_helper, expected_code in _CANONICAL_RECORD_HELPERS:

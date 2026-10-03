@@ -310,6 +310,12 @@ jobs:
           if (-not [string]::Equals([string]$external.launch_working_directory, $hostileCwd, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw 'External UIA evidence did not preserve the hostile child working directory'
           }
+          if ($external.duplicate_launch_status -ne 'PASS' -or [int]$external.duplicate_launch_exit_code -ne 2) {
+            throw 'External UIA evidence did not prove packaged duplicate-launch rejection'
+          }
+          if ([string]$external.duplicate_launch_dialog_title -ne 'Автоспорт — помилка запуску') {
+            throw 'External UIA duplicate-launch dialog title mismatch'
+          }
           if ($external.real_money_execution -ne $false -or $external.human_tested -ne $false -or $external.nvda_verified -ne $false) {
             throw 'External UIA audit violated release truth labels'
           }
@@ -318,6 +324,7 @@ jobs:
           $verification | Add-Member -NotePropertyName extracted_external_uia_status -NotePropertyValue $external.status -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_hostile_cwd_status -NotePropertyValue 'PASS' -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_read_only_package_status -NotePropertyValue 'PASS' -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_duplicate_launch_status -NotePropertyValue $external.duplicate_launch_status -Force
           $verification | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $verificationPath -Encoding utf8
       - name: Upload external UIA failure evidence
         if: failure()

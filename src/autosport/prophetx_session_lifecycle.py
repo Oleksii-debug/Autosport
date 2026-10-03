@@ -428,12 +428,28 @@ class ProphetXSessionLifecycle:
         *,
         now: datetime,
         access_token_available: bool,
+        access_token_lineage_id: str | None = None,
     ) -> ProphetXLoginAdmission:
         timestamp = _aware_utc(now, "now")
         if type(access_token_available) is not bool:
             raise ProphetXSessionLifecycleError(
                 "access_token_available must be an exact bool"
             )
+        if access_token_available:
+            if access_token_lineage_id is None:
+                raise ProphetXSessionLifecycleError(
+                    "available access token requires session lineage evidence"
+                )
+            token_lineage = _sha256_hex(
+                access_token_lineage_id,
+                "access_token_lineage_id",
+            )
+        else:
+            if access_token_lineage_id is not None:
+                raise ProphetXSessionLifecycleError(
+                    "unavailable access token cannot carry session lineage evidence"
+                )
+            token_lineage = None
 
         with self._thread_lock:
             try:
@@ -443,6 +459,7 @@ class ProphetXSessionLifecycle:
                         current,
                         timestamp,
                         access_token_available=access_token_available,
+                        access_token_lineage_id=token_lineage,
                     )
             except WorkspaceEconomicLockBusyError:
                 # Another process is changing this exact provider pool. Waiting is
@@ -844,6 +861,7 @@ class ProphetXSessionLifecycle:
         now: datetime,
         *,
         access_token_available: bool,
+        access_token_lineage_id: str | None,
     ) -> ProphetXLoginAdmission:
         if current is None:
             return self._grant_login(now, generation=0, transient_failures=0)
@@ -920,7 +938,10 @@ class ProphetXSessionLifecycle:
                     generation=current.generation + 1,
                     transient_failures=0,
                 )
-            if not access_token_available:
+            if (
+                not access_token_available
+                or access_token_lineage_id != current.session_lineage_id
+            ):
                 return ProphetXLoginAdmission(
                     action=ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
                     snapshot=current,

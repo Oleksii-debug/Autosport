@@ -456,6 +456,217 @@ class ProphetXSessionLifecycle:
                     "cannot acquire ProphetX session-pool coordination lock"
                 ) from exc
 
+    def begin_renewal(
+        self,
+        *,
+        now: datetime,
+    ) -> ProphetXLoginAdmission:
+        """Reserve one refresh attempt without allocating a new provider session."""
+
+        timestamp = _aware_utc(now, "now")
+        with self._thread_lock:
+            try:
+                with WorkspaceEconomicLock(self._scope_dir):
+                    current = self._load_state()
+                    if current is None:
+                        raise ProphetXSessionLifecycleError(
+                            "cannot renew without durable session evidence"
+                        )
+                    if current.integration_role != self.scope.integration_role:
+                        raise ProphetXSessionLifecycleError(
+                            "access key is bound to a different integration role"
+                        )
+                    if current.credential_revision != self.scope.credential_revision:
+                        raise ProphetXSessionLifecycleError(
+                            "credential revision changed before renewal"
+                        )
+                    if current.state is ProphetXSessionState.RENEWING:
+                        return ProphetXLoginAdmission(
+                            action=ProphetXLoginAdmissionAction.WAIT_FOR_EXISTING_RENEWAL,
+                            snapshot=current,
+                            retry_at=current.access_expires_at,
+                        )
+                    if current.state not in {
+                        ProphetXSessionState.ACTIVE,
+                        ProphetXSessionState.RENEWAL_DUE,
+                    }:
+                        raise ProphetXSessionLifecycleError(
+                            "renewal requires an active or renewal-due session"
+                        )
+                    if current.access_expires_at is None:
+                        raise ProphetXSessionLifecycleError(
+                            "renewal requires exact provider access expiry"
+                        )
+                    if timestamp >= current.access_expires_at:
+                        raise ProphetXSessionLifecycleError(
+                            "cannot renew an already expired access session"
+                        )
+                    if (
+                        current.state is ProphetXSessionState.ACTIVE
+                        and timestamp
+                        < current.access_expires_at - RENEWAL_LEAD_TIME
+                    ):
+                        raise ProphetXSessionLifecycleError(
+                            "renewal is not due yet"
+                        )
+                    if (
+                        current.retry_not_before is not None
+                        and timestamp < current.retry_not_before
+                    ):
+                        return ProphetXLoginAdmission(
+                            action=ProphetXLoginAdmissionAction.RETRY_LATER,
+                            snapshot=current,
+                            retry_at=current.retry_not_before,
+                        )
+                    attempt = token_hex(32)
+                    updated = ProphetXSessionSnapshot(
+                        state=ProphetXSessionState.RENEWING,
+                        generation=current.generation + 1,
+                        credential_revision=current.credential_revision,
+                        integration_role=current.integration_role,
+                        last_transition_at=timestamp,
+                        attempt_id=attempt,
+                        attempt_started_at=timestamp,
+                        session_lineage_id=current.session_lineage_id,
+                        access_expires_at=current.access_expires_at,
+                        slot_hold_until=current.slot_hold_until,
+                        transient_failures=current.transient_failures,
+                        last_failure_class=current.last_failure_class,
+                        last_renewal_failure_class=current.last_renewal_failure_class,
+                    )
+                    self._write_state(updated)
+                    self._owned_attempts.add(attempt)
+                    return ProphetXLoginAdmission(
+                        action=ProphetXLoginAdmissionAction.START_RENEWAL,
+                        snapshot=updated,
+                        attempt_id=attempt,
+                        retry_at=current.access_expires_at,
+                    )
+            except WorkspaceEconomicLockError as exc:
+                raise ProphetXSessionLifecycleError(
+                    "cannot acquire ProphetX session-pool coordination lock"
+                ) from exc
+
+    def complete_renewal_success(
+        self,
+        *,
+        attempt_id: str,
+        now: datetime,
+        access_expires_at: datetime,
+    ) -> ProphetXSessionSnapshot:
+        """Apply exact provider refresh expiry without changing session lineage."""
+
+        attempt = _sha256_hex(attempt_id, "attempt_id")
+        timestamp = _aware_utc(now, "now")
+        expires = _aware_utc(access_expires_at, "access_expires_at")
+        if expires <= timestamp:
+            raise ProphetXSessionLifecycleError(
+                "provider renewal access_expires_at must follow completion"
+            )
+        with self._thread_lock:
+            if attempt not in self._owned_attempts:
+                raise ProphetXSessionLifecycleError(
+                    "renewal attempt was not issued by this coordinator"
+                )
+            try:
+                with WorkspaceEconomicLock(self._scope_dir):
+                    current = self._require_owned_renewal(attempt)
+                    updated = ProphetXSessionSnapshot(
+                        state=ProphetXSessionState.ACTIVE,
+                        generation=current.generation + 1,
+                        credential_revision=current.credential_revision,
+                        integration_role=current.integration_role,
+                        last_transition_at=timestamp,
+                        session_lineage_id=current.session_lineage_id,
+                        access_expires_at=expires,
+                        slot_hold_until=expires,
+                        transient_failures=current.transient_failures,
+                        last_failure_class=current.last_failure_class,
+                    )
+                    self._write_state(updated)
+            except WorkspaceEconomicLockError as exc:
+                raise ProphetXSessionLifecycleError(
+                    "cannot acquire ProphetX session-pool coordination lock"
+                ) from exc
+            self._owned_attempts.discard(attempt)
+            return updated
+
+    def complete_renewal_failure(
+        self,
+        *,
+        attempt_id: str,
+        now: datetime,
+        failure: ProphetXRenewalFailureClass,
+    ) -> ProphetXSessionSnapshot:
+        """Fail closed without converting refresh failure into a replacement login."""
+
+        attempt = _sha256_hex(attempt_id, "attempt_id")
+        timestamp = _aware_utc(now, "now")
+        if type(failure) is not ProphetXRenewalFailureClass:
+            raise ProphetXSessionLifecycleError(
+                "failure must be an exact ProphetXRenewalFailureClass"
+            )
+        with self._thread_lock:
+            if attempt not in self._owned_attempts:
+                raise ProphetXSessionLifecycleError(
+                    "renewal attempt was not issued by this coordinator"
+                )
+            try:
+                with WorkspaceEconomicLock(self._scope_dir):
+                    current = self._require_owned_renewal(attempt)
+                    failures = current.transient_failures + 1
+                    if failure is ProphetXRenewalFailureClass.AMBIGUOUS_PROVIDER_RESULT:
+                        state = ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+                        hold = timestamp + CONSERVATIVE_SESSION_SLOT_HOLD
+                        retry = None
+                        lineage = None
+                        expiry = None
+                    elif failure is ProphetXRenewalFailureClass.CREDENTIAL_REJECTED:
+                        state = ProphetXSessionState.CREDENTIAL_REJECTED
+                        hold = (
+                            current.slot_hold_until
+                            if current.slot_hold_until is not None
+                            and current.slot_hold_until > timestamp
+                            else None
+                        )
+                        retry = None
+                        lineage = None
+                        expiry = None
+                    elif timestamp >= current.access_expires_at:
+                        state = ProphetXSessionState.EXPIRED
+                        hold = None
+                        retry = None
+                        lineage = None
+                        expiry = None
+                    else:
+                        state = ProphetXSessionState.RENEWAL_DUE
+                        hold = current.slot_hold_until
+                        retry = timestamp + self._retry_delay(failures)
+                        lineage = current.session_lineage_id
+                        expiry = current.access_expires_at
+
+                    updated = ProphetXSessionSnapshot(
+                        state=state,
+                        generation=current.generation + 1,
+                        credential_revision=current.credential_revision,
+                        integration_role=current.integration_role,
+                        last_transition_at=timestamp,
+                        session_lineage_id=lineage,
+                        access_expires_at=expiry,
+                        slot_hold_until=hold,
+                        retry_not_before=retry,
+                        transient_failures=failures,
+                        last_failure_class=current.last_failure_class,
+                        last_renewal_failure_class=failure,
+                    )
+                    self._write_state(updated)
+            except WorkspaceEconomicLockError as exc:
+                raise ProphetXSessionLifecycleError(
+                    "cannot acquire ProphetX session-pool coordination lock"
+                ) from exc
+            self._owned_attempts.discard(attempt)
+            return updated
+
     def complete_login_success(
         self,
         *,
@@ -660,6 +871,13 @@ class ProphetXSessionLifecycle:
                 transient_failures=current.transient_failures,
             )
 
+        if current.state is ProphetXSessionState.RENEWING:
+            return ProphetXLoginAdmission(
+                action=ProphetXLoginAdmissionAction.WAIT_FOR_EXISTING_RENEWAL,
+                snapshot=current,
+                retry_at=current.access_expires_at,
+            )
+
         if current.state in {
             ProphetXSessionState.ACTIVE,
             ProphetXSessionState.RENEWAL_DUE,
@@ -796,6 +1014,23 @@ class ProphetXSessionLifecycle:
         ):
             raise ProphetXSessionLifecycleError(
                 "login attempt no longer owns current session-pool admission"
+            )
+        return current
+
+    def _require_owned_renewal(
+        self,
+        attempt_id: str,
+    ) -> ProphetXSessionSnapshot:
+        current = self._load_state()
+        if (
+            current is None
+            or current.state is not ProphetXSessionState.RENEWING
+            or current.attempt_id != attempt_id
+            or current.credential_revision != self.scope.credential_revision
+            or current.integration_role != self.scope.integration_role
+        ):
+            raise ProphetXSessionLifecycleError(
+                "renewal attempt no longer owns current session authority"
             )
         return current
 

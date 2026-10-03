@@ -78,6 +78,7 @@ class FocusedMirrorDependencyIndex:
         self._dependencies: dict[str, FocusedMirrorDependency] = {}
         self._matched_keys: dict[str, set[MirrorQuoteKey]] = {}
         self._lock = RLock()
+        self._publication_input_guard: tuple[str, ...] | None = None
 
     @staticmethod
     def _input_id(value: str) -> str:
@@ -121,6 +122,10 @@ class FocusedMirrorDependencyIndex:
             if dependency.matches(event)
         }
         with self._lock:
+            if self._publication_input_guard is not None:
+                raise FocusedMirrorRegistryChanged(
+                    "focused mirror dependency mutation is blocked during decision publication"
+                )
             if normalized_id in self._dependencies:
                 raise ValueError(f"input_id {normalized_id!r} is already registered")
             self._dependencies[normalized_id] = dependency
@@ -130,6 +135,10 @@ class FocusedMirrorDependencyIndex:
     def unregister(self, input_id: str) -> bool:
         normalized_id = self._input_id(input_id)
         with self._lock:
+            if self._publication_input_guard is not None:
+                raise FocusedMirrorRegistryChanged(
+                    "focused mirror dependency mutation is blocked during decision publication"
+                )
             removed = self._dependencies.pop(normalized_id, None)
             self._matched_keys.pop(normalized_id, None)
             return removed is not None
@@ -154,16 +163,24 @@ class FocusedMirrorDependencyIndex:
         if len(expected) != len(set(expected)):
             raise ValueError("expected_input_ids must be unique")
         with self._lock:
+            if self._publication_input_guard is not None:
+                raise FocusedMirrorRegistryChanged(
+                    "focused mirror dependency publication guard is already active"
+                )
             current = tuple(sorted(self._dependencies))
             if current != expected:
                 raise FocusedMirrorRegistryChanged(
                     "focused mirror dependency registry changed before decision publication"
                 )
-            yield
-            if tuple(sorted(self._dependencies)) != expected:
-                raise FocusedMirrorRegistryChanged(
-                    "focused mirror dependency registry changed during decision publication"
-                )
+            self._publication_input_guard = expected
+            try:
+                yield
+                if tuple(sorted(self._dependencies)) != expected:
+                    raise FocusedMirrorRegistryChanged(
+                        "focused mirror dependency registry changed during decision publication"
+                    )
+            finally:
+                self._publication_input_guard = None
 
     def _dependency(self, input_id: str) -> FocusedMirrorDependency:
         normalized_id = self._input_id(input_id)

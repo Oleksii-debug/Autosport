@@ -33,6 +33,44 @@ class _Response:
         return self._payload
 
 
+def _coherence_complete_empty_exact_ref_fixture(
+    responses: list[bytes],
+    *,
+    provider_order_ref: str | None,
+) -> list[bytes]:
+    prepared = list(responses)
+    if provider_order_ref is None:
+        return prepared
+
+    current: list[bytes] = []
+    cleared: list[bytes] = []
+    for payload in prepared:
+        decoded = json.loads(payload.decode("utf-8"))
+        result = decoded.get("result")
+        if not isinstance(result, dict):
+            continue
+        if (
+            "currentOrders" in result
+            and result.get("currentOrders") == []
+            and result.get("moreAvailable") is False
+        ):
+            current.append(payload)
+        elif (
+            "clearedOrders" in result
+            and result.get("clearedOrders") == []
+            and result.get("moreAvailable") is False
+        ):
+            cleared.append(payload)
+
+    # The canonical exact-ref sweep is one terminal current page plus the four
+    # terminal cleared-status pages. Add only the second stable-empty sweep that
+    # production now requires; transition/coherence falsifiers provide their own
+    # explicit second-pass responses and therefore do not match this shape.
+    if len(current) == 1 and len(cleared) == 4:
+        prepared.extend((current[0], *cleared))
+    return prepared
+
+
 class _QueuedOpener:
     def __init__(self, responses: list[bytes]) -> None:
         self._responses = list(responses)
@@ -89,6 +127,8 @@ def _install_https_opener_dispatch(
             timeout=getattr(request, "timeout", 0),
         )
         response.code = 200
+        response.status = 200
+        response.url = request.full_url
         response.msg = "OK"
         response.info = lambda: {}
         return response
@@ -117,6 +157,10 @@ def semantic_execution_readback(
     for parser/economic falsifiers; public authority verification must reject it.
     """
 
+    responses = _coherence_complete_empty_exact_ref_fixture(
+        responses,
+        provider_order_ref=provider_order_ref,
+    )
     opener = _QueuedOpener(responses)
     with pytest.MonkeyPatch.context() as monkeypatch:
         _install_https_opener_dispatch(monkeypatch, opener)
@@ -145,6 +189,10 @@ def semantic_execution_readback_with_client(
     page_size: int = 1000,
     max_pages: int = 100,
 ) -> tuple[BetfairReadOnlyClient, object]:
+    responses = _coherence_complete_empty_exact_ref_fixture(
+        responses,
+        provider_order_ref=provider_order_ref,
+    )
     opener = _QueuedOpener(responses)
     with pytest.MonkeyPatch.context() as monkeypatch:
         _install_https_opener_dispatch(monkeypatch, opener)

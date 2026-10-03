@@ -453,6 +453,7 @@ def coalesce_posting_replays(
     if not readbacks:
         return ()
     account_context_id: str | None = None
+    currency: str | None = None
     seen: dict[str, BetdaqPostingObservation] = {}
     order: list[str] = []
     for readback in readbacks:
@@ -463,9 +464,14 @@ def coalesce_posting_replays(
         current_context = readback.evidence.account_context_id
         if account_context_id is None:
             account_context_id = current_context
+            currency = readback.currency
         elif current_context != account_context_id:
             raise BetdaqEconomicReadbackError(
                 "posting replays belong to different authenticated account contexts"
+            )
+        elif readback.currency != currency:
+            raise BetdaqEconomicReadbackError(
+                "posting replays use different provider currencies"
             )
         for posting in readback.postings:
             identity = posting.transaction_identity

@@ -566,10 +566,13 @@ class MarketSettlementOutcomeAuthority:
         supply that independently derived authority here; durable data then proves
         identity/equality only.
         """
-        if not isinstance(verified_authority, cls):
+        if (
+            cls is not _CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE
+            or type(verified_authority) is not _CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE
+        ):
             raise ValueError(
                 "durable market outcome authority readback requires separately "
-                "verified source authority"
+                "verified exact canonical source authority"
             )
         canonical = verified_authority.to_dict()
         expected = set(canonical)

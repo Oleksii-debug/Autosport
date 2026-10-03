@@ -816,24 +816,43 @@ class ProductGuiWorker:
                             # currently-authoritative profiled runtime already used by
                             # the packaged product path. Compatibility/dynamic-source
                             # runtimes may tick, but cannot mint this projection.
-                            require_authoritative_trusted_runtime_code_profile(
-                                runtime_profile,
-                                workspace=runtime.workspace,
-                            )
+                            try:
+                                require_authoritative_trusted_runtime_code_profile(
+                                    runtime_profile,
+                                    workspace=runtime.workspace,
+                                )
+                            except TrustedRuntimeCodeProfileError:
+                                if self._stop_event.is_set():
+                                    break
+                                raise
                             # Keep one outer canonical runtime-operation fence across
                             # tick completion and economic readback. runtime.tick()
                             # re-enters the same RLock through its existing decorator.
                             with runtime._operation_fence:
                                 tick = runtime.tick()
-                                require_authoritative_trusted_runtime_code_profile(
-                                    runtime_profile,
-                                    workspace=runtime.workspace,
-                                )
+                                if self._stop_event.is_set():
+                                    break
+                                try:
+                                    require_authoritative_trusted_runtime_code_profile(
+                                        runtime_profile,
+                                        workspace=runtime.workspace,
+                                    )
+                                except TrustedRuntimeCodeProfileError:
+                                    if self._stop_event.is_set():
+                                        break
+                                    raise
                                 economic = _economic_snapshot_builder(runtime, tick)
-                                require_authoritative_trusted_runtime_code_profile(
-                                    runtime_profile,
-                                    workspace=runtime.workspace,
-                                )
+                                if self._stop_event.is_set():
+                                    break
+                                try:
+                                    require_authoritative_trusted_runtime_code_profile(
+                                        runtime_profile,
+                                        workspace=runtime.workspace,
+                                    )
+                                except TrustedRuntimeCodeProfileError:
+                                    if self._stop_event.is_set():
+                                        break
+                                    raise
                         else:
                             # Compatibility-only injected runtimes are never product
                             # economic authority and therefore cannot mint a snapshot.

@@ -997,6 +997,13 @@ def _require_paperbook_admission_authority() -> None:
         raise RuntimeError("economic admission PaperBook mutation authority changed")
 
 
+_RUN_REGISTRY_INIT_FUNCTION = RunRegistry.__dict__["__init__"]
+_RUN_REGISTRY_IN_PROGRESS_FUNCTION = RunRegistry.__dict__["in_progress"]
+if (
+    type(_RUN_REGISTRY_INIT_FUNCTION) is not FunctionType
+    or type(_RUN_REGISTRY_IN_PROGRESS_FUNCTION) is not FunctionType
+):
+    raise RuntimeError("canonical run registry admission gate is unavailable")
 _RUN_REGISTRY_GATE_METHOD_WITNESS, _RUN_REGISTRY_GATE_GLOBAL_WITNESS = (
     _capture_class_transition_graph(
         RunRegistry,
@@ -1038,6 +1045,12 @@ def _require_admission_recovery_gate_authority() -> None:
         ):
             raise RuntimeError("economic admission recovery gate authority changed")
 
+    if (
+        RunRegistry.__dict__.get("__init__") is not _RUN_REGISTRY_INIT_FUNCTION
+        or RunRegistry.__dict__.get("in_progress")
+        is not _RUN_REGISTRY_IN_PROGRESS_FUNCTION
+    ):
+        raise RuntimeError("economic admission run registry gate authority changed")
     _require_class_transition_graph(
         RunRegistry,
         methods=_RUN_REGISTRY_GATE_METHOD_WITNESS,
@@ -1268,18 +1281,20 @@ def admit_paper_ticket(
         except FileNotFoundError:
             registry_missing = True
         else:
-            if RunRegistry(registry_path).in_progress():
+            registry = object.__new__(RunRegistry)
+            _RUN_REGISTRY_INIT_FUNCTION(registry, registry_path)
+            if _RUN_REGISTRY_IN_PROGRESS_FUNCTION(registry):
                 raise UnresolvedExperimentError(
                     "Workspace has an unresolved economic run; repair it before PAPER admission."
                 )
-        if transaction_history_requires_recovery(root):
+        if _TRANSACTION_RECOVERY_FUNCTION(root):
             raise UnresolvedExperimentError(
                 "Workspace has unresolved transaction history; repair it before PAPER admission."
             )
         if registry_missing:
             transaction_root = _ADMISSION_PATH_TRUEDIV(
                 root,
-                RunTransaction.ROOT_NAME,
+                _RUN_TRANSACTION_ROOT_NAME,
             )
             try:
                 first_transaction = next(_ADMISSION_PATH_ITERDIR(transaction_root))
@@ -1313,7 +1328,7 @@ def admit_paper_ticket(
                 )
             working_book = book
 
-        pre_evaluation_state = risk_policy._book_state(working_book)
+        pre_evaluation_state = _RISK_BOOK_STATE(PaperRiskPolicy, working_book)
         goal = risk_policy.economic_goal
         day_authority: _ProductDayAdmissionAuthority | None = None
         effective_placed_at = placed_at

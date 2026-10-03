@@ -31,6 +31,7 @@ from .trusted_runtime_code_profile import (
     _clear_started_product_runtime_origin,
     _register_started_product_runtime_origin,
     issue_trusted_runtime_code_profile,
+    require_authoritative_trusted_runtime_code_profile,
     require_product_owned_source_factory_identity,
     revoke_trusted_runtime_code_profile,
 )
@@ -810,13 +811,29 @@ class ProductGuiWorker:
                             raise RuntimeError(
                                 "runtime economic snapshot authority implementation changed"
                             )
-                        if type(runtime) is _runtime_type:
+                        if type(runtime) is _runtime_type and runtime_profile is not None:
+                            # Economic presentation truth is issued only for the same
+                            # currently-authoritative profiled runtime already used by
+                            # the packaged product path. Compatibility/dynamic-source
+                            # runtimes may tick, but cannot mint this projection.
+                            require_authoritative_trusted_runtime_code_profile(
+                                runtime_profile,
+                                workspace=runtime.workspace,
+                            )
                             # Keep one outer canonical runtime-operation fence across
                             # tick completion and economic readback. runtime.tick()
                             # re-enters the same RLock through its existing decorator.
                             with runtime._operation_fence:
                                 tick = runtime.tick()
+                                require_authoritative_trusted_runtime_code_profile(
+                                    runtime_profile,
+                                    workspace=runtime.workspace,
+                                )
                                 economic = _economic_snapshot_builder(runtime, tick)
+                                require_authoritative_trusted_runtime_code_profile(
+                                    runtime_profile,
+                                    workspace=runtime.workspace,
+                                )
                         else:
                             # Compatibility-only injected runtimes are never product
                             # economic authority and therefore cannot mint a snapshot.

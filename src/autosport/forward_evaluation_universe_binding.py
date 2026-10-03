@@ -6,9 +6,10 @@ Positive membership is never accepted from caller-created receipts or from which
 ProviderEvaluationUniverseStore happens to be supplied.  The resolver composes two
 existing authorities:
 
-1. #1257 CampaignPrecommitManifest + monotonic publication witness selects the exact
-   evaluation-universe SHA prospectively, before source observation; and
-2. ProviderEvaluationUniverseStore re-resolves the exact durable rows, with guarded
+1. #1257 CampaignPrecommitManifest + monotonic publication witness fixes the
+   prospective campaign/evaluation-plan identity before source observation; and
+2. ProviderEvaluationUniverseStore re-resolves the exact realized durable rows,
+   universe digest, and membership digest after provider observation, with guarded
    backing identity/load semantics.
 
 No second universe store, scheduler, execution authority, or money permission exists
@@ -90,9 +91,9 @@ def _instant(value: str, name: str) -> datetime:
 _RULE_PAYLOAD = {
     "rule_id": FORWARD_UNIVERSE_RULE_ID,
     "authority": "CampaignPrecommitManifest + ProviderEvaluationUniverseStore",
-    "membership": "exact prospectively selected durable EvaluationUniverse rows",
+    "membership": "exact realized durable EvaluationUniverse rows",
     "expected_universe_authority": (
-        "CampaignPrecommitPublicationWitness + evaluation_universe_sha256"
+        "CampaignPrecommitPublicationWitness + prospective evaluation-plan identity"
     ),
     "backing_authority": (
         "workspace identity + monotonic evaluation-universe namespace locator"
@@ -147,6 +148,7 @@ class ForwardUniverseAuthorityIdentity:
     """
 
     precommit_authority_sha256: str
+    prospective_evaluation_plan_sha256: str
     backing_locator_sha256: str
     universe_sha256: str
     membership_sha256: str
@@ -159,6 +161,7 @@ class ForwardUniverseAuthorityIdentity:
                 "rule_id": FORWARD_UNIVERSE_RULE_ID,
                 "rule_sha256": FORWARD_UNIVERSE_RULE_SHA256,
                 "precommit_authority_sha256": self.precommit_authority_sha256,
+                "prospective_evaluation_plan_sha256": self.prospective_evaluation_plan_sha256,
                 "backing_locator_sha256": self.backing_locator_sha256,
                 "universe_sha256": self.universe_sha256,
                 "membership_sha256": self.membership_sha256,
@@ -257,7 +260,7 @@ def _build_load_expectations(
         precommit: ForwardUniversePrecommitLocator,
     ) -> tuple[
         tuple[ForwardUniverseMemberExpectation, ...],
-        tuple[str, str, str, str],
+        tuple[str, str, str, str, str],
     ]:
         if type(store) is not store_type:
             raise TypeError("store must be exact ProviderEvaluationUniverseStore")
@@ -333,13 +336,12 @@ def _build_load_expectations(
                 locator=precommit,
                 campaign_id=protocol.campaign_id,
                 source_id=store.source_id,
-                evaluation_universe_sha256=universe.universe_sha256,
                 earliest_source_observation=earliest,
                 latest_source_observation=latest,
             )
         except precommit_error as exc:
             raise ForwardEvaluationUniverseBindingError(
-                "prospective campaign precommit does not authorize durable evaluation universe"
+                "prospective campaign precommit plan cannot be re-resolved"
             ) from exc
         if precommit_resolver.__code__ is not precommit_resolver_code:
             raise ForwardEvaluationUniverseBindingError(
@@ -364,6 +366,7 @@ def _build_load_expectations(
         )
         return expectations, (
             precommit_resolution.authority_sha256,
+            precommit_resolution.evaluation_universe_sha256,
             backing_locator.locator_sha256,
             universe.universe_sha256,
             universe.membership_sha256,
@@ -451,9 +454,10 @@ def _build_public_entrypoints(*, load_expectations):
             )
         return ForwardUniverseAuthorityIdentity(
             precommit_authority_sha256=identity_before[0],
-            backing_locator_sha256=identity_before[1],
-            universe_sha256=identity_before[2],
-            membership_sha256=identity_before[3],
+            prospective_evaluation_plan_sha256=identity_before[1],
+            backing_locator_sha256=identity_before[2],
+            universe_sha256=identity_before[3],
+            membership_sha256=identity_before[4],
             member_count=len(expectations),
         )
 

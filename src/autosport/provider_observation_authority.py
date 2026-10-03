@@ -1135,6 +1135,9 @@ def _seal_provider_evidence_store_dispatch() -> None:
 
     module_globals = globals()
     store_type = CompleteGameBoardEvidenceStore
+    expected_error = ProviderObservationIntegrityError
+    expected_store_surface_reader = _CANONICAL_GETATTR_STATIC
+    expected_store_surface_reader_code = getattr(expected_store_surface_reader, "__code__", None)
     expected_inspect = inspect
     expected_getattr_static = inspect.getattr_static
     expected_save = store_type.save
@@ -1204,6 +1207,8 @@ def _seal_provider_evidence_store_dispatch() -> None:
         "atomic_write_json": atomic_write_json,
         "AuthorityPhase": AuthorityPhase,
         "CompleteGameBoardSnapshot": CompleteGameBoardSnapshot,
+        "ProviderObservationIntegrityError": expected_error,
+        "_CANONICAL_GETATTR_STATIC": expected_store_surface_reader,
         "hashlib": hashlib,
         "hmac": hmac,
         "os": os,
@@ -1263,6 +1268,8 @@ def _seal_provider_evidence_store_dispatch() -> None:
             or module_globals.get("_CANONICAL_REMEMBER_CODE")
             is not expected_remember_code
             or expected_remember.__code__ is not expected_remember_code
+            or getattr(expected_store_surface_reader, "__code__", None)
+            is not expected_store_surface_reader_code
             or expected_save.__code__ is not expected_save_code
             or expected_load.__code__ is not expected_load_code
             or any(
@@ -1277,42 +1284,42 @@ def _seal_provider_evidence_store_dispatch() -> None:
             or expected_os.fdopen is not expected_os_fdopen
             or expected_os.fsync is not expected_os_fsync
         ):
-            raise ProviderObservationIntegrityError(
+            raise expected_error(
                 "provider evidence store authority witness changed"
             )
         for name, target, code in expected_runtime_callables:
             if module_globals.get(name) is not target:
-                raise ProviderObservationIntegrityError(
+                raise expected_error(
                     "provider evidence store authority witness changed"
                 )
             function = getattr(target, "__func__", target)
             if getattr(function, "__code__", None) is not code:
-                raise ProviderObservationIntegrityError(
+                raise expected_error(
                     "provider evidence store authority witness changed"
                 )
         if not _require_surface_witnesses(store_type, expected_store_internal):
-            raise ProviderObservationIntegrityError(
+            raise expected_error(
                 "provider evidence store internal dispatch changed"
             )
         if not _require_surface_witnesses(
             MonotonicWorkspaceAuthority,
             expected_authority_methods,
         ):
-            raise ProviderObservationIntegrityError(
+            raise expected_error(
                 "provider evidence monotonic authority dispatch changed"
             )
         if not _require_surface_witnesses(
             WorkspaceEconomicLock,
             expected_lock_methods,
         ):
-            raise ProviderObservationIntegrityError(
+            raise expected_error(
                 "provider evidence workspace lock dispatch changed"
             )
         if not _require_surface_witnesses(
             CompleteGameBoardSnapshot,
             expected_snapshot_methods,
         ):
-            raise ProviderObservationIntegrityError(
+            raise expected_error(
                 "provider evidence snapshot dispatch changed"
             )
         if (
@@ -1322,7 +1329,7 @@ def _seal_provider_evidence_store_dispatch() -> None:
                 expected_path_methods,
             )
         ):
-            raise ProviderObservationIntegrityError(
+            raise expected_error(
                 "provider evidence filesystem path dispatch changed"
             )
 
@@ -1332,8 +1339,8 @@ def _seal_provider_evidence_store_dispatch() -> None:
             raise TypeError(
                 "provider evidence save requires exact CompleteGameBoardEvidenceStore"
             )
-        if _CANONICAL_GETATTR_STATIC(store_type, "save") is not sealed_save:
-            raise ProviderObservationIntegrityError(
+        if expected_store_surface_reader(store_type, "save") is not sealed_save:
+            raise expected_error(
                 "provider evidence store save surface changed"
             )
         require_store_authority()
@@ -1347,8 +1354,8 @@ def _seal_provider_evidence_store_dispatch() -> None:
             raise TypeError(
                 "provider evidence load requires exact CompleteGameBoardEvidenceStore"
             )
-        if _CANONICAL_GETATTR_STATIC(store_type, "load") is not sealed_load:
-            raise ProviderObservationIntegrityError(
+        if expected_store_surface_reader(store_type, "load") is not sealed_load:
+            raise expected_error(
                 "provider evidence store load surface changed"
             )
         require_store_authority()

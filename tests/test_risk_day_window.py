@@ -434,11 +434,12 @@ class ProductClockBoundaryTests(unittest.TestCase):
             self.assertEqual(second, first)
             self.assertTrue(first.product_clock_authoritative)
 
-    def test_runtime_product_clock_rebind_is_downgraded(self) -> None:
+    def test_runtime_product_clock_rebind_cannot_redirect_default_store(self) -> None:
         original = day_window._PRODUCT_TIME_NS
+        forged_day = "2000-01-01"
         try:
             day_window._PRODUCT_TIME_NS = lambda: _epoch_ns(
-                "2026-09-23T12:00:00Z"
+                forged_day + "T12:00:00Z"
             )
             with TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -448,14 +449,88 @@ class ProductClockBoundaryTests(unittest.TestCase):
                 )
                 evidence = store.current()
 
-                self.assertFalse(evidence.product_clock_authoritative)
-                with self.assertRaisesRegex(
-                    RiskDayWindowIntegrityError,
-                    "test/synthetic clock",
-                ):
-                    store.require_current(evidence)
+                self.assertNotEqual(evidence.day_key, forged_day)
+                self.assertTrue(evidence.product_clock_authoritative)
+                self.assertEqual(store.require_current(evidence), evidence)
         finally:
             day_window._PRODUCT_TIME_NS = original
+
+    def test_module_clock_helper_rebind_cannot_mint_product_day(self) -> None:
+        original = day_window._clock_utc_instant
+        forged_day = "2099-12-31"
+        try:
+            day_window._clock_utc_instant = lambda clock: datetime(
+                2099, 12, 31, 12, 0, tzinfo=timezone.utc
+            )
+            with TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                store = ProductDayRiskWindowStore(
+                    root / "workspace",
+                    authority_root=root / "machine-authority",
+                )
+                evidence = store.current()
+
+                self.assertNotEqual(evidence.day_key, forged_day)
+                self.assertTrue(evidence.product_clock_authoritative)
+                self.assertEqual(store.require_current(evidence), evidence)
+        finally:
+            day_window._clock_utc_instant = original
+
+    def test_class_authority_entrypoints_reject_runtime_replacement(self) -> None:
+        for name in ("current", "require_current", "_publish_day", "_evidence"):
+            with self.subTest(name=name):
+                original = ProductDayRiskWindowStore.__dict__[name]
+                with self.assertRaisesRegex(TypeError, "authority method is sealed"):
+                    setattr(
+                        ProductDayRiskWindowStore,
+                        name,
+                        lambda *args, **kwargs: None,
+                    )
+                self.assertIs(ProductDayRiskWindowStore.__dict__[name], original)
+
+    def test_class_authority_entrypoints_reject_runtime_deletion(self) -> None:
+        for name in ("current", "require_current", "_publish_day", "_evidence"):
+            with self.subTest(name=name):
+                original = ProductDayRiskWindowStore.__dict__[name]
+                with self.assertRaisesRegex(TypeError, "authority method is sealed"):
+                    delattr(ProductDayRiskWindowStore, name)
+                self.assertIs(ProductDayRiskWindowStore.__dict__[name], original)
+
+    def test_current_bypasses_monotonic_recover_instance_shadow(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+
+            def hostile_recover(*args, **kwargs):
+                del args, kwargs
+                raise AssertionError("instance recover shadow executed")
+
+            store._authority.recover = hostile_recover
+            evidence = store.current()
+
+            self.assertTrue(evidence.product_clock_authoritative)
+
+    def test_publish_bypasses_monotonic_prepare_and_commit_instance_shadows(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+
+            def hostile_transition(*args, **kwargs):
+                del args, kwargs
+                raise AssertionError("instance monotonic transition shadow executed")
+
+            store._authority.prepare = hostile_transition
+            store._authority.commit = hostile_transition
+            evidence = store.current()
+
+            self.assertTrue(evidence.product_clock_authoritative)
+            self.assertTrue(store.state_path.exists())
 
 
 if __name__ == "__main__":

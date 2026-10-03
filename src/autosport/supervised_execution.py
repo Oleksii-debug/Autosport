@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import threading
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
@@ -280,6 +279,12 @@ class BoundSupervisedExecutionPlan:
     approval_fingerprint: str
     profile_bindings: tuple[ProfileBinding, ...]
     constraints: tuple[ExecutionLegConstraint, ...]
+    _product_issuance_token: object | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         self.verify_binding()
@@ -747,15 +752,27 @@ def build_supervised_execution_plan(
 
 
 def _install_bound_supervised_execution_plan_authority() -> None:
-    lock = threading.RLock()
-    issued: dict[
-        int,
-        tuple[weakref.ReferenceType[BoundSupervisedExecutionPlan], str],
-    ] = {}
     raw_build = build_supervised_execution_plan
     raw_build_code = getattr(raw_build, "__code__", None)
     witness_fn = _canonical_bound_plan_witness
     witness_code = getattr(witness_fn, "__code__", None)
+    token_guard = object()
+
+    class IssuanceToken:
+        __slots__ = ("reference", "witness")
+
+        def __init__(
+            self,
+            guard: object,
+            value: BoundSupervisedExecutionPlan,
+            witness: str,
+        ) -> None:
+            if guard is not token_guard:
+                raise TypeError("bound plan issuance token is product-internal")
+            self.reference = weakref.ref(value)
+            self.witness = witness
+
+    token_type = IssuanceToken
 
     def require_internal_dispatch() -> None:
         if (
@@ -789,37 +806,23 @@ def _install_bound_supervised_execution_plan_authority() -> None:
         )
         require_internal_dispatch()
         witness = witness_fn(value)
-        identity = id(value)
-
-        def clear(
-            reference: weakref.ReferenceType[BoundSupervisedExecutionPlan],
-            *,
-            _identity: int = identity,
-        ) -> None:
-            with lock:
-                record = issued.get(_identity)
-                if record is not None and record[0] is reference:
-                    issued.pop(_identity, None)
-
-        reference = weakref.ref(value, clear)
-        with lock:
-            issued[identity] = (reference, witness)
+        token = token_type(token_guard, value, witness)
+        object.__setattr__(value, "_product_issuance_token", token)
         return value
 
     def assert_authoritative(value: BoundSupervisedExecutionPlan) -> None:
         require_internal_dispatch()
         try:
             witness = witness_fn(value)
+            token = object.__getattribute__(value, "_product_issuance_token")
         except (SupervisedExecutionError, AttributeError, TypeError, ValueError) as exc:
             raise SupervisedExecutionError(
                 "bound supervised execution plan is not current canonical product issuance"
             ) from exc
-        with lock:
-            record = issued.get(id(value))
         if (
-            record is None
-            or record[0]() is not value
-            or record[1] != witness
+            type(token) is not token_type
+            or token.reference() is not value
+            or token.witness != witness
         ):
             raise SupervisedExecutionError(
                 "bound supervised execution plan is not current canonical product issuance"

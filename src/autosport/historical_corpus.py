@@ -232,6 +232,8 @@ def _snapshot_acquisition_provenance(
         "response_headers",
         "canonical_response_payload_bound",
         "raw_response_bytes_bound",
+        "provider_origin_authority_persisted",
+        "provider_origin_requires_live_product_capture",
     }
     if set(raw) != expected_keys:
         raise ValueError("snapshot acquisition_provenance fields do not match schema v1")
@@ -250,6 +252,14 @@ def _snapshot_acquisition_provenance(
     if raw.get("raw_response_bytes_bound") is not False:
         raise ValueError(
             "snapshot acquisition_provenance cannot claim raw response bytes are bound"
+        )
+    if raw.get("provider_origin_authority_persisted") is not False:
+        raise ValueError(
+            "snapshot acquisition_provenance cannot claim persisted provider-origin authority"
+        )
+    if raw.get("provider_origin_requires_live_product_capture") is not True:
+        raise ValueError(
+            "snapshot acquisition_provenance must preserve live provider-origin requirement"
         )
     response_payload_sha256 = _digest(
         raw,
@@ -296,6 +306,10 @@ def _snapshot_acquisition_provenance(
     ):
         raise ValueError(
             "snapshot acquisition request origin must be a canonical secret-free HTTPS origin"
+        )
+    if origin != "https://parlay-api.com":
+        raise ValueError(
+            "snapshot acquisition request origin is not canonical Parlay production origin"
         )
     base_url_sha256 = _digest(
         request,
@@ -1157,7 +1171,7 @@ def assemble_historical_corpus(
                 "event_count": len(events),
             }
         )
-        fully_bound_acquisition_provenance = all(
+        fully_bound_request_provenance = all(
             row["acquisition_provenance"] is not None
             for row in evidence_rows
         )
@@ -1197,16 +1211,18 @@ def assemble_historical_corpus(
                 "redistribution_policy": proof["redistribution_policy"],
             }
         )
-        qualified_corpus_identity = _canonical_json_sha256(
+        structural_corpus_identity = _canonical_json_sha256(
             {
                 "schema_version": 1,
-                "kind": "parlay_historical_qualified_corpus_identity",
+                "kind": "parlay_historical_structural_corpus_identity",
                 "content_identity": content_identity,
                 "outcome_identity": outcome_identity,
                 "acquisition_identity": acquisition_identity,
                 "governance_identity": governance_identity,
                 "causal_classification": "RETROSPECTIVE_POINT_IN_TIME_PRICE",
-                "qualification_scope": "selected_point_in_time_snapshot_corpus_v1",
+                "provider_origin_verified": False,
+                "provider_origin_authority_persisted": False,
+                "qualification_scope": "selected_point_in_time_snapshot_corpus_structural_v2",
             }
         )
 
@@ -1257,20 +1273,24 @@ def assemble_historical_corpus(
                     "schema_version": 1,
                     "product_kind": "POINT_IN_TIME_ODDS",
                     "causal_classification": "RETROSPECTIVE_POINT_IN_TIME_PRICE",
-                    "qualification_scope": "selected_point_in_time_snapshot_corpus_v1",
+                    "qualification_scope": "selected_point_in_time_snapshot_corpus_structural_v2",
                     "content_identity": content_identity,
                     "content_identity_scope": "market_snapshot_semantics_excluding_product_ingest_time",
                     "market_content_sha256": market_content_sha256,
                     "outcome_identity": outcome_identity,
                     "acquisition_identity": acquisition_identity,
                     "governance_identity": governance_identity,
-                    "qualified_corpus_identity": qualified_corpus_identity,
+                    "structural_corpus_identity": structural_corpus_identity,
                     "upstream_bookmaker_keys": list(upstream_bookmaker_keys),
                     "canonical_response_payload_digest_bound": True,
                     "raw_response_bytes_bound": False,
-                    "normalized_request_scope_bound": fully_bound_acquisition_provenance,
-                    "provider_response_metadata_bound": fully_bound_acquisition_provenance,
+                    "normalized_request_scope_bound": fully_bound_request_provenance,
+                    "provider_response_metadata_bound": fully_bound_request_provenance,
                     "validated_acquisition_provenance_count": validated_acquisition_provenance_count,
+                    "provider_origin_verified": False,
+                    "provider_origin_authority_persisted": False,
+                    "provider_origin_requires_live_product_capture": True,
+                    "scientific_qualification": "PROVIDER_ORIGIN_UNVERIFIED",
                     "prospective_authority": False,
                     "raw_redistribution_authority": proof["redistribution_verified"] is True
                     and proof["redistribution_policy"] == "permitted",

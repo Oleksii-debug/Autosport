@@ -1052,3 +1052,29 @@ def test_renewal_requires_exact_refresh_token_lineage(tmp_path):
     snapshot = lifecycle.read_snapshot()
     assert snapshot.state is ProphetXSessionState.RENEWAL_DUE
     assert snapshot.session_lineage_id == active.session_lineage_id
+
+
+def test_same_process_stale_renewal_recovers_after_uncertainty_deadline(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
+    started = lifecycle.begin_renewal(
+        now=due_at,
+        refresh_token_lineage_id=active.session_lineage_id,
+    )
+    assert started.action is ProphetXLoginAdmissionAction.START_RENEWAL
+
+    uncertainty_deadline = due_at + CONSERVATIVE_SESSION_SLOT_HOLD
+    recovered = lifecycle.begin_login(
+        now=uncertainty_deadline + timedelta(seconds=1),
+        access_token_available=False,
+    )
+
+    assert recovered.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+    assert recovered.attempt_id != started.attempt_id
+    assert recovered.login_authorized is True

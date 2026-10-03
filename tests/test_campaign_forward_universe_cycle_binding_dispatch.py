@@ -21,6 +21,7 @@ def test_authority_preserves_distinct_plan_and_realized_universe_identity() -> N
     )
 
     authority = binding.CampaignForwardUniverseCycleAuthority._issue(
+        _issuance_capability=binding._AUTHORITY_ISSUANCE_CAPABILITY,
         campaign_id="campaign-1",
         source_id="parlayapi:table_tennis",
         cycle_receipt_sha256="1" * 64,
@@ -48,6 +49,7 @@ def test_composed_verification_receipt_fixes_nonpromotion_truth() -> None:
         member_count=2,
     )
     authority = binding.CampaignForwardUniverseCycleAuthority._issue(
+        _issuance_capability=binding._AUTHORITY_ISSUANCE_CAPABILITY,
         campaign_id="campaign-1",
         source_id="parlayapi:table_tennis",
         cycle_receipt_sha256="1" * 64,
@@ -67,6 +69,7 @@ def test_composed_verification_receipt_fixes_nonpromotion_truth() -> None:
     )
 
     receipt = binding.CampaignForwardEvidenceVerification._issue(
+        _issuance_capability=binding._VERIFICATION_ISSUANCE_CAPABILITY,
         authority=authority,
         structural_result=structural,
     )
@@ -95,6 +98,7 @@ def test_composed_verification_receipt_preserves_negative_structural_verdict() -
         member_count=1,
     )
     authority = binding.CampaignForwardUniverseCycleAuthority._issue(
+        _issuance_capability=binding._AUTHORITY_ISSUANCE_CAPABILITY,
         campaign_id="campaign-1",
         source_id="parlayapi:table_tennis",
         cycle_receipt_sha256="1" * 64,
@@ -114,6 +118,7 @@ def test_composed_verification_receipt_preserves_negative_structural_verdict() -
     )
 
     receipt = binding.CampaignForwardEvidenceVerification._issue(
+        _issuance_capability=binding._VERIFICATION_ISSUANCE_CAPABILITY,
         authority=authority,
         structural_result=structural,
     )
@@ -131,6 +136,64 @@ def test_composed_verification_receipt_is_not_caller_constructible() -> None:
         binding.CampaignForwardEvidenceVerification(
             promotion_ready=True,
             real_money_ready=True,
+        )
+
+
+def test_authority_private_issuer_rejects_wrong_capability() -> None:
+    identity = ForwardUniverseAuthorityIdentity(
+        precommit_authority_sha256="a" * 64,
+        prospective_evaluation_plan_sha256="b" * 64,
+        backing_locator_sha256="c" * 64,
+        universe_sha256="d" * 64,
+        membership_sha256="e" * 64,
+        member_count=1,
+    )
+    with pytest.raises(TypeError, match="resolver-private"):
+        binding.CampaignForwardUniverseCycleAuthority._issue(
+            _issuance_capability=object(),
+            campaign_id="campaign-1",
+            source_id="parlayapi:table_tennis",
+            cycle_receipt_sha256="1" * 64,
+            campaign_receipt_sha256="2" * 64,
+            provider_evidence_sha256="3" * 64,
+            provider_frame_sha256="4" * 64,
+            collector_artifact_evidence_sha256="5" * 64,
+            forward_identity=identity,
+        )
+
+
+def test_verification_private_issuer_rejects_wrong_capability() -> None:
+    with pytest.raises(TypeError, match="resolver-private"):
+        binding.CampaignForwardEvidenceVerification._issue(
+            _issuance_capability=object(),
+            authority=object(),
+            structural_result=object(),
+        )
+
+
+def test_authority_private_issuer_rejects_subclass() -> None:
+    class HostileAuthority(binding.CampaignForwardUniverseCycleAuthority):
+        pass
+
+    identity = ForwardUniverseAuthorityIdentity(
+        precommit_authority_sha256="a" * 64,
+        prospective_evaluation_plan_sha256="b" * 64,
+        backing_locator_sha256="c" * 64,
+        universe_sha256="d" * 64,
+        membership_sha256="e" * 64,
+        member_count=1,
+    )
+    with pytest.raises(TypeError, match="exact canonical class"):
+        HostileAuthority._issue(
+            _issuance_capability=binding._AUTHORITY_ISSUANCE_CAPABILITY,
+            campaign_id="campaign-1",
+            source_id="parlayapi:table_tennis",
+            cycle_receipt_sha256="1" * 64,
+            campaign_receipt_sha256="2" * 64,
+            provider_evidence_sha256="3" * 64,
+            provider_frame_sha256="4" * 64,
+            collector_artifact_evidence_sha256="5" * 64,
+            forward_identity=identity,
         )
 
 

@@ -14,6 +14,7 @@ from .real_execution_ledger import (
     AcknowledgementStatus,
     AttemptState,
     ExecutionAttemptReadView,
+    ExecutionLedgerIntegrityError,
     RealExecutionLedger,
     VerifiedExecutionPlanView,
 )
@@ -306,7 +307,12 @@ class ExecutionCapitalAtRiskEvidence:
             raise ExecutionCapitalAtRiskStale(
                 "capital-at-risk evidence belongs to a different execution ledger source"
             )
-        snapshot = _VERIFIED_SNAPSHOT(ledger)
+        try:
+            snapshot = _VERIFIED_SNAPSHOT(ledger)
+        except ExecutionLedgerIntegrityError as exc:
+            raise ExecutionCapitalAtRiskStale(
+                "execution ledger currentness failed during capital-at-risk validation"
+            ) from exc
         if (
             snapshot.sha256 != self.snapshot_sha256
             or snapshot.event_count != self.event_count

@@ -18,6 +18,7 @@ from autosport.real_execution_ledger import (
     ExecutionAction,
     ExecutionPlan,
     ExternalAcknowledgement,
+    ExecutionLedgerIntegrityError,
     RealExecutionLedger,
     ReconciliationSnapshot,
 )
@@ -303,6 +304,48 @@ def test_evidence_becomes_stale_after_any_later_ledger_append(tmp_path) -> None:
         match="changed after capital-at-risk resolution",
     ):
         before.assert_issued_current(ledger)
+
+
+def test_same_path_complete_valid_rollback_cannot_revalidate_stale_evidence(
+    tmp_path,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    s1_bytes = ledger.path.read_bytes()
+    s1_evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+    _attempt(ledger, plan)
+    ledger.mark_unknown(
+        "attempt-1",
+        reason="transport_timeout",
+        observed_at=UNKNOWN_AT,
+    )
+    s2_bytes = ledger.path.read_bytes()
+    s2_evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
+    assert s2_evidence.contingent_unknown_capital == Decimal("10")
+
+    # Restore a complete, parse-valid old prefix at the exact same pathname.
+    # Snapshot SHA + pathname identity alone would make s1_evidence look current
+    # again. The parent RealExecutionLedger monotonic authority must forbid that.
+    ledger.path.write_bytes(s1_bytes)
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskStale,
+        match="currentness failed during capital-at-risk validation",
+    ):
+        s1_evidence.assert_issued_current(ledger)
+
+    with pytest.raises(
+        ExecutionLedgerIntegrityError,
+        match="rollback/monotonic authority check failed",
+    ):
+        resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+    # Reinstating the actual committed tip remains restart-resolvable.
+    ledger.path.write_bytes(s2_bytes)
+    reopened = RealExecutionLedger(ledger.path)
+    recovered = resolve_execution_capital_at_risk(reopened, plan.plan_id)
+    assert recovered == s2_evidence
+    recovered.assert_issued_current(reopened)
 
 
 def test_byte_identical_clone_cannot_validate_evidence_from_other_ledger_source(

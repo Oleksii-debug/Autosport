@@ -389,6 +389,15 @@ class GitHubApi:
                     raise CancellationError(
                         "unexpected allowed cancellation HTTP status"
                     )
+                rebound_request = getattr(self, "_request", None)
+                if (
+                    getattr(request_impl, "__code__", None) is not request_impl_code
+                    or getattr(rebound_request, "__self__", None) is not self
+                    or getattr(rebound_request, "__func__", None) is not request_impl
+                ):
+                    raise CancellationError(
+                        "workflow run cancellation request dispatch changed"
+                    )
                 status_payload = request_impl(
                     self,
                     f"/actions/runs/{run_id}",

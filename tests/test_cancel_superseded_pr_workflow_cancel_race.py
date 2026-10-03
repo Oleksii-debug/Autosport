@@ -142,6 +142,49 @@ def test_cancel_rejects_in_place_request_code_rebind() -> None:
         GitHubApi._request.__code__ = original_code
 
 
+def test_cancel_conflict_rechecks_request_code_before_status_reread(
+    monkeypatch,
+) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    original_code = GitHubApi._request.__code__
+
+    def forged_request(
+        self,
+        path,
+        *,
+        method="GET",
+        allowed_http_errors=frozenset(),
+    ):
+        del self, path, method, allowed_http_errors
+        return {"status": "completed"}
+
+    forged_code = forged_request.__code__
+    assert len(forged_code.co_freevars) == len(original_code.co_freevars)
+
+    def fake_urlopen(request, *, timeout: int):
+        del timeout
+        if request.get_method() != "POST":
+            raise AssertionError("canonical status GET must not run after code mutation")
+        GitHubApi._request.__code__ = forged_code
+        raise HTTPError(
+            request.full_url,
+            409,
+            "Conflict",
+            hdrs=None,
+            fp=None,
+        )
+
+    monkeypatch.setattr(controller_module, "urlopen", fake_urlopen)
+    try:
+        with pytest.raises(
+            CancellationError,
+            match="cancellation request dispatch changed",
+        ):
+            api.cancel(123)
+    finally:
+        GitHubApi._request.__code__ = original_code
+
+
 def test_cancel_rejects_coordinated_request_and_witness_rebind(monkeypatch) -> None:
     api = GitHubApi(repository="owner/repo", token="token")
     forged_acceptance = object()

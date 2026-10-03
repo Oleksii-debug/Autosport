@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from betfair_execution_readback_test_support import canonical_authenticated_readback_client
+from betfair_execution_readback_test_support import semantic_authenticated_readback_client
 
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
@@ -1000,7 +1000,7 @@ def test_transport_timeout_readback_stays_non_authoritative_for_retry(
             provider_order_ref=provider_ref,
             action=action,
         )
-        with canonical_authenticated_readback_client(
+        with semantic_authenticated_readback_client(
             read_transport,
             account_id="acct-1",
         ) as read_client:
@@ -1101,7 +1101,7 @@ def test_foreign_provider_order_ref_cannot_verify_or_reconcile_effect() -> None:
             action=action,
             include_effect=True,
         )
-        with canonical_authenticated_readback_client(
+        with semantic_authenticated_readback_client(
             transport,
             account_id="acct-1",
         ) as client:
@@ -1172,7 +1172,7 @@ def test_foreign_empty_provider_order_ref_cannot_release_retry() -> None:
             provider_order_ref=foreign_ref,
             action=action,
         )
-        with canonical_authenticated_readback_client(
+        with semantic_authenticated_readback_client(
             transport,
             account_id="acct-1",
         ) as client:

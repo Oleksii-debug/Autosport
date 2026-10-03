@@ -2227,8 +2227,18 @@ def admit_paper_ticket(
             book._product_day_admissions = dict(
                 mutation_book._product_day_admissions
             )
-            _paperbook_authority._INSTALL_OPENING(book)
-            _paperbook_authority._INSTALL_CAUSAL(book)
+            _paperbook_authority._call_witnessed_delegate(
+                _paperbook_authority._INSTALL_OPENING,
+                _paperbook_authority._INSTALL_OPENING_WITNESS,
+                "opening-authority installation",
+                book,
+            )
+            _paperbook_authority._call_witnessed_delegate(
+                _paperbook_authority._INSTALL_CAUSAL,
+                _paperbook_authority._INSTALL_CAUSAL_WITNESS,
+                "causal-authority installation",
+                book,
+            )
             _paperbook_authority._advance_book_binding(book, book_path)
 
         _require_paperbook_admission_authority()

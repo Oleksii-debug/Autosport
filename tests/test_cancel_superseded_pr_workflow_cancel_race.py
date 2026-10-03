@@ -271,6 +271,33 @@ def test_scoped_production_api_uses_captured_base_cancel_after_class_mutation(
     ]
 
 
+def test_scoped_cancel_rejects_instance_shadowed_request_dispatch(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=1,
+        workflow_name="CI",
+    )
+    called = False
+
+    def forged_request(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(api, "_request", forged_request)
+
+    with pytest.raises(
+        CancellationError,
+        match="scoped cancellation revalidation dispatch changed",
+    ):
+        api.cancel(123)
+
+    assert called is False
+
+
 def test_scoped_production_api_rejects_in_place_base_cancel_code_rebind() -> None:
     api = WorkflowScopedGitHubApi(
         repository="owner/repo",
@@ -338,6 +365,7 @@ def test_scoped_cancel_helper_dispatch_metadata_is_immutable_and_complete() -> N
 
     assert type(helper_dispatch) is tuple
     assert tuple(name for name, _, _ in helper_dispatch) == (
+        "_request",
         "_historical_associated_pr_number",
         "_historical_head_has_no_associated_prs",
         "_canonical_branch_head",
@@ -501,6 +529,7 @@ def test_scoped_cancel_rechecks_base_cancel_code_after_external_revalidation(
 @pytest.mark.parametrize(
     "helper_name",
     [
+        "_request",
         "_historical_associated_pr_number",
         "_historical_head_has_no_associated_prs",
         "_canonical_branch_head",

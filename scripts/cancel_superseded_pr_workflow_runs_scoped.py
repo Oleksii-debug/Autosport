@@ -1446,6 +1446,10 @@ def cancel_superseded_explicit_pr_runs(
     runs: tuple[WorkflowRun, ...] | None = None,
     _cancel_effect=_cancel_run_or_defer_active_conflict,
     _cancel_effect_code=_cancel_run_or_defer_active_conflict.__code__,
+    _qualification_reader=None,
+    _qualification_reader_code=None,
+    _identity_checker=None,
+    _identity_checker_code=None,
 ) -> tuple[int, ...]:
     """Sweep superseded runs for every explicit singleton PR in one workflow snapshot.
 
@@ -1461,6 +1465,24 @@ def cancel_superseded_explicit_pr_runs(
 
     if getattr(_cancel_effect, "__code__", None) is not _cancel_effect_code:
         raise CancellationError("canonical cancel effect authority changed")
+    if _qualification_reader is None:
+        _qualification_reader = _trusted_live_pr_qualification
+        _qualification_reader_code = getattr(_qualification_reader, "__code__", None)
+    if _identity_checker is None:
+        _identity_checker = _explicit_run_identity_is_current
+        _identity_checker_code = getattr(_identity_checker, "__code__", None)
+
+    def require_decision_authorities() -> None:
+        if (
+            _qualification_reader_code is None
+            or getattr(_qualification_reader, "__code__", None)
+            is not _qualification_reader_code
+            or _identity_checker_code is None
+            or getattr(_identity_checker, "__code__", None) is not _identity_checker_code
+        ):
+            raise CancellationError("canonical decision authority changed")
+
+    require_decision_authorities()
 
     def qualification_state_from_trusted_read(value) -> tuple[str, bool]:
         # The production trusted reader already returns a primitive canonical tuple.
@@ -1533,7 +1555,9 @@ def cancel_superseded_explicit_pr_runs(
     cancelled_ids: set[int] = set()
     for pr_number in pr_numbers:
         try:
-            qualification = _trusted_live_pr_qualification(api, pr_number)
+            require_decision_authorities()
+            qualification = _qualification_reader(api, pr_number)
+            require_decision_authorities()
         except CancellationError:
             # Qualification authority is scoped to one PR group. Failure to resolve
             # one group must fail that group closed without starving independent PRs
@@ -1588,18 +1612,23 @@ def cancel_superseded_explicit_pr_runs(
             if run_id in cancelled_ids:
                 continue
             candidate = explicit_singletons_by_id[run_id]
-            if not _explicit_run_identity_is_current(
+            require_decision_authorities()
+            if not _identity_checker(
                 api,
                 run_id=run_id,
                 expected_head_sha=candidate.head_sha,
                 pr_number=pr_number,
             ):
+                require_decision_authorities()
                 continue
+            require_decision_authorities()
             # The run-identity reread above may itself take a network round trip. Keep
             # live PR head/lifecycle qualification as the final external authority
             # check before the irreversible cancellation.
             try:
-                current_qualification = _trusted_live_pr_qualification(api, pr_number)
+                require_decision_authorities()
+                current_qualification = _qualification_reader(api, pr_number)
+                require_decision_authorities()
             except CancellationError:
                 break
             if (
@@ -1625,6 +1654,10 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
     qualification,
     _cancel_effect=_cancel_run_or_defer_active_conflict,
     _cancel_effect_code=_cancel_run_or_defer_active_conflict.__code__,
+    _qualification_reader=None,
+    _qualification_reader_code=None,
+    _identity_checker=None,
+    _identity_checker_code=None,
 ) -> bool:
     """Cancel a source run proven stale or same-head non-integration-capable.
 
@@ -1637,6 +1670,24 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
 
     if getattr(_cancel_effect, "__code__", None) is not _cancel_effect_code:
         raise CancellationError("canonical cancel effect authority changed")
+    if _qualification_reader is None:
+        _qualification_reader = _trusted_live_pr_qualification
+        _qualification_reader_code = getattr(_qualification_reader, "__code__", None)
+    if _identity_checker is None:
+        _identity_checker = _explicit_run_identity_is_current
+        _identity_checker_code = getattr(_identity_checker, "__code__", None)
+
+    def require_decision_authorities() -> None:
+        if (
+            _qualification_reader_code is None
+            or getattr(_qualification_reader, "__code__", None)
+            is not _qualification_reader_code
+            or _identity_checker_code is None
+            or getattr(_identity_checker, "__code__", None) is not _identity_checker_code
+        ):
+            raise CancellationError("canonical decision authority changed")
+
+    require_decision_authorities()
 
     def qualification_state_from_trusted_read(value) -> tuple[str, bool]:
         if type(value) is tuple:
@@ -1663,16 +1714,21 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
     )
     if not stale and not same_head_nonqualifying:
         return False
-    if not _explicit_run_identity_is_current(
+    require_decision_authorities()
+    if not _identity_checker(
         api,
         run_id=current_run_id,
         expected_head_sha=event_head_sha,
         pr_number=pr_number,
     ):
+        require_decision_authorities()
         return False
+    require_decision_authorities()
     try:
-        current_qualification = _trusted_live_pr_qualification(api, pr_number)
+        current_qualification = _qualification_reader(api, pr_number)
+        require_decision_authorities()
     except CancellationError:
+        require_decision_authorities()
         # A failed authority reread grants no trigger cancellation authority, but it
         # must not invalidate independently completed workflow-wide cleanup.
         return False

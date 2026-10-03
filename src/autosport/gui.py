@@ -489,17 +489,39 @@ class AutosportApp(tk.Tk):
         self.tickets.insert("end", ticket_message)
         if session is None:
             return True
+
+        # Resolve the exact detached session workspace without invoking a property
+        # after teardown has already failed. Hostile/corrupt metadata must not
+        # replace the primary close failure or prevent fail-closed quarantine.
+        session_workspace: Path | None = None
+        try:
+            session_state = object.__getattribute__(session, "__dict__")
+        except BaseException:
+            session_state = None
+        if isinstance(session_state, dict) and session_state.get("workspace") is not None:
+            try:
+                session_workspace = Path(session_state["workspace"])
+            except (TypeError, ValueError):
+                session_workspace = None
+        if session_workspace is None:
+            active_workspace = self.__dict__.get("_active_workspace")
+            if active_workspace is not None:
+                try:
+                    session_workspace = Path(active_workspace)
+                except (TypeError, ValueError):
+                    session_workspace = None
+
         try:
             session.close()
         except BaseException as exc:
-            session_workspace = Path(session.workspace)
-            self._block_workspace_for_recovery(session_workspace)
+            if session_workspace is not None:
+                self._block_workspace_for_recovery(session_workspace)
             if not isinstance(exc, Exception):
                 raise
             self._append_log(
                 text(
                     "ui.log.session.teardown_secondary",
-                    workspace=session_workspace,
+                    workspace=session_workspace if session_workspace is not None else "?",
                     detail=_safe_exception_text(exc),
                 )
             )

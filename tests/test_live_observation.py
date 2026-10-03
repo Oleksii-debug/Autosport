@@ -78,6 +78,51 @@ class LiveObservationTests(unittest.TestCase):
             self.assertTrue((Path(tmp) / "source_health.json").exists())
             self.assertFalse((Path(tmp) / "paper_book.json").exists())
 
+    def test_workspace_observer_stamps_product_owned_ingest_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._observe(tmp)
+
+            self.assertEqual(result.stats.accepted, 2)
+            self.assertEqual(
+                {event.observed_ts for event in result.current_quotes},
+                {"2026-09-12T20:00:00+00:00"},
+            )
+            self.assertEqual(
+                {event.ingest_ts for event in result.current_quotes},
+                {_RECEIVE_TIME},
+            )
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                persisted = store.events()
+            finally:
+                store.close()
+            self.assertEqual({event.ingest_ts for event in persisted}, {_RECEIVE_TIME})
+
+    def test_open_store_poll_mirror_uses_product_owned_ingest_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                mirror = MarketMirror.from_store(store)
+                updates = BoundedMirrorInvalidationBuffer(mirror)
+                health_store = SourceHealthStore(root / "source_health.json")
+                stats = poll_open_market_store_once(
+                    store,
+                    health_store,
+                    self._provider(),
+                    mirror_updates=updates,
+                    max_items=10,
+                    clock=lambda: _RECEIVE_TIME,
+                )
+
+                self.assertEqual(stats.accepted, 2)
+                self.assertEqual(
+                    {event.ingest_ts for event in mirror.snapshot()},
+                    {_RECEIVE_TIME},
+                )
+            finally:
+                store.close()
+
     def test_workspace_observer_closes_market_store_if_health_store_init_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch("autosport.live_observation.SQLiteMarketStore") as store_type:

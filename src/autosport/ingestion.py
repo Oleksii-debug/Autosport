@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from math import isfinite
 from time import perf_counter
@@ -294,6 +294,10 @@ class IngestionEngine:
                     flags.add("FUTURE_CLOCK_SKEW")
             try:
                 event = self.normalizer.normalize(batch.source_id, quote)
+                # Provider/adaptor observation clocks remain evidence fields.
+                # Durable ingestion time is owned by this post-acquisition
+                # product clock, never by provider-controlled quote payloads.
+                event = replace(event, ingest_ts=now)
             except (TypeError, ValueError):
                 flags.add("INVALID_QUOTE")
                 rejected += 1

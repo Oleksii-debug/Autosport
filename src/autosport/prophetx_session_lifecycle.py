@@ -238,6 +238,10 @@ class ProphetXSessionSnapshot:
                 raise ProphetXSessionLifecycleError(
                     "in-flight auth state requires attempt and slot-hold evidence"
                 )
+            if self.attempt_started_at != self.last_transition_at:
+                raise ProphetXSessionLifecycleError(
+                    "in-flight attempt start must equal transition time"
+                )
         if self.state in {
             ProphetXSessionState.ACTIVE,
             ProphetXSessionState.RENEWAL_DUE,
@@ -502,6 +506,7 @@ class ProphetXSessionLifecycle:
                         raise ProphetXSessionLifecycleError(
                             "cannot renew without durable session evidence"
                         )
+                    self._require_monotonic_transition(current, timestamp)
                     if current.integration_role != self.scope.integration_role:
                         raise ProphetXSessionLifecycleError(
                             "access key is bound to a different integration role"
@@ -520,7 +525,9 @@ class ProphetXSessionLifecycle:
                             )
                         if timestamp < uncertainty_deadline:
                             return ProphetXLoginAdmission(
-                                action=ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+                                action=(
+                                    ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+                                ),
                                 snapshot=current,
                                 retry_at=uncertainty_deadline,
                             )
@@ -612,6 +619,7 @@ class ProphetXSessionLifecycle:
             try:
                 with WorkspaceEconomicLock(self._scope_dir):
                     current = self._require_owned_renewal(attempt)
+                    self._require_monotonic_transition(current, timestamp)
                     updated = ProphetXSessionSnapshot(
                         state=ProphetXSessionState.ACTIVE,
                         generation=current.generation + 1,
@@ -655,6 +663,7 @@ class ProphetXSessionLifecycle:
             try:
                 with WorkspaceEconomicLock(self._scope_dir):
                     current = self._require_owned_renewal(attempt)
+                    self._require_monotonic_transition(current, timestamp)
                     failures = current.transient_failures + 1
                     if failure is ProphetXRenewalFailureClass.AMBIGUOUS_PROVIDER_RESULT:
                         state = ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
@@ -732,6 +741,7 @@ class ProphetXSessionLifecycle:
             try:
                 with WorkspaceEconomicLock(self._scope_dir):
                     current = self._require_owned_inflight(attempt)
+                    self._require_monotonic_transition(current, timestamp)
                     updated = ProphetXSessionSnapshot(
                         state=ProphetXSessionState.ACTIVE,
                         generation=current.generation + 1,
@@ -771,6 +781,7 @@ class ProphetXSessionLifecycle:
             try:
                 with WorkspaceEconomicLock(self._scope_dir):
                     current = self._require_owned_inflight(attempt)
+                    self._require_monotonic_transition(current, timestamp)
                     failures = current.transient_failures + 1
                     retry_not_before: datetime | None = None
                     slot_hold_until: datetime | None = None
@@ -827,6 +838,7 @@ class ProphetXSessionLifecycle:
                         hold = None
                         failures = 0
                     else:
+                        self._require_monotonic_transition(current, timestamp)
                         self._require_role_compatible(current)
                         generation = current.generation + 1
                         hold = current.slot_hold_until
@@ -868,6 +880,16 @@ class ProphetXSessionLifecycle:
                     "cannot acquire ProphetX session-pool coordination lock"
                 ) from exc
 
+    def _require_monotonic_transition(
+        self,
+        current: ProphetXSessionSnapshot,
+        now: datetime,
+    ) -> None:
+        if now < current.last_transition_at:
+            raise ProphetXSessionLifecycleError(
+                "transition time cannot precede persisted lifecycle time"
+            )
+
     def _begin_login_locked(
         self,
         current: ProphetXSessionSnapshot | None,
@@ -878,6 +900,8 @@ class ProphetXSessionLifecycle:
     ) -> ProphetXLoginAdmission:
         if current is None:
             return self._grant_login(now, generation=0, transient_failures=0)
+
+        self._require_monotonic_transition(current, now)
 
         if current.integration_role != self.scope.integration_role:
             return ProphetXLoginAdmission(

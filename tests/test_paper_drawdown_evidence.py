@@ -571,6 +571,34 @@ def test_resolver_rejects_workspace_path_dispatch_rebinding(
     assert evidence.scope == DRAW_DOWN_SCOPE
 
 
+def test_resolver_rejects_economic_goal_store_constructor_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _initialize(tmp_path)
+    hostile_called = False
+    original_init = EconomicGoalStore.__init__
+
+    def hostile_init(self, workspace):
+        nonlocal hostile_called
+        hostile_called = True
+        original_init(self, workspace)
+
+    monkeypatch.setattr(EconomicGoalStore, "__init__", hostile_init)
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="economic-goal store authority changed",
+    ):
+        resolve_paper_drawdown_evidence(tmp_path)
+
+    assert hostile_called is False
+
+    monkeypatch.setattr(EconomicGoalStore, "__init__", original_init)
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+    assert evidence.metric_class == DRAW_DOWN_METRIC_CLASS
+
+
 def test_missing_durable_sources_fail_closed(tmp_path):
     with pytest.raises(
         PaperDrawdownEvidenceError,

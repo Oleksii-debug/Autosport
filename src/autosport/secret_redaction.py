@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+import base64
 import builtins
 import os
 import re
-from collections.abc import Iterable, Mapping
-from urllib.parse import unquote_plus
+from collections.abc import Iterable
+from urllib.parse import quote, quote_plus, unquote_plus
 from typing import Any
 
 REDACTED = "[REDACTED]"
+
+# Structured Mapping keys are presentation input. Bound recursive composite-key
+# sanitization well below Python recursion limits and cap total key nodes so a
+# hostile diagnostic payload cannot turn redaction itself into an availability sink.
+_MAPPING_KEY_MAX_TUPLE_DEPTH = 32
+_MAPPING_KEY_MAX_NODES = 256
+_OPERATOR_VALUE_MAX_DEPTH = 64
+_OPERATOR_VALUE_MAX_NODES = 10_000
+_QUERY_KEY_MAX_DECODE_PASSES = 8
 
 _SENSITIVE_NORMALIZED_KEYS = frozenset(
     {
@@ -209,6 +219,64 @@ def _secret_values(extra_secret_values: Iterable[str]) -> tuple[str, ...]:
     return tuple(sorted(values, key=lambda item: (-len(item), item)))
 
 
+def _reversible_base64_secret_values(secrets: Iterable[str]) -> tuple[str, ...]:
+    """Return reversible Base64 spellings only for already-known secret values."""
+
+    values: set[str] = set()
+    for secret in secrets:
+        raw = secret.encode("utf-8")
+        standard = base64.b64encode(raw).decode("ascii")
+        urlsafe = base64.urlsafe_b64encode(raw).decode("ascii")
+        values.update(
+            {
+                standard,
+                standard.rstrip("="),
+                urlsafe,
+                urlsafe.rstrip("="),
+            }
+        )
+    values.discard("")
+    return tuple(sorted(values, key=lambda item: (-len(item), item)))
+
+
+def _reversible_url_secret_values(secrets: Iterable[str]) -> tuple[str, ...]:
+    """Return single-pass URL spellings only for already-known secret values."""
+
+    values: set[str] = set()
+    for secret in secrets:
+        for encoded in (
+            quote(secret, safe=""),
+            quote_plus(secret, safe=""),
+        ):
+            if encoded != secret:
+                values.add(encoded)
+                # Percent-hex is case-insensitive. Preserve literal non-percent text
+                # while covering the common lowercase-hex spelling as well.
+                lowered = re.sub(
+                    r"%[0-9A-Fa-f]{2}",
+                    lambda match: match.group(0).lower(),
+                    encoded,
+                )
+                values.add(lowered)
+    values.discard("")
+    return tuple(sorted(values, key=lambda item: (-len(item), item)))
+
+
+def _decode_query_key_for_classification(value: str) -> tuple[str, bool]:
+    """Return a bounded decoded query key plus unresolved-nesting truth."""
+
+    decoded = value
+    for _ in range(_QUERY_KEY_MAX_DECODE_PASSES):
+        next_decoded = unquote_plus(decoded)
+        if next_decoded == decoded:
+            return decoded, False
+        decoded = next_decoded
+
+    # A key that is still changing after the bounded decode budget is not safe
+    # to classify as ordinary. Callers must fail closed for its associated value.
+    return decoded, unquote_plus(decoded) != decoded
+
+
 def _redacted_value_literal(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
         return value[0] + REDACTED + value[-1]
@@ -278,14 +346,31 @@ def redact_operator_text(
             parts[index] = part
         rendered = REDACTED.join(parts)
 
+        # Base64 and URL percent-encoding are reversible credential material,
+        # not redaction. Derive only spellings of secrets already authoritative
+        # for this call; never decode/classify arbitrary opaque values.
+        reversible_secrets = (
+            *_reversible_base64_secret_values(secrets),
+            *_reversible_url_secret_values(secrets),
+        )
+        if reversible_secrets:
+            parts = rendered.split(REDACTED)
+            for index, part in enumerate(parts):
+                for encoded_secret in reversible_secrets:
+                    part = part.replace(encoded_secret, REDACTED)
+                parts[index] = part
+            rendered = REDACTED.join(parts)
+
     rendered = _URL_USERINFO_RE.sub(
         lambda match: match.group("scheme") + REDACTED + "@",
         rendered,
     )
 
     def redact_query(match: re.Match[str]) -> str:
-        decoded_key = unquote_plus(match.group("key"))
-        if not is_sensitive_key(decoded_key):
+        decoded_key, unresolved_nested_encoding = (
+            _decode_query_key_for_classification(match.group("key"))
+        )
+        if not unresolved_nested_encoding and not is_sensitive_key(decoded_key):
             return match.group(0)
         return match.group("prefix") + REDACTED
 
@@ -332,39 +417,254 @@ def redact_operator_text(
     return _KEY_VALUE_RE.sub(redact_key_value, rendered)
 
 
+def _redact_operator_mapping_key(
+    key: object,
+    *,
+    secrets: tuple[str, ...],
+    _depth: int = 0,
+    _remaining_nodes: list[int] | None = None,
+    _global_remaining_nodes: list[int] | None = None,
+) -> tuple[object, bool, bool]:
+    """Return one safe hashable presentation key plus sensitivity/transform flags.
+
+    Only exact built-in key domains are trusted for structural preservation. Unknown
+    hashable classes are presentation input too; never call their __str__/__repr__ or
+    publish them unchanged because either surface may carry credential material.
+
+    Tuple recursion is explicitly bounded. Exhausting either the depth or total-node
+    budget fails closed to the ordinary redaction marker and makes the associated value
+    sensitive as well.
+    """
+
+    if _remaining_nodes is None:
+        _remaining_nodes = [_MAPPING_KEY_MAX_NODES]
+    if _depth > _MAPPING_KEY_MAX_TUPLE_DEPTH or _remaining_nodes[0] <= 0:
+        return REDACTED, True, True
+    if _global_remaining_nodes is not None:
+        if _global_remaining_nodes[0] <= 0:
+            return REDACTED, True, True
+        _global_remaining_nodes[0] -= 1
+    _remaining_nodes[0] -= 1
+
+    if type(key) is str:
+        safe_key = redact_operator_text(key, extra_secret_values=secrets)
+        return safe_key, is_sensitive_key(key), safe_key != key
+
+    if type(key) is bytes:
+        try:
+            decoded_key = bytes.decode(key, "utf-8", "strict")
+        except UnicodeDecodeError:
+            # Undecodable structured keys cannot be classified safely. Redact both
+            # the presentation key and its associated value.
+            return REDACTED, True, True
+        safe_key = redact_operator_text(
+            decoded_key,
+            extra_secret_values=secrets,
+        )
+        return safe_key, is_sensitive_key(decoded_key), True
+
+    if type(key) is tuple:
+        if (
+            _depth >= _MAPPING_KEY_MAX_TUPLE_DEPTH
+            or len(key) > _remaining_nodes[0]
+        ):
+            return REDACTED, True, True
+        safe_parts: list[object] = []
+        key_is_sensitive = False
+        key_was_transformed = False
+        for part in key:
+            safe_part, part_is_sensitive, part_was_transformed = (
+                _redact_operator_mapping_key(
+                    part,
+                    secrets=secrets,
+                    _depth=_depth + 1,
+                    _remaining_nodes=_remaining_nodes,
+                    _global_remaining_nodes=_global_remaining_nodes,
+                )
+            )
+            safe_parts.append(safe_part)
+            key_is_sensitive = key_is_sensitive or part_is_sensitive
+            key_was_transformed = key_was_transformed or part_was_transformed
+        return tuple(safe_parts), key_is_sensitive, key_was_transformed
+
+    # These exact scalar built-ins cannot carry hidden string/object presentation
+    # state. Preserve them so ordinary numeric/boolean/None structured keys remain
+    # stable. Complex is included because its exact built-in representation contains
+    # only numeric components.
+    if key is None or type(key) in (bool, int, float, complex):
+        return key, False, False
+
+    # Unknown hashable key classes (including str/bytes subclasses and containers
+    # such as frozenset) are not presentation authority. Fail closed without invoking
+    # arbitrary conversion methods and redact the associated value as well.
+    return REDACTED, True, True
+
+
+def _mapping_key_collision_alias(safe_key: object, suffix: int) -> object:
+    """Return a deterministic safe alias without rendering composite key objects."""
+
+    if type(safe_key) is str:
+        return f"{safe_key}#{suffix}"
+    return (safe_key, suffix)
+
+
 def redact_operator_value(
     value: Any,
     *,
     extra_secret_values: Iterable[str] = (),
 ) -> Any:
-    """Return a redacted presentation copy of nested operator data."""
+    """Return a bounded redacted presentation copy of nested operator data."""
 
     secrets = tuple(extra_secret_values)
+    remaining_nodes = [_OPERATOR_VALUE_MAX_NODES]
+    active_container_ids: set[int] = set()
 
-    if isinstance(value, str):
-        return redact_operator_text(value, extra_secret_values=secrets)
-    if isinstance(value, Mapping):
-        redacted: dict[Any, Any] = {}
-        for key, item in value.items():
-            if is_sensitive_key(key):
-                redacted[key] = REDACTED
+    def redact(item: Any, *, depth: int) -> Any:
+        if depth > _OPERATOR_VALUE_MAX_DEPTH or remaining_nodes[0] <= 0:
+            return REDACTED
+        remaining_nodes[0] -= 1
+
+        if isinstance(item, str):
+            return redact_operator_text(item, extra_secret_values=secrets)
+        if type(item) in (bytes, bytearray, memoryview):
+            if type(item) is bytes:
+                raw_binary = item
+            elif type(item) is bytearray:
+                raw_binary = bytes(item)
             else:
-                redacted[key] = redact_operator_value(
-                    item,
+                raw_binary = item.tobytes()
+            try:
+                decoded = raw_binary.decode("utf-8", "strict")
+            except UnicodeDecodeError:
+                redacted_binary = REDACTED.encode("utf-8")
+            else:
+                redacted_binary = redact_operator_text(
+                    decoded,
                     extra_secret_values=secrets,
-                )
-        return redacted
-    if isinstance(value, list):
-        return [
-            redact_operator_value(item, extra_secret_values=secrets)
-            for item in value
-        ]
-    if isinstance(value, tuple):
-        return tuple(
-            redact_operator_value(item, extra_secret_values=secrets)
-            for item in value
-        )
-    return value
+                ).encode("utf-8")
+            if type(item) is bytes:
+                return redacted_binary
+            if type(item) is bytearray:
+                return bytearray(redacted_binary)
+            return memoryview(redacted_binary)
+
+        # Structural presentation is trusted only for exact built-in containers.
+        # Container subclasses can override items()/__iter__ and must not gain code
+        # execution inside this fail-closed redaction boundary.
+        is_mapping = type(item) is dict
+        is_list = type(item) is list
+        is_tuple = type(item) is tuple
+        is_set = type(item) is set
+        is_frozenset = type(item) is frozenset
+        if is_mapping or is_list or is_tuple or is_set or is_frozenset:
+            identity = id(item)
+            if identity in active_container_ids:
+                return REDACTED
+            active_container_ids.add(identity)
+            try:
+                if is_mapping:
+                    redacted: dict[Any, Any] = {}
+                    prepared: list[tuple[object, Any, bool, bool]] = []
+                    reserved_keys: set[object] = set()
+
+                    # Count each mapping entry before retaining it. If the global
+                    # presentation budget is exhausted, fail closed for the whole
+                    # container rather than materializing an unbounded partial copy.
+                    for key, child in item.items():
+                        if remaining_nodes[0] <= 0:
+                            return REDACTED
+                        remaining_nodes[0] -= 1
+                        safe_key, key_is_sensitive, key_was_transformed = (
+                            _redact_operator_mapping_key(
+                                key,
+                                secrets=secrets,
+                                _global_remaining_nodes=remaining_nodes,
+                            )
+                        )
+                        prepared.append(
+                            (
+                                safe_key,
+                                child,
+                                key_is_sensitive,
+                                key_was_transformed,
+                            )
+                        )
+                        if not key_was_transformed:
+                            reserved_keys.add(safe_key)
+
+                    for (
+                        safe_key,
+                        child,
+                        key_is_sensitive,
+                        key_was_transformed,
+                    ) in prepared:
+                        if key_was_transformed:
+                            candidate = safe_key
+                            suffix = 2
+                            while (
+                                candidate in reserved_keys
+                                or candidate in redacted
+                            ):
+                                candidate = _mapping_key_collision_alias(
+                                    safe_key,
+                                    suffix,
+                                )
+                                suffix += 1
+                            safe_key = candidate
+
+                        if key_is_sensitive:
+                            redacted[safe_key] = REDACTED
+                        else:
+                            if remaining_nodes[0] <= 0:
+                                return REDACTED
+                            redacted[safe_key] = redact(
+                                child,
+                                depth=depth + 1,
+                            )
+                    return redacted
+
+                if is_list:
+                    output: list[Any] = []
+                    for child in item:
+                        if remaining_nodes[0] <= 0:
+                            return REDACTED
+                        output.append(redact(child, depth=depth + 1))
+                    return output
+
+                if is_tuple:
+                    output_tuple: list[Any] = []
+                    for child in item:
+                        if remaining_nodes[0] <= 0:
+                            return REDACTED
+                        output_tuple.append(redact(child, depth=depth + 1))
+                    return tuple(output_tuple)
+
+                if is_set:
+                    output_set: set[Any] = set()
+                    for child in item:
+                        if remaining_nodes[0] <= 0:
+                            return REDACTED
+                        output_set.add(redact(child, depth=depth + 1))
+                    return output_set
+
+                output_frozen: set[Any] = set()
+                for child in item:
+                    if remaining_nodes[0] <= 0:
+                        return REDACTED
+                    output_frozen.add(redact(child, depth=depth + 1))
+                return frozenset(output_frozen)
+            finally:
+                active_container_ids.remove(identity)
+
+        # Only exact inert built-in scalars may cross this presentation boundary
+        # unchanged. Arbitrary objects can carry credentials in fields or custom
+        # __str__/__repr__/serialization behavior; returning them intact would defer
+        # the leak to the next renderer. Fail closed without invoking user code.
+        if item is None or type(item) in (bool, int, float, complex):
+            return item
+        return REDACTED
+
+    return redact(value, depth=0)
 
 
 def safe_exception_detail(

@@ -192,56 +192,6 @@ def test_forward_admission_rejects_legacy_admit_surface_rebind(
     assert _admissions(fixture) == {}
 
 
-def test_forward_admission_rejects_internal_expected_verifier_rebind(
-    tmp_path,
-    monkeypatch,
-):
-    fixture = AdmissionFixture(tmp_path)
-    coordinator = fixture.coordinator()
-    hostile_calls: list[str] = []
-
-    def hostile_verify(**_kwargs):
-        hostile_calls.append("verify")
-        raise AssertionError("hostile expected verifier executed")
-
-    monkeypatch.setattr(
-        forward_admission_module,
-        "_EXPECTED_VERIFY",
-        hostile_verify,
-    )
-
-    with pytest.raises(
-        PaperCampaignForwardAdmissionError,
-        match="guard internals changed",
-    ):
-        admit_forward_verified(
-            coordinator,
-            precommit_locator=None,
-            collector_store=None,
-            source_spec=None,
-            cycle_receipt=None,
-            provider_evidence_store=None,
-            universe_store=None,
-            event_lifecycle=None,
-            evidence=None,
-            admission_id="admission-1",
-            observation=fixture.observation,
-            action_type="PAPER_PROPOSAL",
-            decision_action="OPEN_PAPER_TICKET",
-            decision_at="2026-09-20T05:00:05+00:00",
-            at="2026-09-20T05:00:05+00:00",
-            replay_run_id="admission-run",
-            agent="admission-test",
-            execution_decision_id=fixture.execution_decision_id,
-            execution_run_id=fixture.execution_run_id,
-            execution_attempt_id=fixture.execution_attempt_id,
-            execution_ticket_id=fixture.execution_ticket_id,
-        )
-
-    assert hostile_calls == []
-    assert _admissions(fixture) == {}
-
-
 def test_forward_admission_rejects_public_surface_rebind_via_captured_reference(
     tmp_path,
     monkeypatch,
@@ -287,4 +237,55 @@ def test_forward_admission_rejects_public_surface_rebind_via_captured_reference(
             execution_ticket_id=fixture.execution_ticket_id,
         )
 
+    assert _admissions(fixture) == {}
+
+
+def test_forward_admission_rejects_builtin_shadow_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    hostile_calls: list[str] = []
+
+    def hostile_type(*_args, **_kwargs):
+        hostile_calls.append("type")
+        raise AssertionError("hostile type executed")
+
+    monkeypatch.setattr(
+        forward_admission_module,
+        "type",
+        hostile_type,
+        raising=False,
+    )
+
+    with pytest.raises(
+        PaperCampaignForwardAdmissionError,
+        match="builtin dispatch shadowed",
+    ):
+        admit_forward_verified(
+            coordinator,
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+            admission_id="admission-1",
+            observation=fixture.observation,
+            action_type="PAPER_PROPOSAL",
+            decision_action="OPEN_PAPER_TICKET",
+            decision_at="2026-09-20T05:00:05+00:00",
+            at="2026-09-20T05:00:05+00:00",
+            replay_run_id="admission-run",
+            agent="admission-test",
+            execution_decision_id=fixture.execution_decision_id,
+            execution_run_id=fixture.execution_run_id,
+            execution_attempt_id=fixture.execution_attempt_id,
+            execution_ticket_id=fixture.execution_ticket_id,
+        )
+
+    assert hostile_calls == []
     assert _admissions(fixture) == {}

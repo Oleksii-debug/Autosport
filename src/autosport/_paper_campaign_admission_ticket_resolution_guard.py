@@ -36,7 +36,7 @@ def _sealed_tuple_from_callable(candidate: object):
             value = cell.cell_contents
         except ValueError:
             continue
-        if type(value) is tuple and len(value) == 12 and value[0] == _SEAL_MARKER:
+        if type(value) is tuple and len(value) == 15 and value[0] == _SEAL_MARKER:
             return value
     return None
 
@@ -53,6 +53,9 @@ def _initial_seal():
         PaperCampaignAdmissionCoordinator._execution_ticket,
         PaperCampaignAdmissionCoordinator._ticket,
         PaperCampaignAdmissionCoordinator.admit,
+        _admission_module._FORWARD_VERIFICATION_DECISION_FIELD,
+        _admission_module._FORWARD_VERIFICATION_ACTION_PARAMETER,
+        _admission_module._ACTIVE_FORWARD_VERIFICATION,
         WeakKeyDictionary(),
         RLock(),
     )
@@ -69,8 +72,11 @@ def _build_guard(seal):
     original_execution_ticket = seal[7]
     original_ticket = seal[8]
     original_admit = seal[9]
-    path_bindings = seal[10]
-    path_bindings_lock = seal[11]
+    forward_decision_field = seal[10]
+    forward_action_parameter = seal[11]
+    forward_context = seal[12]
+    path_bindings = seal[13]
+    path_bindings_lock = seal[14]
     path_cls = Path
 
     def reject_instance_shadow(value: object, method_name: str) -> None:
@@ -134,6 +140,16 @@ def _build_guard(seal):
         if coordinator_cls.admit is not guarded_admit:
             raise PaperCampaignAdmissionError(
                 "PAPER admission public entry point changed after guard installation"
+            )
+        if (
+            _admission_module._FORWARD_VERIFICATION_DECISION_FIELD
+            != forward_decision_field
+            or _admission_module._FORWARD_VERIFICATION_ACTION_PARAMETER
+            != forward_action_parameter
+            or _admission_module._ACTIVE_FORWARD_VERIFICATION is not forward_context
+        ):
+            raise PaperCampaignAdmissionError(
+                "PAPER admission forward-verification routing changed after guard installation"
             )
         for name in ("admit", "_execution_ticket", "_ticket"):
             reject_instance_shadow(self, name)

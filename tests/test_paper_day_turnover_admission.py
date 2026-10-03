@@ -7,6 +7,7 @@ import pytest
 
 import autosport.economic_admission as economic_admission
 import autosport.monotonic_workspace_authority as monotonic_module
+import autosport.recovery as recovery_module
 import autosport.risk as risk_module
 
 from autosport.domain import MarketEvent, TicketLeg
@@ -1333,6 +1334,58 @@ def test_admission_closure_helper_code_replacement_cannot_mint_headroom(tmp_path
 
     persisted = PaperBook.load(tmp_path / "paper_book.json")
     assert set(persisted.tickets) == set(book.tickets)
+
+
+def _assert_recovery_gate_tamper_rejected(tmp_path, match):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+
+    with pytest.raises(RuntimeError, match=match):
+        _admit(tmp_path, book, goal, _timestamp(now))
+
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert set(persisted.tickets) == set(book.tickets)
+
+
+def test_run_registry_gate_rebind_cannot_bypass_unresolved_run_blocker(tmp_path):
+    original = economic_admission.RunRegistry.in_progress
+    try:
+        economic_admission.RunRegistry.in_progress = lambda self: ()
+        _assert_recovery_gate_tamper_rejected(
+            tmp_path,
+            "economic admission run registry gate authority changed",
+        )
+    finally:
+        economic_admission.RunRegistry.in_progress = original
+
+
+def test_run_transaction_root_rebind_cannot_hide_recovery_history(tmp_path):
+    original = economic_admission.RunTransaction.ROOT_NAME
+    try:
+        economic_admission.RunTransaction.ROOT_NAME = ".forged-transactions"
+        _assert_recovery_gate_tamper_rejected(
+            tmp_path,
+            "economic admission recovery gate authority changed",
+        )
+    finally:
+        economic_admission.RunTransaction.ROOT_NAME = original
+
+
+def test_recovery_helper_code_replacement_cannot_hide_transaction_history(tmp_path):
+    target = recovery_module._lstat_or_none
+    original_code = target.__code__
+    try:
+        target.__code__ = _replacement_code_preserving_freevars(target)
+        _assert_recovery_gate_tamper_rejected(
+            tmp_path,
+            "economic admission recovery gate authority changed",
+        )
+    finally:
+        target.__code__ = original_code
 
 
 def test_live_resume_helper_rebind_cannot_replace_positive_risk_suffix(tmp_path):

@@ -208,6 +208,19 @@ def _install_guard() -> None:
         "randomization stable-file reader",
     )
 
+    frozen_preoutcome_registry_impl = _clone_function(
+        precommit_module._preoutcome_run_registry_sha256,
+        globals_overrides={
+            "_text": sealed_text,
+            "_sha256_bytes": sealed_sha256_bytes,
+            "_canonical_bytes": sealed_canonical_bytes,
+        },
+    )
+    sealed_preoutcome_registry = sealed_clone(
+        frozen_preoutcome_registry_impl,
+        "randomization pre-outcome RunRegistry verifier",
+    )
+
     frozen_membership_binding_impl = _clone_function(
         precommit_module._membership_binding,
         globals_overrides={
@@ -271,6 +284,7 @@ def _install_guard() -> None:
         "_workspace_path": sealed_workspace_path,
         "resolve_fixed_n_membership_publication": membership_resolver,
         "_membership_binding": sealed_membership_binding,
+        "_preoutcome_run_registry_sha256": sealed_preoutcome_registry,
         "_experiment_key": sealed_experiment_key,
         "_state_path": sealed_state_path,
         "_decode_state": sealed_decode_state,

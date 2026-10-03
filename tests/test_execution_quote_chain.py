@@ -454,6 +454,7 @@ def test_evidence_digest_covers_negative_authority_state(tmp_path) -> None:
     assert payload["accepted_price_verified"] is False
     assert payload["chain_complete"] is False
 
+
 def test_replaced_verified_execution_view_cannot_mint_positive_request_binding(
     tmp_path,
     monkeypatch,

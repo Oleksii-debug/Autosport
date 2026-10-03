@@ -294,6 +294,9 @@ def _require_canonical_seams(
         )
 
 
+_RECEIPT_ISSUANCE_CAPABILITY = object()
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class CampaignCompleteBoardCycleReceipt:
     """Resolver-issued proof that exact provider evidence was captured in one cycle."""
@@ -327,9 +330,24 @@ class CampaignCompleteBoardCycleReceipt:
 
     @classmethod
     def _issue(
-        cls, payload: dict[str, object]
+        cls,
+        payload: dict[str, object],
+        *,
+        _issuance_capability: object,
     ) -> "CampaignCompleteBoardCycleReceipt":
-        instance = object.__new__(cls)
+        if cls is not CampaignCompleteBoardCycleReceipt:
+            raise TypeError(
+                "campaign cycle receipt issuer requires exact canonical class"
+            )
+        if _issuance_capability is not _RECEIPT_ISSUANCE_CAPABILITY:
+            raise TypeError(
+                "campaign cycle receipt issuance is resolver-private"
+            )
+        if type(payload) is not dict or set(payload) != set(_RECEIPT_FIELD_NAMES):
+            raise CampaignProviderCycleCaptureIntegrityError(
+                "campaign cycle receipt payload is noncanonical"
+            )
+        instance = object.__new__(CampaignCompleteBoardCycleReceipt)
         for name in _RECEIPT_FIELD_NAMES:
             object.__setattr__(instance, name, payload[name])
         return instance
@@ -351,6 +369,17 @@ _RECEIPT_FIELD_DESCRIPTORS = tuple(
     )
     for name in _RECEIPT_FIELD_NAMES
 )
+
+_CANONICAL_CYCLE_RECEIPT_CLASS = CampaignCompleteBoardCycleReceipt
+_CANONICAL_CYCLE_RECEIPT_ISSUER = inspect.getattr_static(
+    CampaignCompleteBoardCycleReceipt,
+    "_issue",
+)
+_CANONICAL_CYCLE_RECEIPT_ISSUER_FUNCTION = _CANONICAL_CYCLE_RECEIPT_ISSUER.__func__
+_CANONICAL_CYCLE_RECEIPT_ISSUER_CODE = (
+    _CANONICAL_CYCLE_RECEIPT_ISSUER_FUNCTION.__code__
+)
+_CANONICAL_RECEIPT_ISSUANCE_CAPABILITY = _RECEIPT_ISSUANCE_CAPABILITY
 
 _INCEPTION_RECEIPT_FIELD_NAMES = tuple(
     CampaignInceptionReceipt.__dataclass_fields__
@@ -390,7 +419,11 @@ def _issue_receipt(
         "collector_artifact_evidence_sha256": collector_evidence["evidence_sha256"],
     }
     payload["receipt_sha256"] = _digest(payload)
-    return CampaignCompleteBoardCycleReceipt._issue(payload)
+    return _CANONICAL_CYCLE_RECEIPT_ISSUER_FUNCTION(
+        _CANONICAL_CYCLE_RECEIPT_CLASS,
+        payload,
+        _issuance_capability=_CANONICAL_RECEIPT_ISSUANCE_CAPABILITY,
+    )
 
 
 def capture_campaign_complete_game_board(
@@ -475,6 +508,11 @@ def capture_campaign_complete_game_board(
     expected_provider_snapshot_seams = _PROVIDER_SNAPSHOT_SEAMS
     expected_provider_assert = _PROVIDER_CANONICAL_ASSERT
     expected_provider_assert_code = _PROVIDER_CANONICAL_ASSERT_CODE
+    expected_receipt_class = _CANONICAL_CYCLE_RECEIPT_CLASS
+    expected_receipt_issuer = _CANONICAL_CYCLE_RECEIPT_ISSUER
+    expected_receipt_issuer_function = _CANONICAL_CYCLE_RECEIPT_ISSUER_FUNCTION
+    expected_receipt_issuer_code = _CANONICAL_CYCLE_RECEIPT_ISSUER_CODE
+    expected_receipt_issuance_capability = _CANONICAL_RECEIPT_ISSUANCE_CAPABILITY
 
     def require_stable_dispatch() -> None:
         if (
@@ -483,6 +521,27 @@ def capture_campaign_complete_game_board(
         ):
             raise CampaignProviderCycleCaptureIntegrityError(
                 "campaign provider-cycle reflection dispatch changed"
+            )
+        if (
+            module_globals.get("_CANONICAL_CYCLE_RECEIPT_CLASS")
+            is not expected_receipt_class
+            or module_globals.get("_CANONICAL_CYCLE_RECEIPT_ISSUER")
+            is not expected_receipt_issuer
+            or module_globals.get("_CANONICAL_CYCLE_RECEIPT_ISSUER_FUNCTION")
+            is not expected_receipt_issuer_function
+            or module_globals.get("_CANONICAL_CYCLE_RECEIPT_ISSUER_CODE")
+            is not expected_receipt_issuer_code
+            or module_globals.get("_CANONICAL_RECEIPT_ISSUANCE_CAPABILITY")
+            is not expected_receipt_issuance_capability
+            or module_globals.get("_RECEIPT_ISSUANCE_CAPABILITY")
+            is not expected_receipt_issuance_capability
+            or expected_receipt_issuer_function.__code__
+            is not expected_receipt_issuer_code
+            or expected_getattr_static(expected_receipt_class, "_issue")
+            is not expected_receipt_issuer
+        ):
+            raise CampaignProviderCycleCaptureIntegrityError(
+                "campaign cycle receipt issuance authority changed"
             )
         if (
             module_globals.get("_CANONICAL_CAMPAIGN_CLOCK")
@@ -871,6 +930,12 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "_INCEPTION_RECEIPT_FIELD_NAMES": expected_inception_field_names,
         "_INCEPTION_RECEIPT_FIELD_DESCRIPTORS": expected_inception_field_descriptors,
         "ARTIFACT_KIND": ARTIFACT_KIND,
+        "_CANONICAL_CYCLE_RECEIPT_CLASS": _CANONICAL_CYCLE_RECEIPT_CLASS,
+        "_CANONICAL_CYCLE_RECEIPT_ISSUER": _CANONICAL_CYCLE_RECEIPT_ISSUER,
+        "_CANONICAL_CYCLE_RECEIPT_ISSUER_FUNCTION": _CANONICAL_CYCLE_RECEIPT_ISSUER_FUNCTION,
+        "_CANONICAL_CYCLE_RECEIPT_ISSUER_CODE": _CANONICAL_CYCLE_RECEIPT_ISSUER_CODE,
+        "_CANONICAL_RECEIPT_ISSUANCE_CAPABILITY": _CANONICAL_RECEIPT_ISSUANCE_CAPABILITY,
+        "_RECEIPT_ISSUANCE_CAPABILITY": _RECEIPT_ISSUANCE_CAPABILITY,
         "_CANONICAL_CAMPAIGN_CLOCK": _CANONICAL_CAMPAIGN_CLOCK,
         "_CANONICAL_CAMPAIGN_CLOCK_CODE": _CANONICAL_CAMPAIGN_CLOCK_CODE,
         "_TEST_CAMPAIGN_CLOCK_ORIGIN": _TEST_CAMPAIGN_CLOCK_ORIGIN,

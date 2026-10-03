@@ -2395,5 +2395,132 @@ class RealExecutionLedgerTests(unittest.TestCase):
 
 
 
+
+    def test_supervised_plan_issuance_is_idempotent_and_survives_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            witness = "b" * 64
+            current = plan(
+                action(),
+                plan_id=f"supervised-v2-{witness}",
+            )
+            ledger.reserve_plan(current)
+            ledger._bind_supervised_plan_issuance(
+                plan_id=current.plan_id,
+                bound_plan_witness=witness,
+                plan_fingerprint=current.fingerprint,
+            )
+            ledger._bind_supervised_plan_issuance(
+                plan_id=current.plan_id,
+                bound_plan_witness=witness,
+                plan_fingerprint=current.fingerprint,
+            )
+
+            self.assertEqual(ledger.verify_integrity(), 2)
+            restarted = RealExecutionLedger(path)
+            self.assertTrue(
+                restarted.supervised_plan_issuance_is_current(
+                    plan_id=current.plan_id,
+                    bound_plan_witness=witness,
+                    plan_fingerprint=current.fingerprint,
+                )
+            )
+
+    def test_supervised_plan_issuance_rejects_witness_or_fingerprint_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            witness = "c" * 64
+            current = plan(
+                action(),
+                plan_id=f"supervised-v2-{witness}",
+            )
+            ledger.reserve_plan(current)
+
+            with self.assertRaisesRegex(
+                ExecutionIdentityConflict,
+                "witness mismatches plan identity",
+            ):
+                ledger._bind_supervised_plan_issuance(
+                    plan_id=current.plan_id,
+                    bound_plan_witness="d" * 64,
+                    plan_fingerprint=current.fingerprint,
+                )
+
+            with self.assertRaisesRegex(
+                ExecutionIdentityConflict,
+                "fingerprint mismatches durable plan",
+            ):
+                ledger._bind_supervised_plan_issuance(
+                    plan_id=current.plan_id,
+                    bound_plan_witness=witness,
+                    plan_fingerprint="e" * 64,
+                )
+
+            self.assertFalse(
+                ledger.supervised_plan_issuance_is_current(
+                    plan_id=current.plan_id,
+                    bound_plan_witness=witness,
+                    plan_fingerprint=current.fingerprint,
+                )
+            )
+
+    def test_restart_rejects_hash_valid_supervised_issuance_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            witness = "f" * 64
+            current = plan(
+                action(),
+                plan_id=f"supervised-v2-{witness}",
+            )
+            ledger.reserve_plan(current)
+            ledger._bind_supervised_plan_issuance(
+                plan_id=current.plan_id,
+                bound_plan_witness=witness,
+                plan_fingerprint=current.fingerprint,
+            )
+
+            lines = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            issuance = next(
+                envelope
+                for envelope in lines
+                if envelope["event"]["event_type"]
+                == EventType.SUPERVISED_PLAN_ISSUED.value
+            )
+            issuance["event"]["payload"]["bound_plan_witness"] = "0" * 64
+            body = json.dumps(
+                issuance["event"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            issuance["sha256"] = hashlib.sha256(body.encode()).hexdigest()
+            path.write_text(
+                "\n".join(
+                    json.dumps(
+                        envelope,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for envelope in lines
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            restarted = RealExecutionLedger(path)
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "witness mismatches plan identity",
+            ):
+                restarted.verify_integrity()
+
+
 if __name__ == "__main__":
     unittest.main()

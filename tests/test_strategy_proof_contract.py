@@ -316,3 +316,54 @@ def test_all_required_bare_labels_cannot_mint_actionable_truth(
     assert not hasattr(evaluation, "positive_action_candidate")
     assert not hasattr(evaluation, "proof_gate_decision")
 
+class _HostileProofSet(frozenset):
+    def __iter__(self):
+        raise AssertionError("hostile frozenset iteration executed")
+
+
+class _HostileProofTuple(tuple):
+    def __iter__(self):
+        raise AssertionError("hostile tuple iteration executed")
+
+
+def test_hostile_proof_container_subclasses_fail_before_virtual_dispatch() -> None:
+    hostile_set = _HostileProofSet(
+        {ProofRequirement.CAUSAL_OPPORTUNITY_EVIDENCE}
+    )
+
+    with pytest.raises(StrategyProofContractError, match="frozenset"):
+        evaluate_strategy_proofs(
+            StrategyClass.ARBITRAGE,
+            hostile_set,  # type: ignore[arg-type]
+            claims_probability_edge=False,
+        )
+
+    contract = proof_contract_for(
+        StrategyClass.ARBITRAGE,
+        claims_probability_edge=False,
+    )
+    hostile_required = _HostileProofTuple(contract.required_proofs)
+    with pytest.raises(StrategyProofContractError, match="required_proofs must be a tuple"):
+        StrategyProofContract(
+            strategy_class=StrategyClass.ARBITRAGE,
+            claims_probability_edge=False,
+            required_proofs=hostile_required,  # type: ignore[arg-type]
+        )
+
+    evaluation = evaluate_strategy_proofs(
+        StrategyClass.ARBITRAGE,
+        frozenset(contract.required_proofs),
+        claims_probability_edge=False,
+    )
+    hostile_present = _HostileProofTuple(evaluation.present_proofs)
+    with pytest.raises(StrategyProofContractError, match="present_proofs must be a tuple"):
+        StrategyProofEvaluation(
+            strategy_class=evaluation.strategy_class,
+            claims_probability_edge=evaluation.claims_probability_edge,
+            required_proofs=evaluation.required_proofs,
+            present_proofs=hostile_present,  # type: ignore[arg-type]
+            missing_proofs=evaluation.missing_proofs,
+            required_labels_present=evaluation.required_labels_present,
+            execution_authorized=False,
+        )
+

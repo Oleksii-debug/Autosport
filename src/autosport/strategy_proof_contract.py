@@ -151,7 +151,7 @@ def _validate_probability_claim(
 
 
 def _proofs(value: object) -> frozenset[ProofRequirement]:
-    if not isinstance(value, frozenset):
+    if type(value) is not frozenset:
         raise StrategyProofContractError("present_proofs must be a frozenset")
     for proof in value:
         if not isinstance(proof, ProofRequirement):
@@ -192,7 +192,7 @@ class StrategyProofContract:
         canonical_claim = _probability_claim(self.claims_probability_edge)
         expected = _ordered(_required_for(canonical_class, canonical_claim))
 
-        if not isinstance(self.required_proofs, tuple):
+        if type(self.required_proofs) is not tuple:
             raise StrategyProofContractError("required_proofs must be a tuple")
         if any(not isinstance(item, ProofRequirement) for item in self.required_proofs):
             raise StrategyProofContractError(
@@ -241,7 +241,7 @@ class StrategyProofEvaluation:
             ("present_proofs", self.present_proofs),
             ("missing_proofs", self.missing_proofs),
         ):
-            if not isinstance(value, tuple):
+            if type(value) is not tuple:
                 raise StrategyProofContractError(f"{name} must be a tuple")
             if any(not isinstance(item, ProofRequirement) for item in value):
                 raise StrategyProofContractError(

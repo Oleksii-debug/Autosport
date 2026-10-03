@@ -503,6 +503,25 @@ def _canonical_denomination_dispatch(
     )
 
 
+def _canonical_economic_lock(workspace):
+    lock_type = _canonical_denomination_dispatch()[-1]
+    lock = lock_type(workspace)
+    expected_path = workspace / _WORKSPACE_ECONOMIC_LOCK_FILE_NAME
+    lock_workspace = getattr(lock, "workspace", None)
+    lock_path = getattr(lock, "path", None)
+    if (
+        type(lock) is not lock_type
+        or type(lock_workspace) is not type(workspace)
+        or lock_workspace != workspace
+        or type(lock_path) is not type(expected_path)
+        or lock_path != expected_path
+    ):
+        raise ProviderAccountHeadroomError(
+            "canonical economic lock construction authority changed"
+        )
+    return lock
+
+
 def _canonical_intent_denomination_dispatch(
     *,
     _intent_type=_OPPORTUNITY_INTENT_TYPE,
@@ -1320,7 +1339,8 @@ def _current_economic_goal_denomination(
     store_workspace = getattr(store, "workspace", None)
     store_path = getattr(store, "path", None)
     if (
-        type(store_workspace) is not type(workspace)
+        type(store) is not store_type
+        or type(store_workspace) is not type(workspace)
         or store_workspace != workspace
         or type(store_path) is not type(expected_store_path)
         or store_path != expected_store_path
@@ -1579,7 +1599,7 @@ def assess_provider_account_headroom(
     intent_denomination_by_identity = _validated_intent_denomination_map(intents)
     workspace = _canonical_ledger_workspace(ledger)
 
-    with _canonical_denomination_dispatch()[-1](workspace):
+    with _canonical_economic_lock(workspace):
         (
             economic_goal_contract_sha256,
             economic_goal_bankroll_id,
@@ -1789,7 +1809,7 @@ def reserve_observed_provider_headroom(
         bound_by_plan_id = _validated_bound_plan_map(bound_plans)
         intent_denomination_by_identity = _validated_intent_denomination_map(intents)
         workspace = _canonical_ledger_workspace(ledger)
-        with _canonical_denomination_dispatch()[-1](workspace):
+        with _canonical_economic_lock(workspace):
             (
                 current_goal_sha256,
                 current_goal_bankroll_id,

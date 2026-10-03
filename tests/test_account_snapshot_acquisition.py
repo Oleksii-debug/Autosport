@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import json
 import sqlite3
+from threading import Event, Thread
 
 import pytest
 
@@ -14,6 +15,7 @@ from autosport.account_snapshot_acquisition import (
     AccountSnapshotAcquisitionError,
     BetfairAccountSnapshotAcquirer,
     assert_account_snapshot_acquisition_authoritative,
+    hold_current_account_snapshot_acquisition,
 )
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyError,
@@ -342,6 +344,140 @@ def test_retry_identity_is_idempotent_but_new_read_preserves_identical_content(
             "SELECT COUNT(*) FROM account_snapshot_acquisitions"
         ).fetchone()[0]
     assert count == 2
+
+
+def test_current_balance_generation_supersedes_older_still_live_acquisition(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "generation.sqlite3"
+
+    first_calls = _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, _FUNDS])
+    first = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
+        _balance_capabilities(),
+        acquisition_id="generation-read-1",
+    )
+    assert len(first_calls) == 3
+    with hold_current_account_snapshot_acquisition(
+        first,
+        _balance_capabilities(),
+    ) as held:
+        assert held is first
+
+    second_calls = _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, _FUNDS])
+    second = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
+        _balance_capabilities(),
+        acquisition_id="generation-read-2",
+    )
+    assert len(second_calls) == 3
+
+    # Provider-origin issuance remains true for the retained first object, but a
+    # newer genuine BALANCE_READ generation revokes its currentness authority.
+    assert_account_snapshot_acquisition_authoritative(first)
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="not the current canonical provider acquisition.*balance_read",
+    ):
+        with hold_current_account_snapshot_acquisition(
+            first,
+            _balance_capabilities(),
+        ):
+            raise AssertionError("superseded balance generation must not enter")
+
+    with hold_current_account_snapshot_acquisition(
+        second,
+        _balance_capabilities(),
+    ) as held:
+        assert held is second
+
+
+def test_current_generation_is_scoped_per_provider_capability(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "generation-scope.sqlite3"
+    _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, _FUNDS])
+    balance = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
+        _balance_capabilities(),
+        acquisition_id="generation-balance",
+    )
+
+    current_empty = _response(
+        {"currentOrders": [], "moreAvailable": False},
+        3,
+    )
+    _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, current_empty])
+    BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
+        frozenset({BookmakerCapability.OPEN_POSITIONS_READ}),
+        acquisition_id="generation-open",
+    )
+
+    # An unrelated capability refresh must not stale a BALANCE_READ generation.
+    with hold_current_account_snapshot_acquisition(
+        balance,
+        _balance_capabilities(),
+    ) as held:
+        assert held is balance
+
+
+def test_current_generation_guard_serializes_new_publication(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "generation-atomic.sqlite3"
+    _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, _FUNDS])
+    first = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
+        _balance_capabilities(),
+        acquisition_id="generation-atomic-1",
+    )
+
+    second = BetfairAccountSnapshotAcquirer(database, _credentials())
+    calls = _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, _FUNDS])
+    started = Event()
+    finished = Event()
+    result: list[object] = []
+    failure: list[BaseException] = []
+
+    def refresh() -> None:
+        started.set()
+        try:
+            result.append(
+                second.acquire(
+                    _balance_capabilities(),
+                    acquisition_id="generation-atomic-2",
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            failure.append(exc)
+        finally:
+            finished.set()
+
+    worker = Thread(target=refresh)
+    with hold_current_account_snapshot_acquisition(
+        first,
+        _balance_capabilities(),
+    ):
+        worker.start()
+        assert started.wait(timeout=1)
+        assert not finished.wait(timeout=0.05)
+        assert calls == []
+
+    assert finished.wait(timeout=2)
+    worker.join(timeout=1)
+    assert not worker.is_alive()
+    assert failure == []
+    assert len(result) == 1
+    assert len(calls) == 3
+
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="not the current canonical provider acquisition.*balance_read",
+    ):
+        with hold_current_account_snapshot_acquisition(
+            first,
+            _balance_capabilities(),
+        ):
+            raise AssertionError("post-refresh old generation must remain stale")
 
 
 def test_new_acquisition_id_preserves_later_identical_read_time(

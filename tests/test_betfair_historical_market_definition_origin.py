@@ -627,5 +627,49 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
         self.assertEqual(hostile_calls, [])
 
 
+    def test_issuance_registry_containers_are_not_module_mutation_surfaces(self) -> None:
+        self.assertFalse(hasattr(origin_module, "_ISSUED_ORIGIN_OBJECTS"))
+        self.assertFalse(hasattr(origin_module, "_ISSUED_ORIGIN_DIGESTS"))
+
+    def test_issuance_registry_verifier_rebinding_fails_closed(self) -> None:
+        raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
+        witness = self.witness(raw)
+        bound = self.bind_with_upstream_authority_stub(witness, raw, cutoff=1000)
+
+        with patch.object(
+            origin_module,
+            "_issued_origin_digest_matches",
+            new=lambda _origin, _digest: True,
+        ), _upstream_authority_stub():
+            self.assertFalse(bound.provider_origin_verified)
+            with self.assertRaisesRegex(
+                BetfairHistoricalMarketDefinitionOriginError,
+                "issuance registry dispatch was replaced",
+            ):
+                bound.assert_issued_integrity()
+
+        bound.assert_issued_integrity()
+
+    def test_issuance_registry_canonical_alias_rebinding_fails_closed(self) -> None:
+        raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
+        witness = self.witness(raw)
+        bound = self.bind_with_upstream_authority_stub(witness, raw, cutoff=1000)
+
+        with patch.object(
+            origin_module,
+            "_CANONICAL_ISSUED_ORIGIN_DIGEST_MATCHES",
+            new=lambda _origin, _digest: True,
+        ), _upstream_authority_stub():
+            self.assertFalse(bound.provider_origin_verified)
+            with self.assertRaisesRegex(
+                BetfairHistoricalMarketDefinitionOriginError,
+                "issuance registry dispatch was replaced",
+            ):
+                bound.assert_issued_integrity()
+
+        bound.assert_issued_integrity()
+
+
+
 if __name__ == "__main__":
     unittest.main()

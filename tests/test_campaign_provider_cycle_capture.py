@@ -1906,11 +1906,18 @@ def test_production_capture_accepts_only_canonical_default_clock_identity(
     locator, store, spec, provider_store = _setup(tmp_path)
     token = capture_module._CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN.set(None)
     try:
-        assert capture_module.capture_campaign_complete_game_board.__wrapped__.__defaults__ is None
+        sealed = capture_module.capture_campaign_complete_game_board
+        closure = {
+            name: cell.cell_contents
+            for name, cell in zip(
+                sealed.__code__.co_freevars,
+                sealed.__closure__ or (),
+            )
+        }
+        implementation = closure["expected_capture"]
+        assert implementation.__defaults__ is None
         assert (
-            capture_module.capture_campaign_complete_game_board.__wrapped__.__kwdefaults__[
-                "clock"
-            ]
+            implementation.__kwdefaults__["clock"]
             is capture_module._CANONICAL_CAMPAIGN_CLOCK
         )
     finally:

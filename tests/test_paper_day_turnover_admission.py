@@ -257,3 +257,115 @@ def test_day_turnover_override_does_not_bypass_quote_freshness(tmp_path):
     assert baseline.reason == "economic goal turnover limit exceeded"
     assert result.admitted is False
     assert "quote" in result.risk.reason
+
+
+def test_serial_admissions_cannot_double_spend_current_day_headroom(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    canonical = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    canonical.save(tmp_path / "paper_book.json")
+    first_view = PaperBook.load(tmp_path / "paper_book.json")
+    stale_second_view = PaperBook.load(tmp_path / "paper_book.json")
+    policy = _policy(goal)
+
+    first_leg = _leg("first-current-day")
+    first_context = _context(first_leg, _timestamp(now))
+    first = admit_paper_ticket(
+        workspace=tmp_path,
+        book=first_view,
+        risk_policy=policy,
+        stake=Decimal("3"),
+        legs=(first_leg,),
+        reason="consume first current-day turnover room",
+        placed_at=_timestamp(now),
+        context=first_context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+    second_leg = _leg("second-current-day")
+    second_context = _context(second_leg, _timestamp(now))
+    second = admit_paper_ticket(
+        workspace=tmp_path,
+        book=stale_second_view,
+        risk_policy=policy,
+        stake=Decimal("3"),
+        legs=(second_leg,),
+        reason="must not double-spend current-day turnover room",
+        placed_at=_timestamp(now),
+        context=second_context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+    assert first.admitted is True
+    assert second.admitted is False
+    assert second.risk.reason == "economic goal turnover limit exceeded"
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert len(persisted.tickets) == 2
+
+
+def test_restart_re_resolves_remaining_current_day_headroom(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    policy = _policy(goal)
+
+    first_leg = _leg("restart-first")
+    first_context = _context(first_leg, _timestamp(now))
+    first = admit_paper_ticket(
+        workspace=tmp_path,
+        book=PaperBook.load(tmp_path / "paper_book.json"),
+        risk_policy=policy,
+        stake=Decimal("3"),
+        legs=(first_leg,),
+        reason="current-day turnover before restart",
+        placed_at=_timestamp(now),
+        context=first_context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+    assert first.admitted is True
+
+    second_leg = _leg("restart-second")
+    second_context = _context(second_leg, _timestamp(now))
+    second = admit_paper_ticket(
+        workspace=tmp_path,
+        book=PaperBook.load(tmp_path / "paper_book.json"),
+        risk_policy=policy,
+        stake=Decimal("2"),
+        legs=(second_leg,),
+        reason="consume exact residual after restart",
+        placed_at=_timestamp(now),
+        context=second_context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+    assert second.admitted is True
+
+    third_leg = _leg("restart-third")
+    third_context = _context(third_leg, _timestamp(now))
+    third = admit_paper_ticket(
+        workspace=tmp_path,
+        book=PaperBook.load(tmp_path / "paper_book.json"),
+        risk_policy=policy,
+        stake=Decimal("0.01"),
+        legs=(third_leg,),
+        reason="cap exhausted after restart",
+        placed_at=_timestamp(now),
+        context=third_context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+    assert third.admitted is False
+    assert third.risk.reason == "economic goal turnover limit exceeded"

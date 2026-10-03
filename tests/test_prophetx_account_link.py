@@ -1,0 +1,426 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from autosport.prophetx_account_link import (
+    AccountLinkBlocked,
+    AccountLinkInputError,
+    AccountLinkState,
+    DiagnosticCode,
+    LoginDisposition,
+    LoginOutcome,
+    ProviderAuthFailure,
+    ProphetXAccountLinkController,
+)
+
+
+class FakeClock:
+    def __init__(self, value: int = 10_000_000_000) -> None:
+        self.value = value
+
+    def __call__(self) -> int:
+        return self.value
+
+
+class FakeTransport:
+    def __init__(self) -> None:
+        self.begin_outcome = LoginOutcome(
+            LoginDisposition.AUTHENTICATED,
+            session_ref="session-ref-1",
+        )
+        self.verify_outcome = LoginOutcome(
+            LoginDisposition.AUTHENTICATED,
+            session_ref="session-ref-2",
+        )
+        self.begin_failure = None
+        self.send_failure = None
+        self.verify_failure = None
+        self.begin_calls = []
+        self.send_calls = []
+        self.verify_calls = []
+        self.cancel_calls = []
+
+    def begin_login(self, *, email, password, device_id):
+        self.begin_calls.append((email, password, device_id))
+        if self.begin_failure is not None:
+            raise self.begin_failure
+        return self.begin_outcome
+
+    def send_verification_code(self, *, challenge_ref):
+        self.send_calls.append(challenge_ref)
+        if self.send_failure is not None:
+            raise self.send_failure
+
+    def verify_two_factor(self, *, challenge_ref, code):
+        self.verify_calls.append((challenge_ref, code))
+        if self.verify_failure is not None:
+            raise self.verify_failure
+        return self.verify_outcome
+
+    def cancel_challenge(self, *, challenge_ref):
+        self.cancel_calls.append(challenge_ref)
+
+
+class FakeSink:
+    def __init__(self) -> None:
+        self.calls = []
+        self.failure = None
+        self.result = "credential-ref-1"
+
+    def store_prophetx_credentials(self, *, access_key, secret_key, environment):
+        self.calls.append((access_key, secret_key, environment))
+        if self.failure is not None:
+            raise self.failure
+        return self.result
+
+
+def controller(*, transport=None, sink=None, clock=None):
+    transport = transport or FakeTransport()
+    sink = sink or FakeSink()
+    clock = clock or FakeClock()
+    ctl = ProphetXAccountLinkController(
+        transport=transport,
+        credential_sink=sink,
+        device_id="stable-device-1",
+        clock_ns=clock,
+        resend_interval_seconds=30,
+    )
+    ctl.open_login()
+    return ctl, transport, sink, clock
+
+
+def make_2fa(ctl, transport):
+    transport.begin_outcome = LoginOutcome(
+        LoginDisposition.TWO_FACTOR_REQUIRED,
+        challenge_ref="challenge-ref-1",
+    )
+    ctl.submit_login(email="operator@example.test", password="PASSWORD_SECRET")
+    assert ctl.state is AccountLinkState.TWO_FACTOR_REQUIRED
+
+
+def snapshot_text(ctl):
+    return json.dumps(ctl.public_snapshot().to_dict(), sort_keys=True)
+
+
+def test_login_success_is_authenticated_but_never_execution_enabled():
+    ctl, transport, _, _ = controller()
+    ctl.submit_login(email="operator@example.test", password="PASSWORD_SECRET")
+
+    assert ctl.state is AccountLinkState.AUTHENTICATED_SESSION
+    snap = ctl.public_snapshot()
+    assert snap.execution_enabled is False
+    assert snap.real_money_execution is False
+    assert snap.token_contract_verified is False
+    assert transport.begin_calls == [
+        ("operator@example.test", "PASSWORD_SECRET", "stable-device-1")
+    ]
+
+
+def test_2fa_required_is_deterministic_and_public_state_has_no_secret_context():
+    ctl, transport, _, _ = controller()
+    make_2fa(ctl, transport)
+
+    text = snapshot_text(ctl)
+    assert ctl.state is AccountLinkState.TWO_FACTOR_REQUIRED
+    assert "PASSWORD_SECRET" not in text
+    assert "operator@example.test" not in text
+    assert "stable-device-1" not in text
+    assert "challenge-ref-1" not in text
+    assert "session-ref" not in text
+
+
+def test_send_code_throttles_repeated_keypress_before_second_dispatch():
+    ctl, transport, _, clock = controller()
+    make_2fa(ctl, transport)
+
+    ctl.send_verification_code()
+    ctl.send_verification_code()
+
+    assert transport.send_calls == ["challenge-ref-1"]
+    snap = ctl.public_snapshot()
+    assert snap.diagnostic_code == DiagnosticCode.VERIFICATION_THROTTLED.value
+    assert snap.resend_after_ms == 30_000
+    assert snap.can_send_verification_code is False
+
+    clock.value += 30_000_000_000
+    ctl.send_verification_code()
+    assert transport.send_calls == ["challenge-ref-1", "challenge-ref-1"]
+
+
+def test_failed_sms_dispatch_is_still_locally_throttled():
+    ctl, transport, _, _ = controller()
+    make_2fa(ctl, transport)
+    transport.send_failure = ProviderAuthFailure(
+        DiagnosticCode.PROVIDER_UNAVAILABLE,
+        raw_detail="<html>TOKEN_SECRET</html>",
+    )
+
+    ctl.send_verification_code()
+    ctl.send_verification_code()
+
+    assert len(transport.send_calls) == 1
+    text = snapshot_text(ctl)
+    assert "TOKEN_SECRET" not in text
+    assert "<html>" not in text
+
+
+def test_wrong_code_is_recoverable_without_persisting_code_or_raw_error():
+    ctl, transport, _, _ = controller()
+    make_2fa(ctl, transport)
+    ctl.send_verification_code()
+    transport.verify_failure = ProviderAuthFailure(
+        DiagnosticCode.VERIFICATION_FAILED,
+        raw_detail="CODE_SECRET server body",
+    )
+
+    ctl.verify_two_factor(code="CODE_SECRET")
+
+    assert ctl.state is AccountLinkState.AUTH_ERROR
+    assert ctl.public_snapshot().can_verify_two_factor is True
+    text = snapshot_text(ctl)
+    assert "CODE_SECRET" not in text
+    assert "server body" not in text
+
+
+def test_successful_2fa_reaches_authenticated_session_without_exposing_code():
+    ctl, transport, _, _ = controller()
+    make_2fa(ctl, transport)
+    ctl.send_verification_code()
+
+    ctl.verify_two_factor(code="123456")
+
+    assert ctl.state is AccountLinkState.AUTHENTICATED_SESSION
+    assert transport.verify_calls == [("challenge-ref-1", "123456")]
+    text = snapshot_text(ctl)
+    assert "123456" not in text
+    assert "challenge-ref-1" not in text
+
+
+def test_provider_html_or_exception_text_never_becomes_public_diagnostic():
+    ctl, transport, _, _ = controller()
+    transport.begin_failure = ProviderAuthFailure(
+        DiagnosticCode.PROVIDER_CONFIGURATION,
+        raw_detail="<html>Authorization: Bearer TOKEN_SECRET</html>",
+    )
+
+    ctl.submit_login(email="operator@example.test", password="PASSWORD_SECRET")
+
+    snap = ctl.public_snapshot()
+    assert snap.diagnostic_code == DiagnosticCode.PROVIDER_CONFIGURATION.value
+    text = snapshot_text(ctl)
+    for secret in ("TOKEN_SECRET", "PASSWORD_SECRET", "Authorization", "<html>"):
+        assert secret not in text
+
+
+def test_untyped_hostile_transport_failure_is_bounded():
+    class HostileError(RuntimeError):
+        def __str__(self):
+            raise RuntimeError("must not render")
+
+    ctl, transport, _, _ = controller()
+    transport.begin_failure = HostileError()
+
+    ctl.submit_login(email="operator@example.test", password="PASSWORD_SECRET")
+
+    assert ctl.state is AccountLinkState.PROVIDER_UNAVAILABLE
+    assert ctl.public_snapshot().diagnostic_code == "PROVIDER_UNAVAILABLE"
+
+
+def test_direct_key_generation_is_fail_closed_without_any_transport_call():
+    ctl, transport, _, _ = controller()
+    ctl.submit_login(email="operator@example.test", password="PASSWORD_SECRET")
+    before = (
+        len(transport.begin_calls),
+        len(transport.send_calls),
+        len(transport.verify_calls),
+    )
+
+    with pytest.raises(AccountLinkBlocked, match="token contract is unverified"):
+        ctl.request_direct_key_generation()
+
+    assert ctl.state is AccountLinkState.KEY_GENERATION_BLOCKED_UNVERIFIED_TOKEN_CONTRACT
+    assert (
+        len(transport.begin_calls),
+        len(transport.send_calls),
+        len(transport.verify_calls),
+    ) == before
+    snap = ctl.public_snapshot()
+    assert snap.direct_key_generation_available is False
+    assert snap.execution_enabled is False
+
+
+def test_manual_approved_token_import_uses_sink_once_and_retains_only_opaque_reference():
+    ctl, _, sink, _ = controller()
+
+    ctl.import_approved_api_token(
+        access_key="ACCESS_SECRET",
+        secret_key="SUPER_SECRET",
+        environment="sandbox",
+    )
+
+    assert sink.calls == [("ACCESS_SECRET", "SUPER_SECRET", "sandbox")]
+    snap = ctl.public_snapshot()
+    assert snap.state == AccountLinkState.LINKED_CREDENTIAL_STORED.value
+    assert snap.credential_present is True
+    assert snap.credential_ref == "credential-ref-1"
+    text = snapshot_text(ctl)
+    assert "ACCESS_SECRET" not in text
+    assert "SUPER_SECRET" not in text
+    assert snap.execution_enabled is False
+    assert snap.real_money_execution is False
+
+
+@pytest.mark.parametrize(
+    "access_key,secret_key",
+    [
+        ("", "secret"),
+        ("access", ""),
+        (" ", "secret"),
+        ("access", " "),
+        (None, "secret"),
+        ("access", None),
+    ],
+)
+def test_partial_or_missing_manual_credentials_never_call_sink(access_key, secret_key):
+    ctl, _, sink, _ = controller()
+
+    with pytest.raises(AccountLinkInputError):
+        ctl.import_approved_api_token(
+            access_key=access_key,
+            secret_key=secret_key,
+            environment="sandbox",
+        )
+
+    assert sink.calls == []
+    assert ctl.public_snapshot().credential_present is False
+
+
+def test_sink_failure_is_bounded_and_retains_no_credential_reference():
+    ctl, _, sink, _ = controller()
+    sink.failure = RuntimeError("SUPER_SECRET storage details")
+
+    ctl.import_approved_api_token(
+        access_key="ACCESS_SECRET",
+        secret_key="SUPER_SECRET",
+        environment="production",
+    )
+
+    snap = ctl.public_snapshot()
+    assert snap.state == AccountLinkState.AUTH_ERROR.value
+    assert snap.diagnostic_code == DiagnosticCode.CREDENTIAL_STORAGE_FAILED.value
+    assert snap.credential_present is False
+    assert "SUPER_SECRET" not in snapshot_text(ctl)
+
+
+def test_manual_production_credential_presence_does_not_claim_production_execution():
+    ctl, _, _, _ = controller()
+
+    ctl.import_approved_api_token(
+        access_key="ACCESS_SECRET",
+        secret_key="SUPER_SECRET",
+        environment="production",
+    )
+
+    snap = ctl.public_snapshot()
+    assert snap.credential_present is True
+    assert snap.execution_enabled is False
+    assert snap.real_money_execution is False
+
+
+def test_restart_during_2fa_drops_transient_auth_context():
+    ctl, transport, _, _ = controller()
+    make_2fa(ctl, transport)
+    ctl.send_verification_code()
+
+    snap = ctl.public_snapshot()
+    restored_state, restored_credential_ref = ctl.restart_safe_state(snap)
+
+    assert restored_state is AccountLinkState.LOGIN_FORM
+    assert restored_credential_ref is None
+    text = json.dumps(snap.to_dict(), sort_keys=True)
+    assert "PASSWORD_SECRET" not in text
+    assert "challenge-ref-1" not in text
+
+
+def test_restart_preserves_only_opaque_stored_credential_reference():
+    ctl, _, _, _ = controller()
+    ctl.import_approved_api_token(
+        access_key="ACCESS_SECRET",
+        secret_key="SUPER_SECRET",
+        environment="sandbox",
+    )
+
+    restored_state, restored_credential_ref = ctl.restart_safe_state(
+        ctl.public_snapshot()
+    )
+
+    assert restored_state is AccountLinkState.LINKED_CREDENTIAL_STORED
+    assert restored_credential_ref == "credential-ref-1"
+
+
+def test_cancel_drops_2fa_context_and_best_effort_cancels_native_challenge():
+    ctl, transport, _, _ = controller()
+    make_2fa(ctl, transport)
+
+    ctl.cancel()
+
+    assert ctl.state is AccountLinkState.NOT_LINKED
+    assert transport.cancel_calls == ["challenge-ref-1"]
+    snap = ctl.public_snapshot()
+    assert snap.can_verify_two_factor is False
+    assert snap.can_send_verification_code is False
+
+
+def test_session_expiry_clears_session_and_requires_safe_reauthentication():
+    ctl, _, _, _ = controller()
+    ctl.submit_login(email="operator@example.test", password="PASSWORD_SECRET")
+
+    ctl.session_expired()
+
+    snap = ctl.public_snapshot()
+    assert snap.state == AccountLinkState.SESSION_EXPIRED.value
+    assert snap.can_submit_login is True
+    assert snap.execution_enabled is False
+
+
+def test_unlink_removes_only_exact_opaque_credential_reference():
+    ctl, _, _, _ = controller()
+    ctl.import_approved_api_token(
+        access_key="ACCESS_SECRET",
+        secret_key="SUPER_SECRET",
+        environment="sandbox",
+    )
+    removed = []
+
+    ctl.unlink(remover=removed.append)
+
+    assert removed == ["credential-ref-1"]
+    assert ctl.state is AccountLinkState.NOT_LINKED
+    assert ctl.public_snapshot().credential_present is False
+
+
+def test_public_snapshot_truth_flags_cannot_promote_machine_or_real_money_claims():
+    ctl, _, _, _ = controller()
+    snap = ctl.public_snapshot()
+
+    assert snap.real_money_execution is False
+    assert snap.human_tested is False
+    assert snap.nvda_verified is False
+    assert snap.execution_enabled is False
+    assert snap.token_contract_verified is False
+
+
+def test_clock_rollback_does_not_free_sms_throttle():
+    ctl, transport, _, clock = controller()
+    make_2fa(ctl, transport)
+    ctl.send_verification_code()
+
+    clock.value -= 1
+
+    snap = ctl.public_snapshot()
+    assert snap.resend_after_ms == 30_000
+    assert snap.can_send_verification_code is False
+    ctl.send_verification_code()
+    assert len(transport.send_calls) == 1

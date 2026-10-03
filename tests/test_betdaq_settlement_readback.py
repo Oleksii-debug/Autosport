@@ -538,6 +538,32 @@ def test_economic_private_call_cannot_be_widened_to_provider_write_by_globals(
 
 
 @pytest.mark.parametrize(
+    ("local_alias", "replacement"),
+    (
+        ("_CANONICAL_SECURE_ENDPOINT", "https://example.invalid/foreign"),
+        ("_CANONICAL_EXTERNAL_NS", "urn:foreign:betdaq"),
+        ("_CANONICAL_SOAP11_NS", "urn:foreign:soap11"),
+        ("_CANONICAL_SOAP12_NS", "urn:foreign:soap12"),
+    ),
+)
+def test_economic_read_rejects_coordinated_local_protocol_alias_rebind(
+    monkeypatch,
+    local_alias,
+    replacement,
+):
+    client, opener = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    monkeypatch.setattr(settlement_module, local_alias, replacement)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ economic protocol authority was replaced",
+    ):
+        client.read_account_postings_by_id(9000)
+
+    assert opener.calls == []
+
+
+@pytest.mark.parametrize(
     ("attribute", "replacement"),
     (
         ("_SECURE_ENDPOINT", "https://example.invalid/foreign"),
@@ -632,6 +658,98 @@ def test_economic_read_rejects_account_context_authority_replacement_before_disp
 
     assert hostile_calls == []
     assert opener.calls == []
+
+
+@pytest.mark.parametrize(
+    ("account_live", "local_alias", "local_code_alias"),
+    (
+        (
+            "_credential_context_binding",
+            "_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT",
+            "_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_CODE",
+        ),
+        (
+            "_authenticated_account_context",
+            "_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT",
+            "_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_CODE",
+        ),
+    ),
+)
+def test_economic_read_rejects_coordinated_context_alias_rebind_before_dispatch(
+    monkeypatch,
+    account_live,
+    local_alias,
+    local_code_alias,
+):
+    client, opener = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    hostile_calls = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("coordinated hostile economic context executed")
+
+    monkeypatch.setattr(account_module, account_live, hostile)
+    monkeypatch.setattr(settlement_module, local_alias, hostile)
+    monkeypatch.setattr(
+        settlement_module,
+        local_code_alias,
+        hostile.__code__,
+    )
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ authenticated account context authority was replaced",
+    ):
+        client.read_account_postings_by_id(9000)
+
+    assert opener.calls == []
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    ("target_name", "local_name", "local_code_name"),
+    (
+        (
+            "_CANONICAL_HTTPS_POST",
+            "_CANONICAL_ACCOUNT_HTTPS_POST",
+            "_CANONICAL_ACCOUNT_HTTPS_POST_CODE",
+        ),
+        (
+            "_require_canonical_account_transport",
+            "_REQUIRE_CANONICAL_ACCOUNT_TRANSPORT",
+            "_CANONICAL_REQUIRE_ACCOUNT_TRANSPORT_CODE",
+        ),
+    ),
+)
+def test_economic_read_rejects_coordinated_transport_alias_rebind_before_dispatch(
+    monkeypatch,
+    target_name,
+    local_name,
+    local_code_name,
+):
+    client, opener = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    hostile_calls = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("coordinated hostile economic transport executed")
+
+    monkeypatch.setattr(account_module, target_name, hostile)
+    monkeypatch.setattr(settlement_module, local_name, hostile)
+    monkeypatch.setattr(
+        settlement_module,
+        local_code_name,
+        hostile.__code__,
+    )
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ economic transport dispatch was replaced",
+    ):
+        client.read_account_postings_by_id(9000)
+
+    assert opener.calls == []
+    assert hostile_calls == []
 
 
 def test_economic_read_rejects_account_context_resolver_code_mutation(

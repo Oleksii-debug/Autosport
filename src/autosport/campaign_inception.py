@@ -393,7 +393,12 @@ class CampaignInceptionSourceSpec:
             raise CampaignInceptionIntegrityError(
                 "interval_seconds must be an exact built-in int or float"
             )
-        interval_seconds = float(self.interval_seconds)
+        try:
+            interval_seconds = float(self.interval_seconds)
+        except OverflowError as exc:
+            raise CampaignInceptionIntegrityError(
+                "interval_seconds must be representable as a finite float"
+            ) from exc
         if not math.isfinite(interval_seconds) or interval_seconds <= 0:
             raise CampaignInceptionIntegrityError(
                 "interval_seconds must be positive and finite"
@@ -576,9 +581,14 @@ def _validate_schedule_window(
     anchor = _instant(spec.anchor_at, "anchor_at")
     not_before = _instant(manifest.observation_not_before, "observation_not_before")
     not_after = _instant(manifest.observation_not_after, "observation_not_after")
-    last_due = anchor + timedelta(
-        seconds=spec.interval_seconds * spec.evaluation_end_slot_ordinal
-    )
+    try:
+        last_due = anchor + timedelta(
+            seconds=spec.interval_seconds * spec.evaluation_end_slot_ordinal
+        )
+    except (OverflowError, ValueError) as exc:
+        raise CampaignInceptionConflictError(
+            "collector evaluation schedule exceeds the representable prospective window"
+        ) from exc
     if anchor < not_before or last_due > not_after:
         raise CampaignInceptionConflictError(
             "collector evaluation schedule falls outside precommitted observation window"

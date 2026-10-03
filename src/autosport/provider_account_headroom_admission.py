@@ -24,6 +24,7 @@ from .account_snapshot_acquisition import (
     assert_account_snapshot_acquisition_authoritative,
 )
 from .bookmaker_capability import BookmakerCapability
+from . import execution_capital_at_risk as _capital_risk
 from .execution_capital_at_risk import (
     ExecutionCapitalAtRiskError,
     ExecutionCapitalAtRiskEvidence,
@@ -53,6 +54,14 @@ _ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE = getattr(
     "__code__",
     None,
 )
+_RESOLVE_CAPITAL_AT_RISK = resolve_execution_capital_at_risk
+_RESOLVE_CAPITAL_AT_RISK_CODE = getattr(_RESOLVE_CAPITAL_AT_RISK, "__code__", None)
+_ASSERT_CAPITAL_ISSUED_CURRENT = ExecutionCapitalAtRiskEvidence.assert_issued_current
+_ASSERT_CAPITAL_ISSUED_CURRENT_CODE = getattr(
+    _ASSERT_CAPITAL_ISSUED_CURRENT,
+    "__code__",
+    None,
+)
 
 
 class ProviderAccountHeadroomError(RuntimeError):
@@ -71,6 +80,28 @@ class HeadroomDecision(str, Enum):
     SUFFICIENT_LOWER_BOUND = "SUFFICIENT_LOWER_BOUND"
     INSUFFICIENT_UPPER_BOUND = "INSUFFICIENT_UPPER_BOUND"
     WAIT_COVERAGE = "WAIT_COVERAGE"
+
+
+def _canonical_capital_risk_dispatch(
+    *,
+    _resolve=_RESOLVE_CAPITAL_AT_RISK,
+    _resolve_code=_RESOLVE_CAPITAL_AT_RISK_CODE,
+    _assert_current=_ASSERT_CAPITAL_ISSUED_CURRENT,
+    _assert_current_code=_ASSERT_CAPITAL_ISSUED_CURRENT_CODE,
+):
+    live_resolve = getattr(_capital_risk, "resolve_execution_capital_at_risk", None)
+    live_assert = vars(ExecutionCapitalAtRiskEvidence).get("assert_issued_current")
+    if (
+        live_resolve is not _resolve
+        or globals().get("resolve_execution_capital_at_risk") is not _resolve
+        or getattr(_resolve, "__code__", None) is not _resolve_code
+        or live_assert is not _assert_current
+        or getattr(_assert_current, "__code__", None) is not _assert_current_code
+    ):
+        raise ProviderAccountHeadroomError(
+            "canonical capital-at-risk headroom authority changed"
+        )
+    return _resolve, _assert_current
 
 
 def _canonical_account_snapshot_authority(
@@ -706,6 +737,7 @@ def _resolve_account_liability_lattice(
     canonical causal-coverage authority proves otherwise.
     """
     verified_snapshot, verified_execution_view, _, _ = _canonical_ledger_dispatch()
+    resolve_capital, assert_capital_current = _canonical_capital_risk_dispatch()
     start = verified_snapshot(ledger)
     if (
         start.sha256 != expected_snapshot_sha256
@@ -728,11 +760,11 @@ def _resolve_account_liability_lattice(
             )
             if not relevant_attempts:
                 continue
-            capital: ExecutionCapitalAtRiskEvidence = resolve_execution_capital_at_risk(
+            capital: ExecutionCapitalAtRiskEvidence = resolve_capital(
                 ledger,
                 plan_id,
             )
-            capital.assert_issued_current(ledger)
+            assert_capital_current(capital, ledger)
         except ExecutionCapitalAtRiskError as exc:
             raise ProviderAccountHeadroomUnsupported(
                 "canonical capital-at-risk evidence cannot cover the full execution ledger"

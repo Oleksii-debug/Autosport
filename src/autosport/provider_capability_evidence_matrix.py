@@ -21,6 +21,7 @@ from .bookmaker_capability import (
 )
 from .bookmaker_integration_boundary import (
     BookmakerIntegrationEvidence,
+    BookmakerIntegrationEvidenceError,
     BookmakerIntegrationKind,
 )
 from .bookmaker_capability_lifecycle import (
@@ -637,7 +638,7 @@ def _install_provider_capability_authority():
             )
         try:
             integration.verify_profile(issuance.profile)
-        except Exception as exc:
+        except BookmakerIntegrationEvidenceError as exc:
             raise ProviderCapabilityEvidenceMatrixError(
                 "BETDAQ integration evidence does not bind lifecycle profile"
             ) from exc

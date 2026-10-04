@@ -711,36 +711,98 @@ def test_wrong_session_id_cannot_migrate_legacy_checkpoint() -> None:
         assert not journal.exists()
 
 
-def test_wave_m_schema_v3_is_not_misread_as_bounded_journal_schema() -> None:
+def test_wave_m_schema_v3_migrates_to_v4_without_losing_outcome_fingerprint() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         path = root / "continuous_session.json"
-        foreign = _checkpoint_payload(1)
-        foreign["schema_version"] = 3
-        for item in foreign["settlement_evidence"]:
-            item["quote_outcomes_sha256"] = "a" * 64
+        quote_outcomes = {
+            "provider-a:event-0:winner:home": "win",
+        }
+        fingerprint = continuous_session._settlement_quote_outcomes_sha256(
+            quote_outcomes
+        )
+        embedded = _checkpoint_payload(1)
+        embedded["schema_version"] = 3
+        embedded["settlement_evidence"][0]["quote_outcomes_sha256"] = fingerprint
         path.write_text(
-            json.dumps(foreign, sort_keys=True),
+            json.dumps(embedded, sort_keys=True),
             encoding="utf-8",
         )
-        before = path.read_bytes()
 
+        state = continuous_session._ContinuousSessionState(
+            path,
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        checkpoint = json.loads(path.read_text(encoding="utf-8"))
+        assert checkpoint["schema_version"] == 4
+        assert checkpoint["settlement_evidence_count"] == 1
+        migrated = state.snapshot().settlement_evidence
+        assert len(migrated) == 1
+        assert migrated[0]["quote_outcomes_sha256"] == fingerprint
+
+        exact = continuous_session.SettlementResolution(
+            event_identity="provider-a:event-0",
+            settlement_ref="provider-result:0",
+            quote_outcomes=quote_outcomes,
+            evidence_id="receipt-000000",
+            evidence_sha256="0" * 64,
+            available_at=_AT,
+        )
+        state.validate_settlement_evidence(settlement_evidence=(exact,))
+
+        conflicting = continuous_session.SettlementResolution(
+            event_identity="provider-a:event-0",
+            settlement_ref="provider-result:0",
+            quote_outcomes={
+                "provider-a:event-0:winner:home": "loss",
+            },
+            evidence_id="receipt-000000",
+            evidence_sha256="0" * 64,
+            available_at=_AT,
+        )
         try:
-            continuous_session._ContinuousSessionState(
-                path,
-                session_id="session-history-scaling",
-                source_id="provider-a",
-                clock=lambda: _AT,
+            state.validate_settlement_evidence(
+                settlement_evidence=(conflicting,)
             )
         except continuous_session.ContinuousSessionError:
             pass
         else:
             raise AssertionError(
-                "Wave M schema v3 was misread as the bounded journal checkpoint schema"
+                "migrated Wave M receipt accepted conflicting outcome semantics"
             )
 
-        assert path.read_bytes() == before
-        assert not (root / "continuous_session.settlement-evidence").exists()
+
+def test_v2_migration_keeps_unfingerprinted_receipt_non_rebindable() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, 1)
+        migrated = state.snapshot().settlement_evidence
+        assert len(migrated) == 1
+        assert migrated[0]["quote_outcomes_sha256"] is None
+
+        candidate = continuous_session.SettlementResolution(
+            event_identity="provider-a:event-0",
+            settlement_ref="provider-result:0",
+            quote_outcomes={
+                "provider-a:event-0:winner:home": "win",
+            },
+            evidence_id="receipt-000000",
+            evidence_sha256="0" * 64,
+            available_at=_AT,
+        )
+        try:
+            state.validate_settlement_evidence(
+                settlement_evidence=(candidate,)
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "legacy v2 receipt was post-hoc rebound to an outcome fingerprint"
+            )
 
 
 def test_legacy_v2_migration_preserves_session_truth_and_evidence() -> None:

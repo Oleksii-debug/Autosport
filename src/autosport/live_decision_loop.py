@@ -1494,7 +1494,7 @@ class PersistentLiveDecisionLoop:
                 )
                 if (
                     latest_record.decision_id == prospective_decision_id
-                    or latest_time >= decision_time
+                    or latest_time > decision_time
                 ):
                     raise LiveDecisionProgressError(
                         "pending live progress predates an already durable live decision"

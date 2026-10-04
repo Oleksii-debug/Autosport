@@ -130,6 +130,7 @@ class MarketEventBus:
         events: Iterable[MarketEvent],
         *,
         _deepcopy=deepcopy,
+        _delivery_error_type=MarketEventDeliveryError,
     ) -> None:
         # Persistence has already succeeded. Keep an independent value snapshot for
         # delivery-error evidence and isolate every callback from mutable nested
@@ -145,7 +146,7 @@ class MarketEventBus:
                 except Exception as exc:
                     failures.append(exc)
         if failures:
-            raise MarketEventDeliveryError(
+            raise _delivery_error_type(
                 "one or more market event subscribers failed after persistence",
                 failures,
                 accepted_events,

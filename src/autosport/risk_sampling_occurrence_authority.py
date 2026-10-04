@@ -657,6 +657,14 @@ _RUN_ADMISSION_REGISTRY_READ_CODE = getattr(
     "__code__",
     None,
 )
+_RUN_ADMISSION_COMPLETED_SUMMARY = (
+    RunRegistry.verified_completed_summary_for_run
+)
+_RUN_ADMISSION_COMPLETED_SUMMARY_CODE = getattr(
+    _RUN_ADMISSION_COMPLETED_SUMMARY,
+    "__code__",
+    None,
+)
 _RUN_ADMISSION_TX_TYPE = RunTransaction
 _RUN_ADMISSION_TX_BASE = RunTransaction.verified_base_paper_book_snapshot
 _RUN_ADMISSION_TX_TERMINAL = RunTransaction.verified_terminal_paper_book_snapshot
@@ -741,6 +749,10 @@ def _require_run_admission_dispatch() -> None:
         or _RUN_ADMISSION_REGISTRY_TYPE._read is not _RUN_ADMISSION_REGISTRY_READ
         or getattr(_RUN_ADMISSION_REGISTRY_READ, "__code__", None)
         is not _RUN_ADMISSION_REGISTRY_READ_CODE
+        or _RUN_ADMISSION_REGISTRY_TYPE.verified_completed_summary_for_run
+        is not _RUN_ADMISSION_COMPLETED_SUMMARY
+        or getattr(_RUN_ADMISSION_COMPLETED_SUMMARY, "__code__", None)
+        is not _RUN_ADMISSION_COMPLETED_SUMMARY_CODE
         or RunTransaction is not _RUN_ADMISSION_TX_TYPE
         or _RUN_ADMISSION_TX_TYPE.verified_base_paper_book_snapshot
         is not _RUN_ADMISSION_TX_BASE
@@ -1060,9 +1072,13 @@ def _resolve_run_admission_state(
     try:
         _RUN_ADMISSION_TX_BASE(tx)
         _RUN_ADMISSION_TX_TERMINAL(tx)
-        _RUN_ADMISSION_REGISTRY_TYPE(
+        registry = _RUN_ADMISSION_REGISTRY_TYPE(
             workspace / "run_registry.json"
-        ).verified_completed_summary_for_run(prepared.member_id)
+        )
+        _RUN_ADMISSION_COMPLETED_SUMMARY(
+            registry,
+            prepared.member_id,
+        )
     except (RunTransactionError, OSError, ValueError, KeyError) as exc:
         raise ProductIidDrawPlanError(
             "IID draw-admission completed transaction cannot be re-resolved"

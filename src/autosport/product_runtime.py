@@ -157,6 +157,112 @@ _ProductDesktopDeltaConsumer = _build_product_desktop_consumer_type(
 del _build_product_desktop_consumer_type
 
 
+def _build_product_coordinator_type(
+    base_type: type[ContinuousSessionCoordinator],
+    error_type: type[ProductCompositionError],
+):
+    """Freeze the product coordinator's composed authority graph after construction."""
+
+    from weakref import WeakKeyDictionary
+
+    snapshots = WeakKeyDictionary()
+    snapshot_fields = (
+        "workspace",
+        "collector",
+        "lifecycle",
+        "market_store",
+        "desktop_consumer",
+        "invalidation_buffer",
+        "dependency_index",
+        "paper_book_path",
+        "outcome_authority",
+        "settlement_learning_handoff",
+        "clock",
+        "required_history",
+        "max_invalidation_batches_per_tick",
+        "max_invalidation_items_per_batch",
+        "causal_view",
+        "initial_bankroll",
+        "_state",
+    )
+    entry_methods = (
+        "status",
+        "pause",
+        "resume",
+        "stop",
+        "tick",
+        "_settlement_resolutions",
+    )
+    protected_fields = frozenset(
+        {
+            *snapshot_fields,
+            *entry_methods,
+            "__class__",
+            "__dict__",
+        }
+    )
+    base_methods = {
+        name: getattr(base_type, name)
+        for name in entry_methods
+    }
+    missing = object()
+
+    def require_snapshot(self) -> tuple[tuple[str, object], ...]:
+        snapshot = snapshots.get(self)
+        if snapshot is None:
+            raise error_type("product coordinator authority snapshot is unavailable")
+        raw = object.__getattribute__(self, "__dict__")
+        for name in entry_methods:
+            if name in raw:
+                raise error_type(
+                    f"product coordinator method {name!r} changed after composition"
+                )
+        for name, expected in snapshot:
+            if raw.get(name, missing) is not expected:
+                raise error_type(
+                    f"product coordinator authority field {name!r} changed after composition"
+                )
+        return snapshot
+
+    class ProductContinuousSessionCoordinator(base_type):
+        """Product-only coordinator with immutable composed authority references."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            snapshots[self] = tuple(
+                (name, object.__getattribute__(self, name))
+                for name in snapshot_fields
+            )
+
+        def __getattribute__(self, name: str):
+            snapshot = snapshots.get(self)
+            if snapshot is not None:
+                if name in entry_methods:
+                    require_snapshot(self)
+                    return base_methods[name].__get__(self, type(self))
+                if name in snapshot_fields:
+                    for field_name, expected in snapshot:
+                        if field_name == name:
+                            return expected
+            return object.__getattribute__(self, name)
+
+        def __setattr__(self, name: str, value: object) -> None:
+            if snapshots.get(self) is not None and name in protected_fields:
+                raise error_type(
+                    f"product coordinator authority field {name!r} is immutable"
+                )
+            object.__setattr__(self, name, value)
+
+    return ProductContinuousSessionCoordinator
+
+
+_ProductContinuousSessionCoordinator = _build_product_coordinator_type(
+    ContinuousSessionCoordinator,
+    ProductCompositionError,
+)
+del _build_product_coordinator_type
+
+
 def _serialized_runtime_operation(method):
     """Hold one runtime-local fence across an admitted public lifecycle operation."""
 
@@ -1838,10 +1944,11 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     CollectorDeltaStore,
     HeadlessCollectorService,
     DesktopDeltaCheckpointStore,
-    ContinuousSessionCoordinator,
+    _ProductContinuousSessionCoordinator,
     _ProductStartTransitionStore,
 )
 del _ProductDesktopDeltaConsumer
+del _ProductContinuousSessionCoordinator
 del _build_autonomous_product_runtime_impl
 del _desktop_applied_current_for_source
 del _desktop_applied_event_for_receipt

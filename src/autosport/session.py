@@ -680,6 +680,9 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
             "replay_applied_event_payload_sequence_sha256": (
                 result.replay.applied_event_payload_sequence_sha256
             ),
+            "replay_consumed_event_payload_multiset_sha256": (
+                result.replay.consumed_event_payload_multiset_sha256
+            ),
             "campaign_causal_membership": campaign_causal_membership,
             "settled_ticket_ids": list(result.settled_ticket_ids),
             "balance": str(result.balance),

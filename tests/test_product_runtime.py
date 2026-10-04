@@ -195,6 +195,7 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     desktop.resolve_event = lambda _delta: None
             finally:
                 runtime.close()
+
     def test_builder_closure_binds_canonical_application_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -249,6 +250,7 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     runtime.close()
 
             self.assertEqual(forged_calls, [])
+
     def test_product_desktop_authority_graph_rejects_post_build_rebind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -356,6 +358,63 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_post_delivery_ack_failure_retries_receipt_without_duplicate_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event = _event()
+            delta = _delta(event)
+            clock_values = iter(
+                (
+                    "2026-09-20T13:58:00+00:00",
+                    "2026-09-20T13:58:00+00:00",
+                    "2026-09-20T13:58:02+00:00",
+                    "2026-09-20T13:58:01+00:00",
+                    "2026-09-20T13:58:03+00:00",
+                    "2026-09-20T13:58:04+00:00",
+                )
+            )
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(resolved_event=event),
+                clock=lambda: next(clock_values),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                desktop = runtime.coordinator.desktop_consumer
+                with self.assertRaisesRegex(
+                    Exception,
+                    "clock moved backward after receipt delivery",
+                ):
+                    desktop.drain(as_of="2026-09-20T13:58:00+00:00")
+
+                checkpoint = DesktopDeltaCheckpointStore(
+                    root / "desktop_acks.json"
+                )
+                self.assertFalse(checkpoint.has_ack(delta.delta_id))
+                self.assertEqual(runtime.mirror.snapshot(), (event,))
+                self.assertEqual(runtime.invalidations.pending_count, 1)
+                self.assertEqual(len(runtime.market_store.events(event.event_id)), 1)
+                health_after_first = SourceHealthStore(
+                    root / "source_health.json"
+                ).get(event.source_id)
+                self.assertEqual(health_after_first.poll_count, 1)
+
+                self.assertEqual(
+                    desktop.drain(as_of="2026-09-20T13:58:00+00:00"),
+                    (delta.delta_id,),
+                )
+                self.assertTrue(checkpoint.has_ack(delta.delta_id))
+                self.assertEqual(runtime.mirror.snapshot(), (event,))
+                self.assertEqual(runtime.invalidations.pending_count, 1)
+                self.assertEqual(len(runtime.market_store.events(event.event_id)), 1)
+                health_after_retry = SourceHealthStore(
+                    root / "source_health.json"
+                ).get(event.source_id)
+                self.assertEqual(health_after_retry, health_after_first)
+            finally:
+                runtime.close()
     def test_runtime_preload_excludes_unreceipted_market_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

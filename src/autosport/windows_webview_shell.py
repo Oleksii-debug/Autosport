@@ -2028,8 +2028,15 @@ class AutosportWebController:
                 self._wait_for_terminal_worker(worker)
 
             join_product = getattr(self.product_worker, "join", None)
-            if callable(join_product):
-                join_product()
+            if not callable(join_product):
+                if self.product_worker.busy:
+                    raise RuntimeError(
+                        "product runtime worker does not expose terminal join"
+                    )
+            elif join_product() is not True:
+                raise RuntimeError(
+                    "product runtime worker did not reach terminal thread state"
+                )
         except BaseException as exc:
             if not isinstance(exc, Exception):
                 raise

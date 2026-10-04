@@ -208,3 +208,29 @@ def test_webview_close_failure_keeps_controller_retryable_and_error_secret_safe(
     assert controller._close_complete is True
     assert product.stop_reasons == ["app_close", "app_close"]
     assert product.join_calls == 1
+
+
+class _NonTerminalJoinProductWorker(_IdleProductWorker):
+    busy = True
+
+    def join(self, timeout=None) -> bool:
+        del timeout
+        return False
+
+
+def test_webview_close_vetoes_nonterminal_product_join(tmp_path: Path) -> None:
+    controller = _bare_controller(tmp_path)
+    product = _NonTerminalJoinProductWorker()
+    controller.product_worker = product
+
+    try:
+        controller.close()
+    except RuntimeError as exc:
+        assert "did not reach terminal thread state" in str(exc)
+    else:
+        raise AssertionError("nonterminal product join was accepted as close-safe")
+
+    assert controller._closing is False
+    assert getattr(controller, "_close_complete", False) is False
+    assert product.stop_reasons == ["app_close"]
+    assert "Вікно залишено відкритим" in controller.last_error

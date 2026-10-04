@@ -687,27 +687,11 @@ class SQLiteMarketStore:
         payload = _validate_incoming_event(event)
         incoming_key = _projection_order_key(event)
 
-        previous = self.connection.execute(
-            f"""SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes
-                WHERE source_id=? AND quote_key=?""",
-            (event.source_id, event.quote_key),
-        ).fetchone()
-        previous_event = _event_from_current_row(previous) if previous is not None else None
-
-        # Some snapshot providers expose a fresh product acquisition ordering but no
-        # provider event sequence. For an explicitly versioned product-owned semantic
-        # state contract, a strictly newer acquisition whose normalized state is
-        # unchanged is liveness evidence, not another market-state transition. The
-        # caller's source-health/cursor path remains responsible for recording that
-        # fresh successful acquisition. Equal/lower sequence behavior is deliberately
-        # left to the ordinary exact-event identity/history rules below.
-        if (
-            previous_event is not None
-            and incoming_key > _projection_order_key(previous_event)
-            and same_semantic_market_state(previous_event, event)
-        ):
-            return False
-
+        # INSERT is deliberately first. On SQLite this enters the write transaction
+        # before semantic-current comparison, so two connections cannot both observe
+        # one old current row and independently publish the same newer snapshot state.
+        # Exact dedupe conflict semantics also remain authoritative before any broader
+        # semantic-state suppression is considered.
         cursor = self.connection.execute(
             """INSERT INTO market_events
                (dedupe_key,quote_key,event_id,market_id,selection_id,decimal_odds,observed_ts,source_id,sequence,payload_json)
@@ -740,6 +724,34 @@ class SQLiteMarketStore:
                     f"{event.dedupe_key}"
                 )
             return False
+
+        previous = self.connection.execute(
+            f"""SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes
+                WHERE source_id=? AND quote_key=?""",
+            (event.source_id, event.quote_key),
+        ).fetchone()
+        previous_event = _event_from_current_row(previous) if previous is not None else None
+
+        # Some snapshot providers expose a fresh product acquisition ordering but no
+        # provider event sequence. A strictly newer acquisition whose exact supported
+        # normalized-state identity is unchanged remains source-health/liveness
+        # evidence, not another market-state transition. Remove only the row inserted
+        # in this still-uncommitted transaction; no durable history is rewritten.
+        if (
+            previous_event is not None
+            and incoming_key > _projection_order_key(previous_event)
+            and same_semantic_market_state(previous_event, event)
+        ):
+            removed = self.connection.execute(
+                "DELETE FROM market_events WHERE dedupe_key=?",
+                (event.dedupe_key,),
+            )
+            if removed.rowcount != 1:
+                raise RuntimeError(
+                    "semantic duplicate market event could not be withdrawn atomically"
+                )
+            return False
+
         if previous_event is None or incoming_key > _projection_order_key(previous_event):
             self.connection.execute(
                 """INSERT INTO current_quotes

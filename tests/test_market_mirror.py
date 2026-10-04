@@ -86,6 +86,28 @@ class MarketMirrorTests(unittest.TestCase):
         self.assertEqual(mirror.snapshot(), (refresh,))
 
 
+
+    def test_semantic_refresh_advances_live_liveness_without_changing_price_state(self) -> None:
+        mirror = MarketMirror()
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+
+        mirror.apply(first)
+        self.assertEqual(mirror.apply(refresh).status, MirrorUpdate.SEMANTIC_REFRESH)
+
+        before_refresh = mirror.active_view(
+            as_of=datetime(2026, 9, 16, 19, 0, 1, 500000, tzinfo=timezone.utc),
+            max_age=timedelta(milliseconds=750),
+        )
+        after_refresh = mirror.active_view(
+            as_of=datetime(2026, 9, 16, 19, 0, 2, 500000, tzinfo=timezone.utc),
+            max_age=timedelta(milliseconds=750),
+        )
+
+        self.assertEqual(before_refresh.events, ())
+        self.assertEqual(after_refresh.events, (refresh,))
+        self.assertEqual(after_refresh.events[0].decimal_odds, first.decimal_odds)
+
     def test_malformed_semantic_contract_degrades_to_material_update(self) -> None:
         mirror = MarketMirror()
         first = self.prophetx_refresh_event(sequence=1)

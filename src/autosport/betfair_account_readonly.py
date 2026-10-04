@@ -1810,7 +1810,36 @@ def _install_market_price_ladder_authority():
     generation_lock = Lock()
     read_sequence = 0
     raw_read = BetfairReadOnlyClient.read_market_price_ladder
+    raw_read_code = raw_read.__code__
     fingerprint = _market_price_ladder_fingerprint
+    fingerprint_code = fingerprint.__code__
+
+    # The raw MarketDescription reader resolves these helpers through module
+    # globals on every call. Freeze that parser/hash graph so a temporary helper
+    # substitution during provider I/O cannot mint a trusted receipt, and a
+    # later hash-helper substitution cannot preserve authority for a tampered
+    # receipt.
+    canonical_required_text = _required_text
+    canonical_required_text_code = canonical_required_text.__code__
+    canonical_sequence = _sequence
+    canonical_sequence_code = canonical_sequence.__code__
+    canonical_mapping = _mapping
+    canonical_mapping_code = canonical_mapping.__code__
+    canonical_provider_text = _provider_text
+    canonical_provider_text_code = canonical_provider_text.__code__
+    canonical_number = _number
+    canonical_number_code = canonical_number.__code__
+    canonical_decimal = _decimal
+    canonical_decimal_code = canonical_decimal.__code__
+    canonical_hash = _canonical_sha256
+    canonical_hash_code = canonical_hash.__code__
+    canonical_mapping_type = Mapping
+    canonical_decimal_type = Decimal
+    canonical_json_module = json
+    canonical_sha256_function = sha256
+    canonical_error_type = BetfairReadOnlyError
+    canonical_observation_type = BetfairMarketPriceLadderObservation
+    canonical_catalogue_method = _LIST_MARKET_CATALOGUE
 
     canonical_client_type = BetfairReadOnlyClient
     canonical_transport_type = UrllibBetfairHttpTransport
@@ -1863,6 +1892,34 @@ def _install_market_price_ladder_authority():
             and urlopen is canonical_urlopen
         )
 
+    def ladder_read_dispatch_intact() -> bool:
+        return (
+            raw_read.__code__ is raw_read_code
+            and _market_price_ladder_fingerprint is fingerprint
+            and fingerprint.__code__ is fingerprint_code
+            and _required_text is canonical_required_text
+            and canonical_required_text.__code__ is canonical_required_text_code
+            and _sequence is canonical_sequence
+            and canonical_sequence.__code__ is canonical_sequence_code
+            and _mapping is canonical_mapping
+            and canonical_mapping.__code__ is canonical_mapping_code
+            and _provider_text is canonical_provider_text
+            and canonical_provider_text.__code__ is canonical_provider_text_code
+            and _number is canonical_number
+            and canonical_number.__code__ is canonical_number_code
+            and _decimal is canonical_decimal
+            and canonical_decimal.__code__ is canonical_decimal_code
+            and _canonical_sha256 is canonical_hash
+            and canonical_hash.__code__ is canonical_hash_code
+            and Mapping is canonical_mapping_type
+            and Decimal is canonical_decimal_type
+            and json is canonical_json_module
+            and sha256 is canonical_sha256_function
+            and BetfairReadOnlyError is canonical_error_type
+            and BetfairMarketPriceLadderObservation is canonical_observation_type
+            and _LIST_MARKET_CATALOGUE == canonical_catalogue_method
+        )
+
     def canonical_now(label: str) -> datetime:
         value = canonical_clock()
         if (
@@ -1884,13 +1941,21 @@ def _install_market_price_ladder_authority():
             raise BetfairReadOnlyError(
                 "canonical price-ladder RPC dispatch changed"
             )
+        if not ladder_read_dispatch_intact():
+            raise BetfairReadOnlyError(
+                "canonical price-ladder parser/hash authority changed"
+            )
         origin_at_read_start = source_origin_authoritative(self)
         with generation_lock:
             read_sequence += 1
             acquisition_sequence = read_sequence
         acquisition_started_at = canonical_now("acquisition-start instant")
         observation = raw_read(self, market_id)
-        if not origin_at_read_start or not source_origin_authoritative(self):
+        if (
+            not origin_at_read_start
+            or not source_origin_authoritative(self)
+            or not ladder_read_dispatch_intact()
+        ):
             return observation
 
         observation_id = id(observation)
@@ -1978,6 +2043,7 @@ def _install_market_price_ladder_authority():
                 or latest is None
                 or current[4] != latest[0]
                 or not source_origin_authoritative(source)
+                or not ladder_read_dispatch_intact()
             ):
                 raise BetfairReadOnlyError(
                     "price-ladder observation lacks canonical direct Betfair provider IO origin"

@@ -606,6 +606,55 @@ def _build_trusted_private_place_action(private_place_action, private_place_acti
                     "durable Betfair operator confirmation denied final provider send"
                 ) from exc
 
+            # Durable confirmation I/O can consume wall time after the pre-submit
+            # approval/quote check. Sample the product-owned trusted clock again
+            # after receipt consumption and fail closed before POST if authority
+            # expired in that interval. The attempt is already SUBMITTED and the
+            # receipt already consumed, so every such denial remains on the
+            # canonical no-blind-retry side.
+            final_send_at = _impl._supervised_execution_runtime._trusted_now()
+            if not _confirmation_graph_unchanged():
+                raise _impl.BetfairSupervisedExecutionError(
+                    "Betfair confirmation authority changed after durable confirmation"
+                )
+            final_send_instant = _CONFIRMATION_INSTANT(
+                final_send_at,
+                "final_send_at",
+            )
+            submitted_instant = _CONFIRMATION_INSTANT(
+                submitted_at,
+                "submitted_at",
+            )
+            if final_send_instant < submitted_instant:
+                raise _impl.BetfairSupervisedExecutionError(
+                    "trusted Betfair final-send clock moved backwards after confirmation"
+                )
+            _FINAL_REQUIRE_APPROVAL(
+                bound,
+                confirmation_context.approval,
+                final_send_at,
+            )
+            _FINAL_REQUIRE_DURABLE_APPROVAL(
+                confirmation_context.ledger,
+                bound,
+                confirmation_context.approval,
+            )
+            if final_send_instant >= _CONFIRMATION_INSTANT(
+                action.expires_at,
+                "action.expires_at",
+            ):
+                raise _impl.BetfairSupervisedExecutionError(
+                    "Betfair action quote expired after durable confirmation"
+                )
+            if _durable_submitted_at(
+                confirmation_context,
+                action=action,
+                request_sha256=request_sha256,
+            ) != submitted_at:
+                raise _impl.BetfairSupervisedExecutionError(
+                    "durable Betfair submission time changed after confirmation"
+                )
+
         with _TRUSTED_PROFILE_LOCK:
             _require_current_workspace_profile_locked(workspace)
             if (

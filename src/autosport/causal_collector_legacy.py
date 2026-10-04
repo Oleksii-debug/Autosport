@@ -1094,7 +1094,8 @@ class DesktopDeltaConsumer:
                         )
                     acknowledgement_clock = self._acknowledgement_clock
                     on_application_receipt = self._on_application_receipt
-                    acknowledged_at = _acknowledged_at(self,
+                    acknowledged_at = _acknowledged_at(
+                        self,
                         delta,
                         durable_receipt,
                         cutoff=now,
@@ -1103,7 +1104,8 @@ class DesktopDeltaConsumer:
                     if on_application_receipt is not None:
                         on_application_receipt(delta, durable_receipt)
                         if acknowledgement_clock is not None:
-                            acknowledged_at = _acknowledged_at(self,
+                            acknowledged_at = _acknowledged_at(
+                        self,
                                 delta,
                                 durable_receipt,
                                 cutoff=now,
@@ -1137,7 +1139,8 @@ class DesktopDeltaConsumer:
                     raise ApplicationReceiptError("application receipt is not bound to this delta/digest")
                 acknowledgement_clock = self._acknowledgement_clock
                 on_application_receipt = self._on_application_receipt
-                acknowledged_at = _acknowledged_at(self,
+                acknowledged_at = _acknowledged_at(
+                        self,
                     delta,
                     receipt,
                     cutoff=now,
@@ -1146,7 +1149,8 @@ class DesktopDeltaConsumer:
                 if on_application_receipt is not None:
                     on_application_receipt(delta, receipt)
                     if acknowledgement_clock is not None:
-                        acknowledged_at = _acknowledged_at(self,
+                        acknowledged_at = _acknowledged_at(
+                        self,
                             delta,
                             receipt,
                             cutoff=now,

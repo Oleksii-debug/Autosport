@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tempfile
 
 import pytest
 
@@ -58,7 +59,7 @@ def _assert_reserved_without_submission(
 def test_durable_revocation_after_attempt_reservation_denies_final_send(
     monkeypatch,
 ) -> None:
-    with __import__("tempfile").TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(lambda request: _response(request))
         client = _enabled_client(profile, transport, store=goal_store)
@@ -104,7 +105,7 @@ def test_durable_revocation_after_attempt_reservation_denies_final_send(
 
 
 def test_cross_instance_revocation_cannot_commit_during_provider_send() -> None:
-    with __import__("tempfile").TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         competing = RealExecutionLedger(Path(tmp) / "real.jsonl")
         revocation_was_fenced = False
@@ -164,7 +165,7 @@ def test_cross_instance_revocation_cannot_commit_during_provider_send() -> None:
 
 
 def test_quote_expiry_exact_boundary_denies_before_submitted_or_transport() -> None:
-    with __import__("tempfile").TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(lambda request: _response(request))
         client = _enabled_client(profile, transport, store=goal_store)
@@ -193,14 +194,14 @@ def test_quote_expiry_exact_boundary_denies_before_submitted_or_transport() -> N
 
 
 def test_approval_expiry_exact_boundary_denies_before_submitted_or_transport() -> None:
-    with __import__("tempfile").TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(lambda request: _response(request))
         client = _enabled_client(profile, transport, store=goal_store)
 
         with pytest.raises(
             SupervisedExecutionError,
-            match="approval is expired",
+            match="supervised approval is not active",
         ):
             execute_betfair_supervised_action(
                 ledger,
@@ -224,7 +225,7 @@ def test_approval_expiry_exact_boundary_denies_before_submitted_or_transport() -
 def test_second_local_gate_denial_is_not_mislabeled_provider_unknown(
     monkeypatch,
 ) -> None:
-    with __import__("tempfile").TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(lambda request: _response(request))
         client = _enabled_client(profile, transport, store=goal_store)
@@ -267,7 +268,7 @@ def test_second_local_gate_denial_is_not_mislabeled_provider_unknown(
 
 
 def test_unexpected_transport_exception_after_submitted_becomes_unknown() -> None:
-    with __import__("tempfile").TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
 
         def crash_after_transport_entry(_request):
@@ -289,11 +290,14 @@ def test_unexpected_transport_exception_after_submitted_becomes_unknown() -> Non
         assert len(transport.calls) == 1
         assert result.outcome is PlaceOrdersOutcome.UNKNOWN
         assert result.attempt_state is AttemptState.UNKNOWN
-        assert ledger.attempt_state("attempt-unexpected-transport-crash") is AttemptState.UNKNOWN
+        assert (
+            ledger.attempt_state("attempt-unexpected-transport-crash")
+            is AttemptState.UNKNOWN
+        )
 
 
 def test_post_response_local_validation_failure_remains_effect_ambiguous() -> None:
-    with __import__("tempfile").TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(
             lambda request: _response(
@@ -328,7 +332,7 @@ def test_post_response_local_validation_failure_remains_effect_ambiguous() -> No
 def test_final_writer_lock_conflict_fails_closed_before_submission(
     monkeypatch,
 ) -> None:
-    with __import__("tempfile").TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(lambda request: _response(request))
         client = _enabled_client(profile, transport, store=goal_store)
@@ -336,7 +340,10 @@ def test_final_writer_lock_conflict_fails_closed_before_submission(
 
         def bind_then_block_final_writer(*args, **kwargs):
             provider_ref = original_bind(*args, **kwargs)
-            ledger._lock_path.write_text("synthetic competing writer", encoding="utf-8")
+            ledger._lock_path.write_text(
+                "synthetic competing writer",
+                encoding="utf-8",
+            )
             return provider_ref
 
         monkeypatch.setattr(

@@ -41,7 +41,10 @@ if (
 
 
 def _install_credential_origin_guard():
-    issued: dict[int, tuple[object, object, _IDENTITY_TYPE, str, str]] = {}
+    issued: dict[
+        int,
+        tuple[object, object, _IDENTITY_TYPE, str, str, str, str],
+    ] = {}
     lock = Lock()
 
     def _require_k07(client, *, stage: str) -> _IDENTITY_TYPE:
@@ -52,6 +55,24 @@ def _install_credential_origin_guard():
             raise _ERROR(
                 f"settlement currency {stage} lacks K07 authenticated client/session authority"
             ) from exc
+
+    def _routing_snapshot(client) -> tuple[str, str]:
+        try:
+            state = vars(client)
+        except TypeError as exc:
+            raise _ERROR("settlement currency client state is unavailable") from exc
+        venue_id = state.get("_venue_id")
+        account_id = state.get("_account_id")
+        if (
+            type(venue_id) is not str
+            or not venue_id
+            or venue_id != venue_id.strip()
+            or type(account_id) is not str
+            or not account_id
+            or account_id != account_id.strip()
+        ):
+            raise _ERROR("settlement currency routing identity is unavailable")
+        return venue_id, account_id
 
     def _forget_capture(capture_id: int):
         def forget(_dead) -> None:
@@ -73,6 +94,7 @@ def _install_credential_origin_guard():
                 "settlement currency acquisition requires exact BetfairReadOnlyClient"
             )
 
+        expected_venue, expected_account = _routing_snapshot(client)
         before = _require_k07(client, stage="acquisition")
         capture = _ORIGINAL_QUALIFIED_READ(
             client,
@@ -90,6 +112,15 @@ def _install_credential_origin_guard():
             raise _ERROR(
                 "settlement currency authenticated session changed during execution readback"
             ) from exc
+
+        current_venue, current_account = _routing_snapshot(client)
+        if (
+            current_venue != expected_venue
+            or current_account != expected_account
+            or capture.venue_id != expected_venue
+            or capture.account_id != expected_account
+        ):
+            raise _ERROR("settlement currency routing identity changed during readback")
 
         after = _require_k07(client, stage="post-readback verification")
         if (
@@ -117,6 +148,8 @@ def _install_credential_origin_guard():
                 after,
                 after.session_context_id,
                 after.currency_code,
+                expected_venue,
+                expected_account,
             )
         return capture
 
@@ -136,15 +169,22 @@ def _install_credential_origin_guard():
         identity = record[2]
         expected_context = record[3]
         expected_currency = record[4]
+        expected_venue = record[5]
+        expected_account = record[6]
         try:
             current = _REQUIRE_IDENTITY(identity, client=client)
         except _IDENTITY_ERROR as exc:
             raise _ERROR(
                 "settlement currency authenticated session changed before persistence"
             ) from exc
+        current_venue, current_account = _routing_snapshot(client)
         if (
             current.session_context_id != expected_context
             or current.currency_code != expected_currency
+            or current_venue != expected_venue
+            or current_account != expected_account
+            or capture.venue_id != expected_venue
+            or capture.account_id != expected_account
         ):
             raise _ERROR(
                 "settlement currency authenticated context changed before persistence"

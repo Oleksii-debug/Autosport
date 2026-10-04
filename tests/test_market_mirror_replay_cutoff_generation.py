@@ -4780,7 +4780,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_committed_append_boundary_reader_rejects_split_batch_and_preserves_prefix(self) -> None:
+    def test_committed_append_boundary_rejects_split_batch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:

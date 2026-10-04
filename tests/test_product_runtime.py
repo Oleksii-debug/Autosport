@@ -155,7 +155,7 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 restored.close()
 
-    def test_runtime_preload_excludes_other_source_market_history(self) -> None:
+    def test_runtime_preload_excludes_unreceipted_market_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             store = SQLiteMarketStore(root / "market.db")
@@ -182,25 +182,83 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 initial_bankroll="100",
             )
             try:
-                snapshot = runtime.mirror.snapshot()
-                self.assertEqual(len(snapshot), 1)
-                self.assertEqual(snapshot[0].source_id, "provider-a")
-                self.assertEqual(snapshot[0].sequence, 1)
-                self.assertEqual(runtime.invalidations.pending_count, 1)
-                self.assertIsNone(
-                    runtime.mirror.get(
-                        "provider-b",
-                        "event-1",
-                        "winner",
-                        "player-a",
-                    )
-                )
+                self.assertEqual(runtime.mirror.snapshot(), ())
+                self.assertEqual(runtime.invalidations.pending_count, 0)
                 self.assertEqual(
                     len(runtime.market_store.current_by_source()),
                     2,
                 )
             finally:
                 runtime.close()
+
+    def test_runtime_restart_preloads_latest_desktop_applied_not_newer_generic_quote(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            applied = _event()
+            delta = _delta(applied)
+            source = _Source(resolved_event=applied)
+
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                self.assertEqual(
+                    runtime.coordinator.desktop_consumer.drain(as_of=clock.value),
+                    (delta.delta_id,),
+                )
+                receipt = DesktopDeltaCheckpointStore(
+                    root / "desktop_acks.json"
+                ).application_receipt(delta)
+                self.assertIsNotNone(receipt)
+            finally:
+                runtime.close()
+
+            generic_newer = MarketEvent.from_dict(
+                {
+                    **applied.to_dict(),
+                    "sequence": 99,
+                    "observed_ts": "2026-09-20T13:58:05+00:00",
+                    "ingest_ts": "2026-09-20T13:58:06+00:00",
+                    "metadata": {"origin": "generic-import"},
+                }
+            )
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                self.assertTrue(store.append(generic_newer))
+                generic_current = store.current_by_source()[
+                    (applied.source_id, applied.quote_key)
+                ]
+                self.assertEqual(generic_current.sequence, 99)
+            finally:
+                store.close()
+
+            restored = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                snapshot = restored.mirror.snapshot()
+                self.assertEqual(len(snapshot), 1)
+                self.assertEqual(snapshot[0], applied)
+                self.assertEqual(snapshot[0].sequence, 1)
+                self.assertEqual(restored.invalidations.pending_count, 1)
+                self.assertEqual(
+                    restored.market_store.current_by_source()[
+                        (applied.source_id, applied.quote_key)
+                    ].sequence,
+                    99,
+                )
+            finally:
+                restored.close()
 
     def test_restart_with_different_source_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

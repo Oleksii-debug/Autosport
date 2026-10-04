@@ -2305,6 +2305,12 @@ def _build_autonomous_product_runtime_impl(
     _dependency_index_type,
     _collector_store_type,
     _collector_service_type,
+    _collector_service_init,
+    _collector_service_status,
+    _collector_service_resume,
+    _collector_service_stop,
+    _collector_service_run_cycle,
+    _collector_service_bounded_provider_call,
     _checkpoint_type,
     _coordinator_type,
     _start_transition_store_type,
@@ -2783,12 +2789,12 @@ def _build_autonomous_product_runtime_impl(
             "_adapter",
             "_state",
         )
-        base_collector_init = _collector_service_type.__init__
-        base_collector_status = _collector_service_type.status
-        base_collector_resume = _collector_service_type.resume
-        base_collector_stop = _collector_service_type.stop
-        base_collector_run_cycle = _collector_service_type.run_cycle
-        base_bounded_provider_call = _collector_service_type._bounded_provider_call
+        base_collector_init = _collector_service_init
+        base_collector_status = _collector_service_status
+        base_collector_resume = _collector_service_resume
+        base_collector_stop = _collector_service_stop
+        base_collector_run_cycle = _collector_service_run_cycle
+        base_bounded_provider_call = _collector_service_bounded_provider_call
         collector_entry_names = frozenset(
             {"status", "resume", "stop", "run_cycle", "_bounded_provider_call"}
         )
@@ -3247,6 +3253,12 @@ def _bind_autonomous_product_runtime_builder(
     dependency_index_type,
     collector_store_type,
     collector_service_type,
+    collector_service_init,
+    collector_service_status,
+    collector_service_resume,
+    collector_service_stop,
+    collector_service_run_cycle,
+    collector_service_bounded_provider_call,
     checkpoint_type,
     coordinator_type,
     start_transition_store_type,
@@ -3307,6 +3319,12 @@ def _bind_autonomous_product_runtime_builder(
             _dependency_index_type=dependency_index_type,
             _collector_store_type=collector_store_type,
             _collector_service_type=collector_service_type,
+            _collector_service_init=collector_service_init,
+            _collector_service_status=collector_service_status,
+            _collector_service_resume=collector_service_resume,
+            _collector_service_stop=collector_service_stop,
+            _collector_service_run_cycle=collector_service_run_cycle,
+            _collector_service_bounded_provider_call=collector_service_bounded_provider_call,
             _checkpoint_type=checkpoint_type,
             _coordinator_type=coordinator_type,
             _start_transition_store_type=start_transition_store_type,
@@ -3354,6 +3372,12 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     FocusedMirrorDependencyIndex,
     CollectorDeltaStore,
     HeadlessCollectorService,
+    HeadlessCollectorService.__init__,
+    HeadlessCollectorService.status,
+    HeadlessCollectorService.resume,
+    HeadlessCollectorService.stop,
+    HeadlessCollectorService.run_cycle,
+    HeadlessCollectorService._bounded_provider_call,
     DesktopDeltaCheckpointStore,
     _ProductContinuousSessionCoordinator,
     _ProductStartTransitionStore,

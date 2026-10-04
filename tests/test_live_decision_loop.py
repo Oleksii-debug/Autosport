@@ -676,6 +676,72 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 1,
             )
 
+    def test_distinct_equal_time_pending_decision_recovers_after_factory_crash(self) -> None:
+        class CrashOnSecondFactory(_EmptyIntentFactory):
+            def __call__(self, input_id, snapshot):
+                if len(self.calls) == 1:
+                    self.calls.append(
+                        (
+                            input_id,
+                            tuple(
+                                (event.selection_id, event.sequence, event.status)
+                                for event in snapshot.events
+                            ),
+                        )
+                    )
+                    raise RuntimeError("simulated crash after pending publication")
+                return super().__call__(input_id, snapshot)
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace,
+                [
+                    (self._event(sequence=1),),
+                    (
+                        self._event(
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START,
+                        ),
+                    ),
+                ],
+            )
+            factory = CrashOnSecondFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "simulated crash after pending publication",
+            ):
+                loop.run_cycle()
+            progress = json.loads(
+                (
+                    workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(progress["phase"], "pending")
+            self.assertEqual(
+                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
+                1,
+            )
+
+            recovered = loop.run_cycle()
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
+                2,
+            )
+            loop.close()
+
     def test_crash_after_ledger_append_recovers_without_duplicate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

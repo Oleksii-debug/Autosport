@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from threading import RLock
-from types import FunctionType
+from types import FunctionType, MethodType
 from typing import Callable, Protocol
 
 from .causal_collector import (
@@ -589,6 +589,7 @@ def _source_resolver_identity_impl(
     _dumps,
     _sha256,
     _function_type,
+    _method_type,
 ) -> str:
     """Fingerprint the durable delta-to-MarketEvent authority used across restart."""
 
@@ -606,6 +607,15 @@ def _source_resolver_identity_impl(
     if type(resolver) is not _function_type:
         raise _error_type(
             "product source must use a concrete class resolve_event method"
+        )
+    bound_resolver = getattr(source, "resolve_event", None)
+    if (
+        type(bound_resolver) is not _method_type
+        or bound_resolver.__self__ is not source
+        or bound_resolver.__func__ is not resolver
+    ):
+        raise _error_type(
+            "product source resolve_event instance dispatch is not canonical"
         )
     if resolver.__defaults__ is not None or resolver.__kwdefaults__ not in (None, {}):
         raise _error_type(
@@ -691,6 +701,7 @@ def _bind_source_resolver_identity(implementation):
     dumps = json.dumps
     sha256 = hashlib.sha256
     function_type = FunctionType
+    method_type = MethodType
 
     def bound(
         *,
@@ -707,6 +718,7 @@ def _bind_source_resolver_identity(implementation):
             _dumps=dumps,
             _sha256=sha256,
             _function_type=function_type,
+            _method_type=method_type,
         )
 
     return bound

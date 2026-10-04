@@ -1109,8 +1109,13 @@ class _ContinuousSessionState:
             known[evidence.evidence_id] = normalized
             known_pairs[pair] = normalized
             outcome_digests[evidence.evidence_id] = outcomes_digest
-            pending[evidence.evidence_id] = pending_payload
-            pending_pairs[pair] = pending_payload
+            # A cleared historical receipt is durable audit truth, not unfinished
+            # economic work. Re-observing the same provider result must not mint a
+            # new pending commit. Only newly admitted evidence or evidence already
+            # retained as pending may remain on the recovery path.
+            if existing is None or existing_pending is not None:
+                pending[evidence.evidence_id] = pending_payload
+                pending_pairs[pair] = pending_payload
         return (
             list(sorted(known.values(), key=lambda item: item["evidence_id"])),
             dict(sorted(outcome_digests.items())),

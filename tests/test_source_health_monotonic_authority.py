@@ -140,6 +140,53 @@ def test_success_cas_rejects_subclassed_ambiguous_after(
     assert store.get("provider-a") == current
 
 
+def test_success_cas_snapshots_mutable_expected_state_before_writer_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path, monkeypatch, "cas-entry-snapshot")
+    _record_success(store)
+    stale_expected = store.get("provider-a")
+    _record_provider_failure(store)
+    current = store.get("provider-a")
+    assert stale_expected != current
+
+    canonical_guard = store._writer_guard
+
+    class MutatingGuard:
+        def __enter__(self):
+            self._inner = canonical_guard()
+            self._inner.__enter__()
+            for name in SourceHealthState.__dataclass_fields__:
+                setattr(stale_expected, name, getattr(current, name))
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self._inner.__exit__(exc_type, exc_value, traceback)
+
+    monkeypatch.setattr(store, "_writer_guard", lambda: MutatingGuard())
+
+    with pytest.raises(
+        RuntimeError,
+        match="changed since the committed ingestion outcome",
+    ):
+        store.record_success_if_current(
+            stale_expected,
+            now=T2,
+            received=1,
+            accepted=1,
+            rejected=0,
+            cursor="cursor-2",
+            latest_source_ts=T2,
+            quality_flags=(),
+        )
+
+    # The caller object was changed after method entry, proving the race was
+    # exercised, but the durable CAS decision stayed bound to the entry snapshot.
+    assert stale_expected == current
+    assert store.get("provider-a") == current
+
+
 def test_source_health_authority_key_matches_windows_filename_identity() -> None:
     lower = Path("source_health.json")
     upper = Path("SOURCE_HEALTH.JSON")

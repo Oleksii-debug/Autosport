@@ -8,6 +8,7 @@ from unittest.mock import patch
 from autosport.domain import MarketEvent
 from autosport.market_bus import MarketEventBus
 from autosport.market_mirror import MarketMirror, MirrorUpdate
+from autosport.market_state_identity import PROPHETX_REST_MARKET_STATE_CONTRACT
 from autosport.market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependencyIndex,
@@ -39,6 +40,56 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             source_ts=timestamp,
             ingest_ts=timestamp,
         )
+
+
+    @staticmethod
+    def prophetx_refresh_event(*, sequence: int, odds: str = "2.00") -> MarketEvent:
+        timestamp = f"2026-09-16T19:00:{sequence:02d}+00:00"
+        return MarketEvent(
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            decimal_odds=Decimal(odds),
+            observed_ts=timestamp,
+            source_id="prophetx:sandbox",
+            sequence=sequence,
+            status="open",
+            ingest_ts=timestamp,
+            metadata={
+                "provider": "prophetx",
+                "environment": "sandbox",
+                "transport_surface": "v3_affiliate_get_markets",
+                "request_fingerprint_sha256": "a" * 64,
+                "product_acquisition_sequence": sequence,
+                "response_sha256": f"{sequence:x}".rjust(64, "0"),
+                "snapshot_fingerprint_sha256": (
+                    f"{sequence + 100:x}".rjust(64, "0")
+                ),
+                "sequence_authority_id": "prophetx-rest-test-authority",
+                "sequence_source_id": (
+                    "prophetx:sandbox:rest:v3-affiliate-get-markets"
+                ),
+                "semantic_state_contract": PROPHETX_REST_MARKET_STATE_CONTRACT,
+            },
+        )
+
+    def test_semantic_refresh_keeps_conservative_downstream_invalidation(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+
+        self.assertEqual(runtime.accept_persisted(first).status, MirrorUpdate.APPLIED)
+        runtime.drain()
+        result = runtime.accept_persisted(refresh)
+
+        self.assertEqual(result.status, MirrorUpdate.SEMANTIC_REFRESH)
+        self.assertEqual(runtime.pending_count, 1)
+        self.assertEqual(
+            runtime.drain().changed_keys,
+            (("prophetx:sandbox", refresh.quote_key),),
+        )
+        self.assertEqual(mirror.snapshot(), (refresh,))
 
     def test_market_bus_persists_before_mirror_subscriber_runs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

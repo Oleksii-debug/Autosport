@@ -696,3 +696,37 @@ def test_segmented_decode_dispatch_rebind_fails_before_callback(
         _store(path, authority_root).latest_snapshot()
 
     assert callback_reached is False
+
+
+def test_segmented_chain_dispatch_rebind_fails_before_callback(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "account.json"
+    authority_root = tmp_path / "authority"
+    store = _store(path, authority_root)
+    assert store.append_snapshot(_snapshot(1))
+    assert store.append_snapshot(_snapshot(2))
+    _force_segmented(store, path)
+
+    canonical_chain = reconciliation_module.chain
+    callback_reached = False
+
+    def hostile_chain(*args, **kwargs):
+        nonlocal callback_reached
+        callback_reached = True
+        return canonical_chain(*args, **kwargs)
+
+    monkeypatch.setattr(
+        reconciliation_module,
+        "chain",
+        hostile_chain,
+    )
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="transitive module dispatch graph changed",
+    ):
+        _store(path, authority_root).latest_state()
+
+    assert callback_reached is False

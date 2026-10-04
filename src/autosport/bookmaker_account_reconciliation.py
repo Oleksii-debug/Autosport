@@ -2445,6 +2445,7 @@ def _install_canonical_store_dispatch_seal(
         "_authority_transition_binding",
         "sha256",
         "json",
+        "chain",
         "AuthorityPhase",
         "MonotonicWorkspaceAuthorityError",
     )

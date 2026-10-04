@@ -2327,11 +2327,6 @@ class PersistentLiveDecisionLoop:
             ) from exc
         return None
 
-    def _verified_last_ledger_record(
-        self,
-    ) -> tuple[int, DecisionRecord] | None:
-        return self._verified_latest_ledger_record()
-
     def _verified_ledger_record_at_offset(
         self,
         offset: int,

@@ -417,8 +417,8 @@ class ProductCollectorSource(CollectorServiceSource, Protocol):
 class ProductCompositionManifest:
     source_id: str
     initial_bankroll: str
-    source_resolver_identity: str | None = None
     settlement_authority_identity: str | None = None
+    source_resolver_identity: str | None = None
 
 
 class _ManifestStore:

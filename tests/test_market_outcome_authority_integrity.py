@@ -13,6 +13,7 @@ from autosport.market_outcomes import (
     MarketOutcomeAuthorityAssessment,
     MarketOutcomeIdentity,
     MarketSettlementOutcomeAuthority,
+    MarketTerminalState,
     OutcomeAuthorityStatus,
     OutcomeRosterBasis,
     SettlementSemantics,
@@ -570,6 +571,44 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
 
         authority.assert_issued_integrity()
 
+
+
+    def test_causal_cutoff_rejects_datetime_subclass_before_virtual_dispatch(self) -> None:
+        authority = self._authority()
+
+        class HostileDatetime(datetime):
+            def astimezone(self, *args, **kwargs):
+                raise AssertionError("datetime subclass astimezone dispatch executed")
+
+        hostile = HostileDatetime(
+            2026,
+            9,
+            18,
+            15,
+            0,
+            2,
+            tzinfo=timezone.utc,
+        )
+        with self.assertRaisesRegex(TypeError, "exact datetime"):
+            authority.assert_available_as_of(hostile)
+
+        authority.assert_issued_integrity()
+
+    def test_settlement_mapping_rejects_terminal_state_subclass_before_dispatch(self) -> None:
+        authority = self._authority()
+        hostile_calls: list[str] = []
+
+        class HostileState(MarketTerminalState):
+            def __getattribute__(self, name: str):
+                hostile_calls.append(name)
+                raise AssertionError("terminal-state subclass dispatch executed")
+
+        forged = object.__new__(HostileState)
+        with self.assertRaisesRegex(TypeError, "exact MarketTerminalState"):
+            authority.settlement_by_quote(forged)
+
+        self.assertEqual(hostile_calls, [])
+        authority.assert_issued_integrity()
 
 
 if __name__ == "__main__":

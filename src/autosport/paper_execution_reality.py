@@ -23,6 +23,19 @@ PaperExecutionRun = _impl.PaperExecutionRun
 PaperExecutionEvidenceRegistry = _impl.PaperExecutionEvidenceRegistry
 
 
+def _sha256_text(value: object, name: str) -> str:
+    digest = _impl._text(value, name)
+    if (
+        len(digest) != 64
+        or digest != digest.lower()
+        or any(char not in "0123456789abcdef" for char in digest)
+    ):
+        raise ValueError(
+            f"{name} must be a lowercase 64-character SHA-256 digest"
+        )
+    return digest
+
+
 def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
     if not value.is_finite():
         raise ValueError("Decimal must be finite")
@@ -278,11 +291,11 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                         payload.get("plan_id"),
                         "scope plan_id",
                     )
-                    _impl._text(
+                    _sha256_text(
                         payload.get("plan_fingerprint"),
                         "scope plan_fingerprint",
                     )
-                    evidence_sha256 = _impl._text(
+                    _sha256_text(
                         payload.get("intent_evidence_sha256"),
                         "scope intent_evidence_sha256",
                     )
@@ -290,16 +303,6 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     raise PaperExecutionIntegrityError(
                         "PAPER exposure-scope identity is invalid"
                     ) from exc
-                if (
-                    len(evidence_sha256) != 64
-                    or any(
-                        char not in "0123456789abcdef"
-                        for char in evidence_sha256
-                    )
-                ):
-                    raise PaperExecutionIntegrityError(
-                        "PAPER exposure-scope evidence digest is invalid"
-                    )
                 scope_body = dict(payload)
                 binding_sha256 = scope_body.pop("binding_sha256")
                 if binding_sha256 != _impl._digest(scope_body):
@@ -369,11 +372,11 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 try:
                     _impl._text(payload.get("trigger_id"), "trigger_id")
                     _impl._text(payload.get("plan_id"), "plan_id")
-                    _impl._text(
+                    _sha256_text(
                         payload.get("plan_fingerprint"),
                         "plan_fingerprint",
                     )
-                    _impl._text(
+                    _sha256_text(
                         payload.get("model_fingerprint"),
                         "model_fingerprint",
                     )

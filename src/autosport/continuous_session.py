@@ -895,36 +895,18 @@ class _ContinuousSessionState:
         """Prove recovery is replaying pre-P&L durable truth, never minting new truth."""
 
         raw = self._read()
-        known = {
-            item["evidence_id"]: item
+        known_ids = {
+            item["evidence_id"]
             for item in raw["settlement_evidence"]
         }
-        known_pairs = {
-            (item["event_identity"], item["settlement_ref"]): item["evidence_id"]
-            for item in raw["settlement_evidence"]
-        }
-        outcome_digests = raw["settlement_outcome_digests"]
+        # Reuse the closure-bound durable integrity path for exact evidence,
+        # event/reference and quote-outcome digest comparison.  It is intentionally
+        # side-effect free here because raw is only the freshly read candidate.
+        self._merge_settlement_evidence(raw, settlement_evidence)
         for evidence in settlement_evidence:
-            normalized = self._normalized_settlement_evidence(evidence)
-            existing = known.get(evidence.evidence_id)
-            if existing is None:
+            if evidence.evidence_id not in known_ids:
                 raise ContinuousSessionError(
                     "recovered settlement evidence was not durably staged before P&L"
-                )
-            if existing != normalized:
-                raise ContinuousSessionError(
-                    "recovered settlement evidence conflicts with durable evidence"
-                )
-            event_ref = (evidence.event_identity, evidence.settlement_ref)
-            if known_pairs.get(event_ref) != evidence.evidence_id:
-                raise ContinuousSessionError(
-                    "recovered settlement event/reference conflicts with durable evidence"
-                )
-            if outcome_digests.get(evidence.evidence_id) != _settlement_outcomes_sha256(
-                evidence
-            ):
-                raise ContinuousSessionError(
-                    "recovered settlement outcome interpretation conflicts with durable evidence"
                 )
 
     def record_source_projection(

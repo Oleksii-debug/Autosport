@@ -234,3 +234,50 @@ def test_webview_close_vetoes_nonterminal_product_join(tmp_path: Path) -> None:
     assert getattr(controller, "_close_complete", False) is False
     assert product.stop_reasons == ["app_close"]
     assert "Вікно залишено відкритим" in controller.last_error
+
+class _InterruptingProductWorker(_IdleProductWorker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupt = True
+        self.join_calls = 0
+
+    def request_stop(self, reason: str = "operator_stop") -> bool:
+        self.stop_reasons.append(reason)
+        if self.interrupt:
+            raise KeyboardInterrupt("SECRET_PROCESS_CONTROL_CLOSE")
+        return False
+
+    def join(self, timeout=None) -> bool:
+        del timeout
+        self.join_calls += 1
+        return True
+
+
+def test_webview_close_process_control_interrupt_keeps_controller_retryable(
+    tmp_path: Path,
+) -> None:
+    controller = _bare_controller(tmp_path)
+    product = _InterruptingProductWorker()
+    controller.product_worker = product
+
+    try:
+        controller.close()
+    except KeyboardInterrupt as exc:
+        assert str(exc) == "SECRET_PROCESS_CONTROL_CLOSE"
+    else:
+        raise AssertionError("process-control close interruption was swallowed")
+
+    assert controller._closing is False
+    assert getattr(controller, "_close_complete", False) is False
+    assert product.stop_reasons == ["app_close"]
+    assert "SECRET_PROCESS_CONTROL_CLOSE" not in controller.last_error
+    assert "SECRET_PROCESS_CONTROL_CLOSE" not in "\n".join(controller.log)
+
+    product.interrupt = False
+    controller.close()
+
+    assert controller._closing is True
+    assert controller._close_complete is True
+    assert product.stop_reasons == ["app_close", "app_close"]
+    assert product.join_calls == 1
+

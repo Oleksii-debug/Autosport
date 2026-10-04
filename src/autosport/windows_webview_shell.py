@@ -2038,14 +2038,17 @@ class AutosportWebController:
                     "product runtime worker did not reach terminal thread state"
                 )
         except BaseException as exc:
-            if not isinstance(exc, Exception):
-                raise
             with self._lock:
+                # A process-control interruption (for example KeyboardInterrupt or
+                # SystemExit) must still propagate, but it cannot strand the
+                # controller in an in-progress close state if the process remains
+                # alive and the operator/runtime later retries safe teardown.
                 self._closing = False
-                self._fail(
-                    "Не вдалося безпечно завершити фонову роботу. "
-                    "Вікно залишено відкритим; перевірте стан і повторіть завершення."
-                )
+                if isinstance(exc, Exception):
+                    self._fail(
+                        "Не вдалося безпечно завершити фонову роботу. "
+                        "Вікно залишено відкритим; перевірте стан і повторіть завершення."
+                    )
             raise
 
         with self._lock:

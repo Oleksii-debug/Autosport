@@ -1317,6 +1317,45 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 if runtime is not None:
                     runtime.close()
 
+    def test_builder_ignores_canonical_application_journal_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store_type = causal_collector_legacy_module._CanonicalDesktopApplicationStore
+            original_symbol = (
+                causal_collector_legacy_module._CanonicalDesktopApplicationStore
+            )
+            original_init = store_type.__init__
+
+            def forged(*_args, **_kwargs):
+                raise AssertionError(
+                    "rebound canonical application journal must not execute"
+                )
+
+            try:
+                store_type.__init__ = forged
+                causal_collector_legacy_module._CanonicalDesktopApplicationStore = type(
+                    "ForgedApplicationStore",
+                    (),
+                    {"__init__": forged},
+                )
+                runtime = build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+                try:
+                    self.assertEqual(runtime.status().source_id, "provider-a")
+                    self.assertTrue((root / "desktop_application.json").exists())
+                finally:
+                    runtime.close()
+            finally:
+                store_type.__init__ = original_init
+                causal_collector_legacy_module._CanonicalDesktopApplicationStore = (
+                    original_symbol
+                )
+
     def test_builder_closure_binds_canonical_application_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -1138,8 +1138,12 @@ class ProphetXSessionLifecycle:
                         expiry = None
                     else:
                         state = ProphetXSessionState.RENEWAL_DUE
-                        hold = current.slot_hold_until
                         retry = timestamp + self._retry_delay(failures)
+                        # Preserve the bounded no-login horizon across access-token
+                        # expiry. Otherwise a failure just before a long-lived token
+                        # expires can be laundered into an immediate replacement login
+                        # when slot_hold_until equals access_expires_at.
+                        hold = max(current.slot_hold_until, retry)
                         lineage = current.session_lineage_id
                         expiry = current.access_expires_at
 

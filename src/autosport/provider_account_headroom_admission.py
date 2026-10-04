@@ -404,6 +404,8 @@ _PAPER_RISK_CANDIDATE_SHA256_CODE = getattr(
 )
 _RISK_SHA256_PAYLOAD = getattr(_risk, "_sha256_payload", None)
 _RISK_SHA256_PAYLOAD_CODE = getattr(_RISK_SHA256_PAYLOAD, "__code__", None)
+_RISK_JSON_DUMPS = getattr(getattr(_risk, "json", None), "dumps", None)
+_RISK_HASHLIB_SHA256 = getattr(getattr(_risk, "hashlib", None), "sha256", None)
 _PROPOSED_RISK_CONTEXT_TYPE = ProposedTicketRiskContext
 _RISK_CONTEXT_PROVIDER_ACCOUNTS_DESCRIPTOR = vars(ProposedTicketRiskContext).get(
     "provider_accounts"

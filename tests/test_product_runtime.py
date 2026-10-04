@@ -41,9 +41,11 @@ class _Source:
         source_id: str = "provider-a",
         *,
         resolved_event: MarketEvent | None = None,
+        configuration_sha256: str = "1" * 64,
     ) -> None:
         self.source_id = source_id
         self.stream_epoch = "epoch-1"
+        self.product_source_configuration_sha256 = configuration_sha256
         self.resolved_event = resolved_event
 
     def fetch_catalog_page(self, checkpoint):
@@ -865,6 +867,32 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 finally:
                     runtime.close()
 
+    def test_restart_rejects_changed_source_config_with_same_resolver(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(configuration_sha256="1" * 64),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            original_identity = runtime.manifest.source_resolver_identity
+            runtime.close()
+
+            with self.assertRaisesRegex(
+                ProductCompositionError,
+                "source resolver identity conflicts with durable product composition",
+            ):
+                build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(configuration_sha256="2" * 64),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+
+            self.assertIsNotNone(original_identity)
     def test_restart_rejects_changed_resolver_with_same_source_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

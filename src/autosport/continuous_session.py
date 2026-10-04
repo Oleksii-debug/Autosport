@@ -59,6 +59,7 @@ def _bind_canonical_settlement_engine(method):
     canonical_book_load = PaperBook.load
     canonical_book_save = PaperBook.save
     canonical_workspace_lock_type = WorkspaceEconomicLock
+    canonical_collector_source_id_get = HeadlessCollectorService.source_id.fget
     canonical_hex = frozenset("0123456789abcdef")
     canonical_outcomes = frozenset({"win", "loss", "void"})
 
@@ -118,6 +119,11 @@ def _bind_canonical_settlement_engine(method):
         event_identity: str,
         settlement_ref: str,
     ) -> set[str]:
+        live_source_id = canonical_collector_source_id_get(coordinator.collector)
+        if live_source_id != coordinator._settlement_source_id:
+            raise ContinuousSessionError(
+                "collector source identity changed after settlement authority binding"
+            )
         lifecycle = coordinator.lifecycle
         if type(lifecycle) is not canonical_lifecycle_type:
             raise ContinuousSessionError(
@@ -895,6 +901,7 @@ def _bind_canonical_settlement_resolution_collection(method):
     lifecycle_records = ContinuousEventLifecycle.records
     lifecycle_read = ContinuousEventLifecycle._read
     lifecycle_record_type = EventLifecycleRecord
+    collector_source_id_get = HeadlessCollectorService.source_id.fget
     datetime_type = datetime
     timezone_utc = timezone.utc
     valid_hex = frozenset("0123456789abcdef")
@@ -978,6 +985,7 @@ def _bind_canonical_settlement_resolution_collection(method):
             _settlement_resolution_type=resolution_type,
             _settlement_resolution_validate=validate_resolution,
             _lifecycle_records=canonical_records,
+            _collector_source_id_get=collector_source_id_get,
         )
 
     guarded.__name__ = method.__name__
@@ -1015,7 +1023,7 @@ def _canonical_open_quote_keys_for_book(
         raise ContinuousSessionError(
             "settlement evidence reference differs from durable lifecycle"
         )
-    source_id = coordinator.collector.source_id
+    source_id = coordinator._settlement_source_id
     if record.source_id != source_id:
         raise ContinuousSessionError(
             "settlement event source is outside continuous session authority"
@@ -1072,6 +1080,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             "settlement_learning_handoff",
             "_settlement_prepare",
             "_settlement_reconcile",
+            "_settlement_source_id",
             "clock",
             "required_history",
             "max_invalidation_batches_per_tick",
@@ -1105,6 +1114,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             "settlement_learning_handoff",
             "_settlement_prepare",
             "_settlement_reconcile",
+            "_settlement_source_id",
             "clock",
             "required_history",
             "max_invalidation_batches_per_tick",
@@ -1206,6 +1216,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         self.settlement_learning_handoff = settlement_learning_handoff
         self._settlement_prepare = settlement_prepare
         self._settlement_reconcile = settlement_reconcile
+        self._settlement_source_id = _text(
+            collector.source_id,
+            "collector source_id",
+        )
         self.clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
         if isinstance(required_history, timedelta) and required_history.total_seconds() < 0:
             raise ValueError("required_history cannot be negative")
@@ -1237,7 +1251,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         self._state = _ContinuousSessionState(
             self.workspace / "continuous_session.json",
             session_id=session_id,
-            source_id=collector.source_id,
+            source_id=self._settlement_source_id,
             clock=self.clock,
         )
         self._authority_fields_sealed = True
@@ -1351,15 +1365,20 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _settlement_resolution_type: type[SettlementResolution],
         _settlement_resolution_validate: Callable[..., None],
         _lifecycle_records: Callable[[ContinuousEventLifecycle], tuple[EventLifecycleRecord, ...]],
+        _collector_source_id_get: Callable[[HeadlessCollectorService], str],
     ) -> tuple[SettlementResolution, ...]:
         if self._outcome_resolver is None:
             return ()
+        if _collector_source_id_get(self.collector) != self._settlement_source_id:
+            raise ContinuousSessionError(
+                "collector source identity changed after settlement authority binding"
+            )
         resolutions: list[SettlementResolution] = []
         for record in _lifecycle_records(self.lifecycle):
             # A continuous session is bound to exactly one collector source. A
             # shared lifecycle may contain other providers, but their settlement
             # records are outside this session's economic authority.
-            if record.source_id != self.collector.source_id:
+            if record.source_id != self._settlement_source_id:
                 continue
             if record.phase is not EventPhase.COMPLETED or record.settlement_ref is None:
                 continue

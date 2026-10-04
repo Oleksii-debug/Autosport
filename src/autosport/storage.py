@@ -2094,7 +2094,9 @@ class SQLiteMarketStore:
                 else self._market_append_issuance_lock(append_authority)
             )
 
-            # All locks are released before MarketEvent decoding.
+            # Final escaping-row materialization happens after these coordination
+            # locks. Canonical corpus validation may still decode rows here as part of
+            # the authority proof; do not overstate this as a lock-free decode path.
             with append_guard, self._connection_lock:
                 self._validate_causal_replay_state()
                 cutoff_rows = self._validated_replay_cutoff_rows()

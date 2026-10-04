@@ -12,6 +12,7 @@ from autosport.continuous_observation import (
     main,
     run_continuous_observation,
 )
+from autosport.domain import MarketEvent
 from autosport.ingestion_health import SourceHealthStore
 from autosport.providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
 from autosport.storage import SQLiteMarketStore
@@ -105,6 +106,70 @@ class ContinuousObservationTests(unittest.TestCase):
                 self.assertEqual(len(store.events()), 1)
             finally:
                 store.close()
+
+    def test_restart_excludes_newer_untrusted_history_from_live_mirror(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                untrusted = MarketEvent(
+                    event_id="match-1",
+                    market_id="winner",
+                    selection_id="player-a",
+                    decimal_odds=Decimal("9.99"),
+                    observed_ts=_NOW,
+                    source_id=SequenceProvider.source_id,
+                    sequence=99,
+                    status="open",
+                    source_ts="2026-09-19T17:14:59+00:00",
+                    ingest_ts=_NOW,
+                )
+                self.assertTrue(store.append(untrusted))
+                self.assertFalse(store.has_trusted_live_receipt(untrusted))
+            finally:
+                store.close()
+
+            captured = []
+
+            def capture_live_projection(buffer):
+                captured.append(buffer.mirror.snapshot())
+                return False
+
+            provider = SequenceProvider(
+                [_batch(_quote(sequence=1, odds="1.80"), cursor="trusted-live")]
+            )
+            with patch(
+                "autosport.continuous_observation._drain_invalidation_projection",
+                side_effect=capture_live_projection,
+            ):
+                result = self._run(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                )
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.total_accepted, 1)
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(len(captured[0]), 1)
+            self.assertEqual(captured[0][0].sequence, 1)
+            self.assertEqual(captured[0][0].decimal_odds, Decimal("1.80"))
+
+            reopened = SQLiteMarketStore(workspace / "market.db")
+            try:
+                self.assertEqual(
+                    reopened.current_by_source()[
+                        (SequenceProvider.source_id, "match-1|winner|player-a")
+                    ].sequence,
+                    99,
+                )
+                self.assertEqual(
+                    reopened.trusted_live_current_by_source()[
+                        (SequenceProvider.source_id, "match-1|winner|player-a")
+                    ].sequence,
+                    1,
+                )
+            finally:
+                reopened.close()
 
     def test_one_cycle_drains_truncated_snapshot_before_advancing_cycle_count(self):
         with tempfile.TemporaryDirectory() as tmp:

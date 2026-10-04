@@ -18,9 +18,10 @@ from autosport.bookmaker_routing_plan import plan_equal_split_residual
 from autosport.opportunity import QuoteRef
 from autosport.real_execution_ledger import (
     AcknowledgementStatus,
-    AttemptState,
     ExecutionAction,
+    ExecutionLedgerBusyError,
     ExecutionPlan,
+    ExecutionStateError,
     ExternalAcknowledgement,
     RealExecutionLedger,
 )
@@ -142,7 +143,7 @@ def _assert_no_positive_route(proposal) -> None:
     assert proposal.legs == ()
 
 
-def test_new_reserved_attempt_after_verified_snapshot_cannot_leave_positive_reroute(
+def test_post_ack_sibling_attempt_cannot_enter_verified_snapshot_race(
     tmp_path,
 ) -> None:
     venues = (_venue("book-a", "acct-a"), _venue("book-b", "acct-b"))
@@ -154,85 +155,72 @@ def test_new_reserved_attempt_after_verified_snapshot_cannot_leave_positive_rero
     original_verified_events = reconciliation_module._verified_ledger_events
     injected = False
 
-    def read_then_reserve(candidate_ledger):
+    def read_then_attempt_stale_sibling(candidate_ledger):
         nonlocal injected
         events = original_verified_events(candidate_ledger)
         if not injected:
             injected = True
-            writer_ledger.begin_attempt(
-                plan_id=_PLAN_ID,
-                action_id=second.leg_id,
-                attempt_id="attempt-race-reserved",
-                reserved_at=f"{_BASE}05:00+00:00",
-            )
-        return events
-
-    try:
-        with patch.object(
-            reconciliation_module,
-            "_verified_ledger_events",
-            side_effect=read_then_reserve,
-        ):
-            proposal = _reconcile(venues, receipt, ledger)
-    except RoutingContractError:
-        proposal = None
-
-    assert injected
-    assert ledger.attempt_state("attempt-race-reserved") is AttemptState.RESERVED
-    if proposal is not None:
-        _assert_no_positive_route(proposal)
-
-
-def test_new_accepted_effect_after_verified_snapshot_cannot_be_omitted_from_reroute(
-    tmp_path,
-) -> None:
-    venues = (_venue("book-a", "acct-a"), _venue("book-b", "acct-b"))
-    initial = _initial(venues)
-    ledger = _ledger_with_first_leg_accepted(tmp_path, initial)
-    receipt = _first_receipt(initial)
-    second = initial.legs[1]
-    writer_ledger = RealExecutionLedger(ledger.path)
-    original_verified_events = reconciliation_module._verified_ledger_events
-    injected = False
-
-    def read_then_accept_second_leg(candidate_ledger):
-        nonlocal injected
-        events = original_verified_events(candidate_ledger)
-        if not injected:
-            injected = True
-            writer_ledger.begin_attempt(
-                plan_id=_PLAN_ID,
-                action_id=second.leg_id,
-                attempt_id="attempt-race-accepted",
-                reserved_at=f"{_BASE}05:00+00:00",
-            )
-            writer_ledger.mark_submitted(
-                "attempt-race-accepted",
-                submitted_at=f"{_BASE}06:00+00:00",
-            )
-            writer_ledger.acknowledge(
-                ExternalAcknowledgement(
-                    attempt_id="attempt-race-accepted",
-                    external_receipt_id="receipt-race-accepted",
-                    status=AcknowledgementStatus.ACCEPTED,
-                    acknowledged_at=f"{_BASE}07:00+00:00",
-                    accepted_odds=second.venue.quote.decimal_odds,
-                    accepted_stake=second.proposed_stake,
+            # Any external acknowledgement makes a multi-action plan stale. A sibling
+            # attempt therefore cannot be inserted after this accepted effect; residual
+            # work must receive fresh execution authority instead of extending the plan.
+            with pytest.raises(
+                ExecutionStateError,
+                match="execution plan is stale",
+            ):
+                writer_ledger.begin_attempt(
+                    plan_id=_PLAN_ID,
+                    action_id=second.leg_id,
+                    attempt_id="attempt-race-reserved",
+                    reserved_at=f"{_BASE}05:00+00:00",
                 )
-            )
         return events
 
-    try:
-        with patch.object(
-            reconciliation_module,
-            "_verified_ledger_events",
-            side_effect=read_then_accept_second_leg,
-        ):
-            proposal = _reconcile(venues, receipt, ledger)
-    except RoutingContractError:
-        proposal = None
+    with patch.object(
+        reconciliation_module,
+        "_verified_ledger_events",
+        side_effect=read_then_attempt_stale_sibling,
+    ):
+        proposal = _reconcile(venues, receipt, ledger)
 
     assert injected
-    assert ledger.attempt_state("attempt-race-accepted") is AttemptState.ACCEPTED
-    if proposal is not None:
-        _assert_no_positive_route(proposal)
+    with pytest.raises(KeyError):
+        ledger.attempt_state("attempt-race-reserved")
+    assert proposal.state is RoutingState.ROUTE
+
+
+def test_serialized_reread_holds_canonical_cross_instance_writer_lock(
+    tmp_path,
+) -> None:
+    venues = (_venue("book-a", "acct-a"), _venue("book-b", "acct-b"))
+    initial = _initial(venues)
+    ledger = _ledger_with_first_leg_accepted(tmp_path, initial)
+    receipt = _first_receipt(initial)
+    writer_ledger = RealExecutionLedger(ledger.path)
+    original_verified_events = reconciliation_module._verified_ledger_events
+    reads = 0
+    writer_blocked = False
+
+    def read_then_probe_writer_lock(candidate_ledger):
+        nonlocal reads, writer_blocked
+        reads += 1
+        events = original_verified_events(candidate_ledger)
+        if reads == 2:
+            # The second verification executes inside RealExecutionLedger._mutate().
+            # Another instance targeting the same durable path must not enter even an
+            # idempotent writer operation before the routing result is constructed.
+            with pytest.raises(ExecutionLedgerBusyError):
+                writer_ledger.reserve_plan(_execution_plan(initial))
+            writer_blocked = True
+        return events
+
+    with patch.object(
+        reconciliation_module,
+        "_verified_ledger_events",
+        side_effect=read_then_probe_writer_lock,
+    ):
+        proposal = _reconcile(venues, receipt, ledger)
+
+    assert reads == 2
+    assert writer_blocked
+    assert proposal.state is RoutingState.ROUTE
+

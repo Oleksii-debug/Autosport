@@ -1835,6 +1835,28 @@ def _build_main(
 ):
     """Freeze scoped-controller orchestration roots outside caller metadata."""
 
+    def freeze_default_metadata(function):
+        positional = getattr(function, "__defaults__", None)
+        keyword = getattr(function, "__kwdefaults__", None)
+        keyword_items = tuple(keyword.items()) if keyword is not None else ()
+        return positional, keyword, keyword_items
+
+    def default_metadata_current(function, snapshot) -> bool:
+        positional, keyword, keyword_items = snapshot
+        if getattr(function, "__defaults__", None) is not positional:
+            return False
+        current_keyword = getattr(function, "__kwdefaults__", None)
+        if current_keyword is not keyword:
+            return False
+        if keyword is None:
+            return True
+        if len(current_keyword) != len(keyword_items):
+            return False
+        return all(
+            key in current_keyword and current_keyword[key] is value
+            for key, value in keyword_items
+        )
+
     api_init = api_type.__dict__.get("__init__")
     api_init_code = getattr(api_init, "__code__", None)
     active_runs_impl = api_type.__dict__.get("active_runs")
@@ -1847,6 +1869,15 @@ def _build_main(
     trusted_qualification_code = getattr(trusted_qualification_impl, "__code__", None)
     event_identity_code = getattr(event_identity_impl, "__code__", None)
 
+    api_init_defaults = freeze_default_metadata(api_init)
+    active_runs_defaults = freeze_default_metadata(active_runs_impl)
+    orphan_defaults = freeze_default_metadata(orphan_impl)
+    sweep_defaults = freeze_default_metadata(sweep_impl)
+    trigger_defaults = freeze_default_metadata(trigger_impl)
+    snapshot_identity_defaults = freeze_default_metadata(snapshot_identity_impl)
+    trusted_qualification_defaults = freeze_default_metadata(trusted_qualification_impl)
+    event_identity_defaults = freeze_default_metadata(event_identity_impl)
+
     def main(argv: list[str] | None) -> int:
         # Production dispatch roots are closure-owned from module composition time.
         # Callers cannot rebase the comparison graph through main() arguments/defaults.
@@ -1855,18 +1886,22 @@ def _build_main(
                 module_globals.get("WorkflowScopedGitHubApi") is api_type
                 and api_type.__dict__.get("__init__") is api_init
                 and getattr(api_init, "__code__", None) is api_init_code
+                and default_metadata_current(api_init, api_init_defaults)
                 and api_type.__dict__.get("active_runs") is active_runs_impl
                 and getattr(active_runs_impl, "__code__", None) is active_runs_code
+                and default_metadata_current(active_runs_impl, active_runs_defaults)
                 and (
                     api_type.__dict__.get("cancel_historical_unbound_runs")
                     is orphan_impl
                 )
                 and getattr(orphan_impl, "__code__", None) is orphan_code
+                and default_metadata_current(orphan_impl, orphan_defaults)
                 and (
                     module_globals.get("cancel_superseded_explicit_pr_runs")
                     is sweep_impl
                 )
                 and getattr(sweep_impl, "__code__", None) is sweep_code
+                and default_metadata_current(sweep_impl, sweep_defaults)
                 and (
                     module_globals.get(
                         "_cancel_triggering_run_if_stale_or_nonqualifying"
@@ -1874,6 +1909,7 @@ def _build_main(
                     is trigger_impl
                 )
                 and getattr(trigger_impl, "__code__", None) is trigger_code
+                and default_metadata_current(trigger_impl, trigger_defaults)
                 and (
                     module_globals.get("_explicit_singleton_pr_for_current_run")
                     is snapshot_identity_impl
@@ -1881,6 +1917,9 @@ def _build_main(
                 and (
                     getattr(snapshot_identity_impl, "__code__", None)
                     is snapshot_identity_code
+                )
+                and default_metadata_current(
+                    snapshot_identity_impl, snapshot_identity_defaults
                 )
                 and (
                     module_globals.get("_trusted_live_pr_qualification")
@@ -1890,11 +1929,17 @@ def _build_main(
                     getattr(trusted_qualification_impl, "__code__", None)
                     is trusted_qualification_code
                 )
+                and default_metadata_current(
+                    trusted_qualification_impl, trusted_qualification_defaults
+                )
                 and (
                     module_globals.get("_validated_event_pr_identity")
                     is event_identity_impl
                 )
                 and getattr(event_identity_impl, "__code__", None) is event_identity_code
+                and default_metadata_current(
+                    event_identity_impl, event_identity_defaults
+                )
             )
 
         def require_main_dispatch() -> None:

@@ -3089,6 +3089,52 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
         self.assertEqual(active.events, (event,))
 
+    def test_generation_zero_baseline_is_sealed_inside_append_issuance_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = {"held": False, "baseline": False, "rebuild": False}
+
+            class TracingLock:
+                def __enter__(self):
+                    self.assert_not_held = not state["held"]
+                    state["held"] = True
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    state["held"] = False
+                    return False
+
+            def traced_lock(_authority):
+                return TracingLock()
+
+            def require_locked_baseline(_store):
+                self.assertTrue(state["held"])
+                state["baseline"] = True
+
+            def require_locked_rebuild(_store, *, append_authority):
+                self.assertTrue(state["held"])
+                self.assertIsInstance(append_authority, MonotonicWorkspaceAuthority)
+                state["rebuild"] = True
+
+            with patch.object(
+                SQLiteMarketStore,
+                "_market_append_issuance_lock",
+                new=staticmethod(traced_lock),
+            ), patch.object(
+                SQLiteMarketStore,
+                "_ensure_market_append_baseline_authority",
+                new=require_locked_baseline,
+            ), patch.object(
+                SQLiteMarketStore,
+                "_rebuild_current_quotes",
+                new=require_locked_rebuild,
+            ):
+                store = SQLiteMarketStore(Path(directory) / "market.db")
+                store.close()
+
+            self.assertTrue(state["baseline"])
+            self.assertTrue(state["rebuild"])
+            self.assertFalse(state["held"])
+
 
 if __name__ == "__main__":
     unittest.main()

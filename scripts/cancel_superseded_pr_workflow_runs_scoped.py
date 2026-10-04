@@ -1244,6 +1244,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
             # orphan authority only from that invocation's complete observation set.
             if not reader_graph_current(self):
                 raise error_type("active workflow reader authority changed")
+            self._recovered_runs.clear()
+            self._zero_association_recovered_runs.clear()
             self._unbound_active_runs.clear()
             self._explicit_active_run_ids.clear()
             self._conflicted_unbound_run_ids.clear()

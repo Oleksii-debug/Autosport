@@ -986,6 +986,44 @@ def test_repeated_active_run_scan_resets_snapshot_local_orphan_state(monkeypatch
     assert api._conflicted_unbound_run_ids == set()
 
 
+def test_repeated_active_run_scan_resets_snapshot_local_recovery_authority(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    # Recovery maps authorize a stronger final-boundary path than the raw moving
+    # snapshot. They must never survive into a later enumeration generation.
+    api._recovered_runs[7018] = (303, STALE_HEAD)
+    api._zero_association_recovered_runs[7019] = (
+        STALE_HEAD,
+        "feature/stale",
+    )
+
+    def fake_request(
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ) -> object:
+        assert method == "GET"
+        assert not allowed_http_errors
+        assert "/actions/workflows/356678400/runs?" in path
+        return {"total_count": 0, "workflow_runs": []}
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    assert api.active_runs() == ()
+    assert api._recovered_runs == {}
+    assert api._zero_association_recovered_runs == {}
+    assert api._unbound_active_runs == {}
+    assert api._explicit_active_run_ids == set()
+    assert api._conflicted_unbound_run_ids == set()
+
+
 def test_orphan_recovery_active_cancel_conflict_clears_temporary_authority() -> None:
     class OrphanConflictApi:
         def __init__(self) -> None:

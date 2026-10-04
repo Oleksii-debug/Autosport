@@ -1255,32 +1255,67 @@ class SQLiteMarketStore:
             raise TypeError(
                 "live receipt authority requires an exact SQLiteMarketStore"
             )
-        materialized = tuple(events)
-        if any(type(event) is not _market_event_type for event in materialized):
-            raise TypeError("live receipt authority requires exact MarketEvent values")
-        # Snapshot canonical payloads before exposing the non-authoritative batch
-        # object. Durable reconstruction never reads that object's mutable payload slot.
-        canonical_payloads = tuple(
-            _canonical_payload_fn(event) for event in materialized
-        )
-        batch = _object_new(_batch_type)
-        _batch_init(batch, materialized, _payload=_canonical_payload_fn)
-        canonical_events = tuple(
-            _decode_batch_payload(_loads_batch_payload(payload))
-            for payload in canonical_payloads
-        )
-        with self._connection_lock:
-            if self.connection.in_transaction:
+        # Bind the exact durable store authority before touching the caller iterable.
+        # Materializing a lazy iterable may execute arbitrary caller code, so waiting
+        # until after tuple(events) would let that code redefine which workspace is
+        # treated as canonical before the first authority check.
+        connection_lock = self._connection_lock
+        connection = self.connection
+        store_path = self.path
+        with connection_lock:
+            if (
+                self._connection_lock is not connection_lock
+                or self.connection is not connection
+                or self.path is not store_path
+            ):
+                raise RuntimeError(
+                    "live receipt store authority changed before batch materialization"
+                )
+            materialized = tuple(events)
+            if (
+                self._connection_lock is not connection_lock
+                or self.connection is not connection
+                or self.path is not store_path
+            ):
+                if connection.in_transaction:
+                    connection.rollback()
+                raise RuntimeError(
+                    "live receipt batch materialization changed canonical store authority"
+                )
+            if any(type(event) is not _market_event_type for event in materialized):
+                raise TypeError("live receipt authority requires exact MarketEvent values")
+            # Snapshot canonical payloads before exposing the non-authoritative batch
+            # object. Durable reconstruction never reads that object's mutable payload slot.
+            canonical_payloads = tuple(
+                _canonical_payload_fn(event) for event in materialized
+            )
+            batch = _object_new(_batch_type)
+            _batch_init(batch, materialized, _payload=_canonical_payload_fn)
+            canonical_events = tuple(
+                _decode_batch_payload(_loads_batch_payload(payload))
+                for payload in canonical_payloads
+            )
+            if connection.in_transaction:
                 raise RuntimeError(
                     "live receipt authority requires transaction ownership"
                 )
             self._before_live_append_attempt(batch)
-            if self.connection.in_transaction:
-                self.connection.rollback()
+            if (
+                self._connection_lock is not connection_lock
+                or self.connection is not connection
+                or self.path is not store_path
+            ):
+                if connection.in_transaction:
+                    connection.rollback()
+                raise RuntimeError(
+                    "live append attempt seam changed canonical store authority"
+                )
+            if connection.in_transaction:
+                connection.rollback()
                 raise RuntimeError(
                     "live append attempt seam must not leave an active transaction"
                 )
-            self.connection.execute("BEGIN IMMEDIATE")
+            connection.execute("BEGIN IMMEDIATE")
             try:
                 preexisting: set[str] = set()
                 canonical_by_dedupe: dict[str, MarketEvent] = {}
@@ -1295,7 +1330,7 @@ class SQLiteMarketStore:
                         )
 
                 for event in canonical_by_dedupe.values():
-                    row = self.connection.execute(
+                    row = connection.execute(
                         f"SELECT {_history_columns_sql} FROM market_events WHERE dedupe_key=?",
                         (_dedupe_key(event),),
                     ).fetchone()
@@ -1310,7 +1345,7 @@ class SQLiteMarketStore:
                     expected_append_changes += 1
                     projection_key = (event.source_id, _quote_key(event))
                     if projection_key not in projection_state:
-                        row = self.connection.execute(
+                        row = connection.execute(
                             f"""SELECT {_current_columns_sql} FROM current_quotes
                                 WHERE source_id=? AND quote_key=?""",
                             projection_key,
@@ -1325,13 +1360,12 @@ class SQLiteMarketStore:
                         expected_append_changes += 1
                         projection_state[projection_key] = event
 
-                changes_before = self.connection.total_changes
-                # canonical_events was reconstructed through the import-time captured
-                # batch iterator before the replaceable retry seam ran. Persist that
-                # sealed tuple directly: passing the capability object here would make
-                # Python re-resolve its __iter__ after an untrusted callback.
+                changes_before = connection.total_changes
+                # canonical_events was reconstructed from the sealed payload tuple
+                # before the replaceable retry seam ran. Persist that exact tuple
+                # directly; the retry-only capability object is never a durable source.
                 accepted = _canonical_append(self, canonical_events)
-                if not self.connection.in_transaction:
+                if not connection.in_transaction:
                     raise RuntimeError(
                         "live append hook relinquished transaction ownership"
                     )
@@ -1340,7 +1374,7 @@ class SQLiteMarketStore:
 
                 expected: list[MarketEvent] = []
                 for dedupe_key, canonical_event in canonical_by_dedupe.items():
-                    row = self.connection.execute(
+                    row = connection.execute(
                         f"SELECT {_history_columns_sql} FROM market_events WHERE dedupe_key=?",
                         (dedupe_key,),
                     ).fetchone()
@@ -1357,7 +1391,7 @@ class SQLiteMarketStore:
                         )
                     expected.append(stored)
 
-                if self.connection.total_changes - changes_before != expected_append_changes:
+                if connection.total_changes - changes_before != expected_append_changes:
                     raise RuntimeError(
                         "live append hook changed storage outside the canonical batch"
                     )
@@ -1376,22 +1410,22 @@ class SQLiteMarketStore:
                         "live append hook returned events outside the canonical inserted set"
                     )
 
-                receipt_changes_before = self.connection.total_changes
+                receipt_changes_before = connection.total_changes
                 for event in expected:
                     _receipt_writer(self, event)
-                if not self.connection.in_transaction:
+                if not connection.in_transaction:
                     raise RuntimeError(
                         "live receipt writer relinquished transaction ownership"
                     )
                 if (
-                    self.connection.total_changes - receipt_changes_before
+                    connection.total_changes - receipt_changes_before
                     != len(expected)
                 ):
                     raise RuntimeError(
                         "live receipt writer changed authority outside the canonical batch"
                     )
                 for event in expected:
-                    receipt = self.connection.execute(
+                    receipt = connection.execute(
                         """SELECT ingest_ts,authority
                            FROM market_event_live_receipts
                            WHERE dedupe_key=?""",
@@ -1408,7 +1442,7 @@ class SQLiteMarketStore:
                 for event in expected:
                     dedupe_key = _dedupe_key(event)
                     quote_key = _quote_key(event)
-                    self.connection.execute(
+                    connection.execute(
                         """INSERT INTO trusted_live_current_quotes
                            (source_id,quote_key,sequence,dedupe_key)
                            VALUES (?,?,?,?)
@@ -1426,7 +1460,7 @@ class SQLiteMarketStore:
                 # A stale accepted history row may legitimately leave the projection
                 # unchanged; it must never move the trusted projection behind that row.
                 for event in expected:
-                    projected = self.connection.execute(
+                    projected = connection.execute(
                         """SELECT sequence,dedupe_key
                            FROM trusted_live_current_quotes
                            WHERE source_id=? AND quote_key=?""",
@@ -1441,10 +1475,10 @@ class SQLiteMarketStore:
                             "trusted live current projection did not retain canonical order"
                         )
             except Exception:
-                self.connection.rollback()
+                connection.rollback()
                 raise
             else:
-                self.connection.commit()
+                connection.commit()
                 return expected
 
     _append_live_batch_accepted = _bind_live_batch_writer(

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .domain import MarketEvent
 from .integrity import atomic_write_json, durable_path_lock
 from .monotonic_workspace_authority import (
     AuthorityPhase,
@@ -18,6 +19,7 @@ from .monotonic_workspace_authority import (
 from .replay import (
     market_event_payload_multiset_sha256,
     market_event_payload_sequence_sha256,
+    market_event_payload_sha256,
 )
 from .run_registry import RunRegistry
 from .run_transaction import RunTransaction, RunTransactionError
@@ -54,6 +56,16 @@ _REPLAY_SEQUENCE_DIGEST = market_event_payload_sequence_sha256
 _REPLAY_SEQUENCE_DIGEST_CODE = getattr(_REPLAY_SEQUENCE_DIGEST, "__code__", None)
 _REPLAY_MULTISET_DIGEST = market_event_payload_multiset_sha256
 _REPLAY_MULTISET_DIGEST_CODE = getattr(_REPLAY_MULTISET_DIGEST, "__code__", None)
+_REPLAY_PAYLOAD_DIGEST = market_event_payload_sha256
+_REPLAY_PAYLOAD_DIGEST_CODE = getattr(_REPLAY_PAYLOAD_DIGEST, "__code__", None)
+_MARKET_EVENT_TYPE = MarketEvent
+_MARKET_EVENT_FROM_DICT_DESCRIPTOR = MarketEvent.__dict__.get("from_dict")
+_MARKET_EVENT_FROM_DICT = getattr(
+    _MARKET_EVENT_FROM_DICT_DESCRIPTOR,
+    "__func__",
+    None,
+)
+_MARKET_EVENT_TO_DICT = MarketEvent.__dict__.get("to_dict")
 
 
 class ProductIidDrawPlanError(RuntimeError):
@@ -243,6 +255,19 @@ def _require_replay_payload_digest_dispatch() -> None:
         or market_event_payload_multiset_sha256 is not _REPLAY_MULTISET_DIGEST
         or getattr(_REPLAY_MULTISET_DIGEST, "__code__", None)
         is not _REPLAY_MULTISET_DIGEST_CODE
+        or market_event_payload_sha256 is not _REPLAY_PAYLOAD_DIGEST
+        or getattr(_REPLAY_PAYLOAD_DIGEST, "__code__", None)
+        is not _REPLAY_PAYLOAD_DIGEST_CODE
+        or MarketEvent is not _MARKET_EVENT_TYPE
+        or MarketEvent.__dict__.get("from_dict")
+        is not _MARKET_EVENT_FROM_DICT_DESCRIPTOR
+        or getattr(
+            _MARKET_EVENT_FROM_DICT_DESCRIPTOR,
+            "__func__",
+            None,
+        )
+        is not _MARKET_EVENT_FROM_DICT
+        or MarketEvent.__dict__.get("to_dict") is not _MARKET_EVENT_TO_DICT
     ):
         raise ProductIidDrawPlanError(
             "replay payload digest authority dispatch changed"
@@ -305,6 +330,91 @@ def expected_replay_consumed_payload_multiset_sha256(
         ) from exc
     _require_replay_payload_digest_dispatch()
     return _sha(result, "expected replay consumed payload multiset sha256")
+
+
+def materialize_product_iid_member_market_events(
+    plan: ProductIidExpectedDrawPlan,
+    *,
+    member_index: int,
+    market_events: tuple[MarketEvent, ...] | list[MarketEvent],
+) -> tuple[MarketEvent, ...]:
+    """Resolve one frozen member draw to exact canonical MarketEvent values.
+
+    The caller supplies a product-loaded dataset snapshot, not sampling truth. Every
+    frame payload must resolve by its frozen SHA-256 to one exact canonical event.
+    Extra dataset events are allowed because the frozen sampling frame may be a
+    deliberate subset. Ambiguous duplicate payloads, missing frame payloads, type
+    substitution, and digest-dispatch rebinding fail closed.
+    """
+
+    _require_dispatch()
+    if type(plan) is not _PLAN_TYPE:
+        raise TypeError("plan must be an exact ProductIidExpectedDrawPlan")
+    if type(member_index) is not int or member_index < 0:
+        raise ProductIidDrawPlanError(
+            "member_index must be a non-negative exact integer"
+        )
+    if member_index >= len(plan.member_draws):
+        raise ProductIidDrawPlanError(
+            "member_index is outside the expected draw plan"
+        )
+    if type(market_events) not in (tuple, list):
+        raise TypeError("market_events must be an exact tuple or list")
+
+    by_payload: dict[str, MarketEvent] = {}
+    for event in market_events:
+        if type(event) is not _MARKET_EVENT_TYPE:
+            raise ProductIidDrawPlanError(
+                "sampling corpus contains a non-canonical MarketEvent type"
+            )
+        try:
+            if _MARKET_EVENT_FROM_DICT is None or _MARKET_EVENT_TO_DICT is None:
+                raise ProductIidDrawPlanError(
+                    "canonical MarketEvent serializer authority is unavailable"
+                )
+            snapshot = _MARKET_EVENT_FROM_DICT(
+                _MARKET_EVENT_TYPE,
+                _MARKET_EVENT_TO_DICT(event),
+            )
+            digest = _REPLAY_PAYLOAD_DIGEST(snapshot)
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise ProductIidDrawPlanError(
+                "sampling corpus contains a non-canonical MarketEvent"
+            ) from exc
+        _require_dispatch()
+        if digest in by_payload:
+            raise ProductIidDrawPlanError(
+                "sampling corpus payload identity is ambiguous"
+            )
+        by_payload[digest] = snapshot
+
+    frame_payloads = tuple(unit.payload_sha256 for unit in plan.frame_units)
+    if any(payload not in by_payload for payload in frame_payloads):
+        raise ProductIidDrawPlanError(
+            "sampling frame payload cannot be resolved from the product dataset"
+        )
+
+    draw = plan.member_draws[member_index]
+    materialized = tuple(
+        _MARKET_EVENT_FROM_DICT(
+            _MARKET_EVENT_TYPE,
+            _MARKET_EVENT_TO_DICT(by_payload[payload]),
+        )
+        for payload in draw.draw_payload_sha256
+    )
+    actual_payloads = tuple(
+        _REPLAY_PAYLOAD_DIGEST(event) for event in materialized
+    )
+    _require_dispatch()
+    if actual_payloads != draw.draw_payload_sha256:
+        raise ProductIidDrawPlanError(
+            "materialized IID member events differ from the frozen draw transcript"
+        )
+    if _REPLAY_SEQUENCE_DIGEST(actual_payloads) != expected_replay_input_payload_sequence_sha256(draw):
+        raise ProductIidDrawPlanError(
+            "materialized IID member event sequence identity is inconsistent"
+        )
+    return materialized
 
 
 def _parse_frame(
@@ -856,6 +966,7 @@ __all__ = [
     "SamplingFrameUnit",
     "expected_replay_consumed_payload_multiset_sha256",
     "expected_replay_input_payload_sequence_sha256",
+    "materialize_product_iid_member_market_events",
     "resolve_product_iid_expected_draw_plan",
     "verify_product_iid_expected_draw_plan",
 ]

@@ -1576,6 +1576,44 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(records[-1].decision_id, "diagnostic-unrelated-record")
             loop.close()
 
+    def test_midprocess_torn_ledger_tail_blocks_next_material_decision_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace,
+                [
+                    ProviderUnavailableError("provider unavailable"),
+                    ProviderUnavailableError("provider unavailable"),
+                ],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(
+                loop.run_cycle().status,
+                LiveCycleStatus.PROVIDER_GAP,
+            )
+
+            ledger_path = workspace / "decisions.jsonl"
+            with ledger_path.open("ab") as handle:
+                handle.write(b'{"torn":')
+            before = ledger_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "unterminated final record",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(ledger_path.read_bytes(), before)
+            self.assertEqual(observer.calls, 2)
+            loop.close()
+
     def test_catalog_provider_gap_preserves_checkpoint_and_recovers_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

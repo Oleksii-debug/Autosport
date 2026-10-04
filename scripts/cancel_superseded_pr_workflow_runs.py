@@ -1156,6 +1156,11 @@ def cancel_superseded(
     _production_api_type=GitHubApi,
     _production_active_runs=GitHubApi.active_runs,
     _production_active_runs_code=GitHubApi.active_runs.__code__,
+    _production_active_runs_defaults=GitHubApi.active_runs.__defaults__,
+    _production_active_runs_kwdefaults=GitHubApi.active_runs.__kwdefaults__,
+    _production_active_runs_kwdefault_items=tuple(
+        GitHubApi.active_runs.__kwdefaults__.items()
+    ),
     _production_cancel=GitHubApi.cancel,
     _production_cancel_code=GitHubApi.cancel.__code__,
 ) -> CancellationResult:
@@ -1197,6 +1202,18 @@ def cancel_superseded(
                 is _production_active_runs
                 and getattr(_production_active_runs, "__code__", None)
                 is _production_active_runs_code
+                and getattr(_production_active_runs, "__defaults__", None)
+                is _production_active_runs_defaults
+                and getattr(_production_active_runs, "__kwdefaults__", None)
+                is _production_active_runs_kwdefaults
+                and _production_active_runs_kwdefaults is not None
+                and len(_production_active_runs_kwdefaults)
+                == len(_production_active_runs_kwdefault_items)
+                and all(
+                    key in _production_active_runs_kwdefaults
+                    and _production_active_runs_kwdefaults[key] is value
+                    for key, value in _production_active_runs_kwdefault_items
+                )
                 and _production_api_type.__dict__.get("cancel")
                 is _production_cancel
                 and getattr(_production_cancel, "__code__", None)

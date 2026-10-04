@@ -517,6 +517,23 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             observation_evidence_ids=observation_evidence_ids,
             suspended_action_ids=suspended_action_ids,
         )
+        if observation_evidence_ids:
+            durable_events = self.events()
+            for evidence_id in observation_evidence_ids.values():
+                matches = [
+                    event
+                    for event in durable_events
+                    if (
+                        event["event_type"]
+                        == "OBSERVATION_EVIDENCE_REGISTERED"
+                        and event["payload"]["evidence_id"]
+                        == evidence_id
+                    )
+                ]
+                if len(matches) != 1:
+                    raise PaperExecutionStateError(
+                        "reserved observation evidence is not durably registered"
+                    )
         self._append_event(
             event_type="RUN_RESERVED",
             run_id=run_id,
@@ -856,7 +873,12 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         suspended_action_ids: frozenset[str] = frozenset(),
         evidence_registry: PaperExecutionEvidenceRegistry | None = None,
     ) -> PaperExecutionRun | None:
-        events = self.events(run_id)
+        all_events = self.events()
+        events = tuple(
+            event
+            for event in all_events
+            if event["run_id"] == run_id
+        )
         if not events:
             return None
         reserve = [event for event in events if event["event_type"] == "RUN_RESERVED"]
@@ -879,6 +901,25 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             raise PaperExecutionStateError(
                 "run identity conflicts with durable reservation"
             )
+        for evidence_id in observation_evidence_ids.values():
+            evidence_events = [
+                event
+                for event in all_events
+                if (
+                    event["event_type"]
+                    == "OBSERVATION_EVIDENCE_REGISTERED"
+                    and event["payload"]["evidence_id"] == evidence_id
+                )
+            ]
+            if (
+                len(evidence_events) != 1
+                or evidence_events[0]["sequence"]
+                >= reservation_event["sequence"]
+            ):
+                raise PaperExecutionIntegrityError(
+                    "reserved observation evidence was not durable before "
+                    "RUN_RESERVED"
+                )
 
         scopes = [
             event

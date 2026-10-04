@@ -155,3 +155,42 @@ def test_update_rejects_transition_subclass_before_identity_dispatch():
     with pytest.raises(TypeError, match="exact Transition"):
         policy.update(action=action, reward=reward, transition=hostile)
 
+def test_update_evidence_rejects_rebound_action_chain_with_rewritten_top_level_id():
+    policy, action, reward, transition = _resolved_step()
+    _successor, evidence = policy.update(
+        action=action,
+        reward=reward,
+        transition=transition,
+    )
+    rebound_action = replace(
+        action,
+        decided_at="2026-09-17T13:00:03Z",
+    )
+
+    with pytest.raises(LearningEnvironmentError, match="bind the exact action"):
+        replace(
+            evidence,
+            action=rebound_action,
+            action_id=rebound_action.action_id,
+        )
+
+
+def test_update_evidence_rejects_rebound_reward_chain_with_rewritten_top_level_id():
+    policy, action, reward, transition = _resolved_step()
+    _successor, evidence = policy.update(
+        action=action,
+        reward=reward,
+        transition=transition,
+    )
+    rebound_reward = replace(
+        reward,
+        reward=Decimal("0.30"),
+    )
+
+    with pytest.raises(LearningEnvironmentError, match="bind the exact reward"):
+        replace(
+            evidence,
+            reward=rebound_reward,
+            reward_id=rebound_reward.reward_id,
+        )
+

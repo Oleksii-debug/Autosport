@@ -413,6 +413,74 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             ("selection-a", "selection-b", "unrelated"),
         )
 
+    def test_history_transition_deadline_ignores_future_stale_lower_sequence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                mirror = MarketMirror()
+                dependencies = FocusedMirrorDependencyIndex(mirror)
+                dependencies.register(
+                    "decision",
+                    source_ids="provider-a",
+                    selection_ids="selection-1",
+                )
+                current = MarketEvent(
+                    event_id="event-1",
+                    market_id="market-1",
+                    selection_id="selection-1",
+                    decimal_odds=Decimal("2.30"),
+                    observed_ts="2026-09-16T19:00:01+00:00",
+                    source_id="provider-a",
+                    sequence=3,
+                    status="open",
+                    source_ts="2026-09-16T19:00:01+00:00",
+                    ingest_ts="2026-09-16T19:00:01+00:00",
+                )
+                stale_future = MarketEvent(
+                    event_id="event-1",
+                    market_id="market-1",
+                    selection_id="selection-1",
+                    decimal_odds=Decimal("2.20"),
+                    observed_ts="2026-09-16T19:00:02+00:00",
+                    source_id="provider-a",
+                    sequence=2,
+                    status="open",
+                    source_ts="2026-09-16T19:00:02+00:00",
+                    ingest_ts="2026-09-16T19:00:04+00:00",
+                )
+                advancing_future = MarketEvent(
+                    event_id="event-1",
+                    market_id="market-1",
+                    selection_id="selection-1",
+                    decimal_odds=Decimal("2.40"),
+                    observed_ts="2026-09-16T19:00:03+00:00",
+                    source_id="provider-a",
+                    sequence=4,
+                    status="open",
+                    source_ts="2026-09-16T19:00:03+00:00",
+                    ingest_ts="2026-09-16T19:00:06+00:00",
+                )
+                for event in (current, stale_future, advancing_future):
+                    self.assertTrue(store.append(event))
+
+                snapshot, deadline = dependencies.current_history_decision_state(
+                    "decision",
+                    store,
+                    as_of=datetime(
+                        2026, 9, 16, 19, 0, 3, tzinfo=timezone.utc
+                    ),
+                    max_age=timedelta(minutes=1),
+                )
+
+                self.assertEqual(len(snapshot.events), 1)
+                self.assertEqual(snapshot.events[0].sequence, 3)
+                self.assertEqual(
+                    deadline,
+                    datetime(2026, 9, 16, 19, 0, 6, tzinfo=timezone.utc),
+                )
+            finally:
+                store.close()
+
     def test_history_transition_deadline_is_scoped_to_registered_dependency(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

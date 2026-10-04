@@ -288,17 +288,34 @@ class FocusedMirrorDependencyIndex:
             max_age=age_limit,
             **self._selectors(dependency),
         )
-        future_boundaries: list[datetime] = []
+        sequence_fences: dict[MirrorQuoteKey, int] = {}
+        future_candidates: list[tuple[datetime, MirrorQuoteKey, int]] = []
         for event, append_generation in events_with_generation:
-            if append_generation <= 0 or not dependency.matches(event):
+            if not dependency.matches(event):
                 continue
+            key = (event.source_id, event.quote_key)
             causal_times = MarketMirror._event_causal_times(event)
-            if causal_times is None:
+            if append_generation == 0:
+                sequence_fences[key] = max(
+                    sequence_fences.get(key, event.sequence),
+                    event.sequence,
+                )
+                continue
+            if append_generation < 0 or causal_times is None:
                 continue
             available_at = max(causal_times)
-            if boundary < available_at:
-                future_boundaries.append(available_at)
-        return snapshot, min(future_boundaries) if future_boundaries else None
+            if available_at <= boundary:
+                sequence_fences[key] = max(
+                    sequence_fences.get(key, event.sequence),
+                    event.sequence,
+                )
+            else:
+                future_candidates.append((available_at, key, event.sequence))
+
+        for available_at, key, sequence in sorted(future_candidates):
+            if sequence > sequence_fences.get(key, -1):
+                return snapshot, available_at
+        return snapshot, None
 
     def current_history_decision_state(
         self,

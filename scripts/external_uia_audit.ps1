@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Output,
     [string]$WorkingDirectory = '',
+    [string]$Workspace = '',
     [int]$TimeoutSeconds = 20
 )
 
@@ -355,6 +356,9 @@ $report = [ordered]@{
     duplicate_launch_dialog_title = $null
     normal_close_status = 'NOT_RUN'
     normal_close_exit_code = $null
+    runtime_witness_status = 'NOT_REQUESTED'
+    runtime_witness_path = $null
+    runtime_browser_version = $null
     controls = @()
     failures = @()
     real_money_execution = $false
@@ -438,6 +442,45 @@ try {
     }
     if ($null -eq $semanticReady -or $null -eq $uiaRoot) {
         throw "Timed out waiting for WebView2 semantic UIA readiness (automation_id=330) across packaged process family"
+    }
+
+    # Bind the externally observed packaged UIA session to the product-owned
+    # witness emitted by the actual native CoreWebView2 Environment before bridge
+    # injection. A stale witness cannot survive canonical startup because the shell
+    # invalidates it before creating the window and fails closed if republishing fails.
+    if (-not [string]::IsNullOrWhiteSpace($Workspace)) {
+        $workspacePath = [System.IO.Path]::GetFullPath($Workspace)
+        if (-not [System.IO.Path]::IsPathRooted($workspacePath)) {
+            throw "External UIA workspace witness root is not absolute"
+        }
+        $runtimeWitnessPath = Join-Path $workspacePath 'webview2-runtime-witness.json'
+        $report.runtime_witness_path = $runtimeWitnessPath
+        if (-not (Test-Path -LiteralPath $runtimeWitnessPath -PathType Leaf)) {
+            throw "Packaged WebView2 session did not publish the actual runtime witness"
+        }
+        try {
+            $runtimeWitness = Get-Content -LiteralPath $runtimeWitnessPath -Raw | ConvertFrom-Json
+        } catch {
+            throw "Packaged WebView2 runtime witness is not valid JSON"
+        }
+        $browserVersion = [string]$runtimeWitness.browser_version_string
+        if (
+            [int]$runtimeWitness.schema_version -ne 1 -or
+            [string]$runtimeWitness.renderer -ne 'edgechromium' -or
+            [string]$runtimeWitness.observation_source -ne 'native_core_webview2_environment' -or
+            [string]::IsNullOrWhiteSpace($browserVersion) -or
+            $browserVersion -ne $browserVersion.Trim() -or
+            $browserVersion.Length -gt 256 -or
+            $browserVersion -match '[\x00-\x1F\x7F]' -or
+            $runtimeWitness.real_money_execution -ne $false -or
+            $runtimeWitness.human_tested -ne $false -or
+            $runtimeWitness.nvda_verified -ne $false -or
+            $runtimeWitness.whole_product_complete -ne $false
+        ) {
+            throw "Packaged WebView2 runtime witness violated the bounded runtime/truth contract"
+        }
+        $report.runtime_browser_version = $browserVersion
+        $report.runtime_witness_status = 'PASS'
     }
 
     # While the real packaged semantic shell is alive, a second normal launch must

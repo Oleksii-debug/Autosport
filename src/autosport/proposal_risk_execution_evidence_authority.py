@@ -4,22 +4,33 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal, localcontext
+from decimal import Decimal
 
 from .proposal_risk_evaluation_precommit_authority import (
     ProductProposalRiskEvaluationPrecommit,
 )
+from .risk_of_ruin_evaluator import (
+    RiskOfRuinEvaluationError,
+    RiskOfRuinIssuanceError,
+    clopper_pearson_upper_bound,
+    evaluator_source_sha256,
+)
 
 
-_SCHEMA = "autosport.proposal-risk-execution-evidence.v1"
-_BOUND_METHOD = "HOEFFDING_ONE_SIDED_BERNOULLI_V1"
+_SCHEMA = "autosport.proposal-risk-execution-evidence.v2"
+_BOUND_METHOD = "CLOPPER_PEARSON_EXACT_ONE_SIDED_BERNOULLI_V1"
 _EXECUTION_SCOPE = "EXACT_PROPOSAL_TARGET_FIXED_STAKE_VECTOR_COUNTERFACTUAL_V1"
 _HEX = frozenset("0123456789abcdef")
 _MAX_DECIMAL_TEXT = 256
 
+_CP = clopper_pearson_upper_bound
+_CP_CODE = getattr(_CP, "__code__", None)
+_SOURCE_DIGEST = evaluator_source_sha256
+_SOURCE_DIGEST_CODE = getattr(_SOURCE_DIGEST, "__code__", None)
+
 
 class ProductProposalRiskExecutionEvidenceError(RuntimeError):
-    """Counterfactual proposal execution evidence is incomplete or inconsistent."""
+    """Proposal counterfactual assertions cannot be converted into unsafe authority."""
 
 
 def _text(value: object, name: str, *, max_length: int = 512) -> str:
@@ -129,9 +140,27 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value)).hexdigest()
 
 
+def _require_estimator_dispatch() -> None:
+    if (
+        clopper_pearson_upper_bound is not _CP
+        or getattr(_CP, "__code__", None) is not _CP_CODE
+        or evaluator_source_sha256 is not _SOURCE_DIGEST
+        or getattr(_SOURCE_DIGEST, "__code__", None) is not _SOURCE_DIGEST_CODE
+    ):
+        raise ProductProposalRiskExecutionEvidenceError(
+            "canonical risk estimator dispatch changed"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class CounterfactualMemberExecutionEvidence:
-    """One source-backed counterfactual execution of the exact proposal target."""
+    """Caller-supplied exact-target execution assertion.
+
+    This type validates shape, arithmetic, chronology inputs and hashes. Construction
+    does not prove that the product executed the target or produced the source bytes.
+    Product-owned provenance must be established by a separate authority before this
+    assertion can become positive proposal-execution evidence.
+    """
 
     member_id: str
     binding_sha256: str
@@ -177,7 +206,9 @@ class CounterfactualMemberExecutionEvidence:
                 "starting_equity must be positive"
             )
         if costs < 0:
-            raise ProductProposalRiskExecutionEvidenceError("costs must be non-negative")
+            raise ProductProposalRiskExecutionEvidenceError(
+                "costs must be non-negative"
+            )
         if net != gross - costs:
             raise ProductProposalRiskExecutionEvidenceError(
                 "net_pnl must equal gross_pnl minus costs"
@@ -210,12 +241,13 @@ del _make_identity_capability
 
 @dataclass(frozen=True, slots=True, init=False)
 class ProductProposalRiskExecutionEvidence:
-    """Product-qualified fixed-N counterfactual evidence for one exact proposal.
+    """Fail-closed statistical estimate over exact-target caller assertions.
 
-    This object proves only target-specific counterfactual execution evidence and a
-    statistical upper bound for that exact target. It deliberately cannot authorize
-    a ticket, broker/exchange side effect, real-money action, risk approval, or state
-    mutation.
+    The object proves that the product validated a complete fixed-N assertion cohort
+    and computed the canonical Clopper-Pearson bound over the declared minimum-equity
+    values. It deliberately does not prove product-owned counterfactual execution,
+    proposal risk qualification, a ticket, broker/exchange action, real-money
+    authority, risk approval, or state mutation.
     """
 
     workspace_instance_id: str
@@ -240,6 +272,7 @@ class ProductProposalRiskExecutionEvidence:
     confidence_level: Decimal
     ruin_threshold: Decimal
     bound_method: str
+    evaluator_source_sha256: str
     ruin_probability_upper_bound: Decimal
     evidence_sha256: str
     _execution_evidence_capability: object = field(
@@ -248,7 +281,9 @@ class ProductProposalRiskExecutionEvidence:
         compare=False,
     )
 
-    def __new__(cls, *args: object, **kwargs: object) -> "ProductProposalRiskExecutionEvidence":
+    def __new__(
+        cls, *args: object, **kwargs: object
+    ) -> "ProductProposalRiskExecutionEvidence":
         raise TypeError(
             "ProductProposalRiskExecutionEvidence is product-derived; use "
             "derive_product_proposal_risk_execution_evidence"
@@ -263,18 +298,24 @@ class ProductProposalRiskExecutionEvidence:
         return _proven(self)
 
     @property
-    def proposal_target_counterfactual_execution_proven(
-        self, _proven=_IDENTITY_PROVEN
-    ) -> bool:
+    def statistical_bound_computed(self, _proven=_IDENTITY_PROVEN) -> bool:
         return _proven(self)
 
     @property
-    def risk_upper_bound_for_target(self, _proven=_IDENTITY_PROVEN) -> bool:
-        return _proven(self)
+    def product_execution_provenance_proven(self) -> bool:
+        return False
 
     @property
-    def proposal_target_risk_qualified(self, _proven=_IDENTITY_PROVEN) -> bool:
-        return _proven(self) and self.ruin_probability_upper_bound <= self.ruin_threshold
+    def proposal_target_counterfactual_execution_proven(self) -> bool:
+        return False
+
+    @property
+    def risk_upper_bound_for_target(self) -> bool:
+        return False
+
+    @property
+    def proposal_target_risk_qualified(self) -> bool:
+        return False
 
     @property
     def grants_risk_approval_authority(self) -> bool:
@@ -320,33 +361,10 @@ _RESULT_FIELDS = (
     "confidence_level",
     "ruin_threshold",
     "bound_method",
+    "evaluator_source_sha256",
     "ruin_probability_upper_bound",
     "evidence_sha256",
 )
-
-
-def _hoeffding_upper_bound(*, ruin_count: int, sample_size: int, confidence: Decimal) -> Decimal:
-    if type(ruin_count) is not int or type(sample_size) is not int:
-        raise ProductProposalRiskExecutionEvidenceError(
-            "ruin count and sample size must be exact integers"
-        )
-    if sample_size <= 0 or ruin_count < 0 or ruin_count > sample_size:
-        raise ProductProposalRiskExecutionEvidenceError("invalid fixed-N ruin counts")
-    confidence = _decimal(confidence, "confidence_level")
-    if confidence <= 0 or confidence >= 1:
-        raise ProductProposalRiskExecutionEvidenceError(
-            "confidence_level must be strictly between zero and one"
-        )
-    with localcontext() as context:
-        context.prec = 50
-        n = Decimal(sample_size)
-        empirical = Decimal(ruin_count) / n
-        alpha = Decimal(1) - confidence
-        radius = ((-alpha.ln()) / (Decimal(2) * n)).sqrt()
-        upper = empirical + radius
-        if upper > 1:
-            upper = Decimal(1)
-        return +upper
 
 
 def _evidence_payload(values: dict[str, object]) -> dict[str, object]:
@@ -389,13 +407,18 @@ def _evidence_payload(values: dict[str, object]) -> dict[str, object]:
         "ruin_observations": list(values["ruin_observations"]),
         "ruin_count": values["ruin_count"],
         "sample_size": values["sample_size"],
-        "confidence_level": _decimal_text(values["confidence_level"], "confidence_level"),
+        "confidence_level": _decimal_text(
+            values["confidence_level"], "confidence_level"
+        ),
         "ruin_threshold": _decimal_text(values["ruin_threshold"], "ruin_threshold"),
         "bound_method": values["bound_method"],
+        "evaluator_source_sha256": values["evaluator_source_sha256"],
         "ruin_probability_upper_bound": _decimal_text(
             values["ruin_probability_upper_bound"],
             "ruin_probability_upper_bound",
         ),
+        "product_execution_provenance_proven": False,
+        "proposal_target_risk_qualified": False,
     }
 
 
@@ -413,7 +436,7 @@ def derive_product_proposal_risk_execution_evidence(
     *,
     evaluated_at: str,
 ) -> ProductProposalRiskExecutionEvidence:
-    """Validate complete target-specific fixed-N evidence and derive its risk bound."""
+    """Validate assertions and compute a fail-closed canonical fixed-N ruin bound."""
 
     if type(precommit) is not ProductProposalRiskEvaluationPrecommit:
         raise ProductProposalRiskExecutionEvidenceError(
@@ -470,7 +493,6 @@ def derive_product_proposal_risk_execution_evidence(
     gross_pnls: list[Decimal] = []
     costs: list[Decimal] = []
     net_pnls: list[Decimal] = []
-    ruin_observations: list[bool] = []
     execution_engine_sha256: str | None = None
 
     for index, row in enumerate(rows):
@@ -518,7 +540,6 @@ def derive_product_proposal_risk_execution_evidence(
         gross_pnls.append(row.gross_pnl)
         costs.append(row.costs)
         net_pnls.append(row.net_pnl)
-        ruin_observations.append(row.minimum_equity <= 0)
 
     if len(set(source_shas)) != len(source_shas):
         raise ProductProposalRiskExecutionEvidenceError(
@@ -531,17 +552,34 @@ def derive_product_proposal_risk_execution_evidence(
 
     confidence = _decimal(precommit.confidence_level, "confidence_level")
     threshold = _decimal(precommit.ruin_threshold, "ruin_threshold")
-    if threshold < 0 or threshold > 1:
-        raise ProductProposalRiskExecutionEvidenceError(
-            "ruin_threshold must be between zero and one"
-        )
+    ruin_observations = tuple(
+        minimum_equity <= threshold for minimum_equity in minimum_equities
+    )
     ruin_count = sum(1 for value in ruin_observations if value)
     sample_size = len(rows)
-    upper = _hoeffding_upper_bound(
-        ruin_count=ruin_count,
-        sample_size=sample_size,
-        confidence=confidence,
-    )
+
+    _require_estimator_dispatch()
+    try:
+        upper = _CP(
+            ruin_count=ruin_count,
+            independent_units=sample_size,
+            confidence_level=confidence,
+        )
+        source_digest = _sha(
+            _SOURCE_DIGEST(),
+            "evaluator_source_sha256",
+        )
+    except (
+        RiskOfRuinEvaluationError,
+        RiskOfRuinIssuanceError,
+        OSError,
+        ArithmeticError,
+        ValueError,
+    ) as exc:
+        raise ProductProposalRiskExecutionEvidenceError(
+            "canonical risk estimator could not derive proposal assertion bound"
+        ) from exc
+    _require_estimator_dispatch()
 
     values: dict[str, object] = {
         "workspace_instance_id": precommit.workspace_instance_id,
@@ -560,12 +598,13 @@ def derive_product_proposal_risk_execution_evidence(
         "member_gross_pnls": tuple(gross_pnls),
         "member_costs": tuple(costs),
         "member_net_pnls": tuple(net_pnls),
-        "ruin_observations": tuple(ruin_observations),
+        "ruin_observations": ruin_observations,
         "ruin_count": ruin_count,
         "sample_size": sample_size,
         "confidence_level": confidence,
         "ruin_threshold": threshold,
         "bound_method": _BOUND_METHOD,
+        "evaluator_source_sha256": source_digest,
         "ruin_probability_upper_bound": upper,
         "evidence_sha256": "",
     }

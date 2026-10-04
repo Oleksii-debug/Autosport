@@ -183,7 +183,7 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     RuntimeError,
-                    "changed market history outside the canonical batch",
+                    "changed storage outside the canonical batch",
                 ):
                     store._append_live_batch_accepted([event])
 
@@ -263,6 +263,25 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
 
             self.assertEqual(store.events(), [])
             self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
+    def test_live_transaction_write_accounting_handles_descending_same_quote_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            newer = self._direct_event(sequence=2, odds="2.20")
+            older = self._direct_event(sequence=1, odds="2.00")
+
+            accepted = store._append_live_batch_accepted([newer, older])
+
+            self.assertEqual(accepted, [newer, older])
+            self.assertEqual(store.trusted_live_events(), [older, newer])
+            current = store.trusted_live_current_by_source()
+            self.assertEqual(
+                current[(newer.source_id, newer.quote_key)],
+                newer,
+            )
+            self.assertFalse(store.connection.in_transaction)
             store.close()
 
     def test_live_receipt_authority_does_not_leak_into_reentrant_generic_batch(self) -> None:

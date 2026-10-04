@@ -1420,7 +1420,6 @@ def resolve_product_proposal_risk_scenario_population(
 
 
 del _IDENTITY_PROVEN
-del _IDENTITY_PROVEN
 del _BIND_IDENTITY
 
 

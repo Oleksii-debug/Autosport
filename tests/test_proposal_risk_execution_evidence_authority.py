@@ -994,5 +994,4 @@ class ProductProposalRiskScenarioPopulationTests(unittest.TestCase):
             scenario_population_authority._LEDGER_APPEND = original
 
 if __name__ == "__main__":
-if __name__ == "__main__":
     unittest.main()

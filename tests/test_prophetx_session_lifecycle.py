@@ -646,6 +646,9 @@ def test_active_state_rejects_expiry_at_or_before_transition(tmp_path):
     _active(lifecycle)
     payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
     payload["access_expires_at"] = payload["last_transition_at"]
+    payload["slot_hold_started_at"] = (
+        NOW - CONSERVATIVE_SESSION_SLOT_HOLD
+    ).isoformat()
     payload["slot_hold_until"] = payload["last_transition_at"]
     lifecycle.state_path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -664,6 +667,9 @@ def test_active_state_rejects_expiry_at_or_before_transition(tmp_path):
             {
                 "attempt_id": "a" * 64,
                 "attempt_started_at": NOW,
+                "slot_hold_started_at": (
+                    NOW - CONSERVATIVE_SESSION_SLOT_HOLD + timedelta(seconds=1)
+                ),
                 "slot_hold_until": NOW + timedelta(seconds=1),
             },
             "login_in_flight slot hold is below the conservative floor",
@@ -673,6 +679,9 @@ def test_active_state_rejects_expiry_at_or_before_transition(tmp_path):
             {
                 "session_lineage_id": "b" * 64,
                 "access_expires_at": NOW + timedelta(seconds=1),
+                "slot_hold_started_at": (
+                    NOW - CONSERVATIVE_SESSION_SLOT_HOLD + timedelta(seconds=1)
+                ),
                 "slot_hold_until": NOW + timedelta(seconds=1),
             },
             "active slot hold is below the conservative floor",
@@ -680,6 +689,9 @@ def test_active_state_rejects_expiry_at_or_before_transition(tmp_path):
         (
             ProphetXSessionState.SESSION_POOL_EXHAUSTED,
             {
+                "slot_hold_started_at": (
+                    NOW - CONSERVATIVE_SESSION_SLOT_HOLD + timedelta(seconds=1)
+                ),
                 "slot_hold_until": NOW + timedelta(seconds=1),
                 "last_failure_class": (
                     ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED
@@ -754,6 +766,9 @@ def test_restart_rejects_shortened_inflight_hold_before_new_login(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     lifecycle.begin_login(now=NOW, access_token_available=False)
     payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
+    payload["slot_hold_started_at"] = (
+        NOW - CONSERVATIVE_SESSION_SLOT_HOLD + timedelta(seconds=1)
+    ).isoformat()
     payload["slot_hold_until"] = (NOW + timedelta(seconds=1)).isoformat()
     lifecycle.state_path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -776,6 +791,7 @@ def test_provider_slot_wait_requires_explicit_hold_horizon(tmp_path):
         failure=ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED,
     )
     payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
+    payload["slot_hold_started_at"] = None
     payload["slot_hold_until"] = None
     lifecycle.state_path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -1451,6 +1467,7 @@ def test_persisted_renewal_state_cannot_precede_lead_window(state):
         "last_transition_at": NOW,
         "session_lineage_id": sha256(b"session").hexdigest(),
         "access_expires_at": access_expires_at,
+        "slot_hold_started_at": NOW,
         "slot_hold_until": NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
     }
     if state is ProphetXSessionState.RENEWING:
@@ -1482,6 +1499,7 @@ def test_persisted_renewal_state_accepts_time_inside_lead_window(state):
         "last_transition_at": due_at,
         "session_lineage_id": sha256(b"session").hexdigest(),
         "access_expires_at": access_expires_at,
+        "slot_hold_started_at": NOW,
         "slot_hold_until": NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
     }
     if state is ProphetXSessionState.RENEWING:
@@ -1874,6 +1892,7 @@ def test_login_failure_state_rejects_contradictory_failure_class(
         "last_failure_class": wrong_failure,
     }
     if state is ProphetXSessionState.SESSION_POOL_EXHAUSTED:
+        kwargs["slot_hold_started_at"] = NOW
         kwargs["slot_hold_until"] = NOW + CONSERVATIVE_SESSION_SLOT_HOLD
     else:
         kwargs["retry_not_before"] = NOW + timedelta(seconds=5)
@@ -1917,6 +1936,7 @@ def test_login_failure_state_rejects_renewal_failure_evidence(state, failure):
         "last_renewal_failure_class": ProphetXRenewalFailureClass.RETRYABLE,
     }
     if state is ProphetXSessionState.SESSION_POOL_EXHAUSTED:
+        kwargs["slot_hold_started_at"] = NOW
         kwargs["slot_hold_until"] = NOW + CONSERVATIVE_SESSION_SLOT_HOLD
     else:
         kwargs["retry_not_before"] = NOW + timedelta(seconds=5)
@@ -2037,6 +2057,11 @@ def test_provider_slot_wait_rejects_nonfuture_hold(tmp_path, state):
     )
     payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
     payload["state"] = state.value
+    payload["slot_hold_started_at"] = (
+        NOW
+        + timedelta(seconds=1)
+        - CONSERVATIVE_SESSION_SLOT_HOLD
+    ).isoformat()
     payload["slot_hold_until"] = payload["last_transition_at"]
     if state is ProphetXSessionState.SESSION_POOL_EXHAUSTED:
         payload["last_failure_class"] = (

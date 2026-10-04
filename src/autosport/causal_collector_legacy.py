@@ -1090,9 +1090,10 @@ class CanonicalDesktopApplication:
                 _state_mark_health_applied(state, delta)
             elif current == expected_before:
                 recorded = _record_health(reproved_outcome, health_store)
-                if recorded != expected_after:
+                durable_recorded = durable_health_state()
+                if recorded != expected_after or durable_recorded != expected_after:
                     raise ApplicationReceiptError(
-                        "canonical health authority returned an unexpected post-state"
+                        "canonical health authority returned an unexpected durable post-state"
                     )
                 _state_mark_health_applied(state, delta)
             else:

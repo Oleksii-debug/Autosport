@@ -113,6 +113,51 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
         )
         store.connection.commit()
 
+    def test_generation_zero_baseline_recovers_after_prepare_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            original_recover = MonotonicWorkspaceAuthority.recover
+            calls = 0
+
+            def fail_first_recover(authority, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise RuntimeError("simulated baseline authority crash")
+                return original_recover(authority, **kwargs)
+
+            with patch.object(
+                MonotonicWorkspaceAuthority,
+                "recover",
+                new=fail_first_recover,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated baseline authority crash",
+                ):
+                    SQLiteMarketStore(path)
+
+            recovered = SQLiteMarketStore(path)
+            try:
+                history = recovered._market_append_authority().read_history()
+                self.assertEqual(history[-1].phase.value, "COMMIT")
+                self.assertRegex(
+                    history[-1].tx_id,
+                    r"^baseline-[0-9a-f]{32}$",
+                )
+                self.assertTrue(
+                    recovered.append(
+                        self.event(
+                            sequence=1,
+                            odds="2.00",
+                            observed_ts="2026-09-16T19:00:00+00:00",
+                        )
+                    )
+                )
+                self.assertEqual(len(self.replay(recovered).events), 1)
+            finally:
+                recovered.close()
+
     def test_relative_database_path_keeps_cutoff_authority_bound_to_opened_workspace(self) -> None:
         original_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as opened_directory, tempfile.TemporaryDirectory() as later_directory:

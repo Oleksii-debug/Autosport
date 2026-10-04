@@ -55,7 +55,22 @@ _LEDGER_RESOLVE_CODE = getattr(_LEDGER_RESOLVE, "__code__", None)
 _LEDGER_VERIFY = JsonlDecisionLedger.verify_integrity
 _LEDGER_VERIFY_CODE = getattr(_LEDGER_VERIFY, "__code__", None)
 _RECORD_TYPE = DecisionRecord
+_RECORD_POST_INIT = DecisionRecord.__post_init__
+_RECORD_POST_INIT_CODE = getattr(_RECORD_POST_INIT, "__code__", None)
+_RECORD_TO_DICT = DecisionRecord.to_dict
+_RECORD_TO_DICT_CODE = getattr(_RECORD_TO_DICT, "__code__", None)
 _LOCK_TYPE = WorkspaceEconomicLock
+_ENSURE_DURABLE_FILE = ensure_durable_file
+_ENSURE_DURABLE_FILE_CODE = getattr(_ENSURE_DURABLE_FILE, "__code__", None)
+_JSON_DUMPS = json.dumps
+_JSON_DUMPS_EXPECTED = _JSON_DUMPS
+_JSON_DUMPS_CODE = getattr(_JSON_DUMPS, "__code__", None)
+_JSON_LOADS = json.loads
+_JSON_LOADS_EXPECTED = _JSON_LOADS
+_JSON_LOADS_CODE = getattr(_JSON_LOADS, "__code__", None)
+_JSON_DECODE_ERROR_TYPE = json.JSONDecodeError
+_HASHLIB_SHA256 = hashlib.sha256
+_HASHLIB_SHA256_EXPECTED = _HASHLIB_SHA256
 
 
 class ProductProposalTargetTerminalPopulationError(RuntimeError):
@@ -164,6 +179,31 @@ class ProductProposalTargetTerminalPopulation:
 
 
 _POPULATION_TYPE = ProductProposalTargetTerminalPopulation
+_POPULATION_TYPE_EXPECTED = _POPULATION_TYPE
+_POPULATION_AUTHORITY_PROPERTY_NAMES = (
+    "population_identity_proven",
+    "provider_terminal_authority_proven",
+    "terminal_space_exhaustive",
+    "probability_model_bound",
+    "scientific_precommit_bound",
+    "iid_member_mapping_proven",
+    "proposal_target_counterfactual_execution_proven",
+    "risk_upper_bound_for_target",
+    "grants_ticket_authority",
+    "grants_real_money_authority",
+)
+_POPULATION_AUTHORITY_PROPERTY_WITNESSES = tuple(
+    (
+        name,
+        _POPULATION_TYPE.__dict__[name],
+        _POPULATION_TYPE.__dict__[name].fget,
+        getattr(_POPULATION_TYPE.__dict__[name].fget, "__code__", None),
+    )
+    for name in _POPULATION_AUTHORITY_PROPERTY_NAMES
+)
+_POPULATION_AUTHORITY_PROPERTY_WITNESSES_EXPECTED = (
+    _POPULATION_AUTHORITY_PROPERTY_WITNESSES
+)
 
 
 def _require_dispatch() -> None:
@@ -190,8 +230,46 @@ def _require_dispatch() -> None:
         or JsonlDecisionLedger.verify_integrity is not _LEDGER_VERIFY
         or getattr(_LEDGER_VERIFY, "__code__", None) is not _LEDGER_VERIFY_CODE
         or DecisionRecord is not _RECORD_TYPE
+        or DecisionRecord.__post_init__ is not _RECORD_POST_INIT
+        or getattr(_RECORD_POST_INIT, "__code__", None) is not _RECORD_POST_INIT_CODE
+        or DecisionRecord.to_dict is not _RECORD_TO_DICT
+        or getattr(_RECORD_TO_DICT, "__code__", None) is not _RECORD_TO_DICT_CODE
         or WorkspaceEconomicLock is not _LOCK_TYPE
-        or ProductProposalTargetTerminalPopulation is not _POPULATION_TYPE
+        or ensure_durable_file is not _ENSURE_DURABLE_FILE
+        or getattr(_ENSURE_DURABLE_FILE, "__code__", None)
+        is not _ENSURE_DURABLE_FILE_CODE
+        or ProductProposalTargetTerminalPopulation is not _POPULATION_TYPE_EXPECTED
+        or _POPULATION_TYPE is not _POPULATION_TYPE_EXPECTED
+        or _POPULATION_AUTHORITY_PROPERTY_WITNESSES
+        is not _POPULATION_AUTHORITY_PROPERTY_WITNESSES_EXPECTED
+        or any(
+            ProductProposalTargetTerminalPopulation.__dict__.get(name)
+            is not descriptor
+            or getattr(
+                ProductProposalTargetTerminalPopulation.__dict__.get(name),
+                "fget",
+                None,
+            )
+            is not getter
+            or getattr(getter, "__code__", None) is not code
+            for name, descriptor, getter, code
+            in _POPULATION_AUTHORITY_PROPERTY_WITNESSES_EXPECTED
+        )
+        or _JSON_DUMPS is not _JSON_DUMPS_EXPECTED
+        or json.dumps is not _JSON_DUMPS_EXPECTED
+        or getattr(_JSON_DUMPS_EXPECTED, "__code__", None) is not _JSON_DUMPS_CODE
+        or _JSON_LOADS is not _JSON_LOADS_EXPECTED
+        or json.loads is not _JSON_LOADS_EXPECTED
+        or getattr(_JSON_LOADS_EXPECTED, "__code__", None) is not _JSON_LOADS_CODE
+        or json.JSONDecodeError is not _JSON_DECODE_ERROR_TYPE
+        or _HASHLIB_SHA256 is not _HASHLIB_SHA256_EXPECTED
+        or hashlib.sha256 is not _HASHLIB_SHA256_EXPECTED
+        or _HELPER_WITNESSES is not _HELPER_WITNESSES_EXPECTED
+        or any(
+            globals().get(name) is not function
+            or getattr(function, "__code__", None) is not code
+            for name, function, code in _HELPER_WITNESSES_EXPECTED
+        )
     ):
         raise ProductProposalTargetTerminalPopulationError(
             "proposal target terminal-population authority dispatch changed"
@@ -267,8 +345,16 @@ def _plain(value: object) -> object:
 
 
 def _canonical_json(value: object) -> str:
+    if (
+        _JSON_DUMPS is not _JSON_DUMPS_EXPECTED
+        or json.dumps is not _JSON_DUMPS_EXPECTED
+        or getattr(_JSON_DUMPS_EXPECTED, "__code__", None) is not _JSON_DUMPS_CODE
+    ):
+        raise ProductProposalTargetTerminalPopulationError(
+            "proposal target terminal-population authority dispatch changed"
+        )
     try:
-        return json.dumps(
+        return _JSON_DUMPS(
             _plain(value),
             ensure_ascii=False,
             sort_keys=True,
@@ -282,7 +368,14 @@ def _canonical_json(value: object) -> str:
 
 
 def _digest(value: object) -> str:
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+    if (
+        _HASHLIB_SHA256 is not _HASHLIB_SHA256_EXPECTED
+        or hashlib.sha256 is not _HASHLIB_SHA256_EXPECTED
+    ):
+        raise ProductProposalTargetTerminalPopulationError(
+            "proposal target terminal-population authority dispatch changed"
+        )
+    return _HASHLIB_SHA256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -303,17 +396,26 @@ def _reject_nonfinite(value: str) -> None:
 
 
 def _candidate_context(value: object) -> dict[str, object]:
+    if (
+        _JSON_LOADS is not _JSON_LOADS_EXPECTED
+        or json.loads is not _JSON_LOADS_EXPECTED
+        or getattr(_JSON_LOADS_EXPECTED, "__code__", None) is not _JSON_LOADS_CODE
+        or json.JSONDecodeError is not _JSON_DECODE_ERROR_TYPE
+    ):
+        raise ProductProposalTargetTerminalPopulationError(
+            "proposal target terminal-population authority dispatch changed"
+        )
     if type(value) is not str or not value:
         raise ProductProposalTargetTerminalPopulationError(
             "candidate context must be canonical JSON text"
         )
     try:
-        parsed = json.loads(
+        parsed = _JSON_LOADS(
             value,
             object_pairs_hook=_reject_duplicate_keys,
             parse_constant=_reject_nonfinite,
         )
-    except json.JSONDecodeError as exc:
+    except _JSON_DECODE_ERROR_TYPE as exc:
         raise ProductProposalTargetTerminalPopulationError(
             "candidate context is invalid JSON"
         ) from exc
@@ -619,7 +721,7 @@ def _current_economic_state(
     policy = _POLICY_TYPE(economic_goal=goal)
     ledger = _LEDGER_TYPE(workspace / "decisions.jsonl")
     try:
-        ensure_durable_file(ledger.path)
+        _ENSURE_DURABLE_FILE(ledger.path)
         _LEDGER_VERIFY(ledger)
     except (DecisionLedgerIntegrityError, OSError, TypeError, ValueError) as exc:
         raise ProductProposalTargetTerminalPopulationError(
@@ -686,6 +788,33 @@ def _build(
     return result
 
 
+_HELPER_WITNESSES = tuple(
+    (
+        name,
+        globals()[name],
+        getattr(globals()[name], "__code__", None),
+    )
+    for name in (
+        "_workspace_path",
+        "_text",
+        "_sha",
+        "_instant",
+        "_plain",
+        "_canonical_json",
+        "_digest",
+        "_reject_duplicate_keys",
+        "_reject_nonfinite",
+        "_candidate_context",
+        "_authority_snapshot",
+        "_leg_key",
+        "_material",
+        "_current_economic_state",
+        "_build",
+    )
+)
+_HELPER_WITNESSES_EXPECTED = _HELPER_WITNESSES
+
+
 def issue_product_proposal_target_terminal_population(
     workspace: Path,
     *,
@@ -738,7 +867,7 @@ def issue_product_proposal_target_terminal_population(
                 "population_sha256": population_sha256,
                 MATERIAL_ACTION_ID_PAYLOAD_KEY: action_id,
             }
-            record = DecisionRecord(
+            record = _RECORD_TYPE(
                 replay_run_id=action_id,
                 agent=_AGENT,
                 observed_ts=target.decision_ts,

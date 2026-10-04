@@ -364,6 +364,166 @@ class ProductProposalTargetTerminalPopulationTests(unittest.TestCase):
                 authorities=(authority, authority),
             )
 
+    def test_population_internal_helper_rebinding_fails_closed(self) -> None:
+        authority = self._authority()
+        original = terminal_population_authority._material
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        with patch.object(terminal_population_authority, "_material", fake):
+            with self.assertRaisesRegex(
+                ProductProposalTargetTerminalPopulationError,
+                "dispatch changed",
+            ):
+                issue_product_proposal_target_terminal_population(
+                    self.workspace,
+                    target_sha256=self.target.target_sha256,
+                    authorities=(authority,),
+                )
+
+    def test_population_result_class_rebinding_fails_closed(self) -> None:
+        with patch.object(
+            terminal_population_authority,
+            "ProductProposalTargetTerminalPopulation",
+            object,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalTargetTerminalPopulationError,
+                "dispatch changed",
+            ):
+                terminal_population_authority._require_dispatch()
+
+    def test_population_authority_property_rebinding_fails_closed(self) -> None:
+        forged = property(lambda _self: True)
+        with patch.object(
+            ProductProposalTargetTerminalPopulation,
+            "risk_upper_bound_for_target",
+            forged,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalTargetTerminalPopulationError,
+                "dispatch changed",
+            ):
+                terminal_population_authority._require_dispatch()
+
+    def test_population_false_authority_getter_code_mutation_fails_closed(
+        self,
+    ) -> None:
+        false_names = (
+            "probability_model_bound",
+            "scientific_precommit_bound",
+            "iid_member_mapping_proven",
+            "proposal_target_counterfactual_execution_proven",
+            "risk_upper_bound_for_target",
+            "grants_ticket_authority",
+            "grants_real_money_authority",
+        )
+
+        def forged(_self: object) -> bool:
+            return True
+
+        for name in false_names:
+            descriptor = ProductProposalTargetTerminalPopulation.__dict__[name]
+            getter = descriptor.fget
+            self.assertIsNotNone(getter)
+            original_code = getter.__code__
+            try:
+                getter.__code__ = forged.__code__
+                with self.assertRaisesRegex(
+                    ProductProposalTargetTerminalPopulationError,
+                    "dispatch changed",
+                    msg=name,
+                ):
+                    terminal_population_authority._require_dispatch()
+            finally:
+                getter.__code__ = original_code
+
+    def test_population_json_dump_root_and_code_recheck_after_dispatch(self) -> None:
+        original = terminal_population_authority.json.dumps
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        terminal_population_authority._require_dispatch()
+        with (
+            patch.object(terminal_population_authority, "_JSON_DUMPS", fake),
+            patch.object(terminal_population_authority.json, "dumps", fake),
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalTargetTerminalPopulationError,
+                "dispatch changed",
+            ):
+                terminal_population_authority._canonical_json({"safe": True})
+
+        serializer = terminal_population_authority.json.dumps
+        original_code = serializer.__code__
+
+        def forged(*args: object, **kwargs: object) -> str:
+            return '{"forged":true}'
+
+        terminal_population_authority._require_dispatch()
+        try:
+            serializer.__code__ = forged.__code__
+            with self.assertRaisesRegex(
+                ProductProposalTargetTerminalPopulationError,
+                "dispatch changed",
+            ):
+                terminal_population_authority._canonical_json({"safe": True})
+        finally:
+            serializer.__code__ = original_code
+
+    def test_population_json_load_root_and_code_recheck_after_dispatch(self) -> None:
+        original = terminal_population_authority.json.loads
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        terminal_population_authority._require_dispatch()
+        with (
+            patch.object(terminal_population_authority, "_JSON_LOADS", fake),
+            patch.object(terminal_population_authority.json, "loads", fake),
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalTargetTerminalPopulationError,
+                "dispatch changed",
+            ):
+                terminal_population_authority._candidate_context("{}")
+
+        parser = terminal_population_authority.json.loads
+        original_code = parser.__code__
+
+        def forged(*args: object, **kwargs: object) -> object:
+            return {}
+
+        terminal_population_authority._require_dispatch()
+        try:
+            parser.__code__ = forged.__code__
+            with self.assertRaisesRegex(
+                ProductProposalTargetTerminalPopulationError,
+                "dispatch changed",
+            ):
+                terminal_population_authority._candidate_context("{}")
+        finally:
+            parser.__code__ = original_code
+
+    def test_population_sha_root_rechecks_after_dispatch(self) -> None:
+        original = terminal_population_authority.hashlib.sha256
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        terminal_population_authority._require_dispatch()
+        with (
+            patch.object(terminal_population_authority, "_HASHLIB_SHA256", fake),
+            patch.object(terminal_population_authority.hashlib, "sha256", fake),
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalTargetTerminalPopulationError,
+                "dispatch changed",
+            ):
+                terminal_population_authority._digest({"safe": True})
+
 
 if __name__ == "__main__":
     unittest.main()

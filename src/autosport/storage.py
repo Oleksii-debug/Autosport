@@ -2065,12 +2065,20 @@ class SQLiteMarketStore:
         canonical_as_of = _canonical_replay_cutoff(as_of)
         cutoff_id = _replay_cutoff_id(canonical_as_of)
         authority = self._replay_cutoff_authority()
+        append_authority = self._market_append_authority()
 
-        # Serialize complete resolver transactions independently of SQLite. This is
-        # deliberately narrower than append ingestion: ordinary market appends do not
-        # acquire this lock and remain concurrent with replay decoding.
+        # A cutoff resolver must never recover the PREPARE of a still-live append
+        # writer from another SQLiteMarketStore instance.  Append commits SQLite
+        # before machine COMMIT, so BEGIN IMMEDIATE alone leaves a real
+        # SQLite-COMMIT -> machine-COMMIT window.  Respect the same global lock order
+        # as trusted history readers: append issuance before this instance's SQLite
+        # connection lock.  The sibling replay-cutoff lock is outermost; append
+        # writers never acquire it, so this adds no reverse dependency.  All locks
+        # are released before MarketEvent decoding, preserving live ingestion during
+        # potentially expensive replay decoding.
         with self._replay_cutoff_issuance_lock(authority):
-            with self._connection_lock:
+            with self._market_append_issuance_lock(append_authority):
+                with self._connection_lock:
                 self._validate_causal_replay_state()
                 cutoff_rows = self._validated_replay_cutoff_rows()
                 observed_state_sha256 = (
@@ -2106,7 +2114,7 @@ class SQLiteMarketStore:
                     try:
                         self._validate_causal_replay_state()
                         self._require_product_issued_positive_history(
-                            self._market_append_authority()
+                            append_authority
                         )
                         cutoff_rows = self._validated_replay_cutoff_rows()
                         observed_state_sha256 = (

@@ -358,8 +358,11 @@ def test_windows_candidate_requires_packaged_runtime_witness_binding() -> None:
     step_end = workflow.index("- name: Upload external UIA failure evidence", step_start)
     step = workflow[step_start:step_end]
 
-    assert "$expectedWorkspace = [System.IO.Path]::GetFullPath(" in step
-    assert "(Join-Path $env:LOCALAPPDATA 'Autosport/workspace')" in step
+    assert "$isolatedRoot = Join-Path $env:RUNNER_TEMP 'Autosport-external-uia'" in step
+    assert "$isolatedLocalAppData = Join-Path $isolatedRoot 'localappdata'" in step
+    assert "$expectedWorkspace = Join-Path $isolatedRoot 'workspace'" in step
+    assert "$env:LOCALAPPDATA = $isolatedLocalAppData" in step
+    assert "$env:AUTOSPORT_WORKSPACE = $expectedWorkspace" in step
     assert "-Workspace $expectedWorkspace" in step
     assert "$external.runtime_witness_status -ne 'PASS'" in step
     assert "$external.runtime_browser_version" in step
@@ -367,3 +370,28 @@ def test_windows_candidate_requires_packaged_runtime_witness_binding() -> None:
     assert "External UIA evidence did not bind the packaged session" in step
     assert "extracted_external_uia_runtime_witness_status" in step
     assert "extracted_external_uia_runtime_browser_version" in step
+
+
+def test_external_uia_gate_scrubs_prior_runner_state_and_restores_environment() -> None:
+    workflow = _windows_workflow()
+    step_start = workflow.index("- name: External UIA fresh-extraction gate")
+    step_end = workflow.index("- name: Upload external UIA failure evidence", step_start)
+    step = workflow[step_start:step_end]
+
+    assert "$hadLocalAppData = Test-Path Env:LOCALAPPDATA" in step
+    assert "$hadWorkspaceOverride = Test-Path Env:AUTOSPORT_WORKSPACE" in step
+    assert "$originalLocalAppData = $env:LOCALAPPDATA" in step
+    assert "$originalWorkspaceOverride = $env:AUTOSPORT_WORKSPACE" in step
+    assert "Remove-Item -LiteralPath $isolatedRoot -Recurse -Force" in step
+    assert "New-Item -ItemType Directory -Path $isolatedLocalAppData -Force" in step
+    assert "New-Item -ItemType Directory -Path $expectedWorkspace -Force" in step
+    assert "$env:LOCALAPPDATA = $isolatedLocalAppData" in step
+    assert "$env:AUTOSPORT_WORKSPACE = $expectedWorkspace" in step
+
+    finally_index = step.index("} finally {")
+    assert finally_index < step.index("$env:LOCALAPPDATA = $originalLocalAppData")
+    assert finally_index < step.index("$env:AUTOSPORT_WORKSPACE = $originalWorkspaceOverride")
+    assert "Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue" in step
+    assert "Remove-Item Env:AUTOSPORT_WORKSPACE -ErrorAction SilentlyContinue" in step
+    assert "extracted_external_uia_isolated_workspace" in step
+    assert "extracted_external_uia_isolated_localappdata" in step

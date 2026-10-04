@@ -75,61 +75,6 @@ def _market_event_dedupe_key(
     return _getter(event)
 
 
-class _LiveReceiptBatch:
-    """Immutable live value snapshot that can recognize its retry-hook generations."""
-
-    __slots__ = ("_payloads", "_issued_generations")
-
-    def __init__(
-        self,
-        events: tuple[MarketEvent, ...],
-        *,
-        _canonical_payload_fn=_canonical_payload,
-    ) -> None:
-        object.__setattr__(
-            self,
-            "_payloads",
-            tuple(_canonical_payload_fn(event) for event in events),
-        )
-        object.__setattr__(self, "_issued_generations", [])
-
-    def __setattr__(self, name: str, value: object) -> None:
-        raise AttributeError("live receipt batch is immutable")
-
-    def __iter__(
-        self,
-        *,
-        _decode=_decode_market_event,
-        _loads=json.loads,
-    ):
-        generation = tuple(_decode(_loads(payload)) for payload in self._payloads)
-        self._issued_generations.append(generation)
-        return iter(generation)
-
-    def authorizes(
-        self,
-        events: Iterable[MarketEvent],
-        *,
-        _market_event_type: type[MarketEvent] = MarketEvent,
-        _canonical_payload_fn=_canonical_payload,
-    ) -> bool:
-        if events is self:
-            return True
-        if type(events) is not tuple:
-            return False
-        if any(type(event) is not _market_event_type for event in events):
-            return False
-        for generation in self._issued_generations:
-            if len(events) != len(generation):
-                continue
-            if not all(candidate is issued for candidate, issued in zip(events, generation)):
-                continue
-            if tuple(_canonical_payload_fn(event) for event in events) != self._payloads:
-                raise ValueError("live receipt retry batch was mutated after issuance")
-            return True
-        return False
-
-
 _LEGACY_CURRENT_COLUMNS = ("quote_key", "observed_ts", "sequence", "payload_json")
 _LEGACY_CURRENT_COLUMNS_SQL = ",".join(_LEGACY_CURRENT_COLUMNS)
 
@@ -244,6 +189,61 @@ def _source_payload(
     _encode=_encode_market_event,
 ) -> str:
     return _source_from_raw(_encode(event))
+
+
+class _LiveReceiptBatch:
+    """Immutable live value snapshot that can recognize its retry-hook generations."""
+
+    __slots__ = ("_payloads", "_issued_generations")
+
+    def __init__(
+        self,
+        events: tuple[MarketEvent, ...],
+        *,
+        _canonical_payload_fn=_canonical_payload,
+    ) -> None:
+        object.__setattr__(
+            self,
+            "_payloads",
+            tuple(_canonical_payload_fn(event) for event in events),
+        )
+        object.__setattr__(self, "_issued_generations", [])
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("live receipt batch is immutable")
+
+    def __iter__(
+        self,
+        *,
+        _decode=_decode_market_event,
+        _loads=json.loads,
+    ):
+        generation = tuple(_decode(_loads(payload)) for payload in self._payloads)
+        self._issued_generations.append(generation)
+        return iter(generation)
+
+    def authorizes(
+        self,
+        events: Iterable[MarketEvent],
+        *,
+        _market_event_type: type[MarketEvent] = MarketEvent,
+        _canonical_payload_fn=_canonical_payload,
+    ) -> bool:
+        if events is self:
+            return True
+        if type(events) is not tuple:
+            return False
+        if any(type(event) is not _market_event_type for event in events):
+            return False
+        for generation in self._issued_generations:
+            if len(events) != len(generation):
+                continue
+            if not all(candidate is issued for candidate, issued in zip(events, generation)):
+                continue
+            if tuple(_canonical_payload_fn(event) for event in events) != self._payloads:
+                raise ValueError("live receipt retry batch was mutated after issuance")
+            return True
+        return False
 
 
 def _typed_equal(left: object, right: object) -> bool:
@@ -1075,7 +1075,7 @@ class SQLiteMarketStore:
                     INNER JOIN market_event_live_receipts AS r
                     ON r.dedupe_key=m.dedupe_key
                     WHERE m.dedupe_key=?""",
-                (_market_event_dedupe_key(event),),
+                (_dedupe_key(event),),
             ).fetchone()
         if row is None:
             return False

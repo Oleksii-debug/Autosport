@@ -587,6 +587,67 @@ class ParlayApiProductSource:
             elif item["delta"] is not None:
                 raise ProductSourceStateError("unassigned pending item cannot contain a delta")
 
+    @classmethod
+    def _snapshot_provider_quote(cls, quote: object) -> ProviderQuote:
+        """Revalidate one provider DTO at the product-source acquisition boundary.
+
+        ProviderQuote is frozen for ordinary callers, but frozen dataclasses can still
+        be mutated through low-level object.__setattr__ and subclasses can replace
+        descriptors. Constructor-time provider validation therefore is not sufficient
+        authority for bytes received later from an external provider adapter.
+        """
+
+        if type(quote) is not ProviderQuote:
+            raise ProductSourcePayloadError(
+                "provider batch requires exact ProviderQuote evidence"
+            )
+        try:
+            metadata = strict_json_loads(cls._canonical_json(quote.metadata))
+            if type(metadata) is not dict:
+                raise TypeError("provider quote metadata must be an object")
+            return ProviderQuote(
+                provider_event_id=quote.provider_event_id,
+                provider_market_id=quote.provider_market_id,
+                provider_selection_id=quote.provider_selection_id,
+                decimal_odds=quote.decimal_odds,
+                observed_ts=quote.observed_ts,
+                sequence=quote.sequence,
+                market_type=quote.market_type,
+                status=quote.status,
+                source_ts=quote.source_ts,
+                score_state=quote.score_state,
+                metadata=metadata,
+                sport=quote.sport,
+                exchange_side=quote.exchange_side,
+            )
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ProductSourcePayloadError(
+                "provider quote failed acquisition-boundary validation"
+            ) from exc
+
+    @classmethod
+    def _snapshot_provider_batch(cls, batch: object) -> ProviderBatch:
+        """Copy provider output into exact canonical DTOs before product use."""
+
+        if type(batch) is not ProviderBatch:
+            raise ProductSourcePayloadError(
+                "provider.read_batch must return exact ProviderBatch"
+            )
+        try:
+            quotes = tuple(cls._snapshot_provider_quote(quote) for quote in batch.quotes)
+            return ProviderBatch(
+                source_id=batch.source_id,
+                quotes=quotes,
+                cursor=batch.cursor,
+                quality_flags=batch.quality_flags,
+            )
+        except ProductSourcePayloadError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise ProductSourcePayloadError(
+                "provider batch failed acquisition-boundary validation"
+            ) from exc
+
     @staticmethod
     def _quote_payload_bytes(quote: ProviderQuote) -> bytes:
         payload = {
@@ -634,8 +695,7 @@ class ParlayApiProductSource:
                 raise ProductSourcePayloadError(
                     "product source provider changed during acquisition"
                 )
-            if not isinstance(batch, ProviderBatch):
-                raise ProductSourcePayloadError("provider.read_batch must return ProviderBatch")
+            batch = self._snapshot_provider_batch(batch)
             if getattr(provider, "source_id", None) != source_id:
                 raise ProductSourcePayloadError(
                     "provider source_id changed during acquisition"

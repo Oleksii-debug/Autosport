@@ -621,7 +621,7 @@ def _confirmation_graph_unchanged() -> bool:
 
 def _canonical_workspace_text(value: object) -> str:
     try:
-        resolved = Path(value).resolve()
+        resolved = _CONFIRMATION_PATH(value).resolve()
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise _impl.BetfairSupervisedExecutionError(
             "trusted runtime profile requires canonical execution workspace"
@@ -802,7 +802,7 @@ def _build_trusted_private_place_action(private_place_action, private_place_acti
                 )
             try:
                 _CONSUME_CONFIRMATION(
-                    Path(workspace),
+                    _CONFIRMATION_PATH(workspace),
                     bound,
                     confirmation_context.approval,
                     action_id=action.action_id,
@@ -847,7 +847,7 @@ def _build_trusted_private_place_action(private_place_action, private_place_acti
             # and reject if the review TTL elapsed before the actual POST seam.
             try:
                 final_confirmation_authority = _CONFIRMATION_INNER_AUTHORITY_TYPE(
-                    Path(workspace) / _CONFIRMATION_FILENAME,
+                    _CONFIRMATION_PATH(workspace) / _CONFIRMATION_FILENAME,
                     clock=lambda: final_send_instant,
                 )
                 final_confirmation = _CONFIRMATION_INNER_RESOLVE_BINDING(
@@ -1013,7 +1013,7 @@ def _confirmed_execute_betfair_supervised_action(
     """Carry one exact durable final-send receipt through canonical execution."""
 
     try:
-        workspace = str(Path(ledger.path).parent.resolve())
+        workspace = str(_CONFIRMATION_PATH(ledger.path).parent.resolve())
     except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
         raise _impl.BetfairSupervisedExecutionError(
             "Betfair execution ledger workspace is not canonical"
@@ -1055,7 +1055,8 @@ _PUBLIC_EXECUTE.__doc__ = _CANONICAL_EXECUTE.__doc__
 
 def _canonical_internal_dispatch_unchanged() -> bool:
     return (
-        _CLIENT_TYPE is _impl.BetfairSupervisedPlaceOrdersClient
+        Path is _CONFIRMATION_PATH
+        and _CLIENT_TYPE is _impl.BetfairSupervisedPlaceOrdersClient
         and _CANONICAL_TRANSPORT_TYPE is _impl.UrllibBetfairHttpTransport
         and _CLIENT_TYPE.__dict__.get("place_action") is _BOUNDARY
         and _impl._CANONICAL_BETFAIR_PLACE_ACTION is _TRUSTED_PRIVATE_PLACE_ACTION

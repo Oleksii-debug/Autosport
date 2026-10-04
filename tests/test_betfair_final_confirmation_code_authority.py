@@ -320,3 +320,10 @@ def test_final_send_identity_property_rebinding_fails_closed(
     )
     assert not boundary._confirmation_graph_unchanged()
 
+def test_outer_boundary_path_rebinding_fails_closed(monkeypatch) -> None:
+    assert boundary._canonical_internal_dispatch_unchanged()
+
+    monkeypatch.setattr(boundary, "Path", lambda value: value)
+
+    assert not boundary._canonical_internal_dispatch_unchanged()
+

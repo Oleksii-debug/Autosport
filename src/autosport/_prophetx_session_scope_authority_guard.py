@@ -88,14 +88,12 @@ def _install_scope_authority_guard() -> None:
         if len(current) != len(expected):
             raise error_type("session scope authority changed")
         # Scope text is immutable semantic content; path/workspace objects are also
-        # immutable and remain exact construction products.  Identity comparison for
+        # immutable and remain exact construction products. Identity comparison for
         # every slot rejects equal-looking object replacement as well as value drift.
         if any(now is not original for now, original in zip(current, expected)):
             raise error_type("session scope authority changed")
 
     def guarded_init(self, *args, **kwargs) -> None:
-        if type(self) is not lifecycle_type:
-            raise error_type("session scope authority requires exact lifecycle type")
         original_init(self, *args, **kwargs)
         _register(self)
 

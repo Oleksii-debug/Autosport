@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from urllib import request as urllib_request
 
 import pytest
@@ -116,5 +117,75 @@ def test_by_id_request_body_cannot_drift_from_cursor_identity(monkeypatch):
         match="request body does not match exact economic request authority",
     ):
         client.read_account_postings_by_id(10)
+
+    assert opener.calls == []
+
+
+def test_window_request_body_cannot_drift_from_time_identity(monkeypatch):
+    client, opener = _economic_client(monkeypatch)
+    original_builder = settlement_module._request_xml
+
+    def hostile_builder(credentials, method, attributes):
+        body = original_builder(credentials, method, attributes)
+        assert method == "ListAccountPostings"
+        start = attributes["StartTime"].encode("utf-8")
+        end = attributes["EndTime"].encode("utf-8")
+        assert start in body
+        return body.replace(start, end, 1)
+
+    monkeypatch.setattr(settlement_module, "_request_xml", hostile_builder)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="request body does not match exact economic request authority",
+    ):
+        client.read_account_postings(
+            datetime(2026, 1, 1, tzinfo=timezone.utc),
+            datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+    assert opener.calls == []
+
+
+def test_request_body_method_cannot_drift_from_soap_action(monkeypatch):
+    client, opener = _economic_client(monkeypatch)
+    original_builder = settlement_module._request_xml
+
+    def hostile_builder(credentials, method, attributes):
+        assert method == "GetOrderDetails"
+        assert attributes == {"OrderId": "123"}
+        return original_builder(
+            credentials,
+            "ListAccountPostingsById",
+            {"TransactionId": "10"},
+        )
+
+    monkeypatch.setattr(settlement_module, "_request_xml", hostile_builder)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="request body does not match exact economic request authority",
+    ):
+        client.read_order_details(123)
+
+    assert opener.calls == []
+
+
+def test_request_body_credentials_cannot_drift_from_account_context(monkeypatch):
+    client, opener = _economic_client(monkeypatch)
+    original_builder = settlement_module._request_xml
+
+    def hostile_builder(credentials, method, attributes):
+        body = original_builder(credentials, method, attributes)
+        assert b'username="alice"' in body
+        return body.replace(b'username="alice"', b'username="mallory"', 1)
+
+    monkeypatch.setattr(settlement_module, "_request_xml", hostile_builder)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="request body does not match exact economic request authority",
+    ):
+        client.read_order_details(123)
 
     assert opener.calls == []

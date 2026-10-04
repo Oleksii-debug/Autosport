@@ -1092,6 +1092,7 @@ def _audit_payload(
                 "observed_worst_case_change": str(impact.observed_worst_case_change),
                 "conservative_floor_change": str(impact.conservative_floor_change),
                 "worst_case_change_proven": impact.worst_case_change_proven,
+                "scenario_reports_authoritative": impact.scenario_reports_authoritative,
                 "scenario_worst_case_change_proven": (
                     impact.scenario_worst_case_change_proven
                 ),

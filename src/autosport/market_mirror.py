@@ -77,6 +77,33 @@ class MirrorSnapshot:
     events: tuple[MarketEvent, ...]
 
 
+def _trusted_mirror_event_key(
+    event: MarketEvent,
+    *,
+    _quote_key=MarketEvent.quote_key.fget,
+) -> tuple[str, str]:
+    if type(event) is not MarketEvent:
+        raise TypeError("trusted mirror event must be an exact MarketEvent")
+    if _quote_key is None:
+        raise RuntimeError("canonical quote_key descriptor is unavailable")
+    return (event.source_id, _quote_key(event))
+
+
+def _trusted_mirror_event_snapshot(
+    event: MarketEvent,
+    *,
+    _event_type: type[MarketEvent] = MarketEvent,
+    _to_dict=MarketEvent.to_dict,
+    _from_dict=MarketEvent.from_dict,
+) -> MarketEvent:
+    if type(event) is not _event_type:
+        raise TypeError("trusted mirror event must be an exact MarketEvent")
+    snapshot = _from_dict(_to_dict(event))
+    if type(snapshot) is not _event_type:
+        raise TypeError("trusted mirror snapshot lost canonical MarketEvent authority")
+    return snapshot
+
+
 class MarketMirror:
     """Deterministic in-memory mirror for normalized market quotes.
 
@@ -615,6 +642,10 @@ class MarketMirror:
         *,
         _require_store=_require_market_store,
         _trusted_current=_trusted_live_current_by_source,
+        _object_new=object.__new__,
+        _lock_factory=RLock,
+        _event_key=_trusted_mirror_event_key,
+        _snapshot_event=_trusted_mirror_event_snapshot,
     ) -> "MarketMirror":
         """Restore only rows with durable product-owned live receipt authority.
 
@@ -630,10 +661,19 @@ class MarketMirror:
             exact=True,
             error_message="live store must be an exact SQLiteMarketStore",
         )
-        mirror = cls()
         current = _trusted_current(canonical_store)
-        for key in sorted(current):
-            mirror.apply(current[key])
+        mirror = _object_new(cls)
+        mirror._latest = {}
+        mirror._revision = 0
+        mirror._lock = _lock_factory()
+        mirror._publication_revision_guard = None
+        for expected_key in sorted(current):
+            event = _snapshot_event(current[expected_key])
+            canonical_key = _event_key(event)
+            if expected_key != canonical_key:
+                raise ValueError("trusted live current key does not match MarketEvent identity")
+            mirror._latest[canonical_key] = event
+            mirror._revision += 1
         return mirror
 
     def __len__(self) -> int:

@@ -297,3 +297,37 @@ def test_external_uia_gate_covers_product_runtime_and_emergency_stop_controls() 
             if f"automation_id = '{automation_id}'" in line
         )
         assert "allow_disabled = $true" in line
+
+
+def test_external_uia_pass_requires_ordinary_main_window_close_not_cleanup_kill() -> None:
+    audit = _audit()
+
+    assert "normal_close_status = 'NOT_RUN'" in audit
+    assert "normal_close_exit_code = $null" in audit
+    assert "[System.Windows.Automation.WindowPattern]::Pattern" in audit
+    assert "([System.Windows.Automation.WindowPattern]$closePatternObject).Close()" in audit
+    assert "[System.Windows.Forms.SendKeys]::SendWait('%{F4}')" in audit
+    assert "$closeDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(10, $TimeoutSeconds))" in audit
+    assert "alive_process_ids=" in audit
+    assert "$process.WaitForExit()" in audit
+    assert "$report.normal_close_exit_code = [int]$process.ExitCode" in audit
+    assert "$report.normal_close_status = 'PASS'" in audit
+    assert audit.index("$report.normal_close_status = 'PASS'") < audit.index(
+        "$report.status = 'PASS'"
+    )
+
+    cleanup_force = "Stop-Process -Id $cleanupId -Force"
+    assert cleanup_force in audit
+    assert audit.index("$report.status = 'PASS'") < audit.index(cleanup_force)
+
+
+def test_windows_candidate_requires_external_uia_normal_close_evidence() -> None:
+    workflow = _windows_workflow()
+    step_start = workflow.index("- name: External UIA fresh-extraction gate")
+    step_end = workflow.index("- name: Upload external UIA failure evidence", step_start)
+    step = workflow[step_start:step_end]
+
+    assert "$external.normal_close_status -ne 'PASS'" in step
+    assert "[int]$external.normal_close_exit_code -ne 0" in step
+    assert "External UIA evidence did not prove ordinary packaged close/teardown" in step
+    assert "extracted_external_uia_normal_close_status" in step

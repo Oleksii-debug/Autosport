@@ -306,7 +306,12 @@ def _assess_unsealed(
 def _install_price_ladder_admission_authority():
     issued: dict[
         int,
-        tuple[object, str, BetfairMarketPriceLadderObservation],
+        tuple[
+            object,
+            str,
+            BetfairMarketPriceLadderObservation,
+            timedelta,
+        ],
     ] = {}
     raw_assess = _assess_unsealed
     raw_assess_code = raw_assess.__code__
@@ -398,10 +403,11 @@ def _install_price_ladder_admission_authority():
             raise RuntimeError(
                 "canonical Betfair price-ladder assessor changed"
             )
+        max_age = exact_positive_age(max_evidence_age)
         result = raw_assess(
             observation,
             price,
-            max_evidence_age=max_evidence_age,
+            max_evidence_age=max_age,
         )
         if type(result) is not result_type:
             raise TypeError("price-ladder assessor returned invalid result type")
@@ -423,6 +429,7 @@ def _install_price_ladder_admission_authority():
             ref(result, forget),
             result_fingerprint,
             observation,
+            max_age,
         )
         return result
 
@@ -433,7 +440,21 @@ def _install_price_ladder_admission_authority():
         if current is None or current[0]() is not result:
             return False
         try:
-            acquisition(current[2])
+            # A positive assessment is a time-bounded witness, not timeless
+            # authority. Re-read the canonical product decision clock on every
+            # authority check so a cached result cannot stay admissible after the
+            # exact max_evidence_age budget used to issue it has elapsed.
+            current_decision_at = assert_authoritative(current[2]).astimezone(
+                timezone_module.utc
+            )
+            if (
+                current_decision_at < result.decision_at
+                or current_decision_at < result.response_received_at
+                or current_decision_at < result.acquisition_started_at
+                or current_decision_at - result.acquisition_started_at
+                > current[3]
+            ):
+                return False
             return current[1] == fingerprint(result)
         except Exception:
             return False

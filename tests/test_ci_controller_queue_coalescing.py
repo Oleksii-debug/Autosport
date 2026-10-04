@@ -2038,7 +2038,7 @@ def test_consistent_duplicate_run_observations_authorize_only_one_cancel() -> No
     assert api.cancelled == [49]
 
 
-def test_rebound_selector_cannot_cancel_current_run_or_widen_pr_group(monkeypatch) -> None:
+def test_rebound_selector_cannot_starve_canonical_pr_group(monkeypatch) -> None:
     qualification = PullRequestQualification(
         head_sha="7" * 40,
         integration_capable=True,
@@ -2052,8 +2052,8 @@ def test_rebound_selector_cannot_cancel_current_run_or_widen_pr_group(monkeypatc
         {501: [qualification]},
     )
 
-    # A mutable selector must not be able to redirect this PR group's sweep to the
-    # triggering source run. The outer authority independently validates the result.
+    # A mutable module-global selector must neither widen nor silently starve this
+    # PR group. Production sweep owns the composition-time canonical selector.
     monkeypatch.setattr(
         scoped_controller,
         "select_superseded_runs",
@@ -2064,12 +2064,12 @@ def test_rebound_selector_cannot_cancel_current_run_or_widen_pr_group(monkeypatc
         api,  # type: ignore[arg-type]
         workflow_name="CI",
         current_run_id=51,
-    ) == ()
-    assert api.cancelled == []
-    assert api.identity_reads == []
+    ) == (50,)
+    assert api.cancelled == [50]
+    assert api.identity_reads == [(50, "8" * 40, 501)]
 
 
-def test_rebound_selector_cannot_import_another_pr_group(monkeypatch) -> None:
+def test_rebound_selector_cannot_replace_canonical_group_with_another_pr(monkeypatch) -> None:
     qualification = PullRequestQualification(
         head_sha="7" * 40,
         integration_capable=True,
@@ -2092,9 +2092,34 @@ def test_rebound_selector_cannot_import_another_pr_group(monkeypatch) -> None:
         api,  # type: ignore[arg-type]
         workflow_name="CI",
         current_run_id=99,
-    ) == ()
+    ) == (50,)
+    assert api.cancelled == [50]
+    assert api.identity_reads == [(50, "8" * 40, 501)]
+
+
+def test_sweep_rejects_in_place_selector_code_drift(monkeypatch) -> None:
+    qualification = PullRequestQualification(
+        head_sha="7" * 40,
+        integration_capable=True,
+    )
+    api = SweepApi(
+        (_run(50, "8" * 40, (501,)),),
+        {501: [qualification]},
+    )
+    canonical_selector = scoped_controller.select_superseded_runs
+
+    def forged_selector(*_args, **_kwargs):
+        return ()
+
+    monkeypatch.setattr(canonical_selector, "__code__", forged_selector.__code__)
+
+    with pytest.raises(CancellationError, match="canonical decision authority changed"):
+        cancel_superseded_explicit_pr_runs(
+            api,  # type: ignore[arg-type]
+            workflow_name="CI",
+            current_run_id=99,
+        )
     assert api.cancelled == []
-    assert api.identity_reads == []
 
 
 def test_one_pr_authority_move_does_not_block_other_pr_group() -> None:

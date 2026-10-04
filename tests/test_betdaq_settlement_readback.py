@@ -38,6 +38,10 @@ class _FakeHttpResponse:
             return self.payload
         return self.payload[:limit]
 
+    def info(self):
+        # urllib's HTTPErrorProcessor consults response headers even for 2xx.
+        return {}
+
 
 class QueueUrlopen:
     def __init__(self, *results):

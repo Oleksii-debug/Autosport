@@ -415,6 +415,73 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
         )
         self.assertNotEqual(first.target_sha256, second.target_sha256)
         self.assertNotEqual(first.signal_strengths, second.signal_strengths)
+        self.assertEqual(
+            resolve_product_proposal_risk_target(
+                self.workspace, second.target_sha256
+            ),
+            second,
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "superseded",
+        ):
+            resolve_product_proposal_risk_target(
+                self.workspace, first.target_sha256
+            )
+
+    def test_target_chain_blocks_new_issue_after_latest_target_ledger_rollback(
+        self,
+    ) -> None:
+        first = self._issue()
+        (self.workspace / "decisions.jsonl").write_bytes(b"")
+
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "chain tip is missing",
+        ):
+            issue_product_proposal_risk_target(
+                self.workspace,
+                signal_strengths=(Decimal("0.9"), Decimal("0.8")),
+                contexts=self._contexts(),
+            )
+
+        with self.assertRaises(ProductProposalRiskTargetError):
+            resolve_product_proposal_risk_target(
+                self.workspace, first.target_sha256
+            )
+
+    def test_target_chain_keeps_exact_append_history_while_only_latest_is_current(
+        self,
+    ) -> None:
+        first = self._issue()
+        second = issue_product_proposal_risk_target(
+            self.workspace,
+            signal_strengths=(Decimal("0.9"), Decimal("0.8")),
+            contexts=self._contexts(),
+        )
+
+        records = JsonlDecisionLedger(
+            self.workspace / "decisions.jsonl"
+        ).verified_records()
+        target_ids = tuple(
+            record.payload["target_sha256"]
+            for record in records
+            if record.action == "PROPOSAL_RISK_TARGET_PRECOMMIT"
+        )
+        self.assertEqual(target_ids, (first.target_sha256, second.target_sha256))
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "superseded",
+        ):
+            resolve_product_proposal_risk_target(
+                self.workspace, first.target_sha256
+            )
+        self.assertEqual(
+            resolve_product_proposal_risk_target(
+                self.workspace, second.target_sha256
+            ).target_sha256,
+            second.target_sha256,
+        )
 
 
 if __name__ == "__main__":

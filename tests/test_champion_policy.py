@@ -267,6 +267,61 @@ def test_load_champion_rejects_registry_subclass_before_virtual_dispatch(tmp_pat
     assert hostile_calls == []
 
 
+def test_persist_policy_rejects_live_and_canonical_policy_root_rebinding(
+    tmp_path,
+):
+    _, successor, _ = _policy_successor()
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    original_live = champion_policy_module.BanditPolicyState
+    original_alias = champion_policy_module._CANONICAL_POLICY_TYPE
+
+    class ForgedPolicy:
+        pass
+
+    champion_policy_module.BanditPolicyState = ForgedPolicy
+    champion_policy_module._CANONICAL_POLICY_TYPE = ForgedPolicy
+    try:
+        with pytest.raises(
+            ChampionPolicyError,
+            match="durable type authority changed",
+        ):
+            persist_policy_state(store, successor)
+    finally:
+        champion_policy_module.BanditPolicyState = original_live
+        champion_policy_module._CANONICAL_POLICY_TYPE = original_alias
+
+
+def test_load_rejects_live_and_canonical_registry_root_rebinding(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    original_live = champion_policy_module.ScientificRegistry
+    original_alias = champion_policy_module._CANONICAL_REGISTRY_TYPE
+
+    class ForgedRegistry:
+        pass
+
+    champion_policy_module.ScientificRegistry = ForgedRegistry
+    champion_policy_module._CANONICAL_REGISTRY_TYPE = ForgedRegistry
+    try:
+        with pytest.raises(
+            ChampionPolicyError,
+            match="durable type authority changed",
+        ):
+            load_champion_policy(
+                registry,
+                store,
+                as_of=PROMOTED_AT,
+                canonical_strategy_id=STRATEGY_ID,
+                environment_id=ENVIRONMENT_ID,
+                protocol_id=PROTOCOL_ID,
+                config_sha256=CONFIG_SHA256,
+                admissible_actions=frozenset({"PAPER_PROPOSAL", "WAIT"}),
+            )
+    finally:
+        champion_policy_module.ScientificRegistry = original_live
+        champion_policy_module._CANONICAL_REGISTRY_TYPE = original_alias
+
+
 def test_policy_payload_round_trip_preserves_exact_identity_and_decimal():
     _, successor, _ = _policy_successor()
 

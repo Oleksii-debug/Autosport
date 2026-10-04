@@ -317,6 +317,80 @@ def load_champion_policy(
     return policy
 
 
+def _bind_durable_seam_type_authority(
+    persist_impl,
+    load_impl,
+):
+    """Bind exact durable-seam type authority outside mutable module aliases."""
+
+    registry_type = ScientificRegistry
+    artifact_store_type = FactoryArtifactStore
+    policy_type = BanditPolicyState
+
+    def guarded_persist_policy_state(
+        artifact_store: FactoryArtifactStore,
+        policy: BanditPolicyState,
+    ) -> str:
+        if (
+            ScientificRegistry is not registry_type
+            or FactoryArtifactStore is not artifact_store_type
+            or BanditPolicyState is not policy_type
+        ):
+            raise ChampionPolicyError(
+                "champion policy durable type authority changed"
+            )
+        if type(artifact_store) is not artifact_store_type:
+            raise TypeError("artifact_store must be exact FactoryArtifactStore")
+        if type(policy) is not policy_type:
+            raise TypeError("policy must be exact BanditPolicyState")
+        return persist_impl(artifact_store, policy)
+
+    def guarded_load_champion_policy(
+        registry: ScientificRegistry,
+        artifact_store: FactoryArtifactStore,
+        *,
+        as_of: str,
+        canonical_strategy_id: str,
+        environment_id: str,
+        protocol_id: str,
+        config_sha256: str,
+        admissible_actions: frozenset[str],
+        eligibility_decision: ChampionEligibilityDecision | None = None,
+    ) -> BanditPolicyState:
+        if (
+            ScientificRegistry is not registry_type
+            or FactoryArtifactStore is not artifact_store_type
+            or BanditPolicyState is not policy_type
+        ):
+            raise ChampionPolicyError(
+                "champion policy durable type authority changed"
+            )
+        if type(registry) is not registry_type:
+            raise TypeError("registry must be exact ScientificRegistry")
+        if type(artifact_store) is not artifact_store_type:
+            raise TypeError("artifact_store must be exact FactoryArtifactStore")
+        return load_impl(
+            registry,
+            artifact_store,
+            as_of=as_of,
+            canonical_strategy_id=canonical_strategy_id,
+            environment_id=environment_id,
+            protocol_id=protocol_id,
+            config_sha256=config_sha256,
+            admissible_actions=admissible_actions,
+            eligibility_decision=eligibility_decision,
+        )
+
+    return guarded_persist_policy_state, guarded_load_champion_policy
+
+
+persist_policy_state, load_champion_policy = _bind_durable_seam_type_authority(
+    persist_policy_state,
+    load_champion_policy,
+)
+del _bind_durable_seam_type_authority
+
+
 __all__ = [
     "ChampionPolicyError",
     "POLICY_ARTIFACT_KIND",

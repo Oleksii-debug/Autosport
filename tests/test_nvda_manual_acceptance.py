@@ -778,6 +778,70 @@ def test_fake_registry_global_cannot_mint_a_copied_resolution(
         )
 
 
+def test_resolution_issuance_rejects_reader_helper_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript)
+    hostile_called = False
+
+    def hostile_record_from_event(_event):
+        nonlocal hostile_called
+        hostile_called = True
+        raise AssertionError("hostile record parser executed")
+
+    monkeypatch.setattr(
+        nvda_manual_module,
+        "_record_from_event",
+        hostile_record_from_event,
+    )
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="durable-reader dependency changed: _record_from_event",
+    ):
+        _resolve(ledger, transcript)
+    assert hostile_called is False
+
+
+def test_resolution_verifier_rejects_reader_helper_rebinding_after_issuance(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript)
+    resolution = _resolve(ledger, transcript)
+    assert resolution is not None
+    hostile_called = False
+
+    def hostile_parse(*_args, **_kwargs):
+        nonlocal hostile_called
+        hostile_called = True
+        raise AssertionError("hostile JSON parser executed")
+
+    monkeypatch.setattr(
+        nvda_manual_module,
+        "_parse_json_object",
+        hostile_parse,
+    )
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="reader dependency changed after issuance: _parse_json_object",
+    ):
+        verify_manual_nvda_acceptance_resolution(
+            resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
+            expected_transcript_sha256=resolution.record.transcript_sha256,
+        )
+    assert hostile_called is False
+
+
 def test_resolution_verifier_rejects_instance_events_locked_override(
     tmp_path,
 ) -> None:

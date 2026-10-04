@@ -1808,6 +1808,17 @@ class SQLiteMarketStore:
     def append_batch_accepted(self, events: Iterable[MarketEvent]) -> list[MarketEvent]:
         """Insert one normalized batch and independently issue its positive chronology."""
 
+        # Consume caller-controlled iterables before taking any product authority or
+        # SQLite writer lock. A generator may perform arbitrary I/O or re-enter this
+        # store; executing it under the issuance lock/BEGIN IMMEDIATE would turn
+        # caller code into part of the durable critical section and can deadlock or
+        # stall live ingestion. The materialized membership is also stable for the
+        # entire PREPARE -> SQLite COMMIT -> machine COMMIT transition.
+        try:
+            batch = tuple(events)
+        except TypeError as exc:
+            raise TypeError("events must be an iterable of MarketEvent values") from exc
+
         authority = self._market_append_authority()
         # Keep the global lock order identical to trusted readers: cross-process
         # append issuance first, then this instance's SQLite connection lock.
@@ -1829,7 +1840,7 @@ class SQLiteMarketStore:
                     committed_head, committed_state_sha256 = (
                         self._recover_positive_append_authority(authority)
                     )
-                    for event in events:
+                    for event in batch:
                         if self._insert_one(event):
                             accepted.append(event)
 

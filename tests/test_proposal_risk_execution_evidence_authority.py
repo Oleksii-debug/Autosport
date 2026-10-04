@@ -274,6 +274,7 @@ def _canonical_precommit(
         raise AssertionError("canonical proposal risk precommit fixture is not authoritative")
     return result
 
+
 def _row_impl(
     precommit: ProductProposalRiskEvaluationPrecommit,
     member_id: str,
@@ -326,6 +327,7 @@ class ProductProposalRiskExecutionEvidenceTests(unittest.TestCase):
 
     def _row(self, member_id: str, **kwargs: object) -> CounterfactualMemberExecutionEvidence:
         return _row_impl(self.precommit, member_id, **kwargs)
+
     def test_direct_product_result_construction_is_closed(self) -> None:
         with self.assertRaises(TypeError):
             ProductProposalRiskExecutionEvidence()
@@ -506,7 +508,7 @@ class ProductProposalRiskExecutionEvidenceTests(unittest.TestCase):
             self._row(
                 "member-a",
                 source="a",
-                observed_at="2026-10-04T09:59:59+00:00",
+                observed_at="2026-09-09T23:59:59+00:00",
             ),
             self._row(
                 "member-a",
@@ -534,7 +536,7 @@ class ProductProposalRiskExecutionEvidenceTests(unittest.TestCase):
                     self._row("member-a", source="a"),
                     self._row("member-b", source="b"),
                 ),
-                evaluated_at="2026-10-04T09:59:59+00:00",
+                evaluated_at="2026-09-09T23:59:59+00:00",
             )
 
     def test_member_economics_are_fail_closed(self) -> None:

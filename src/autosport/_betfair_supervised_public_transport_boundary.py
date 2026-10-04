@@ -1029,7 +1029,7 @@ def _build_confirmed_execute_betfair_supervised_action(
         confirmation_review_sha256: str | None = None,
     ):
         """Carry one exact durable final-send receipt through canonical execution."""
-    
+
         if (
             _CANONICAL_EXECUTE is not canonical_execute
             or _CANONICAL_EXECUTE_CODE is not canonical_execute_code
@@ -1038,7 +1038,7 @@ def _build_confirmed_execute_betfair_supervised_action(
             raise _impl.BetfairSupervisedExecutionError(
                 "canonical Betfair execution caller authority changed"
             )
-    
+
         try:
             workspace = str(_CONFIRMATION_PATH(ledger.path).parent.resolve())
         except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -1070,7 +1070,7 @@ def _build_confirmed_execute_betfair_supervised_action(
             )
         finally:
             _CONFIRMATION_CONTEXT.reset(token)
-    
+
 
     return _confirmed_execute_betfair_supervised_action
 

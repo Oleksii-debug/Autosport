@@ -424,6 +424,7 @@ def test_coordinated_canonical_execute_root_rebinding_cannot_call_trusted_privat
     )
     assert closure["canonical_execute_code"].cell_contents is original_code
 
+
 def test_public_executor_rejects_coordinated_canonical_execute_root_rebinding(
     monkeypatch,
 ) -> None:

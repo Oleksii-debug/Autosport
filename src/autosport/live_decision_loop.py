@@ -33,6 +33,7 @@ from .market_mirror_runtime import (
     FocusedMirrorDependency,
     FocusedMirrorDependencyIndex,
 )
+from .opportunity import Opportunity, OpportunityContractError
 from .paper import PaperBook
 from .paper_execution_adoption import (
     PaperExecutionAdoptionRuntime,
@@ -47,6 +48,7 @@ from .paper_execution_reality import (
     _derive_run_economics,
 )
 from .portfolio_plan import (
+    OpportunityEvidence,
     PortfolioDependencyGraph,
     PortfolioPlan,
     build_portfolio_plan,
@@ -2981,16 +2983,119 @@ class PersistentLiveDecisionLoop:
                 "committed live decision intent execution evidence conflicts with plan"
             )
         provenance = self.intent_provenance
+        expected_intent_keys = {
+            "schema",
+            "schema_version",
+            "intent_id",
+            "intent_sha256",
+            "opportunity_id",
+            "opportunity",
+            "evidence",
+            "evidence_sha256",
+            "candidate_sha256",
+            "signal_strength",
+            "strategy_id",
+            "model_id",
+            "config_sha256",
+            "risk_context",
+        }
+        canonical_opportunities: list[Opportunity] = []
         for item in intent_items:
             if (
                 type(item) is not dict
-                or item.get("strategy_id") != provenance.strategy_version_id
+                or set(item) != expected_intent_keys
+                or item.get("schema")
+                != "autosport.opportunity_intent_evidence"
+                or item.get("schema_version") != 1
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision intent execution item is invalid"
+                )
+            if (
+                item.get("strategy_id") != provenance.strategy_version_id
                 or item.get("model_id") != provenance.model_version_id
                 or item.get("config_sha256") != provenance.config_sha256
             ):
                 raise DecisionLedgerIntegrityError(
                     "committed live decision intent execution provenance conflicts"
                 )
+            try:
+                opportunity = Opportunity.from_dict(item["opportunity"])
+                evidence = OpportunityEvidence.from_dict(item["evidence"])
+                signal_strength = Decimal(item["signal_strength"])
+                _canonical_sha256(
+                    "intent candidate_sha256",
+                    item["candidate_sha256"],
+                )
+                risk_context = item["risk_context"]
+                if (
+                    type(risk_context) is not dict
+                    or set(risk_context)
+                    != {
+                        "provider_accounts",
+                        "bankroll_id",
+                        "currency",
+                        "measurement_window_start",
+                        "measurement_window_end",
+                        "proposal_ts",
+                    }
+                ):
+                    raise ValueError("risk_context audit fields are invalid")
+                for field_name in (
+                    "measurement_window_start",
+                    "measurement_window_end",
+                    "proposal_ts",
+                ):
+                    value = risk_context[field_name]
+                    if value is not None:
+                        _canonical_timestamp(
+                            f"intent risk_context {field_name}",
+                            value,
+                        )
+            except (
+                InvalidOperation,
+                OpportunityContractError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision intent execution item is invalid"
+                ) from exc
+            if (
+                not signal_strength.is_finite()
+                or opportunity.to_dict() != item["opportunity"]
+                or opportunity.opportunity_id != item["opportunity_id"]
+                or evidence.to_dict() != item["evidence"]
+                or evidence.evidence_sha256 != item["evidence_sha256"]
+                or risk_context["bankroll_id"]
+                != self.authority.contract.bankroll_id
+                or risk_context["currency"] != self.authority.contract.currency
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision intent execution item conflicts "
+                    "with canonical evidence"
+                )
+            recomputed_intent_sha256 = _canonical_json_sha256(
+                {
+                    "schema": "autosport.opportunity_intent",
+                    "schema_version": 2,
+                    "intent_id": item["intent_id"],
+                    "opportunity_id": opportunity.opportunity_id,
+                    "opportunity_class": opportunity.strategy_class.value,
+                    "opportunity_decision": opportunity.decision.value,
+                    "evidence_sha256": evidence.evidence_sha256,
+                    "candidate_sha256": item["candidate_sha256"],
+                    "signal_strength": str(signal_strength),
+                    "strategy_id": item["strategy_id"],
+                    "model_id": item["model_id"],
+                    "config_sha256": item["config_sha256"],
+                }
+            )
+            if recomputed_intent_sha256 != item["intent_sha256"]:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision intent execution hash is invalid"
+                )
+            canonical_opportunities.append(opportunity)
 
         try:
             execution_events = runtime.ledger.events(run_id)
@@ -3167,9 +3272,14 @@ class PersistentLiveDecisionLoop:
             )
 
         positive_inputs = tuple(
-            (index, item, stake)
-            for index, (item, stake) in enumerate(
-                zip(intent_items, durable_plan.stakes, strict=True)
+            (index, item, opportunity, stake)
+            for index, (item, opportunity, stake) in enumerate(
+                zip(
+                    intent_items,
+                    canonical_opportunities,
+                    durable_plan.stakes,
+                    strict=True,
+                )
             )
             if stake > 0
         )
@@ -3186,6 +3296,7 @@ class PersistentLiveDecisionLoop:
         for position, (
             original_index,
             intent_item,
+            opportunity,
             stake,
         ) in enumerate(positive_inputs):
             action_id = action_ids[position]
@@ -3199,40 +3310,25 @@ class PersistentLiveDecisionLoop:
                 raise DecisionLedgerIntegrityError(
                     "committed live decision execution input binding is invalid"
                 )
-            risk_context = intent_item.get("risk_context")
-            opportunity = intent_item.get("opportunity")
-            if (
-                type(risk_context) is not dict
-                or type(opportunity) is not dict
-                or type(opportunity.get("quotes")) is not list
-            ):
-                raise DecisionLedgerIntegrityError(
-                    "committed live decision execution evidence is incomplete"
-                )
-
-            candidate_quotes: list[dict[str, object]] = []
-            for quote in opportunity["quotes"]:
-                if type(quote) is not dict:
-                    continue
-                candidate_action_id = (
+            risk_context = intent_item["risk_context"]
+            candidate_quotes = tuple(
+                quote
+                for quote in opportunity.quotes
+                if (
                     "paper-action-v1-"
                     + _canonical_json_sha256(
                         {
                             "decision_id": progress.decision_id,
-                            "intent_id": intent_item.get("intent_id"),
-                            "intent_sha256": intent_item.get(
-                                "intent_sha256"
-                            ),
-                            "quote_market_event_hash": quote.get(
-                                "market_event_hash"
-                            ),
+                            "intent_id": intent_item["intent_id"],
+                            "intent_sha256": intent_item["intent_sha256"],
+                            "quote_market_event_hash": quote.market_event_hash,
                             "stake": str(stake),
                             "index": original_index,
                         }
                     )
+                    == action_id
                 )
-                if candidate_action_id == action_id:
-                    candidate_quotes.append(quote)
+            )
             if len(candidate_quotes) != 1:
                 raise DecisionLedgerIntegrityError(
                     "committed live decision #623 action identity is invalid"
@@ -3245,7 +3341,7 @@ class PersistentLiveDecisionLoop:
                 or len(provider_accounts) != 1
                 or type(provider_accounts[0]) is not list
                 or len(provider_accounts[0]) != 2
-                or provider_accounts[0][0] != quote.get("source_id")
+                or provider_accounts[0][0] != quote.source_id
                 or type(provider_accounts[0][1]) is not str
                 or not provider_accounts[0][1]
             ):
@@ -3255,24 +3351,22 @@ class PersistentLiveDecisionLoop:
             account_id = provider_accounts[0][1]
 
             try:
-                quote_clock = quote.get("source_ts") or quote.get(
-                    "observed_ts"
-                )
+                quote_clock = quote.source_ts or quote.observed_ts
                 _, quote_time = _canonical_timestamp(
                     "execution quote observed time",
                     quote_clock,
                 )
                 action = ExecutionAction(
                     action_id=action_id,
-                    bookmaker_id=quote.get("source_id"),
+                    bookmaker_id=quote.source_id,
                     account_id=account_id,
-                    event_id=quote.get("event_id"),
-                    market_id=quote.get("market_id"),
-                    selection_id=quote.get("selection_id"),
+                    event_id=quote.event_id,
+                    market_id=quote.market_id,
+                    selection_id=quote.selection_id,
                     side="BACK",
-                    requested_odds=quote.get("decimal_odds"),
+                    requested_odds=quote.decimal_odds,
                     requested_stake=stake,
-                    quote_id=quote.get("market_event_hash"),
+                    quote_id=quote.market_event_hash,
                     quote_observed_at=quote_time.isoformat(
                         timespec="microseconds"
                     ),
@@ -3282,7 +3376,7 @@ class PersistentLiveDecisionLoop:
                 )
                 binding = PaperExposureBinding(
                     action_id=action_id,
-                    sport=quote.get("sport"),
+                    sport=quote.sport,
                     bankroll_id=risk_context.get("bankroll_id"),
                     currency=risk_context.get("currency"),
                 )

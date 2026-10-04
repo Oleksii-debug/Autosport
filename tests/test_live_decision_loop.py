@@ -3697,6 +3697,62 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 )
             self.assertEqual(model_observer.calls, 0)
 
+            opportunity_envelope = json.loads(
+                json.dumps(original_envelope)
+            )
+            opportunity_record = opportunity_envelope["record"]
+            opportunity_item = opportunity_record["payload"][
+                "paper_execution"
+            ]["intent_evidence_json"]
+            opportunity_payload = json.loads(opportunity_item)
+            quote_payload = opportunity_payload["intents"][0][
+                "opportunity"
+            ]["quotes"][0]
+            quote_payload["decimal_odds"] = "9.99"
+            opportunity_record["payload"]["paper_execution"][
+                "intent_evidence_json"
+            ] = json.dumps(
+                opportunity_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            canonical = JsonlDecisionLedger._canonical_record(
+                opportunity_record
+            )
+            opportunity_envelope["sha256"] = hashlib.sha256(
+                canonical.encode("utf-8")
+            ).hexdigest()
+            ledger_path.write_text(
+                json.dumps(
+                    opportunity_envelope,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            JsonlDecisionLedger(ledger_path).verify_integrity()
+
+            opportunity_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "intent execution item is invalid",
+            ):
+                self._loop(
+                    workspace,
+                    observer=opportunity_observer,
+                    factory=_PositiveIntentFactory(
+                        self.INTENT_CONFIG_SHA256
+                    ),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                    book=resumed_book,
+                    authority=authority,
+                    paper_execution=resumed_execution,
+                )
+            self.assertEqual(opportunity_observer.calls, 0)
+
             ledger_path.write_text(
                 json.dumps(
                     original_envelope,

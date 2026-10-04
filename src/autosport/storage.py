@@ -678,6 +678,30 @@ def _ensure_canonical_secondary_indexes(connection: sqlite3.Connection) -> None:
             )
 
 
+def _trusted_live_events_from_connection(
+    connection: sqlite3.Connection,
+) -> list[MarketEvent]:
+    """Read and verify receipt-authoritative history from one locked connection."""
+    rows = connection.execute(
+        f"""SELECT {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)},
+                   r.ingest_ts,r.authority
+            FROM market_events AS m
+            INNER JOIN market_event_live_receipts AS r
+            ON r.dedupe_key=m.dedupe_key"""
+    ).fetchall()
+    events: list[MarketEvent] = []
+    for row in rows:
+        event = _event_from_history_row(row[: len(_HISTORY_COLUMNS)])
+        receipt_ingest_ts, authority = row[-2:]
+        if (
+            receipt_ingest_ts != event.ingest_ts
+            or authority != _LIVE_RECEIPT_AUTHORITY
+        ):
+            raise ValueError("live receipt authority conflicts with market history")
+        events.append(event)
+    return sorted(events, key=_event_order_key)
+
+
 class SQLiteMarketStore:
     """Crash-safe append-only normalized market history plus current quote projection.
 
@@ -1021,32 +1045,25 @@ class SQLiteMarketStore:
             raise ValueError("live receipt authority conflicts with market event")
         return True
 
-    def trusted_live_events(self) -> list[MarketEvent]:
+    def trusted_live_events(
+        self,
+        *,
+        _read=_trusted_live_events_from_connection,
+    ) -> list[MarketEvent]:
         """Return only history rows whose local receipt instant has product authority."""
         with self._connection_lock:
-            rows = self.connection.execute(
-                f"""SELECT {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)},
-                           r.ingest_ts,r.authority
-                    FROM market_events AS m
-                    INNER JOIN market_event_live_receipts AS r
-                    ON r.dedupe_key=m.dedupe_key"""
-            ).fetchall()
-            events: list[MarketEvent] = []
-            for row in rows:
-                event = _event_from_history_row(row[: len(_HISTORY_COLUMNS)])
-                receipt_ingest_ts, authority = row[-2:]
-                if (
-                    receipt_ingest_ts != event.ingest_ts
-                    or authority != _LIVE_RECEIPT_AUTHORITY
-                ):
-                    raise ValueError("live receipt authority conflicts with market history")
-                events.append(event)
-        return sorted(events, key=_event_order_key)
+            return _read(self.connection)
 
-    def trusted_live_current_by_source(self) -> dict[tuple[str, str], MarketEvent]:
+    def trusted_live_current_by_source(
+        self,
+        *,
+        _read=_trusted_live_events_from_connection,
+    ) -> dict[tuple[str, str], MarketEvent]:
         """Project latest source-local live state without retroactively trusting imports."""
+        with self._connection_lock:
+            events = _read(self.connection)
         current: dict[tuple[str, str], MarketEvent] = {}
-        for event in __class__.trusted_live_events(self):
+        for event in events:
             key = (event.source_id, _market_event_quote_key(event))
             previous = current.get(key)
             if previous is None or _projection_order_key(event) > _projection_order_key(

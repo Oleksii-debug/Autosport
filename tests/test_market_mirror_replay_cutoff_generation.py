@@ -2464,6 +2464,83 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 second.close()
                 first.close()
 
+    def test_distinct_new_cutoff_still_requires_append_lock_when_old_cutoff_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            first = SQLiteMarketStore(path)
+            second = SQLiteMarketStore(path)
+            later_cutoff = self.CUTOFF + timedelta(seconds=1)
+            writer_at_machine_commit = threading.Event()
+            release_writer = threading.Event()
+            foreign_recovery = threading.Event()
+            writer_errors: list[BaseException] = []
+            original_recover = MonotonicWorkspaceAuthority.recover
+
+            # An older exact cutoff is already independently sealed. Its existence
+            # must not let a distinct later cutoff bypass live append issuance.
+            self.assertEqual(len(self.replay(second).events), 0)
+
+            def guarded_recover(authority, **kwargs):
+                tx_id = kwargs.get("tx_id")
+                if isinstance(tx_id, str) and tx_id.startswith("append-"):
+                    if threading.current_thread().name == "append-writer":
+                        writer_at_machine_commit.set()
+                        if not release_writer.wait(timeout=5):
+                            raise TimeoutError("append writer was not released")
+                    else:
+                        foreign_recovery.set()
+                return original_recover(authority, **kwargs)
+
+            def append_from_first() -> None:
+                try:
+                    first.append(
+                        self.event(
+                            sequence=1,
+                            odds="2.00",
+                            observed_ts="2026-09-16T19:00:00+00:00",
+                        )
+                    )
+                except BaseException as exc:  # pragma: no cover - thread handoff
+                    writer_errors.append(exc)
+
+            try:
+                with patch.object(
+                    MonotonicWorkspaceAuthority,
+                    "recover",
+                    new=guarded_recover,
+                ):
+                    writer = threading.Thread(
+                        target=append_from_first,
+                        name="append-writer",
+                    )
+                    writer.start()
+                    self.assertTrue(writer_at_machine_commit.wait(timeout=5))
+
+                    # The already sealed exact cutoff remains readable.
+                    self.assertEqual(len(self.replay(second).events), 0)
+
+                    # A different cutoff identity is new authority and must not
+                    # recover the live append PREPARE merely because an older row
+                    # already exists in market_replay_cutoffs.
+                    with self.assertRaises(WorkspaceEconomicLockBusyError):
+                        self.replay(second, as_of=later_cutoff)
+                    self.assertFalse(foreign_recovery.is_set())
+
+                    release_writer.set()
+                    writer.join(timeout=5)
+                    self.assertFalse(writer.is_alive())
+
+                self.assertEqual(writer_errors, [])
+                self.assertEqual(
+                    len(self.replay(second, as_of=later_cutoff).events),
+                    1,
+                )
+                self.assertFalse(foreign_recovery.is_set())
+            finally:
+                release_writer.set()
+                second.close()
+                first.close()
+
     def test_parallel_store_append_lock_contention_has_no_partial_write(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

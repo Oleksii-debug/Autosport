@@ -3616,6 +3616,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             ledger_path = workspace / "decisions.jsonl"
             envelope = json.loads(ledger_path.read_text(encoding="utf-8"))
+            original_envelope = json.loads(json.dumps(envelope))
             record = envelope["record"]
             del record["payload"]["paper_execution"]
             canonical = JsonlDecisionLedger._canonical_record(record)
@@ -3657,6 +3658,43 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     paper_execution=resumed_execution,
                 )
             self.assertEqual(resumed_observer.calls, 0)
+
+            model_envelope = original_envelope
+            model_record = model_envelope["record"]
+            model_record["payload"]["paper_execution"]["model_fingerprint"] = (
+                "0" * 64
+            )
+            canonical = JsonlDecisionLedger._canonical_record(model_record)
+            model_envelope["sha256"] = hashlib.sha256(
+                canonical.encode("utf-8")
+            ).hexdigest()
+            ledger_path.write_text(
+                json.dumps(
+                    model_envelope,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            JsonlDecisionLedger(ledger_path).verify_integrity()
+
+            model_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "execution model conflicts with runtime",
+            ):
+                self._loop(
+                    workspace,
+                    observer=model_observer,
+                    factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                    book=resumed_book,
+                    authority=authority,
+                    paper_execution=resumed_execution,
+                )
+            self.assertEqual(model_observer.calls, 0)
 
     def test_pending_restart_recovers_before_polling_new_quote(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

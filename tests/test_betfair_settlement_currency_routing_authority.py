@@ -148,25 +148,19 @@ def test_account_route_change_after_capture_revokes_currency_persistence(
         origin_guard._currency_for_capture(capture)
 
 
-def test_k07_verifier_executable_drift_cannot_preserve_currency_after_credential_rotation(
+def test_k07_verifier_executable_identity_drift_is_rejected_before_persistence(
     monkeypatch,
 ) -> None:
     client, _provider = _client(monkeypatch)
     capture = _qualified_capture(client)
     assert origin_guard._currency_for_capture(capture) == "USD"
-
-    client._credentials = BetfairSessionCredentials(
-        "app-key-rotated",
-        "session-token-rotated",
-    )
-
-    def permissive_verifier(identity, *, client):
-        return identity
+    original_code = origin_guard._REQUIRE_IDENTITY.__code__
+    drifted_code = original_code.replace(co_name="drifted_k07_verifier")
 
     monkeypatch.setattr(
         origin_guard._REQUIRE_IDENTITY,
         "__code__",
-        permissive_verifier.__code__,
+        drifted_code,
     )
 
     with pytest.raises(

@@ -1559,6 +1559,64 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
         finally:
             terminal_mapping_authority.hashlib.sha256 = original
 
+    def test_positive_capability_proof_code_mutation_is_rejected(self) -> None:
+        getter = ProductProposalRiskTerminalStateMapping.__dict__[
+            "terminal_mapping_proven"
+        ].fget
+        self.assertIsNotNone(getter)
+        proof = getter.__defaults__[0]
+        original_code = proof.__code__
+
+        def forged_proof(_instance):
+            return True
+
+        try:
+            proof.__code__ = forged_proof.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "result authority surface changed",
+            ):
+                self._binding(("winner:other-a", "winner:selection-b"))
+        finally:
+            proof.__code__ = original_code
+
+    def test_hard_false_getter_code_mutation_is_rejected(self) -> None:
+        getter = ProductProposalRiskTerminalStateMapping.__dict__[
+            "scenario_execution_proven"
+        ].fget
+        self.assertIsNotNone(getter)
+        original_code = getter.__code__
+
+        def forged_execution(_self):
+            return True
+
+        try:
+            getter.__code__ = forged_execution.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "result authority surface changed",
+            ):
+                self._binding(("winner:other-a", "winner:selection-b"))
+        finally:
+            getter.__code__ = original_code
+
+    def test_mint_binder_replacement_is_rejected(self) -> None:
+        kwdefaults = terminal_mapping_authority._mint_result.__kwdefaults__
+        original = kwdefaults["_bind_mapping"]
+
+        def forged_bind(_instance):
+            return None
+
+        try:
+            kwdefaults["_bind_mapping"] = forged_bind
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "result mint capability changed",
+            ):
+                self._binding(("winner:other-a", "winner:selection-b"))
+        finally:
+            kwdefaults["_bind_mapping"] = original
+
 
 if __name__ == "__main__":
     unittest.main()

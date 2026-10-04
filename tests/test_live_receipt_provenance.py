@@ -203,6 +203,106 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertTrue(store.has_trusted_live_receipt(event))
             store.close()
 
+    def test_live_capability_constructor_descriptor_rebind_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self._direct_event(sequence=1)
+            capability_type = storage_module._LiveReceiptBatch
+
+            with patch.object(
+                capability_type,
+                "__init__",
+                side_effect=AssertionError("mutable capability constructor must not be consulted"),
+            ):
+                accepted = store._append_live_batch_accepted([event])
+
+            self.assertEqual(accepted, [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_live_capability_iterator_descriptor_rebind_cannot_rewrite_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self._direct_event(sequence=1)
+            forged = replace(event, ingest_ts="2000-01-01T00:00:00+00:00")
+            capability_type = storage_module._LiveReceiptBatch
+
+            with patch.object(
+                capability_type,
+                "__iter__",
+                lambda _capability: iter((forged,)),
+            ):
+                accepted = store._append_live_batch_accepted([event])
+
+            self.assertEqual(accepted, [event])
+            trusted = store.trusted_live_events()
+            self.assertEqual(trusted, [event])
+            self.assertEqual(trusted[0].ingest_ts, event.ingest_ts)
+            store.close()
+
+    def test_live_capability_authorizer_rebind_cannot_promote_reentrant_generic_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            live_event = self._direct_event(sequence=1)
+            generic_event = self._direct_event(sequence=2, odds="2.20")
+            capability_type = storage_module._LiveReceiptBatch
+            canonical_append = store.append_batch_accepted
+            generic_results = []
+
+            def retry_hook(events):
+                with patch.object(capability_type, "authorizes", return_value=True):
+                    generic_results.append(canonical_append([generic_event]))
+                return canonical_append(events)
+
+            with patch.object(store, "append_batch_accepted", side_effect=retry_hook):
+                accepted = store._append_live_batch_accepted([live_event])
+
+            self.assertEqual(accepted, [live_event])
+            self.assertEqual(generic_results, [[generic_event]])
+            self.assertFalse(store.has_trusted_live_receipt(generic_event))
+            self.assertTrue(store.has_trusted_live_receipt(live_event))
+            store.close()
+
+    def test_live_authority_write_uses_sealed_store_descriptors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self._direct_event(sequence=1)
+
+            with (
+                patch.object(
+                    SQLiteMarketStore,
+                    "_insert_one",
+                    side_effect=AssertionError("mutable insert descriptor must not be consulted"),
+                ),
+                patch.object(
+                    SQLiteMarketStore,
+                    "_insert_live_receipt_authority",
+                    side_effect=AssertionError("mutable receipt descriptor must not be consulted"),
+                ),
+            ):
+                accepted = store._append_live_batch_accepted([event])
+
+            self.assertEqual(accepted, [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_live_authority_write_ignores_instance_insert_shadows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self._direct_event(sequence=1)
+            store._insert_one = lambda _event: (_ for _ in ()).throw(
+                AssertionError("instance insert shadow must not be consulted")
+            )
+            store._insert_live_receipt_authority = lambda _event: (_ for _ in ()).throw(
+                AssertionError("instance receipt shadow must not be consulted")
+            )
+
+            accepted = store._append_live_batch_accepted([event])
+
+            self.assertEqual(accepted, [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
     def test_live_retry_keeps_canonical_market_event_type_after_module_rebind(self) -> None:
         class PoisonMarketEvent(MarketEvent):
             @classmethod
@@ -1278,11 +1378,15 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"
             store = SQLiteMarketStore(path)
-            with patch.object(
-                store,
-                "_insert_live_receipt_authority",
-                side_effect=sqlite3.OperationalError("receipt write failed"),
-            ):
+            canonical_append = store.append_batch_accepted
+
+            def fail_receipt(_store, _event):
+                raise sqlite3.OperationalError("receipt write failed")
+
+            def injected_append(events):
+                return canonical_append(events, _insert_receipt_fn=fail_receipt)
+
+            with patch.object(store, "append_batch_accepted", side_effect=injected_append):
                 with self.assertRaisesRegex(sqlite3.OperationalError, "receipt write failed"):
                     self._ingest(store)
 

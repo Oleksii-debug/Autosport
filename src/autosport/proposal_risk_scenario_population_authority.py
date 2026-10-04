@@ -895,6 +895,34 @@ def _require_dispatch(
         is not _MEMBER_BINDING_POST_INIT
         or getattr(_MEMBER_BINDING_POST_INIT, "__code__", None)
         is not _MEMBER_BINDING_POST_INIT_CODE
+        or issue_product_proposal_risk_scenario_population
+        is not _PUBLIC_ISSUE_EXPECTED
+        or getattr(
+            issue_product_proposal_risk_scenario_population,
+            "__code__",
+            None,
+        )
+        is not _PUBLIC_ISSUE_CODE
+        or getattr(
+            issue_product_proposal_risk_scenario_population,
+            "__closure__",
+            None,
+        )
+        is not _PUBLIC_ISSUE_CLOSURE
+        or resolve_product_proposal_risk_scenario_population
+        is not _PUBLIC_RESOLVE_EXPECTED
+        or getattr(
+            resolve_product_proposal_risk_scenario_population,
+            "__code__",
+            None,
+        )
+        is not _PUBLIC_RESOLVE_CODE
+        or getattr(
+            resolve_product_proposal_risk_scenario_population,
+            "__closure__",
+            None,
+        )
+        is not _PUBLIC_RESOLVE_CLOSURE
     ):
         raise ProductProposalRiskScenarioPopulationError(
             "scenario population authority dispatch changed"
@@ -1665,14 +1693,14 @@ def _require_authority_committed(
         )
 
 
-def _mint(
+def _materialize_unbound(
     precommit: ProductProposalRiskEvaluationPrecommit,
     terminal_population: ProductProposalTargetTerminalPopulation,
     record: DecisionRecord,
     values: dict[str, object],
-    *,
-    _bind_identity=_BIND_IDENTITY,
 ) -> ProductProposalRiskScenarioPopulation:
+    """Materialize validated fields without granting product-issued identity."""
+
     members = values["members"]
     instance = object.__new__(_RESULT_TYPE)
     result = {
@@ -1696,7 +1724,6 @@ def _mint(
     }
     for name in _RESULT_FIELDS:
         object.__setattr__(instance, name, result[name])
-    _bind_identity(instance)
     return instance
 
 
@@ -1739,13 +1766,13 @@ _HELPER_WITNESSES = tuple(
         "_record_values",
         "_recover_population_authority",
         "_require_authority_committed",
-        "_mint",
+        "_materialize_unbound",
     )
 )
 _HELPER_WITNESSES_EXPECTED = _HELPER_WITNESSES
 
 
-def issue_product_proposal_risk_scenario_population(
+def _issue_product_proposal_risk_scenario_population_unbound(
     workspace: Path,
     precommit: ProductProposalRiskEvaluationPrecommit,
     terminal_population: ProductProposalTargetTerminalPopulation,
@@ -1826,7 +1853,7 @@ def issue_product_proposal_risk_scenario_population(
                     "a different scenario population is already bound to this precommit"
                 )
             _require_authority_committed(authority, committed)
-            return _mint(
+            return _materialize_unbound(
                 precommit,
                 terminal_population,
                 existing,
@@ -1935,7 +1962,7 @@ def issue_product_proposal_risk_scenario_population(
                 "scenario population authority COMMIT failed; exact recovery is required"
             ) from exc
         _require_authority_committed(authority, population_sha256)
-        return _mint(
+        return _materialize_unbound(
             precommit,
             terminal_population,
             existing,
@@ -1943,7 +1970,7 @@ def issue_product_proposal_risk_scenario_population(
         )
 
 
-def resolve_product_proposal_risk_scenario_population(
+def _resolve_product_proposal_risk_scenario_population_unbound(
     workspace: Path,
     precommit: ProductProposalRiskEvaluationPrecommit,
     terminal_population: ProductProposalTargetTerminalPopulation,
@@ -2014,12 +2041,69 @@ def resolve_product_proposal_risk_scenario_population(
                 "scenario population durable authorities disagree"
             )
         _require_authority_committed(authority, committed)
-        return _mint(
+        return _materialize_unbound(
             precommit,
             terminal_population,
             record,
             values,
         )
+
+
+def _make_public_operations(_bind_identity):
+    def issue(
+        workspace: Path,
+        precommit: ProductProposalRiskEvaluationPrecommit,
+        terminal_population: ProductProposalTargetTerminalPopulation,
+        members: tuple[CounterfactualScenarioMemberBinding, ...],
+    ) -> ProductProposalRiskScenarioPopulation:
+        instance = _issue_product_proposal_risk_scenario_population_unbound(
+            workspace,
+            precommit,
+            terminal_population,
+            members,
+        )
+        _bind_identity(instance)
+        return instance
+
+    def resolve(
+        workspace: Path,
+        precommit: ProductProposalRiskEvaluationPrecommit,
+        terminal_population: ProductProposalTargetTerminalPopulation,
+    ) -> ProductProposalRiskScenarioPopulation:
+        instance = _resolve_product_proposal_risk_scenario_population_unbound(
+            workspace,
+            precommit,
+            terminal_population,
+        )
+        _bind_identity(instance)
+        return instance
+
+    issue.__name__ = "issue_product_proposal_risk_scenario_population"
+    issue.__qualname__ = issue.__name__
+    issue.__doc__ = (
+        "Durably bind one fixed-N member-to-scenario vector to verified "
+        "terminal space."
+    )
+    resolve.__name__ = "resolve_product_proposal_risk_scenario_population"
+    resolve.__qualname__ = resolve.__name__
+    resolve.__doc__ = (
+        "Re-resolve the durable fixed-N scenario mapping against the same "
+        "verified terminal population."
+    )
+    return issue, resolve
+
+
+(
+    issue_product_proposal_risk_scenario_population,
+    resolve_product_proposal_risk_scenario_population,
+) = _make_public_operations(_BIND_IDENTITY)
+_PUBLIC_ISSUE_EXPECTED = issue_product_proposal_risk_scenario_population
+_PUBLIC_ISSUE_CODE = getattr(_PUBLIC_ISSUE_EXPECTED, "__code__", None)
+_PUBLIC_ISSUE_CLOSURE = getattr(_PUBLIC_ISSUE_EXPECTED, "__closure__", None)
+_PUBLIC_RESOLVE_EXPECTED = resolve_product_proposal_risk_scenario_population
+_PUBLIC_RESOLVE_CODE = getattr(_PUBLIC_RESOLVE_EXPECTED, "__code__", None)
+_PUBLIC_RESOLVE_CLOSURE = getattr(_PUBLIC_RESOLVE_EXPECTED, "__closure__", None)
+del _make_public_operations
 
 
 del _IDENTITY_PROVEN

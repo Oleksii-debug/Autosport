@@ -142,12 +142,29 @@ class SettlementReceiptIdentityTests(unittest.TestCase):
                 settlement_evidence=(first,),
             )
             raw_state = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(raw_state["schema_version"], 3)
-            fingerprint = raw_state["settlement_evidence"][0][
+            self.assertEqual(raw_state["schema_version"], 4)
+            self.assertEqual(raw_state["settlement_evidence_count"], 1)
+            self.assertNotIn("settlement_evidence", raw_state)
+            fingerprint = state.snapshot().settlement_evidence[0][
                 "quote_outcomes_sha256"
             ]
             self.assertIsInstance(fingerprint, str)
             self.assertEqual(len(fingerprint), 64)
+
+            journal = path.with_name(
+                f"{path.stem}.settlement-evidence"
+            )
+            records = [
+                json.loads(record.read_text(encoding="utf-8"))
+                for record in journal.iterdir()
+                if record.suffix == ".json"
+            ]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["schema_version"], 2)
+            self.assertEqual(
+                records[0]["quote_outcomes_sha256"],
+                fingerprint,
+            )
 
             reordered = SettlementResolution(
                 event_identity=first.event_identity,
@@ -164,7 +181,7 @@ class SettlementReceiptIdentityTests(unittest.TestCase):
                 settlement_evidence=(reordered,)
             )
 
-    def test_duplicate_durable_receipt_ids_fail_closed(self) -> None:
+    def test_duplicate_durable_receipt_alias_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "continuous_session.json"
             state = _state(path)
@@ -173,14 +190,21 @@ class SettlementReceiptIdentityTests(unittest.TestCase):
                 full_refresh=False,
                 settlement_evidence=(_resolution(),),
             )
-            raw_state = json.loads(path.read_text(encoding="utf-8"))
-            duplicate = dict(raw_state["settlement_evidence"][0])
-            duplicate["quote_outcomes_sha256"] = "c" * 64
-            raw_state["settlement_evidence"].append(duplicate)
-            path.write_text(json.dumps(raw_state), encoding="utf-8")
+            journal = path.with_name(
+                f"{path.stem}.settlement-evidence"
+            )
+            records = [
+                record
+                for record in journal.iterdir()
+                if record.suffix == ".json"
+            ]
+            self.assertEqual(len(records), 1)
+            alias = journal / ("c" * 64 + ".json")
+            alias.write_bytes(records[0].read_bytes())
+
             with self.assertRaisesRegex(
                 ContinuousSessionError,
-                "evidence_id values must be unique",
+                "filename/key mismatch",
             ):
                 _state(path)
 

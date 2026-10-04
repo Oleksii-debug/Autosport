@@ -278,43 +278,72 @@ class _ProductRuntimeLease(WorkspaceEconomicLock):
     """Crash-releasing single-process authority for one canonical product workspace."""
 
     FILE_NAME = ".product-runtime.lock"
+    _PRODUCT_AUTHORITY_FIELDS = frozenset(
+        {
+            "_product_authority_fields_sealed",
+            "_authority_active",
+            "_acquired_once",
+            "_operation_fence",
+        }
+    )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        try:
+            sealed = object.__getattribute__(
+                self,
+                "_product_authority_fields_sealed",
+            )
+        except AttributeError:
+            sealed = False
+        if sealed and name in (
+            "_product_authority_fields_sealed",
+            "_authority_active",
+            "_acquired_once",
+            "_operation_fence",
+        ):
+            raise WorkspaceEconomicLockError(
+                f"product runtime lease authority field {name!r} is immutable"
+            )
+        object.__setattr__(self, name, value)
 
     def __init__(self, workspace: str | Path) -> None:
+        object.__setattr__(self, "_product_authority_fields_sealed", False)
         super().__init__(workspace)
-        self._authority_active = False
-        self._acquired_once = False
-        self._operation_fence: RLock | None = None
+        object.__setattr__(self, "_authority_active", False)
+        object.__setattr__(self, "_acquired_once", False)
+        object.__setattr__(self, "_operation_fence", None)
+        object.__setattr__(self, "_product_authority_fields_sealed", True)
 
     def bind_operation_fence(self, operation_fence: RLock) -> None:
         """Bind runtime release to the same in-process lifecycle serialization fence."""
-        if self._operation_fence is not None:
+        if object.__getattribute__(self, "_operation_fence") is not None:
             raise WorkspaceEconomicLockError(
                 "product runtime operation fence is already bound"
             )
-        self._operation_fence = operation_fence
+        object.__setattr__(self, "_operation_fence", operation_fence)
 
     @property
     def authority_active(self) -> bool:
         """Whether this one-shot lease still grants positive runtime authority."""
-        return self._authority_active
+        return bool(object.__getattribute__(self, "_authority_active"))
 
     def acquire(self) -> None:
-        if self._acquired_once:
+        if object.__getattribute__(self, "_acquired_once"):
             raise WorkspaceEconomicLockError(
                 "product runtime workspace authority cannot be reacquired"
             )
         super().acquire()
-        self._acquired_once = True
-        self._authority_active = True
+        object.__setattr__(self, "_acquired_once", True)
+        object.__setattr__(self, "_authority_active", True)
 
     def release(self) -> None:
-        operation_fence = self._operation_fence
+        operation_fence = object.__getattribute__(self, "_operation_fence")
         if operation_fence is None:
-            self._authority_active = False
+            object.__setattr__(self, "_authority_active", False)
             super().release()
             return
         with operation_fence:
-            self._authority_active = False
+            object.__setattr__(self, "_authority_active", False)
             super().release()
 
 
@@ -1960,7 +1989,7 @@ class AutonomousProductRuntime:
 
     @_serialized_runtime_operation
     def close(self) -> None:
-        self._closed = True
+        object.__setattr__(self, "_closed", True)
         try:
             self.market_store.close()
         except BaseException as primary_error:
@@ -2044,7 +2073,7 @@ def _build_product_runtime_type(
             if snapshot is not None and (
                 name in snapshot_fields
                 or name in entry_methods
-                or name == "__class__"
+                or name in {"__class__", "_closed"}
             ):
                 raise error_type(
                     f"product runtime authority field {name!r} is immutable"

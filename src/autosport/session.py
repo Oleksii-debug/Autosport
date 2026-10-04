@@ -392,7 +392,7 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
             draw = plan.member_draws[member_index]
 
             corpus_events = dataset.load_market_events()
-            verified_sports = dataset._assert_sport_scope(corpus_events)
+            dataset._assert_sport_scope(corpus_events)
             if self.research_plan is not None:
                 self.research_plan.preflight(corpus_events)
             member_events = materialize_product_iid_member_market_events(
@@ -400,6 +400,9 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
                 member_index=member_index,
                 market_events=corpus_events,
             )
+            verified_sports = dataset._assert_sport_scope(list(member_events))
+            if self.research_plan is not None:
+                self.research_plan.preflight(list(member_events))
 
             expected_sequence = expected_replay_input_payload_sequence_sha256(draw)
             expected_multiset = expected_replay_consumed_payload_multiset_sha256(draw)

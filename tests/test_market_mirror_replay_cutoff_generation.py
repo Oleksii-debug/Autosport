@@ -113,6 +113,53 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
         )
         store.connection.commit()
 
+    @staticmethod
+    def direct_issue_first_cutoff_authority(
+        store: SQLiteMarketStore,
+        *,
+        as_of: datetime,
+        max_generation: int,
+    ) -> MonotonicWorkspaceAuthority:
+        canonical_as_of = storage_module._canonical_replay_cutoff(as_of.isoformat())
+        cutoff_id = storage_module._replay_cutoff_id(canonical_as_of)
+        corpus_sha256 = store._frozen_replay_corpus_sha256(max_generation)
+        binding_sha256 = storage_module._replay_cutoff_binding_sha256(
+            cutoff_id=cutoff_id,
+            canonical_as_of=canonical_as_of,
+            max_append_generation=max_generation,
+            corpus_sha256=corpus_sha256,
+        )
+        rows = ((cutoff_id, canonical_as_of, max_generation),)
+        intended_state_sha256 = storage_module._replay_cutoff_state_sha256(
+            rows,
+            sealed_corpus_sha256=corpus_sha256,
+        )
+        assert intended_state_sha256 is not None
+        authority = store._replay_cutoff_authority()
+        self_rows = store._validated_replay_cutoff_rows()
+        if self_rows:
+            raise AssertionError("direct first-cutoff helper requires an empty cutoff table")
+        tx_id = f"{cutoff_id[:32]}-{'0' * 32}"
+        authority.prepare(
+            tx_id=tx_id,
+            observed_state_sha256=None,
+            intended_state_sha256=intended_state_sha256,
+            semantic_binding_sha256=binding_sha256,
+        )
+        store.connection.execute(
+            """INSERT INTO market_replay_cutoffs
+               (cutoff_id, as_of, max_append_generation)
+               VALUES (?, ?, ?)""",
+            (cutoff_id, canonical_as_of, max_generation),
+        )
+        store.connection.commit()
+        authority.recover(
+            observed_state_sha256=intended_state_sha256,
+            tx_id=tx_id,
+            semantic_binding_sha256=binding_sha256,
+        )
+        return authority
+
     def test_generation_zero_baseline_recovers_after_prepare_crash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"
@@ -3708,6 +3755,52 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
                     "cutoff exceeds independently committed append authority",
+                ):
+                    self.replay(store)
+            finally:
+                store.close()
+
+    def test_cutoff_inside_atomic_append_batch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                second = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:00.500000+00:00",
+                )
+                self.assertEqual(
+                    store.append_batch_accepted((first, second)),
+                    [first, second],
+                )
+
+                append_history = store._market_append_authority().read_history()
+                positive_commits = [
+                    record
+                    for record in append_history
+                    if record.phase.value == "COMMIT"
+                    and record.tx_id.startswith("append-")
+                ]
+                self.assertEqual(len(positive_commits), 1)
+                self.assertRegex(
+                    positive_commits[0].tx_id,
+                    r"^append-1-2-[0-9a-f]{32}$",
+                )
+
+                self.direct_issue_first_cutoff_authority(
+                    store,
+                    as_of=self.CUTOFF,
+                    max_generation=1,
+                )
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "not an exact committed append transition boundary",
                 ):
                     self.replay(store)
             finally:

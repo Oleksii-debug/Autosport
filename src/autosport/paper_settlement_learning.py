@@ -502,7 +502,18 @@ class PaperSettlementLearningBridge:
         with WorkspaceEconomicLock(self.state_path.parent):
             if self.state_path.exists():
                 state = self._read()
+                book = None
+                if state["bindings"]:
+                    try:
+                        book = PaperBook.load(self.paper_book_path)
+                    except (OSError, ValueError) as exc:
+                        raise PaperSettlementLearningBridgeError(
+                            "durable bridge PaperBook is unavailable or invalid"
+                        ) from exc
                 for binding in state["bindings"].values():
+                    ticket = self._bound_ticket(book, binding)
+                    if binding["status"] != BOUND:
+                        self._require_outbox_matches_ticket(binding, ticket)
                     if (
                         binding["economic_goal_fingerprint"]
                         != owner_goal_fingerprint
@@ -1650,6 +1661,23 @@ class PaperSettlementLearningBridge:
         ):
             raise PaperSettlementLearningBridgeError(
                 "PaperBook changed after learner outbox publication"
+            )
+        expected_reward = _exact_subtract(ticket.payout, ticket.stake)
+        outcome, reward, transition, _checkpoint_value = (
+            PaperSettlementLearningBridge._outbox_objects(outbox)
+        )
+        if (
+            str(expected_reward) != outbox["net_reward"]
+            or reward.reward != expected_reward
+            or outcome.environment_id != binding["environment_id"]
+            or outcome.action_id != binding["action_id"]
+            or transition.environment_id != binding["environment_id"]
+            or transition.episode_id != binding["episode_id"]
+            or transition.observation_id != binding["observation_id"]
+            or transition.action_id != binding["action_id"]
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "learner outbox differs from bound ticket economics or causal identity"
             )
 
     def reconcile_after_settlement(

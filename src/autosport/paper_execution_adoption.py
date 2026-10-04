@@ -21,6 +21,7 @@ from .paper_execution_reality import (
     PaperExecutionLedger,
     PaperExecutionModelConfig,
     PaperExecutionRun,
+    PaperExecutionStateError,
     execute_paper_plan,
 )
 from .portfolio_plan import (
@@ -579,31 +580,15 @@ class PaperExecutionAdoptionRuntime:
         prepared: PreparedPaperExecution,
         run_id: str,
     ) -> None:
-        """Persist the already-minted #646 scope into the canonical #623 ledger.
-
-        This is not a second scope authority. The in-process minted capability is
-        checked first, then the exact immutable binding is copied into the same
-        hash-chained execution ledger before any attempt can be recorded. A restart
-        re-mints from canonical inputs and can only reproduce the same event payload;
-        any substituted sport/bankroll/currency conflicts on the stable event key.
-        """
+        """Persist the exact #646 scope before any #623 run state."""
         self._require_minted(prepared)
-        run_events = self.ledger.events(run_id)
-        scope_events = [
-            event
-            for event in run_events
-            if event["event_type"] == self._EXPOSURE_SCOPE_EVENT_TYPE
-        ]
-        if not scope_events and run_events:
-            raise PaperExecutionAdoptionError(
-                "exposure scope cannot be retroactively published after run state"
+        try:
+            self.ledger.publish_exposure_scope(
+                run_id=run_id,
+                payload=self._exposure_scope_payload(prepared),
             )
-        self.ledger._append_event(
-            event_type=self._EXPOSURE_SCOPE_EVENT_TYPE,
-            run_id=run_id,
-            key=f"{run_id}:exposure-scope",
-            payload=self._exposure_scope_payload(prepared),
-        )
+        except PaperExecutionStateError as exc:
+            raise PaperExecutionAdoptionError(str(exc)) from exc
 
     def _require_durable_exposure_scope(
         self,

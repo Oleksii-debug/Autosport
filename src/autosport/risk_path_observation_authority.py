@@ -34,10 +34,12 @@ from .risk_sampling_occurrence_authority import (
     ProductIidDrawPlanError,
     ProductIidExpectedDrawPlan,
     ProductIidRunAdmissionReceipt,
+    ProductIidRunExecutionReceipt,
     expected_replay_consumed_payload_multiset_sha256,
     expected_replay_input_payload_sequence_sha256,
     resolve_product_iid_expected_draw_plan,
     resolve_product_iid_run_admission,
+    resolve_product_iid_run_execution,
 )
 from .run_registry import ReconciliationError, RunRegistry
 from .run_transaction import RunTransaction, RunTransactionError
@@ -97,6 +99,9 @@ _DRAW_PLAN_CODE = getattr(_DRAW_PLAN, "__code__", None)
 _RUN_ADMISSION_TYPE = ProductIidRunAdmissionReceipt
 _RUN_ADMISSION = resolve_product_iid_run_admission
 _RUN_ADMISSION_CODE = getattr(_RUN_ADMISSION, "__code__", None)
+_RUN_EXECUTION_TYPE = ProductIidRunExecutionReceipt
+_RUN_EXECUTION = resolve_product_iid_run_execution
+_RUN_EXECUTION_CODE = getattr(_RUN_EXECUTION, "__code__", None)
 _EXPECTED_REPLAY_SEQUENCE = expected_replay_input_payload_sequence_sha256
 _EXPECTED_REPLAY_SEQUENCE_CODE = getattr(_EXPECTED_REPLAY_SEQUENCE, "__code__", None)
 _EXPECTED_REPLAY_MULTISET = expected_replay_consumed_payload_multiset_sha256
@@ -366,6 +371,9 @@ def _require_dispatch() -> None:
         or ProductIidRunAdmissionReceipt is not _RUN_ADMISSION_TYPE
         or resolve_product_iid_run_admission is not _RUN_ADMISSION
         or getattr(_RUN_ADMISSION, "__code__", None) is not _RUN_ADMISSION_CODE
+        or ProductIidRunExecutionReceipt is not _RUN_EXECUTION_TYPE
+        or resolve_product_iid_run_execution is not _RUN_EXECUTION
+        or getattr(_RUN_EXECUTION, "__code__", None) is not _RUN_EXECUTION_CODE
         or expected_replay_input_payload_sequence_sha256
         is not _EXPECTED_REPLAY_SEQUENCE
         or getattr(_EXPECTED_REPLAY_SEQUENCE, "__code__", None)
@@ -648,6 +656,7 @@ class ProductRunCapitalPathEvidence:
     expected_draw_plan_sha256: str
     expected_draw_transcript_sha256: str
     run_admission_receipt_sha256: str
+    run_execution_receipt_sha256: str
     expected_replay_input_event_payload_sequence_sha256: str
     completed_replay_input_event_payload_sequence_sha256: str
     expected_replay_consumed_event_payload_multiset_sha256: str
@@ -696,11 +705,11 @@ class ProductRunCapitalPathEvidence:
 
     @property
     def execution_consumption_proven(self) -> bool:
-        return False
+        return True
 
     @property
     def sampling_occurrence_ancestry_proven(self) -> bool:
-        return False
+        return True
 
     @property
     def iid_qualified(self) -> bool:
@@ -765,6 +774,16 @@ def resolve_product_run_capital_path_evidence(
             member_index=member_index,
             authority_root=authority_root,
         )
+        execution = _RUN_EXECUTION(
+            membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=sampling_manifest_json,
+            sampling_frame_json=sampling_frame_json,
+            horizon_json=horizon_json,
+            member_index=member_index,
+            authority_root=authority_root,
+        )
     except (
         ProductIidDrawPlanError,
         OSError,
@@ -805,6 +824,17 @@ def resolve_product_run_capital_path_evidence(
         or admission.sampling_manifest_sha256 != structure.manifest_sha256
         or admission.sampling_frame_sha256 != structure.sampling_frame_sha256
         or admission.horizon_sha256 != structure.horizon_sha256
+        or type(execution) is not _RUN_EXECUTION_TYPE
+        or execution.product_precommit_bound is not True
+        or execution.run_admission_bound is not True
+        or execution.execution_consumption_proven is not True
+        or execution.occurrence_ancestry_proven is not True
+        or execution.iid_qualified is not False
+        or execution.grants_real_money_authority is not False
+        or execution.member_id != run_id
+        or execution.member_index != member_index
+        or execution.expected_draw_plan_sha256 != draw_plan.plan_sha256
+        or execution.run_admission_receipt_sha256 != admission.receipt_sha256
     ):
         raise ProductRunCapitalPathError(
             "product fixed-N precommit truth boundary is inconsistent"
@@ -994,6 +1024,10 @@ def resolve_product_run_capital_path_evidence(
             admission.receipt_sha256,
             "run_admission_receipt_sha256",
         ),
+        "run_execution_receipt_sha256": _sha(
+            execution.receipt_sha256,
+            "run_execution_receipt_sha256",
+        ),
         "expected_replay_input_event_payload_sequence_sha256": (
             expected_replay_input_sha256
         ),
@@ -1014,8 +1048,8 @@ def resolve_product_run_capital_path_evidence(
         "expected_draw_product_derived": True,
         "run_admission_bound": True,
         "replay_input_binding_proven": True,
-        "execution_consumption_proven": False,
-        "sampling_occurrence_ancestry_proven": False,
+        "execution_consumption_proven": True,
+        "sampling_occurrence_ancestry_proven": True,
         "iid_qualified": False,
         "grants_real_money_authority": False,
     }
@@ -1047,6 +1081,10 @@ def resolve_product_run_capital_path_evidence(
         (
             "run_admission_receipt_sha256",
             _sha(admission.receipt_sha256, "run_admission_receipt_sha256"),
+        ),
+        (
+            "run_execution_receipt_sha256",
+            _sha(execution.receipt_sha256, "run_execution_receipt_sha256"),
         ),
         (
             "expected_replay_input_event_payload_sequence_sha256",
@@ -1169,6 +1207,7 @@ def _build_product_run_capital_path_evidence_verifier(
         "expected_draw_plan_sha256",
         "expected_draw_transcript_sha256",
         "run_admission_receipt_sha256",
+        "run_execution_receipt_sha256",
         "expected_replay_input_event_payload_sequence_sha256",
         "completed_replay_input_event_payload_sequence_sha256",
         "expected_replay_consumed_event_payload_multiset_sha256",

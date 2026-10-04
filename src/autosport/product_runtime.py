@@ -17,6 +17,7 @@ from .causal_collector import (
     CollectorDeltaStore,
     DesktopDeltaCheckpointStore,
     DesktopDeltaConsumer,
+    canonical_event_digest,
 )
 from .collector_service import CollectorServiceSource, HeadlessCollectorService
 from .continuous_session import (
@@ -51,6 +52,54 @@ from .workspace_lock import (
 class ProductCompositionError(RuntimeError):
     """The durable product composition cannot be verified safely."""
 
+
+def _receipt_authoritative_runtime_current(
+    *,
+    source_id: str,
+    market_store: SQLiteMarketStore,
+    collector_store: CollectorDeltaStore,
+    canonical_application: CanonicalDesktopApplication,
+) -> tuple[MarketEvent, ...]:
+    """Return same-source current rows proven by durable desktop application receipts.
+
+    market.db intentionally retains generic/import/audit history as canonical
+    evidence. The autonomous product mirror, however, is a product decision surface:
+    restart preload may therefore adopt only events that can be joined back to this
+    workspace's collector delta and a completed canonical desktop application receipt.
+    """
+
+    receipt_digests: set[str] = set()
+    after_delta_id: str | None = None
+    while True:
+        deltas = collector_store.deltas_after_commit(
+            source_id=source_id,
+            after_delta_id=after_delta_id,
+            max_items=1000,
+        )
+        if not deltas:
+            break
+        for delta in deltas:
+            receipt = canonical_application.lookup_receipt(delta)
+            if receipt is None:
+                continue
+            receipt.validate()
+            if (
+                receipt.delta_id != delta.delta_id
+                or receipt.canonical_event_digest != delta.canonical_event_digest
+            ):
+                raise ProductCompositionError(
+                    "desktop application receipt conflicts with collector evidence"
+                )
+            receipt_digests.add(delta.canonical_event_digest)
+        after_delta_id = deltas[-1].delta_id
+
+    accepted: list[MarketEvent] = []
+    for (stored_source_id, _quote_key), event in market_store.current_by_source().items():
+        if stored_source_id != source_id:
+            continue
+        if canonical_event_digest(event) in receipt_digests:
+            accepted.append(event)
+    return tuple(accepted)
 
 def _serialized_runtime_operation(method):
     """Hold one runtime-local fence across an admitted public lifecycle operation."""
@@ -886,20 +935,7 @@ def build_autonomous_product_runtime(
         lifecycle = ContinuousEventLifecycle(root / "catalog.json")
         market_store = SQLiteMarketStore(root / "market.db")
         lease_stack.callback(market_store.close)
-        mirror = MarketMirror()
-        invalidations = BoundedMirrorInvalidationBuffer(mirror)
-
-        # This composition owns exactly one provider/source. Canonical market.db may
-        # legitimately also contain audit/import/live history for other providers;
-        # none of that state may seed this runtime's in-memory decision projection.
-        for (stored_source_id, _quote_key), event in (
-            market_store.current_by_source().items()
-        ):
-            if stored_source_id == source_id:
-                invalidations.accept_persisted(event)
-
         market_bus = MarketEventBus(market_store)
-        market_bus.subscribe(invalidations.accept_persisted)
         source_health = SourceHealthStore(root / "source_health.json")
         canonical_application = CanonicalDesktopApplication(
             market_bus,
@@ -907,9 +943,20 @@ def build_autonomous_product_runtime(
             root / "desktop_application.json",
             clock=resolved_clock,
         )
-
-        dependencies = FocusedMirrorDependencyIndex(mirror)
         collector_store = CollectorDeltaStore(root / "collector_deltas.json")
+
+        mirror = MarketMirror()
+        invalidations = BoundedMirrorInvalidationBuffer(mirror)
+        for event in _receipt_authoritative_runtime_current(
+            source_id=source_id,
+            market_store=market_store,
+            collector_store=collector_store,
+            canonical_application=canonical_application,
+        ):
+            invalidations.accept_persisted(event)
+
+        market_bus.subscribe(invalidations.accept_persisted)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
         collector = HeadlessCollectorService(
             delta_store=collector_store,
             lifecycle=lifecycle,

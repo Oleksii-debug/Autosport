@@ -5822,6 +5822,45 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     clock=_ManualClock(self.START),
                 )
 
+    def test_non_integer_progress_schema_version_fails_closed_on_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(input_id, snapshot):
+                del input_id, snapshot
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+            first.close()
+
+            progress_path = workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+            malformed = json.loads(progress_path.read_text(encoding="utf-8"))
+            malformed["schema_version"] = 2.0
+            progress_path.write_text(
+                json.dumps(malformed, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(LiveDecisionProgressError):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                )
+
     def test_corrupted_progress_fails_closed_on_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

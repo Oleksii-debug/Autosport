@@ -462,39 +462,61 @@ def _bind_continuous_state_settlement_integrity(method):
             raise ValueError(f"{field} must be timezone-aware ISO-8601")
         return parsed.astimezone(canonical_timezone_utc)
 
-    def outcomes_digest(evidence: SettlementResolution) -> str:
+    def settlement_snapshot(
+        evidence: SettlementResolution,
+    ) -> tuple[dict[str, str], dict[str, str], str]:
         if type(evidence) is not canonical_resolution_type:
             raise TypeError("settlement evidence must be canonical")
-        canonical_text(evidence.event_identity, "event_identity")
-        canonical_text(evidence.settlement_ref, "settlement_ref")
-        canonical_text(evidence.evidence_id, "evidence_id")
-        digest = evidence.evidence_sha256
+
+        # Snapshot every caller-owned field exactly once. All durable comparison,
+        # hashing and publication below consume these detached values rather than
+        # rereading a live SettlementResolution after validation.
+        event_identity = evidence.event_identity
+        settlement_ref = evidence.settlement_ref
+        evidence_id = evidence.evidence_id
+        evidence_sha256 = evidence.evidence_sha256
+        available_at = evidence.available_at
+        quote_outcomes = evidence.quote_outcomes
+        if type(quote_outcomes) is not dict or not quote_outcomes:
+            raise ValueError("quote_outcomes must be a non-empty exact dict")
+        quote_outcomes = dict(quote_outcomes)
+
+        event_identity = canonical_text(event_identity, "event_identity")
+        settlement_ref = canonical_text(settlement_ref, "settlement_ref")
+        evidence_id = canonical_text(evidence_id, "evidence_id")
         if (
-            type(digest) is not str
-            or len(digest) != 64
-            or any(character not in canonical_hex for character in digest)
+            type(evidence_sha256) is not str
+            or len(evidence_sha256) != 64
+            or any(character not in canonical_hex for character in evidence_sha256)
         ):
             raise ValueError(
                 "evidence_sha256 must be a lowercase SHA-256 hex digest"
             )
-        canonical_instant(evidence.available_at, "available_at")
-        quote_outcomes = evidence.quote_outcomes
-        if type(quote_outcomes) is not dict or not quote_outcomes:
-            raise ValueError("quote_outcomes must be a non-empty exact dict")
+        available_at = canonical_instant(available_at, "available_at").isoformat()
+
         normalized_outcomes: dict[str, str] = {}
         for quote_key, outcome in quote_outcomes.items():
             canonical_key = canonical_text(quote_key, "quote_outcomes quote_key")
             if type(outcome) is not str or outcome not in canonical_outcomes:
                 raise ValueError("quote_outcomes contains unsupported outcome")
             normalized_outcomes[canonical_key] = outcome
+        normalized_outcomes = dict(sorted(normalized_outcomes.items()))
         payload = canonical_json_dumps(
-            dict(sorted(normalized_outcomes.items())),
+            normalized_outcomes,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
         ).encode("utf-8")
-        return canonical_sha256(payload).hexdigest()
+        outcomes_digest = canonical_sha256(payload).hexdigest()
+        normalized = {
+            "event_identity": event_identity,
+            "settlement_ref": settlement_ref,
+            "evidence_id": evidence_id,
+            "evidence_sha256": evidence_sha256,
+            "available_at": available_at,
+        }
+        return normalized, normalized_outcomes, outcomes_digest
 
     def guarded(self, raw, settlement_evidence):
         if type(settlement_evidence) is not tuple:
@@ -503,8 +525,7 @@ def _bind_continuous_state_settlement_integrity(method):
             self,
             raw,
             settlement_evidence,
-            _settlement_instant=canonical_instant,
-            _settlement_outcomes_digest=outcomes_digest,
+            _settlement_snapshot=settlement_snapshot,
         )
 
     guarded.__name__ = method.__name__
@@ -1030,8 +1051,10 @@ class _ContinuousSessionState:
         raw: dict[str, Any],
         settlement_evidence: tuple[SettlementResolution, ...],
         *,
-        _settlement_instant: Callable[[object, str], datetime],
-        _settlement_outcomes_digest: Callable[[SettlementResolution], str],
+        _settlement_snapshot: Callable[
+            [SettlementResolution],
+            tuple[dict[str, str], dict[str, str], str],
+        ],
     ) -> tuple[
         list[dict[str, str]],
         dict[str, str | None],
@@ -1059,31 +1082,21 @@ class _ContinuousSessionState:
         }
         seen_input_ids: set[str] = set()
         for evidence in settlement_evidence:
-            # Validate the exact canonical resolution before any caller-controlled
-            # attribute is consumed by the durable state authority.
-            outcomes_digest = _settlement_outcomes_digest(evidence)
-            evidence_id = evidence.evidence_id
+            normalized, normalized_outcomes, outcomes_digest = (
+                _settlement_snapshot(evidence)
+            )
+            evidence_id = normalized["evidence_id"]
             if evidence_id in seen_input_ids:
                 raise ContinuousSessionError(
                     "settlement evidence repeats evidence_id"
                 )
             seen_input_ids.add(evidence_id)
-            normalized = {
-                "event_identity": evidence.event_identity,
-                "settlement_ref": evidence.settlement_ref,
-                "evidence_id": evidence_id,
-                "evidence_sha256": evidence.evidence_sha256,
-                "available_at": _settlement_instant(
-                    evidence.available_at,
-                    "available_at",
-                ).isoformat(),
-            }
             existing = known.get(evidence_id)
             if existing is not None and existing != normalized:
                 raise ContinuousSessionError(
                     "settlement evidence id conflicts with durable evidence"
                 )
-            pair = (evidence.event_identity, evidence.settlement_ref)
+            pair = (normalized["event_identity"], normalized["settlement_ref"])
             pair_existing = known_pairs.get(pair)
             if pair_existing is not None and pair_existing != normalized:
                 raise ContinuousSessionError(
@@ -1100,7 +1113,7 @@ class _ContinuousSessionState:
                 )
             pending_payload = {
                 **normalized,
-                "quote_outcomes": dict(sorted(evidence.quote_outcomes.items())),
+                "quote_outcomes": normalized_outcomes,
             }
             existing_pending = pending.get(evidence_id)
             if existing_pending is not None and existing_pending != pending_payload:

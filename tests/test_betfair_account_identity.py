@@ -139,7 +139,7 @@ def _client(
     )
 
 
-def test_k07_factory_uses_private_no_redirect_opener_not_process_opener(
+def test_k07_factory_uses_per_request_no_redirect_transport_without_global_opener_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     caller_process_opener = object()
@@ -149,14 +149,10 @@ def test_k07_factory_uses_private_no_redirect_opener_not_process_opener(
     transport = client._transport
 
     assert isinstance(transport, UrllibBetfairHttpTransport)
-    assert transport._opener is not caller_process_opener
-    redirect_handlers = [
-        handler
-        for handler in transport._opener.handlers
-        if isinstance(handler, _urllib_request.HTTPRedirectHandler)
-    ]
-    assert len(redirect_handlers) == 1
-    assert type(redirect_handlers[0]) is _readonly._RejectAuthenticatedRedirects
+    assert vars(transport) == {"_max_response_bytes": 8 * 1024 * 1024}
+    assert not hasattr(transport, "_opener")
+    assert _urllib_request._opener is caller_process_opener
+    assert _readonly._RejectBetfairRedirects is not None
 
 
 def test_k07_import_order_does_not_patch_client_constructor() -> None:

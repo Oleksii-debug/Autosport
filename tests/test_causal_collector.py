@@ -1880,6 +1880,109 @@ class CollectorDeltaTests(unittest.TestCase):
             market_store.close()
 
 
+    def test_canonical_application_rejects_tampered_active_progress_identity(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "canonical-application.json"
+            market_store = SQLiteMarketStore(root / "market.db")
+            health_store = SourceHealthStore(root / "health.json")
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                health_store,
+                state_path,
+                clock=lambda: "2026-01-01T00:00:05+00:00",
+            )
+            application.apply(delta, event)
+
+            corrupted = json.loads(state_path.read_text(encoding="utf-8"))
+            corrupted["applications"][delta.delta_id]["source_cursor"] = "forged-cursor"
+            state_path.write_text(
+                json.dumps(corrupted, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            reopened = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                SourceHealthStore(root / "health.json"),
+                state_path,
+                clock=lambda: "2026-01-01T00:00:06+00:00",
+            )
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "progress conflicts on source_cursor",
+            ):
+                reopened.apply(delta, event)
+            market_store.close()
+
+    def test_canonical_application_rejects_health_marker_without_durable_post_state(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "canonical-application.json"
+            health_path = root / "health.json"
+            market_store = SQLiteMarketStore(root / "market.db")
+            health_store = SourceHealthStore(health_path)
+            pristine_health = health_path.read_text(encoding="utf-8")
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                health_store,
+                state_path,
+                clock=lambda: "2026-01-01T00:00:05+00:00",
+            )
+            application.apply(delta, event)
+
+            health_path.write_text(pristine_health, encoding="utf-8")
+            reopened = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                SourceHealthStore(health_path),
+                state_path,
+                clock=lambda: "2026-01-01T00:00:06+00:00",
+            )
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "health marker lacks its durable post-state",
+            ):
+                reopened.apply(delta, event)
+            market_store.close()
+
+    def test_canonical_application_reproves_event_derived_health_transition(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "canonical-application.json"
+            market_store = SQLiteMarketStore(root / "market.db")
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                SourceHealthStore(root / "health.json"),
+                state_path,
+                clock=lambda: "2026-01-01T00:00:05+00:00",
+            )
+            application.apply(delta, event)
+
+            corrupted = json.loads(state_path.read_text(encoding="utf-8"))
+            health_after = corrupted["applications"][delta.delta_id]["health_after"]
+            health_after["quality_flags"] = ["forged-quality"]
+            health_after["status"] = "degraded"
+            state_path.write_text(
+                json.dumps(corrupted, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            reopened = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                SourceHealthStore(root / "health.json"),
+                state_path,
+                clock=lambda: "2026-01-01T00:00:06+00:00",
+            )
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "health transition conflicts with event evidence",
+            ):
+                reopened.apply(delta, event)
+            market_store.close()
+
     def test_canonical_application_receipt_time_is_after_durable_completion(self):
         event = MarketEvent.from_dict(event_payload())
         payload = event.to_dict()

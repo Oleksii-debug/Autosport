@@ -80,25 +80,25 @@ class BetfairStandardLimitAction:
 
     def __post_init__(self) -> None:
         if type(self.selection_id) is not int or self.selection_id <= 0:
-            raise BetfairStandardLimitAdmissionError(
+            raise error_type(
                 "selection_id must be a positive integer"
             )
         if type(self.side) is not str or self.side not in {"BACK", "LAY"}:
-            raise BetfairStandardLimitAdmissionError(
+            raise error_type(
                 "side must be exactly BACK or LAY"
             )
         _positive_decimal(self.size, "size")
         _positive_decimal(self.price, "price")
         if self.price <= Decimal("1"):
-            raise BetfairStandardLimitAdmissionError(
+            raise error_type(
                 "price must be greater than 1"
             )
         if self.order_type != "LIMIT":
-            raise BetfairStandardLimitAdmissionError(
+            raise error_type(
                 "only plain LIMIT belongs to this admission authority"
             )
         if self.bet_target_type is not None:
-            raise BetfairStandardLimitAdmissionError(
+            raise error_type(
                 "target-size orders are outside standard-size LIMIT admission"
             )
 
@@ -107,6 +107,17 @@ def _build_result_meta():
     sealed: set[type] = set()
     protected = frozenset(
         {
+            "state",
+            "reason_codes",
+            "as_of",
+            "currency_code",
+            "login_route",
+            "submitted_payout",
+            "account_identity_id",
+            "jurisdiction_authority_id",
+            "constraint_resolution_sha256",
+            "policy_version",
+            "result_sha256",
             "execution_authorized",
             "real_money_execution",
             "_execution_authorized_constant",
@@ -170,13 +181,13 @@ class BetfairStandardLimitAdmission(metaclass=_ResultMeta):
 
     def __post_init__(self) -> None:
         if type(self.state) is not BetfairStandardLimitAdmissionState:
-            raise BetfairStandardLimitAdmissionError(
+            raise error_type(
                 "state must be exact BetfairStandardLimitAdmissionState"
             )
         if type(self.reason_codes) is not tuple or any(
             type(reason) is not str or not reason for reason in self.reason_codes
         ):
-            raise BetfairStandardLimitAdmissionError(
+            raise error_type(
                 "reason_codes must be an exact tuple of non-empty strings"
             )
         _utc(self.as_of, "as_of")
@@ -185,7 +196,7 @@ class BetfairStandardLimitAdmission(metaclass=_ResultMeta):
         if self.login_route is not None and (
             type(self.login_route) is not str or not self.login_route
         ):
-            raise BetfairStandardLimitAdmissionError(
+            raise error_type(
                 "login_route must be non-empty text or None"
             )
         _positive_decimal(self.submitted_payout, "submitted_payout")
@@ -200,7 +211,7 @@ class BetfairStandardLimitAdmission(metaclass=_ResultMeta):
             if value is not None:
                 _sha256_hex(value, field)
         if type(self.policy_version) is not int or self.policy_version != POLICY_VERSION:
-            raise BetfairStandardLimitAdmissionError(
+            raise error_type(
                 "policy_version must be the current product-owned version"
             )
         _sha256_hex(self.result_sha256, "result_sha256")
@@ -216,7 +227,7 @@ class BetfairStandardLimitAdmission(metaclass=_ResultMeta):
             constraint_resolution_sha256=self.constraint_resolution_sha256,
         )
         if expected != self.result_sha256:
-            raise BetfairStandardLimitAdmissionError(
+            raise error_type(
                 "result_sha256 does not match admission projection"
             )
 
@@ -251,6 +262,9 @@ def _build_admission_authority():
     spain_state_type = SpainOrderAdmission
     constraint_state_type = BetfairConstraintResolutionState
     jurisdiction_enum = BetfairLoginJurisdiction
+    admission_state_type = BetfairStandardLimitAdmissionState
+    error_type = BetfairStandardLimitAdmissionError
+    record_type = _IssuedRecord
 
     snapshot_action_fn = _snapshot_action
     exact_multiply_fn = _exact_multiply
@@ -278,7 +292,7 @@ def _build_admission_authority():
                     issued.pop(key, None)
 
         with lock:
-            issued[key] = _IssuedRecord(
+            issued[key] = record_type(
                 ref(value, discard),
                 fingerprint_fn(value),
                 client,
@@ -297,11 +311,11 @@ def _build_admission_authority():
         as_of: datetime,
     ) -> BetfairStandardLimitAdmission:
         if type(client) is not client_type:
-            raise BetfairStandardLimitAdmissionError(
+            raise error_type(
                 "client must be exact BetfairReadOnlyClient"
             )
         if type(action) is not action_type:
-            raise BetfairStandardLimitAdmissionError(
+            raise error_type(
                 "action must be exact BetfairStandardLimitAction"
             )
         current = utc_fn(as_of, "as_of")
@@ -316,7 +330,7 @@ def _build_admission_authority():
         if account_identity is None:
             reasons.append("AUTHENTICATED_ACCOUNT_IDENTITY_MISSING")
         elif type(account_identity) is not identity_type:
-            raise BetfairStandardLimitAdmissionError(
+            raise error_type(
                 "account_identity must be exact BetfairAuthenticatedAccountIdentity or None"
             )
         else:
@@ -335,7 +349,7 @@ def _build_admission_authority():
         if jurisdiction is None:
             reasons.append("AUTHENTICATED_JURISDICTION_MISSING")
         elif type(jurisdiction) is not jurisdiction_type:
-            raise BetfairStandardLimitAdmissionError(
+            raise error_type(
                 "jurisdiction must be exact BetfairAuthenticatedJurisdiction or None"
             )
         else:
@@ -369,7 +383,7 @@ def _build_admission_authority():
         if constraints is None:
             reasons.append("CURRENT_CONSTRAINT_EVIDENCE_MISSING")
         elif type(constraints) is not constraint_type:
-            raise BetfairStandardLimitAdmissionError(
+            raise error_type(
                 "constraints must be exact BetfairProviderConstraintResolution or None"
             )
         else:
@@ -439,7 +453,7 @@ def _build_admission_authority():
         deduped = tuple(dict.fromkeys(reasons))
         if deduped:
             result = make_result_fn(
-                state=BetfairStandardLimitAdmissionState.UNKNOWN_UNPROVEN,
+                state=admission_state_type.UNKNOWN_UNPROVEN,
                 reason_codes=deduped,
                 as_of=current,
                 currency_code=(
@@ -470,11 +484,11 @@ def _build_admission_authority():
 
             if action_snapshot[2] >= min_size:
                 state = (
-                    BetfairStandardLimitAdmissionState.STANDARD_MINIMUM_SATISFIED
+                    admission_state_type.STANDARD_MINIMUM_SATISFIED
                 )
                 positive_reasons: tuple[str, ...] = ()
             elif not constraint_value.lower_minimum_payout_enabled:
-                state = BetfairStandardLimitAdmissionState.BELOW_PROVIDER_MINIMUM
+                state = admission_state_type.BELOW_PROVIDER_MINIMUM
                 positive_reasons = ("SIZE_BELOW_CURRENT_STANDARD_MINIMUM",)
             elif (
                 jurisdiction_value.jurisdiction
@@ -488,10 +502,10 @@ def _build_admission_authority():
                     uses_lower_minimum_payout_exception=True,
                 )
                 if spain.state is not spain_state_type.REJECTED:
-                    raise BetfairStandardLimitAdmissionError(
+                    raise error_type(
                         "Spain lower-minimum delegate failed closed contract"
                     )
-                state = BetfairStandardLimitAdmissionState.BELOW_PROVIDER_MINIMUM
+                state = admission_state_type.BELOW_PROVIDER_MINIMUM
                 positive_reasons = (
                     "SPAIN_LOWER_MINIMUM_PAYOUT_EXCEPTION_DISABLED",
                 )
@@ -499,22 +513,22 @@ def _build_admission_authority():
                 jurisdiction_value.jurisdiction
                 is jurisdiction_enum.ITALY
             ):
-                state = BetfairStandardLimitAdmissionState.BELOW_PROVIDER_MINIMUM
+                state = admission_state_type.BELOW_PROVIDER_MINIMUM
                 positive_reasons = (
                     "ITALY_LOWER_MINIMUM_PAYOUT_EXCEPTION_DISABLED",
                 )
             else:
                 min_payout = constraint_value.min_payout
                 if min_payout is None:
-                    state = BetfairStandardLimitAdmissionState.UNKNOWN_UNPROVEN
+                    state = admission_state_type.UNKNOWN_UNPROVEN
                     positive_reasons = ("CURRENT_MIN_PAYOUT_UNPROVEN",)
                 elif payout >= min_payout:
                     state = (
-                        BetfairStandardLimitAdmissionState.LOWER_MINIMUM_PAYOUT_SATISFIED
+                        admission_state_type.LOWER_MINIMUM_PAYOUT_SATISFIED
                     )
                     positive_reasons = ()
                 else:
-                    state = BetfairStandardLimitAdmissionState.BELOW_PROVIDER_MINIMUM
+                    state = admission_state_type.BELOW_PROVIDER_MINIMUM
                     positive_reasons = ("PAYOUT_BELOW_CURRENT_MINIMUM",)
 
             result = make_result_fn(
@@ -593,15 +607,15 @@ def _snapshot_action(
     size = action.size
     price = action.price
     if type(selection_id) is not int or selection_id <= 0:
-        raise BetfairStandardLimitAdmissionError("selection_id changed after construction")
+        raise error_type("selection_id changed after construction")
     if type(side) is not str or side not in {"BACK", "LAY"}:
-        raise BetfairStandardLimitAdmissionError("side changed after construction")
+        raise error_type("side changed after construction")
     _positive_decimal(size, "size")
     _positive_decimal(price, "price")
     if price <= Decimal("1"):
-        raise BetfairStandardLimitAdmissionError("price must be greater than 1")
+        raise error_type("price must be greater than 1")
     if action.order_type != "LIMIT" or action.bet_target_type is not None:
-        raise BetfairStandardLimitAdmissionError(
+        raise error_type(
             "action changed outside plain standard-size LIMIT"
         )
     return selection_id, side, size, price
@@ -609,12 +623,12 @@ def _snapshot_action(
 
 def _positive_decimal(value: object, field: str) -> Decimal:
     if type(value) is not Decimal or not value.is_finite() or value <= 0:
-        raise BetfairStandardLimitAdmissionError(
+        raise error_type(
             f"{field} must be exact positive finite Decimal"
         )
     _sign, digits, exponent = value.as_tuple()
     if len(digits) > _MAX_DECIMAL_DIGITS or abs(exponent) > _MAX_ABS_EXPONENT:
-        raise BetfairStandardLimitAdmissionError(
+        raise error_type(
             f"{field} exceeds bounded Decimal shape"
         )
     return value
@@ -639,7 +653,7 @@ def _exact_multiply(left: Decimal, right: Decimal) -> Decimal:
 
 def _utc(value: object, field: str) -> datetime:
     if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
-        raise BetfairStandardLimitAdmissionError(
+        raise error_type(
             f"{field} must be timezone-aware datetime"
         )
     return value.astimezone(timezone.utc)
@@ -653,7 +667,7 @@ def _currency(value: object) -> str:
         or not value.isalpha()
         or value != value.upper()
     ):
-        raise BetfairStandardLimitAdmissionError(
+        raise error_type(
             "currency_code must be three-letter uppercase ASCII"
         )
     return value
@@ -665,7 +679,7 @@ def _sha256_hex(value: object, field: str) -> str:
         or len(value) != 64
         or any(character not in "0123456789abcdef" for character in value)
     ):
-        raise BetfairStandardLimitAdmissionError(
+        raise error_type(
             f"{field} must be lowercase SHA-256 hex"
         )
     return value

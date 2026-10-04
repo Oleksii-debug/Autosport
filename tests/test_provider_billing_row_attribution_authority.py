@@ -650,3 +650,23 @@ def test_verified_witness_cannot_expose_cost_or_allocation_authority() -> None:
         "not_applicable",
         "complete",
     })
+
+def test_provider_billing_source_tamper_revocation_is_monotonic() -> None:
+    source = _source()
+    assert validate_betfair_provider_billing_inputs_observation(source) is source
+
+    original = source.observed_at
+    object.__setattr__(
+        source,
+        "observed_at",
+        "2026-09-21T05:59:59+00:00",
+    )
+    with pytest.raises(BetfairProviderBillingInputsAuthorityError):
+        validate_betfair_provider_billing_inputs_observation(source)
+
+    object.__setattr__(source, "observed_at", original)
+    with pytest.raises(
+        BetfairProviderBillingInputsAuthorityError,
+        match="must be issued by canonical provider read",
+    ):
+        validate_betfair_provider_billing_inputs_observation(source)

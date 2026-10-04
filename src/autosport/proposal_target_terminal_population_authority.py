@@ -462,7 +462,11 @@ def _material(
 
     groups: list[dict[str, object]] = []
     total_states = 1
-    all_exact = True
+    # Exact per-market terminal spaces do not prove that their Cartesian product is
+    # an exact joint state space. With more than one canonical market, cross-market
+    # dependence can make combinations impossible; absent a separate joint-state
+    # authority this population is an exhaustive conservative superset.
+    all_exact = len(market_groups) == 1
     for market_key in sorted(market_groups):
         providers = sorted(
             market_groups[market_key],

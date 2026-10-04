@@ -17,10 +17,20 @@ _COUNTER_FIELDS = (
     "total_rejected",
     "total_failures",
     "consecutive_failures",
+    "consecutive_failure_kind_count",
+)
+_FAILURE_KIND_PROVIDER_UNAVAILABLE = "provider_unavailable"
+_FAILURE_KIND_PROVIDER_OR_VALIDATION = "provider_or_validation"
+_ALLOWED_FAILURE_KINDS = frozenset(
+    {
+        _FAILURE_KIND_PROVIDER_UNAVAILABLE,
+        _FAILURE_KIND_PROVIDER_OR_VALIDATION,
+    }
 )
 _SCHEMA_V1 = 1
 _SCHEMA_V2 = 2
 _SCHEMA_V3 = 3
+_SCHEMA_V4 = 4
 _HISTORY_ENTRY_V2_FIELDS = frozenset({"recorded_at", "state"})
 _HISTORY_ENTRY_V3_FIELDS = frozenset({"recorded_at", "transition_order", "state"})
 
@@ -117,6 +127,8 @@ class SourceHealthState:
     last_cursor: str | None = None
     latest_source_ts: str | None = None
     quality_flags: tuple[str, ...] = field(default_factory=tuple)
+    last_failure_kind: str | None = None
+    consecutive_failure_kind_count: int = 0
 
     def __post_init__(self) -> None:
         self.validate()
@@ -131,6 +143,25 @@ class SourceHealthState:
             raise ValueError("total_failures cannot exceed poll_count")
         if self.consecutive_failures > self.total_failures:
             raise ValueError("consecutive_failures cannot exceed total_failures")
+        if self.consecutive_failure_kind_count > self.consecutive_failures:
+            raise ValueError(
+                "consecutive_failure_kind_count cannot exceed consecutive_failures"
+            )
+        if self.last_failure_kind is None:
+            if self.consecutive_failure_kind_count != 0:
+                raise ValueError(
+                    "untyped source failure cannot retain typed consecutive count"
+                )
+        else:
+            if (
+                not isinstance(self.last_failure_kind, str)
+                or self.last_failure_kind not in _ALLOWED_FAILURE_KINDS
+            ):
+                raise ValueError("invalid source health failure kind")
+            if self.status != "failed" or self.consecutive_failure_kind_count <= 0:
+                raise ValueError(
+                    "typed source failure requires failed status and positive typed count"
+                )
         if self.total_accepted + self.total_rejected > self.total_received:
             raise ValueError("accepted and rejected source totals cannot exceed total_received")
 
@@ -205,6 +236,10 @@ class SourceHealthState:
 
 
 _SOURCE_STATE_FIELDS = frozenset(item.name for item in fields(SourceHealthState))
+_LEGACY_SOURCE_STATE_FIELDS = _SOURCE_STATE_FIELDS - {
+    "last_failure_kind",
+    "consecutive_failure_kind_count",
+}
 
 
 class _SourceHealthWriterLock:
@@ -270,11 +305,11 @@ class _SourceHealthWriterLock:
 class SourceHealthStore:
     """Durable provider-health projection plus causal append-only state history.
 
-    Schema v3 keeps exact transition evidence time plus a durable per-source order key,
-    so equal-time transitions remain totally ordered without inventing timestamps.
-    Legacy schema-v1/v2 stores remain readable and are upgraded on the first successful
-    mutation. A legacy projection is never backfilled earlier than the timestamp
-    evidenced by that projection itself.
+    Schema v4 extends the v3 causal transition history with a product-owned failure
+    kind and same-kind consecutive suffix count in the exact same durable mutation as
+    generic health counters. Legacy schema-v1/v2/v3 stores remain readable as untyped
+    failure history and are upgraded on the first successful mutation; legacy error
+    text is never guessed into typed provider authority.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -283,13 +318,15 @@ class SourceHealthStore:
         self._lock_path = self.path.with_name(self.path.name + ".lock")
         with self._writer_guard():
             if not self.path.exists():
-                self._write({"schema_version": _SCHEMA_V3, "sources": {}, "history": {}})
+                self._write({"schema_version": _SCHEMA_V4, "sources": {}, "history": {}})
             else:
                 self._read()
 
     @staticmethod
     def _state_from_payload(payload: dict, *, normalize_failed_flags: bool = True) -> SourceHealthState:
         value = dict(payload)
+        value.setdefault("last_failure_kind", None)
+        value.setdefault("consecutive_failure_kind_count", 0)
         value["quality_flags"] = tuple(value["quality_flags"])
         if normalize_failed_flags and value.get("status") == "failed":
             # Old schema-v1 stores could retain the preceding successful batch's
@@ -388,6 +425,8 @@ class SourceHealthStore:
         state.consecutive_failures = 0
         state.last_success_at = now
         state.last_error = None
+        state.last_failure_kind = None
+        state.consecutive_failure_kind_count = 0
         state.last_cursor = cursor
         if latest_source_ts is not None:
             if state.latest_source_ts is None or (
@@ -485,7 +524,19 @@ class SourceHealthStore:
                 quality_flags=quality_flags,
             )
 
-    def record_failure(self, source_id: str, *, now: str, error: BaseException) -> SourceHealthState:
+    def record_failure(
+        self,
+        source_id: str,
+        *,
+        now: str,
+        error: BaseException,
+        failure_kind: str | None = None,
+    ) -> SourceHealthState:
+        if failure_kind is not None and (
+            not isinstance(failure_kind, str)
+            or failure_kind not in _ALLOWED_FAILURE_KINDS
+        ):
+            raise ValueError("invalid source health failure kind")
         with self._writer_guard():
             state = self.get(source_id)
             state.poll_count += 1
@@ -493,6 +544,19 @@ class SourceHealthStore:
             state.consecutive_failures += 1
             state.last_error_at = now
             state.last_error = f"{type(error).__name__}: {error}"
+            if failure_kind is None:
+                state.last_failure_kind = None
+                state.consecutive_failure_kind_count = 0
+            elif (
+                state.status == "failed"
+                and state.last_failure_kind == failure_kind
+                and state.consecutive_failure_kind_count > 0
+            ):
+                state.last_failure_kind = failure_kind
+                state.consecutive_failure_kind_count += 1
+            else:
+                state.last_failure_kind = failure_kind
+                state.consecutive_failure_kind_count = 1
             state.quality_flags = ()
             state.status = "failed"
             self._put(state, recorded_at=now)
@@ -501,10 +565,11 @@ class SourceHealthStore:
     def _writer_guard(self) -> _SourceHealthWriterLock:
         return _SourceHealthWriterLock(self._lock_path)
 
-    def _upgrade_to_v3(self, raw: dict) -> dict:
-        if raw["schema_version"] == _SCHEMA_V3:
+    def _upgrade_to_v4(self, raw: dict) -> dict:
+        if raw["schema_version"] == _SCHEMA_V4:
             return raw
-        upgraded = {"schema_version": _SCHEMA_V3, "sources": {}, "history": {}}
+        upgraded = {"schema_version": _SCHEMA_V4, "sources": {}, "history": {}}
+
         if raw["schema_version"] == _SCHEMA_V1:
             for source_id, payload in raw["sources"].items():
                 state = self._state_from_payload(payload)
@@ -525,15 +590,28 @@ class SourceHealthStore:
             return upgraded
 
         for source_id, payload in raw["sources"].items():
-            upgraded["sources"][source_id] = payload
-            upgraded["history"][source_id] = [
-                {
-                    "recorded_at": entry["recorded_at"],
-                    "transition_order": index,
-                    "state": entry["state"],
-                }
-                for index, entry in enumerate(raw["history"][source_id], start=1)
-            ]
+            upgraded["sources"][source_id] = self._payload(
+                self._state_from_payload(payload, normalize_failed_flags=False)
+            )
+            entries: list[dict] = []
+            for index, entry in enumerate(raw["history"][source_id], start=1):
+                transition_order = (
+                    entry["transition_order"]
+                    if raw["schema_version"] == _SCHEMA_V3
+                    else index
+                )
+                entries.append(
+                    {
+                        "recorded_at": entry["recorded_at"],
+                        "transition_order": transition_order,
+                        "state": self._payload(
+                            self._state_from_payload(
+                                entry["state"], normalize_failed_flags=False
+                            )
+                        ),
+                    }
+                )
+            upgraded["history"][source_id] = entries
         return upgraded
 
     def _put(self, state: SourceHealthState, *, recorded_at: str) -> None:
@@ -543,7 +621,7 @@ class SourceHealthStore:
         if transition_at is None or parse_source_timestamp(transition_at) != recorded:
             raise ValueError("source health transition timestamp mismatch")
 
-        raw = self._upgrade_to_v3(self._read())
+        raw = self._upgrade_to_v4(self._read())
         entries = raw["history"].setdefault(state.source_id, [])
         if entries and parse_source_timestamp(entries[-1]["recorded_at"]) > recorded:
             raise ValueError("source health transitions cannot move backwards in evidence time")
@@ -561,15 +639,27 @@ class SourceHealthStore:
         self._write(raw)
 
     @staticmethod
-    def _validate_persisted_state(source_id: str, payload: object) -> None:
+    def _validate_persisted_state(
+        source_id: str,
+        payload: object,
+        *,
+        schema_version: int,
+    ) -> None:
         _validate_source_id(source_id)
-        if not isinstance(payload, dict) or set(payload) != _SOURCE_STATE_FIELDS:
+        expected_state_fields = (
+            _SOURCE_STATE_FIELDS
+            if schema_version == _SCHEMA_V4
+            else _LEGACY_SOURCE_STATE_FIELDS
+        )
+        if not isinstance(payload, dict) or set(payload) != expected_state_fields:
             raise ValueError("invalid source health state fields")
         if payload.get("source_id") != source_id:
             raise ValueError("source health state identity mismatch")
         if not isinstance(payload.get("quality_flags"), list):
             raise ValueError("persisted quality_flags must be a JSON array")
         value = dict(payload)
+        value.setdefault("last_failure_kind", None)
+        value.setdefault("consecutive_failure_kind_count", 0)
         value["quality_flags"] = tuple(value["quality_flags"])
         SourceHealthState(**value)
 
@@ -588,7 +678,7 @@ class SourceHealthStore:
             not isinstance(raw, dict)
             or isinstance(schema_version, bool)
             or not isinstance(schema_version, int)
-            or schema_version not in {_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3}
+            or schema_version not in {_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4}
             or not isinstance(raw.get("sources"), dict)
         ):
             raise ValueError("invalid source health store")
@@ -600,16 +690,20 @@ class SourceHealthStore:
         )
         if set(raw) != expected_fields:
             raise ValueError("invalid source health store")
-        if schema_version in {_SCHEMA_V2, _SCHEMA_V3} and not isinstance(
+        if schema_version in {_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4} and not isinstance(
             raw.get("history"), dict
         ):
             raise ValueError("invalid source health store")
 
         try:
             for source_id, payload in raw["sources"].items():
-                self._validate_persisted_state(source_id, payload)
+                self._validate_persisted_state(
+                    source_id,
+                    payload,
+                    schema_version=schema_version,
+                )
 
-            if schema_version in {_SCHEMA_V2, _SCHEMA_V3}:
+            if schema_version in {_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4}:
                 if set(raw["history"]) != set(raw["sources"]):
                     raise ValueError("source health history/projection identity mismatch")
                 for source_id, entries in raw["history"].items():
@@ -641,7 +735,11 @@ class SourceHealthStore:
                                 raise ValueError("source health history evidence time moved backwards")
                             previous_order = order
                         previous_recorded = recorded_at
-                        self._validate_persisted_state(source_id, entry["state"])
+                        self._validate_persisted_state(
+                            source_id,
+                            entry["state"],
+                            schema_version=schema_version,
+                        )
                         state = self._state_from_payload(
                             entry["state"], normalize_failed_flags=False
                         )

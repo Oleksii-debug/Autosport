@@ -1471,9 +1471,48 @@ class SQLiteMarketStore:
         else:
             self.connection.commit()
 
+    def _repair_current_projection_for_key(
+        self,
+        *,
+        source_id: str,
+        quote_key: str,
+    ) -> MarketEvent:
+        """Re-derive one repairable current row from canonical history only."""
+
+        row = self.connection.execute(
+            f"""SELECT {_HISTORY_COLUMNS_SQL}
+                FROM market_events
+                WHERE source_id=? AND quote_key=?
+                ORDER BY sequence DESC, dedupe_key DESC
+                LIMIT 1""",
+            (source_id, quote_key),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                "cannot project current quote without canonical market history"
+            )
+        event = _event_from_history_row(row)
+        payload = _canonical_payload(event)
+        self.connection.execute(
+            """INSERT INTO current_quotes
+               (source_id,quote_key,observed_ts,sequence,payload_json)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(source_id,quote_key) DO UPDATE SET
+               observed_ts=excluded.observed_ts,
+               sequence=excluded.sequence,
+               payload_json=excluded.payload_json""",
+            (
+                event.source_id,
+                event.quote_key,
+                event.observed_ts,
+                event.sequence,
+                payload,
+            ),
+        )
+        return event
+
     def _insert_one(self, event: MarketEvent) -> bool:
         payload = _validate_incoming_event(event)
-        incoming_key = _projection_order_key(event)
         cursor = self.connection.execute(
             """INSERT INTO market_events
                (dedupe_key,quote_key,event_id,market_id,selection_id,decimal_odds,observed_ts,source_id,sequence,payload_json)
@@ -1519,6 +1558,10 @@ class SQLiteMarketStore:
                 raise ValueError(
                     "duplicate market event lacks valid append-generation authority"
                 )
+            self._repair_current_projection_for_key(
+                source_id=event.source_id,
+                quote_key=event.quote_key,
+            )
             return False
 
         self.connection.execute(
@@ -1527,29 +1570,10 @@ class SQLiteMarketStore:
                VALUES (?, ?)""",
             (event.dedupe_key, self._next_append_generation()),
         )
-        previous = self.connection.execute(
-            f"""SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes
-                WHERE source_id=? AND quote_key=?""",
-            (event.source_id, event.quote_key),
-        ).fetchone()
-        previous_event = _event_from_current_row(previous) if previous is not None else None
-        if previous_event is None or incoming_key > _projection_order_key(previous_event):
-            self.connection.execute(
-                """INSERT INTO current_quotes
-                   (source_id,quote_key,observed_ts,sequence,payload_json)
-                   VALUES (?,?,?,?,?)
-                   ON CONFLICT(source_id,quote_key) DO UPDATE SET
-                   observed_ts=excluded.observed_ts,
-                   sequence=excluded.sequence,
-                   payload_json=excluded.payload_json""",
-                (
-                    event.source_id,
-                    event.quote_key,
-                    event.observed_ts,
-                    event.sequence,
-                    payload,
-                ),
-            )
+        self._repair_current_projection_for_key(
+            source_id=event.source_id,
+            quote_key=event.quote_key,
+        )
         return True
 
     def append(self, event: MarketEvent) -> bool:

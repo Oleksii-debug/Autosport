@@ -1972,6 +1972,11 @@ def _build_autonomous_product_runtime_impl(
     _checkpoint_type,
     _coordinator_type,
     _start_transition_store_type,
+    _start_transition_pending,
+    _start_transition_begin,
+    _start_transition_mark_completed,
+    _start_transition_mark_rolled_back,
+    _start_transition_mark_recovery_required,
 ) -> AutonomousProductRuntime:
     """Construct or restore one canonical headless PAPER product runtime.
 
@@ -2632,6 +2637,56 @@ def _build_autonomous_product_runtime_impl(
             clock=resolved_clock,
             initial_bankroll=manifest.initial_bankroll,
         )
+        raw_start_transition_store = _start_transition_store_type(
+            root / "product_start_transition.json"
+        )
+
+        def product_start_pending(_proxy):
+            return _start_transition_pending(raw_start_transition_store)
+
+        def product_start_begin(
+            _proxy,
+            *,
+            collector_was_stopped,
+            session_pre_state,
+        ):
+            return _start_transition_begin(
+                raw_start_transition_store,
+                collector_was_stopped=collector_was_stopped,
+                session_pre_state=session_pre_state,
+            )
+
+        def product_start_mark_completed(_proxy, generation):
+            return _start_transition_mark_completed(
+                raw_start_transition_store,
+                generation,
+            )
+
+        def product_start_mark_rolled_back(_proxy, generation):
+            return _start_transition_mark_rolled_back(
+                raw_start_transition_store,
+                generation,
+            )
+
+        def product_start_mark_recovery_required(_proxy, generation):
+            return _start_transition_mark_recovery_required(
+                raw_start_transition_store,
+                generation,
+            )
+
+        ProductStartTransitionStoreProxy = build_sealed_product_proxy_type(
+            "ProductStartTransitionStoreProxy",
+            methods={
+                "pending": product_start_pending,
+                "begin": product_start_begin,
+                "mark_completed": product_start_mark_completed,
+                "mark_rolled_back": product_start_mark_rolled_back,
+                "mark_recovery_required": product_start_mark_recovery_required,
+            },
+            authority_label="START transition",
+        )
+        product_start_transition_store = ProductStartTransitionStoreProxy()
+
         runtime = _runtime_type(
             workspace=root,
             manifest=manifest,
@@ -2643,9 +2698,7 @@ def _build_autonomous_product_runtime_impl(
             invalidations=invalidations,
             dependencies=dependencies,
             _runtime_lease=runtime_lease,
-            _start_transition_store=_start_transition_store_type(
-                root / "product_start_transition.json"
-            ),
+            _start_transition_store=product_start_transition_store,
         )
         runtime_lease.bind_operation_fence(runtime._operation_fence)
         runtime._recover_interrupted_start()
@@ -2680,6 +2733,11 @@ def _bind_autonomous_product_runtime_builder(
     checkpoint_type,
     coordinator_type,
     start_transition_store_type,
+    start_transition_pending,
+    start_transition_begin,
+    start_transition_mark_completed,
+    start_transition_mark_rolled_back,
+    start_transition_mark_recovery_required,
 ):
     """Expose the product builder without mutable restart/delivery dispatch."""
 
@@ -2726,6 +2784,11 @@ def _bind_autonomous_product_runtime_builder(
             _checkpoint_type=checkpoint_type,
             _coordinator_type=coordinator_type,
             _start_transition_store_type=start_transition_store_type,
+            _start_transition_pending=start_transition_pending,
+            _start_transition_begin=start_transition_begin,
+            _start_transition_mark_completed=start_transition_mark_completed,
+            _start_transition_mark_rolled_back=start_transition_mark_rolled_back,
+            _start_transition_mark_recovery_required=start_transition_mark_recovery_required,
         )
 
     build_autonomous_product_runtime.__doc__ = implementation.__doc__
@@ -2759,6 +2822,11 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     DesktopDeltaCheckpointStore,
     _ProductContinuousSessionCoordinator,
     _ProductStartTransitionStore,
+    _ProductStartTransitionStore.pending,
+    _ProductStartTransitionStore.begin,
+    _ProductStartTransitionStore.mark_completed,
+    _ProductStartTransitionStore.mark_rolled_back,
+    _ProductStartTransitionStore.mark_recovery_required,
 )
 del _ProductDesktopDeltaConsumer
 del _ProductContinuousSessionCoordinator

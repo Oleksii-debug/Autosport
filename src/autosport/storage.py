@@ -1355,7 +1355,6 @@ def _seal_live_receipt_authority_call_surfaces() -> None:
     """Hide canonical dependency bindings from callers of receipt-authority APIs."""
 
     live_append_impl = SQLiteMarketStore._append_live_batch_accepted
-    receipt_insert_impl = SQLiteMarketStore._insert_live_receipt_authority
     rebuild_trusted_current_impl = SQLiteMarketStore._rebuild_trusted_live_current_quotes
     append_impl = SQLiteMarketStore.append_batch_accepted
     has_receipt_impl = SQLiteMarketStore.has_trusted_live_receipt
@@ -1372,7 +1371,9 @@ def _seal_live_receipt_authority_call_surfaces() -> None:
         self: SQLiteMarketStore,
         event: MarketEvent,
     ) -> None:
-        return receipt_insert_impl(self, event)
+        raise PermissionError(
+            "live receipt authority writes are internal to canonical live ingestion"
+        )
 
     def _rebuild_trusted_live_current_quotes(
         self: SQLiteMarketStore,

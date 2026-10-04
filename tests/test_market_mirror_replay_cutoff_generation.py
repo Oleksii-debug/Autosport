@@ -1639,6 +1639,105 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_append_rejects_post_startup_current_projection_trigger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T18:59:58+00:00",
+                )
+                self.assertTrue(store.append(first))
+                before = store._market_append_authority().read_history()
+                store.connection.execute(
+                    """CREATE TRIGGER forged_current_projection
+                       AFTER UPDATE ON current_quotes
+                       BEGIN
+                           DELETE FROM current_quotes
+                           WHERE source_id = NEW.source_id
+                             AND quote_key = NEW.quote_key;
+                       END"""
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "current_quotes schema is not canonical: triggers are not allowed",
+                ):
+                    store.append(
+                        self.event(
+                            sequence=2,
+                            odds="2.10",
+                            observed_ts="2026-09-16T19:00:00+00:00",
+                        )
+                    )
+
+                self.assertEqual(store._market_append_authority().read_history(), before)
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_events"
+                    ).fetchone(),
+                    (1,),
+                )
+            finally:
+                store.close()
+
+    def test_append_rejects_post_startup_history_trigger_before_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T18:59:58+00:00",
+                )
+                self.assertTrue(store.append(first))
+                before = store._market_append_authority().read_history()
+                store.connection.execute(
+                    """CREATE TRIGGER forged_market_history
+                       AFTER INSERT ON market_events
+                       BEGIN
+                           INSERT INTO market_events
+                               (dedupe_key,quote_key,event_id,market_id,selection_id,
+                                decimal_odds,observed_ts,source_id,sequence,payload_json)
+                           VALUES
+                               (NEW.dedupe_key || '-ghost','ghost|market|selection',
+                                NEW.event_id,NEW.market_id,NEW.selection_id,
+                                NEW.decimal_odds,NEW.observed_ts,'ghost-provider',
+                                NEW.sequence,NEW.payload_json);
+                       END"""
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "market_events schema is not canonical: triggers are not allowed",
+                ):
+                    store.append(
+                        self.event(
+                            sequence=2,
+                            odds="2.10",
+                            observed_ts="2026-09-16T19:00:00+00:00",
+                        )
+                    )
+
+                self.assertEqual(store._market_append_authority().read_history(), before)
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_events"
+                    ).fetchone(),
+                    (1,),
+                )
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_event_commit_order"
+                    ).fetchone(),
+                    (1,),
+                )
+            finally:
+                store.close()
+
     def test_new_append_repairs_forged_current_projection_from_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

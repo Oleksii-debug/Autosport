@@ -1633,14 +1633,26 @@ class SQLiteMarketStore:
             key=f"{_REPLAY_CUTOFF_MACHINE_KEY_PREFIX}{_database_authority_key(database_path)}",
         )
 
-    def _validated_replay_cutoff_rows(self) -> tuple[tuple[str, str, int], ...]:
-        latest_row = self.connection.execute(
-            """SELECT COALESCE(MAX(append_generation), 0)
-               FROM market_event_commit_order"""
-        ).fetchone()
-        if latest_row is None or type(latest_row[0]) is not int or latest_row[0] < 0:
-            raise ValueError("cannot validate causal replay cutoff generation")
-        latest_generation = latest_row[0]
+    def _validated_replay_cutoff_rows(
+        self,
+        *,
+        require_current_append_head: bool = True,
+    ) -> tuple[tuple[str, str, int], ...]:
+        if type(require_current_append_head) is not bool:
+            raise TypeError("require_current_append_head must be a bool")
+        latest_generation: int | None = None
+        if require_current_append_head:
+            latest_row = self.connection.execute(
+                """SELECT COALESCE(MAX(append_generation), 0)
+                   FROM market_event_commit_order"""
+            ).fetchone()
+            if (
+                latest_row is None
+                or type(latest_row[0]) is not int
+                or latest_row[0] < 0
+            ):
+                raise ValueError("cannot validate causal replay cutoff generation")
+            latest_generation = latest_row[0]
 
         raw_rows = self.connection.execute(
             """SELECT cutoff_id, as_of, max_append_generation
@@ -1654,7 +1666,10 @@ class SQLiteMarketStore:
                 or type(stored_as_of) is not str
                 or type(max_generation) is not int
                 or max_generation < 0
-                or max_generation > latest_generation
+                or (
+                    latest_generation is not None
+                    and max_generation > latest_generation
+                )
             ):
                 raise ValueError("causal replay cutoff authority is invalid")
             canonical_as_of = _canonical_replay_cutoff(stored_as_of)
@@ -2578,7 +2593,9 @@ class SQLiteMarketStore:
                     )
                 else:
                     self._validate_causal_replay_state()
-                cutoff_rows = self._validated_replay_cutoff_rows()
+                cutoff_rows = self._validated_replay_cutoff_rows(
+                    require_current_append_head=not preexisting_cutoff
+                )
                 observed_state_sha256 = (
                     self._replay_cutoff_authority_state_sha256(cutoff_rows)
                 )

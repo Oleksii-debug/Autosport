@@ -3555,15 +3555,57 @@ class PersistentLiveDecisionLoop:
             binding.action_id: binding
             for binding in canonical_bindings
         }
+        ticket_reason_prefix = (
+            "paper execution adoption; "
+            f"decision_id={progress.decision_id}; "
+            f"run_id={run_id}; "
+            f"{PaperExecutionAdoptionRuntime._TICKET_MARKER}"
+        )
+        claimed_tickets: dict[str, list[object]] = {}
+        for ticket in runtime.book.tickets.values():
+            if not ticket.strategy_reason.startswith(ticket_reason_prefix):
+                continue
+            attempt_id = ticket.strategy_reason[
+                len(ticket_reason_prefix) :
+            ]
+            if not attempt_id:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision PaperBook has empty #623 "
+                    "attempt marker"
+                )
+            claimed_tickets.setdefault(attempt_id, []).append(ticket)
+
+        expected_ticket_attempt_ids = {
+            attempt.attempt_id
+            for attempt in attempts
+            if (
+                self.mode is LiveDecisionMode.PAPER
+                and attempt.outcome
+                in {
+                    PaperAttemptOutcome.ACCEPTED,
+                    PaperAttemptOutcome.PARTIAL,
+                }
+            )
+        }
+        if (
+            set(claimed_tickets) != expected_ticket_attempt_ids
+            or any(
+                len(values) != 1
+                for values in claimed_tickets.values()
+            )
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision PaperBook #623 marker set "
+                "conflicts with terminal attempts"
+            )
+
         for attempt in attempts:
             marker = (
                 f"{PaperExecutionAdoptionRuntime._TICKET_MARKER}"
                 f"{attempt.attempt_id}"
             )
             matches = tuple(
-                ticket
-                for ticket in runtime.book.tickets.values()
-                if marker in ticket.strategy_reason
+                claimed_tickets.get(attempt.attempt_id, ())
             )
             should_materialize = (
                 self.mode is LiveDecisionMode.PAPER

@@ -7,6 +7,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+import copy
 from unittest.mock import patch
 
 from autosport.decision_ledger import (
@@ -4080,6 +4081,37 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 )
             self.assertEqual(missing_ticket_observer.calls, 0)
             resumed_book.tickets.update(original_tickets)
+
+            source_ticket = next(iter(original_tickets.values()))
+            forged_ticket = copy.deepcopy(source_ticket)
+            forged_ticket.ticket_id = "forged-execution-ticket"
+            reason_prefix, _, _ = source_ticket.strategy_reason.partition(
+                "paper_execution_attempt_id="
+            )
+            forged_ticket.strategy_reason = (
+                reason_prefix
+                + "paper_execution_attempt_id=forged-attempt"
+            )
+            resumed_book.tickets[forged_ticket.ticket_id] = forged_ticket
+
+            extra_ticket_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "#623 marker set conflicts with terminal attempts",
+            ):
+                self._loop(
+                    workspace,
+                    observer=extra_ticket_observer,
+                    factory=_PositiveIntentFactory(
+                        self.INTENT_CONFIG_SHA256
+                    ),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                    book=resumed_book,
+                    authority=authority,
+                    paper_execution=resumed_execution,
+                )
+            self.assertEqual(extra_ticket_observer.calls, 0)
+            del resumed_book.tickets[forged_ticket.ticket_id]
 
     def test_pending_restart_recovers_before_polling_new_quote(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

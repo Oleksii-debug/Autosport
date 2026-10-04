@@ -252,6 +252,7 @@ def test_expired_access_token_cannot_bypass_conservative_slot_hold(tmp_path):
     assert persisted.state is ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
     assert persisted.session_lineage_id is None
     assert persisted.access_expires_at is None
+    assert persisted.slot_hold_started_at == active.slot_hold_started_at
     assert persisted.slot_hold_until == active.slot_hold_until
 
     successor = lifecycle.begin_login(
@@ -260,6 +261,42 @@ def test_expired_access_token_cannot_bypass_conservative_slot_hold(tmp_path):
     )
     assert successor.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
     assert successor.snapshot.generation == persisted.generation + 1
+
+
+
+
+def test_restart_rejects_shortened_residual_wait_slot_hold(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    transition_at = active.access_expires_at + timedelta(seconds=1)
+
+    waiting = lifecycle.begin_login(
+        now=transition_at,
+        access_token_available=False,
+    )
+    assert (
+        waiting.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    )
+    assert waiting.snapshot is not None
+    assert waiting.snapshot.slot_hold_started_at == active.slot_hold_started_at
+    assert waiting.snapshot.slot_hold_until == active.slot_hold_until
+
+    payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
+    payload["slot_hold_until"] = (
+        transition_at + timedelta(seconds=2)
+    ).isoformat()
+    lifecycle.state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    restarted = _lifecycle(tmp_path)
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="provider-slot hold is below its durable conservative floor",
+    ):
+        restarted.begin_login(
+            now=transition_at + timedelta(seconds=3),
+            access_token_available=False,
+        )
 
 
 def test_ambiguous_provider_result_preserves_conservative_slot_horizon(tmp_path):
@@ -689,6 +726,7 @@ def test_ambiguous_wait_rejects_shortened_conservative_hold(
             credential_revision="rev-1",
             integration_role="market-maker-primary",
             last_transition_at=NOW,
+            slot_hold_started_at=NOW - CONSERVATIVE_SESSION_SLOT_HOLD + timedelta(seconds=1),
             slot_hold_until=NOW + timedelta(seconds=1),
             last_failure_class=login_failure,
             last_renewal_failure_class=renewal_failure,
@@ -707,6 +745,7 @@ def test_refresh_success_wait_rejects_shortened_conservative_hold():
             integration_role="market-maker-primary",
             last_transition_at=NOW,
             access_expires_at=NOW + timedelta(minutes=5),
+            slot_hold_started_at=NOW - timedelta(minutes=15),
             slot_hold_until=NOW + timedelta(minutes=5),
         )
 
@@ -1158,6 +1197,7 @@ def test_renewal_failure_after_short_expiry_preserves_provider_slot_hold(tmp_pat
     )
 
     assert failed.state is ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    assert failed.slot_hold_started_at == active.slot_hold_started_at
     assert failed.slot_hold_until == active.slot_hold_until
     blocked = lifecycle.begin_login(
         now=active.access_expires_at + timedelta(seconds=2),
@@ -1270,6 +1310,7 @@ def test_credential_rejection_evidence_cannot_be_reclassified_as_wait(
             credential_revision="rev-1",
             integration_role="market-maker-primary",
             last_transition_at=NOW,
+            slot_hold_started_at=NOW,
             slot_hold_until=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
             last_failure_class=login_failure,
             last_renewal_failure_class=renewal_failure,
@@ -1295,6 +1336,7 @@ def test_login_failure_evidence_cannot_be_laundered_into_wait_state(failure):
             credential_revision="rev-1",
             integration_role="market-maker-primary",
             last_transition_at=NOW,
+            slot_hold_started_at=NOW,
             slot_hold_until=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
             last_failure_class=failure,
         )
@@ -1323,6 +1365,7 @@ def test_renewal_failure_evidence_cannot_be_laundered_into_active_state(
             last_transition_at=NOW,
             session_lineage_id=sha256(b"session").hexdigest(),
             access_expires_at=NOW + timedelta(minutes=10),
+            slot_hold_started_at=NOW,
             slot_hold_until=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
             last_renewal_failure_class=failure,
         )
@@ -1339,6 +1382,7 @@ def test_credential_rejected_state_rejects_nonfuture_provider_slot_hold():
             credential_revision="rev-1",
             integration_role="market-maker-primary",
             last_transition_at=NOW,
+            slot_hold_started_at=NOW - CONSERVATIVE_SESSION_SLOT_HOLD,
             slot_hold_until=NOW,
             last_failure_class=ProphetXLoginFailureClass.CREDENTIAL_REJECTED,
         )
@@ -2056,6 +2100,7 @@ def test_wait_state_rejects_access_expiry_beyond_slot_hold():
             integration_role="market-maker",
             last_transition_at=NOW,
             access_expires_at=NOW + timedelta(minutes=30),
+            slot_hold_started_at=NOW,
             slot_hold_until=NOW + timedelta(minutes=20),
         )
 
@@ -2072,6 +2117,7 @@ def test_session_pool_exhaustion_cannot_claim_access_expiry():
             integration_role="market-maker",
             last_transition_at=NOW,
             access_expires_at=NOW + timedelta(minutes=10),
+            slot_hold_started_at=NOW,
             slot_hold_until=NOW + timedelta(minutes=20),
         )
 
@@ -2115,6 +2161,7 @@ def test_structurally_valid_forged_login_admission_has_no_effect_authority(
         last_transition_at=NOW,
         attempt_id=attempt,
         attempt_started_at=NOW,
+        slot_hold_started_at=NOW,
         slot_hold_until=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
     )
     forged = ProphetXLoginAdmission(

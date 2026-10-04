@@ -774,6 +774,72 @@ def test_run_admission_rejects_symlink_path_replacement(
         _issue_admission(values)
 
 
+def test_deleted_admission_state_cannot_be_silently_reissued(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values = _product_precommit(tmp_path, monkeypatch)
+    _issue_admission(values)
+    workspace = values[1]
+    paths = tuple(workspace.glob(".risk-iid-run-admission-*.json"))
+    assert len(paths) == 1
+    paths[0].unlink()
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="authority|rollback|missing",
+    ):
+        _issue_admission(values)
+
+
+def test_run_admission_stable_reader_rebinding_fails_before_attacker_executes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values = _product_precommit(tmp_path, monkeypatch)
+    _issue_admission(values)
+    attacker_called = False
+
+    def forged_reader(_path):
+        nonlocal attacker_called
+        attacker_called = True
+        return {}
+
+    monkeypatch.setattr(
+        draw_authority,
+        "_read_stable_run_admission_state",
+        forged_reader,
+    )
+
+    with pytest.raises(ProductIidDrawPlanError, match="authority dispatch changed"):
+        _issue_admission(values)
+    assert attacker_called is False
+
+
+def test_run_admission_descriptor_rebinding_fails_before_attacker_executes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values = _product_precommit(tmp_path, monkeypatch)
+    _issue_admission(values)
+    attacker_called = False
+
+    def forged_open(_path):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("attacker descriptor opener executed")
+
+    monkeypatch.setattr(
+        draw_authority,
+        "_open_read_only_descriptor",
+        forged_open,
+    )
+
+    with pytest.raises(ProductIidDrawPlanError, match="authority dispatch changed"):
+        _issue_admission(values)
+    assert attacker_called is False
+
+
 def test_run_admission_truth_cannot_be_caller_constructed_or_subclassed() -> None:
     with pytest.raises(TypeError, match="product-issued"):
         ProductIidRunAdmissionReceipt(

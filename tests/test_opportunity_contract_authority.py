@@ -442,3 +442,49 @@ def test_identity_helper_rebinding_cannot_replace_economic_ids(
         rebuilt_plan.plan_id,
     ) == expected
 
+class _HostileDecisionTime:
+    tzinfo = object()
+
+    def __lt__(self, _other: object) -> bool:
+        raise AssertionError("caller decision-time comparison must not execute")
+
+    def __gt__(self, _other: object) -> bool:
+        raise AssertionError("caller decision-time comparison must not execute")
+
+
+def test_predictive_decision_time_rejects_hostile_objects_before_comparison() -> None:
+    eligibility = PredictiveEligibilityEvidence(
+        evaluation_id="evaluation-hostile-decision-time",
+        evaluation_sha256=_HASH,
+        protocol_sha256=_HASH,
+        admission_policy_sha256=_HASH,
+        model_id="model",
+        model_version="1",
+        strategy_version="1",
+        uncertainty_kind="absolute_probability_radius_v1",
+        sample_size=100,
+        minimum_sample_size=50,
+        maximum_uncertainty=Decimal("0.1"),
+        as_of="2026-09-16T15:00:00+00:00",
+        valid_until="2026-09-16T18:00:00+00:00",
+    )
+    forecast = ForecastRef(
+        forecast_id="forecast-hostile-decision-time",
+        forecast_hash=_HASH,
+        quote_key="event|market|selection",
+        probability=Decimal("0.5"),
+        input_cutoff_ts="2026-09-16T16:00:00+00:00",
+        market_snapshot_hash=_HASH,
+        quote_market_event_hash=_HASH,
+        model_id="model",
+        model_version="1",
+        strategy_version="1",
+        uncertainty=Decimal("0.05"),
+        predictive_eligibility=eligibility,
+    )
+
+    assert forecast.predictive_eligibility_reason(
+        _HostileDecisionTime(),
+        expected_model_id="model",
+    ) == "predictive decision time must be timezone-aware"
+

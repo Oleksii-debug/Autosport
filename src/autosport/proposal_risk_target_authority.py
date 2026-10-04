@@ -87,6 +87,14 @@ _PROVENANCE_FOR_CODE = getattr(_PROVENANCE_FOR, "__code__", None)
 _ENSURE_DURABLE_FILE = ensure_durable_file
 _ENSURE_DURABLE_FILE_CODE = getattr(_ENSURE_DURABLE_FILE, "__code__", None)
 _REPLACE = replace
+_AUTHORITY_METHOD_WITNESSES = tuple(
+    (
+        name,
+        MonotonicWorkspaceAuthority.__dict__[name],
+        getattr(MonotonicWorkspaceAuthority.__dict__[name], "__code__", None),
+    )
+    for name in ("prepare", "commit", "recover", "read_history")
+)
 
 
 class ProductProposalRiskTargetError(RuntimeError):
@@ -403,6 +411,15 @@ def _require_dispatch() -> None:
         raise ProductProposalRiskTargetError(
             "proposal-risk target dispatch authority changed: durable-file helper"
         )
+    for name, expected, code in _AUTHORITY_METHOD_WITNESSES:
+        current = MonotonicWorkspaceAuthority.__dict__.get(name)
+        if (
+            current is not expected
+            or getattr(current, "__code__", None) is not code
+        ):
+            raise ProductProposalRiskTargetError(
+                f"proposal-risk target dispatch authority changed: monotonic authority {name}"
+            )
 
 
 def _context_payload(context: ProposedTicketRiskContext) -> dict[str, object]:
@@ -1203,12 +1220,36 @@ def issue_product_proposal_risk_target(
                 raise ProductProposalRiskTargetError(
                     "proposal-risk target append did not re-resolve"
                 )
+
+            # Re-read every product-owned economic input after the durable ledger
+            # append and before the independent authority COMMIT. Cooperating
+            # writers are excluded by WorkspaceEconomicLock; this second read also
+            # fails closed if an uncooperative filesystem writer changed the goal,
+            # PaperBook, or ledger during target issuance.
+            fresh_goal, fresh_policy, fresh_book, fresh_ledger = _current_product_state(
+                workspace
+            )
+            try:
+                fresh_existing = _LEDGER_RESOLVE(
+                    fresh_ledger,
+                    action_id,
+                    fresh_goal,
+                    risk_policy=fresh_policy,
+                )
+            except (DecisionLedgerIntegrityError, TypeError, ValueError) as exc:
+                raise ProductProposalRiskTargetError(
+                    "proposal-risk target product state changed before authority COMMIT"
+                ) from exc
+            if fresh_existing is None:
+                raise ProductProposalRiskTargetError(
+                    "proposal-risk target disappeared before authority COMMIT"
+                )
             target = _build_target(
                 workspace_instance_id=workspace_instance_id,
-                record=existing,
-                goal=goal,
-                policy=policy,
-                book=book,
+                record=fresh_existing,
+                goal=fresh_goal,
+                policy=fresh_policy,
+                book=fresh_book,
                 expected_target_sha256=target_sha256,
             )
             try:

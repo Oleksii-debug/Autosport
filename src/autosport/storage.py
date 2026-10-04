@@ -2369,7 +2369,12 @@ class SQLiteMarketStore:
                 raise
         return sorted(events, key=_event_order_key)
 
-    def replay_events_at_frozen_cutoff(self, *, as_of: str) -> list[MarketEvent]:
+    def replay_events_at_frozen_cutoff(
+        self,
+        *,
+        as_of: str,
+        _with_append_generation: bool = False,
+    ) -> list[MarketEvent] | list[tuple[MarketEvent, int]]:
         """Return the exact independently issued durable history cutoff for as_of.
 
         SQLite remains the canonical event/history store, but a cutoff row is accepted
@@ -2381,8 +2386,14 @@ class SQLiteMarketStore:
         Generation-zero rows remain part of that tamper-evident sealed corpus, but they
         are never emitted as causal decision history: their baseline authority proves
         exact membership at authority activation, not historical product receipt order.
+
+        The private provenance mode returns the same final proven SQLite snapshot with
+        generation-zero rows included and tagged, solely so MarketMirror can preserve
+        legacy provider sequence fences without making those rows decision-causal.
         """
 
+        if type(_with_append_generation) is not bool:
+            raise TypeError("_with_append_generation must be a bool")
         canonical_as_of = _canonical_replay_cutoff(as_of)
         cutoff_id = _replay_cutoff_id(canonical_as_of)
         authority = self._replay_cutoff_authority()
@@ -2617,19 +2628,15 @@ class SQLiteMarketStore:
                     qualified_columns = ",".join(
                         f"m.{column}" for column in _HISTORY_COLUMNS
                     )
-                    # Generation zero is a sealed migration baseline, not
-                    # historical receipt chronology. Keep it inside every corpus
-                    # digest so post-activation rewrites fail closed, but do not let
-                    # it escape as decision-visible causal replay evidence. Only
-                    # positive append generations were product-issued in temporal
-                    # order relative to this authority.
+                    # Read baseline and positive rows from this exact proven SQLite
+                    # snapshot. Compatibility callers still suppress generation zero;
+                    # the private provenance path keeps it tagged for sequence fencing.
                     rows = self.connection.execute(
-                        f"""SELECT {qualified_columns}
+                        f"""SELECT c.append_generation, {qualified_columns}
                             FROM market_events AS m
                             JOIN market_event_commit_order AS c
                               ON c.dedupe_key = m.dedupe_key
-                            WHERE c.append_generation > 0
-                              AND c.append_generation <= ?""",
+                            WHERE c.append_generation <= ?""",
                         (max_generation,),
                     ).fetchall()
                     self._commit_stable_database_path()
@@ -2637,8 +2644,23 @@ class SQLiteMarketStore:
                     self.connection.rollback()
                     raise
 
-        events = [_event_from_history_row(row) for row in rows]
-        return sorted(events, key=_event_order_key)
+        events_with_generation: list[tuple[MarketEvent, int]] = []
+        for row in rows:
+            if len(row) != len(_HISTORY_COLUMNS) + 1:
+                raise ValueError("causal replay row has unexpected shape")
+            generation = row[0]
+            if type(generation) is not int or generation < 0:
+                raise ValueError("causal replay append generation is invalid")
+            event = _event_from_history_row(tuple(row[1:]))
+            events_with_generation.append((event, generation))
+        events_with_generation.sort(key=lambda item: _event_order_key(item[0]))
+        if _with_append_generation:
+            return events_with_generation
+        return [
+            event
+            for event, generation in events_with_generation
+            if generation > 0
+        ]
 
     def current_by_source(self) -> dict[tuple[str, str], MarketEvent]:
         """Return only a projection proven to equal independently trusted history."""

@@ -14,6 +14,17 @@ class _Value:
         self.value = value
 
 
+class _Tickets:
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def delete(self, _start, _end) -> None:
+        self.lines.clear()
+
+    def insert(self, _index, value: str) -> None:
+        self.lines.append(value)
+
+
 class _Session:
     def __init__(self) -> None:
         self.closed = False
@@ -30,6 +41,9 @@ class GuiLiveCloseDurabilityTests(unittest.TestCase):
         app.replay_worker = SimpleNamespace(busy=False)
         app.live_worker = SimpleNamespace(busy=True)
         app.session = _Session()
+        app._active_workspace = "economic-workspace"
+        app.bank = _Value()
+        app.tickets = _Tickets()
         app.status = _Value()
         app.live_status = _Value()
         app._logs = []

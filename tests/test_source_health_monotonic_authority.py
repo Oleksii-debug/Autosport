@@ -8,12 +8,14 @@ import pytest
 from autosport.ingestion_health import SourceHealthStore
 from autosport.monotonic_workspace_authority import (
     AuthorityPhase,
+    MonotonicAuthorityRecoveryRequiredError,
     MonotonicAuthorityRollbackError,
 )
 
 
 T0 = "2026-10-04T00:00:00Z"
 T1 = "2026-10-04T00:01:00Z"
+T2 = "2026-10-04T00:02:00Z"
 
 
 def _store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str = "workspace") -> SourceHealthStore:
@@ -160,3 +162,86 @@ def test_published_bytes_without_commit_are_recovered_on_reopen(
     history = reopened._monotonic_authority().read_history()
     assert history[-1].phase is AuthorityPhase.COMMIT
     assert history[-1].intended_state_sha256 == intended
+
+
+def test_validated_legacy_image_establishes_one_baseline_then_rejects_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str((tmp_path / "machine-authority").resolve()),
+    )
+    path = tmp_path / "legacy-workspace" / "source-health.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{\n  "history": {},\n  "schema_version": 4,\n  "sources": {}\n}\n',
+        encoding="utf-8",
+    )
+    legacy_bytes = path.read_bytes()
+
+    store = SourceHealthStore(path)
+    history = store._monotonic_authority().read_history()
+    assert history[-1].phase is AuthorityPhase.COMMIT
+    assert history[-1].intended_state_sha256 == _sha256(legacy_bytes)
+
+    _record_success(store)
+    path.write_bytes(legacy_bytes)
+
+    with pytest.raises(
+        MonotonicAuthorityRollbackError,
+        match="rolled back|unproven|authority|match",
+    ):
+        SourceHealthStore(path)
+
+
+def test_long_lived_writer_recovers_published_prefix_before_next_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path, monkeypatch, "target-live")
+    _record_success(store)
+    observed = _sha256(store.path.read_bytes())
+
+    future = _store(tmp_path, monkeypatch, "future-live")
+    _record_success(future)
+    _record_provider_failure(future)
+    intended_bytes = future.path.read_bytes()
+    intended = _sha256(intended_bytes)
+
+    authority = store._monotonic_authority()
+    binding = store._authority_binding(observed, intended, kind="PUBLISH")
+    authority.prepare(
+        tx_id="test-live-post-publish-crash",
+        observed_state_sha256=observed,
+        intended_state_sha256=intended,
+        semantic_binding_sha256=binding,
+    )
+    store.path.write_bytes(intended_bytes)
+
+    # An ordinary reader does not mutate independent authority to finish someone
+    # else's in-flight publication; it fails closed while COMMIT is absent.
+    with pytest.raises(
+        MonotonicAuthorityRecoveryRequiredError,
+        match="recovery|required|commit",
+    ):
+        store.get("provider-a")
+
+    # A later writer holds the canonical SourceHealthStore lock, so it may recover
+    # the exact prepared image before deriving and publishing its successor.
+    recovered = store.record_success(
+        "provider-a",
+        now=T2,
+        received=1,
+        accepted=1,
+        rejected=0,
+        cursor="cursor-2",
+        latest_source_ts=T2,
+        quality_flags=(),
+    )
+    assert recovered.status == "healthy"
+    assert recovered.last_failure_kind is None
+
+    history = store._monotonic_authority().read_history()
+    assert history[-1].phase is AuthorityPhase.COMMIT
+    assert history[-1].intended_state_sha256 == _sha256(store.path.read_bytes())

@@ -99,6 +99,9 @@ class ItalianLimitInstruction(tuple):
     price = property(itemgetter(3))
     bet_target_type = property(itemgetter(4))
 
+    def __getnewargs__(self):
+        return tuple(self)
+
 
 def _build_italian_limit_batch_admission_meta():
     """Seal hard-false provider/execution claims on diagnostic results."""
@@ -109,6 +112,7 @@ def _build_italian_limit_batch_admission_meta():
             "__dataclass_fields__",
             "__init__",
             "__new__",
+            "__getnewargs__",
             "__post_init__",
             "state",
             "reason_codes",
@@ -236,6 +240,9 @@ class ItalianLimitBatchAdmission(
     )
     execution_authorized = property(attrgetter("_execution_authorized_constant"))
     real_money_execution = property(attrgetter("_real_money_execution_constant"))
+
+    def __getnewargs__(self):
+        return tuple(self)
 
 
 _ItalianLimitBatchAdmissionMeta.seal(ItalianLimitBatchAdmission)

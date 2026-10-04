@@ -401,3 +401,24 @@ def test_evaluator_captures_authority_dependencies_against_module_rebinding(
     assert result.admissible is False
     assert result.execution_authorized is False
     assert result.real_money_execution is False
+
+
+def test_evaluator_uses_captured_instruction_slot_descriptors(monkeypatch):
+    instruction = I(side="LAY", size="0.49")
+    monkeypatch.setattr(ItalianLimitInstruction, "side", "BACK")
+    monkeypatch.setattr(ItalianLimitInstruction, "size", Decimal("100"))
+
+    result = evaluate_italian_limit_batch((instruction,))
+    assert result.state is ItalianLimitAdmissionState.REJECTED
+    assert result.reason_codes == ("I0:LAY_BACKER_STAKE_BELOW_EUR_0_50",)
+
+
+def test_result_diagnostic_state_slots_are_class_sealed():
+    for name, value in (
+        ("state", ItalianLimitAdmissionState.RULESET_SATISFIED_UNBOUND),
+        ("reason_codes", ()),
+        ("preselected_returns_eur", (Decimal("1"),)),
+        ("ruleset_satisfied_unbound", property(lambda _self: True)),
+    ):
+        with pytest.raises(TypeError, match="authority surface is sealed"):
+            setattr(ItalianLimitBatchAdmission, name, value)

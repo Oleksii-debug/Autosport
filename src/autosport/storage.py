@@ -1812,12 +1812,21 @@ class SQLiteMarketStore:
         # SQLite writer lock. A generator may perform arbitrary I/O or re-enter this
         # store; executing it under the issuance lock/BEGIN IMMEDIATE would turn
         # caller code into part of the durable critical section and can deadlock or
-        # stall live ingestion. The materialized membership is also stable for the
-        # entire PREPARE -> SQLite COMMIT -> machine COMMIT transition.
+        # stall live ingestion. Snapshot each yielded event immediately into its
+        # canonical durable representation before asking the generator for the next
+        # value, so later caller mutation of nested metadata cannot rewrite admitted
+        # batch bytes during PREPARE -> SQLite COMMIT -> machine COMMIT.
+        admitted: list[MarketEvent] = []
         try:
-            batch = tuple(events)
+            iterator = iter(events)
         except TypeError as exc:
             raise TypeError("events must be an iterable of MarketEvent values") from exc
+        for event in iterator:
+            if not isinstance(event, MarketEvent):
+                raise TypeError("events must contain only MarketEvent values")
+            payload = _validate_incoming_event(event)
+            admitted.append(MarketEvent.from_dict(_load_history_payload(payload)))
+        batch = tuple(admitted)
 
         authority = self._market_append_authority()
         # Keep the global lock order identical to trusted readers: cross-process

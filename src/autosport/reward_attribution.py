@@ -317,10 +317,11 @@ def _reward_attribution_semantic_payload(evidence: Any) -> dict[str, Any]:
 def _reward_attribution_payload(
     evidence: Any,
     *,
+    _semantic_payload_impl=_reward_attribution_semantic_payload,
     _component_to_dict=RewardComponentAttribution.to_dict,
 ) -> dict[str, Any]:
     return {
-        **_reward_attribution_semantic_payload(evidence),
+        **_semantic_payload_impl(evidence),
         "components": [
             _component_to_dict(item) for item in evidence.components
         ],

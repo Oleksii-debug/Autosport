@@ -60,15 +60,16 @@ def _receipt_authoritative_runtime_current(
     collector_store: CollectorDeltaStore,
     canonical_application: CanonicalDesktopApplication,
 ) -> tuple[MarketEvent, ...]:
-    """Return same-source current rows proven by durable desktop application receipts.
+    """Restore only market rows proven by this product desktop-application lineage.
 
-    market.db intentionally retains generic/import/audit history as canonical
-    evidence. The autonomous product mirror, however, is a product decision surface:
-    restart preload may therefore adopt only events that can be joined back to this
-    workspace's collector delta and a completed canonical desktop application receipt.
+    Generic/import/audit history remains canonical in market.db.  Restart preload
+    instead joins completed DesktopApplicationReceipt evidence back to the exact
+    collector delta and exact persisted market dedupe identity.  This preserves an
+    older receipt-authoritative quote even when newer generic history shadows the
+    ordinary current_quotes projection.
     """
 
-    receipt_digests: set[str] = set()
+    receipt_witnesses: dict[str, dict[str, str]] = {}
     after_delta_id: str | None = None
     while True:
         deltas = collector_store.deltas_after_commit(
@@ -90,15 +91,35 @@ def _receipt_authoritative_runtime_current(
                 raise ProductCompositionError(
                     "desktop application receipt conflicts with collector evidence"
                 )
-            receipt_digests.add(delta.canonical_event_digest)
+            by_dedupe = receipt_witnesses.setdefault(delta.event_id, {})
+            previous = by_dedupe.get(delta.event_dedupe_key)
+            if previous is not None and previous != delta.canonical_event_digest:
+                raise ProductCompositionError(
+                    "collector evidence reuses one market dedupe identity inconsistently"
+                )
+            by_dedupe[delta.event_dedupe_key] = delta.canonical_event_digest
         after_delta_id = deltas[-1].delta_id
 
     accepted: list[MarketEvent] = []
-    for event in market_store.events():
-        if event.source_id != source_id:
-            continue
-        if canonical_event_digest(event) in receipt_digests:
+    for event_id in sorted(receipt_witnesses):
+        expected = receipt_witnesses[event_id]
+        found: set[str] = set()
+        for event in market_store.events(event_id):
+            if event.source_id != source_id:
+                continue
+            expected_digest = expected.get(event.dedupe_key)
+            if expected_digest is None:
+                continue
+            if canonical_event_digest(event) != expected_digest:
+                raise ProductCompositionError(
+                    "receipt-authoritative market history conflicts with collector evidence"
+                )
             accepted.append(event)
+            found.add(event.dedupe_key)
+        if found != set(expected):
+            raise ProductCompositionError(
+                "receipt-authoritative market history is missing from canonical storage"
+            )
     return tuple(accepted)
 
 def _serialized_runtime_operation(method):

@@ -102,6 +102,119 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(store.trusted_live_events(), [])
             store.close()
 
+    def test_public_batch_cannot_mint_receipt_via_capability_type_rebind(self) -> None:
+        class ForgedCapability:
+            def authorizes(self, events) -> bool:
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+            forged = ForgedCapability()
+            store._active_live_receipt_batch = forged
+            try:
+                with patch.object(storage_module, "_LiveReceiptBatch", ForgedCapability):
+                    accepted = store.append_batch_accepted([event])
+            finally:
+                store._active_live_receipt_batch = None
+
+            self.assertEqual(accepted, [event])
+            self.assertFalse(store.has_trusted_live_receipt(event))
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
+    def test_private_live_receipt_seam_uses_sealed_capability_type(self) -> None:
+        class PoisonCapability:
+            def __init__(self, events):
+                raise AssertionError("mutable capability class must not be consulted")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+
+            with patch.object(storage_module, "_LiveReceiptBatch", PoisonCapability):
+                accepted = SQLiteMarketStore._append_live_batch_accepted(store, [event])
+
+            self.assertEqual(accepted, [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_live_receipt_writer_uses_sealed_authority_constant(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+
+            with patch.object(
+                storage_module,
+                "_LIVE_RECEIPT_AUTHORITY",
+                "attacker-controlled-authority",
+            ):
+                accepted = store._append_live_batch_accepted([event])
+                receipt = store.connection.execute(
+                    "SELECT authority FROM market_event_live_receipts"
+                ).fetchone()
+
+            self.assertEqual(accepted, [event])
+            self.assertEqual(receipt, ("autosport.live_ingestion_receipt.v1",))
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_live_receipt_reopen_and_read_use_sealed_authority_constant(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            self._ingest(store)
+            expected = store.trusted_live_events()
+            store.close()
+
+            with patch.object(
+                storage_module,
+                "_LIVE_RECEIPT_AUTHORITY",
+                "attacker-controlled-authority",
+            ):
+                reopened = SQLiteMarketStore(path)
+                try:
+                    self.assertEqual(reopened.trusted_live_events(), expected)
+                    self.assertTrue(reopened.has_trusted_live_receipt(expected[0]))
+                finally:
+                    reopened.close()
+
+    def test_live_capability_uses_sealed_canonical_payload_helpers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+
+            with (
+                patch.object(
+                    storage_module,
+                    "_canonical_payload",
+                    side_effect=AssertionError("mutable canonical payload helper must not be consulted"),
+                ),
+                patch.object(
+                    storage_module,
+                    "_canonical_json",
+                    side_effect=AssertionError("mutable canonical JSON helper must not be consulted"),
+                ),
+                patch.object(
+                    storage_module,
+                    "_encode_market_event",
+                    side_effect=AssertionError("mutable event encoder helper must not be consulted"),
+                ),
+            ):
+                accepted = store._append_live_batch_accepted([event])
+                receipt_count = store.connection.execute(
+                    "SELECT COUNT(*) FROM market_event_live_receipts"
+                ).fetchone()[0]
+
+            self.assertEqual(accepted, [event])
+            self.assertEqual(receipt_count, 1)
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
     def test_live_retry_keeps_canonical_market_event_type_after_module_rebind(self) -> None:
         class PoisonMarketEvent(MarketEvent):
             @classmethod

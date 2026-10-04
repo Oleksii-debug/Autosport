@@ -52,11 +52,13 @@ class MarketBookTransport:
         ),
         lay_sizes: tuple[tuple[str, str], ...] = (("1.99", "999"),),
         selection_status: str = "ACTIVE",
+        before_response=None,
     ) -> None:
         self.delayed = delayed
         self.back_sizes = back_sizes
         self.lay_sizes = lay_sizes
         self.selection_status = selection_status
+        self.before_response = before_response
         self.calls: list[dict[str, object]] = []
 
     def post(
@@ -88,6 +90,8 @@ class MarketBookTransport:
             for price, size in self.lay_sizes
         )
         delayed = "true" if self.delayed else "false"
+        if self.before_response is not None:
+            self.before_response()
         return (
             '{"jsonrpc":"2.0","id":'
             + str(request["id"])
@@ -1064,6 +1068,53 @@ def test_authoritative_decision_epoch_is_durable_plan_reservation() -> None:
     assert "RECEIVED_AFTER_DECISION" not in result.reasons
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
     assert "LIMIT_AUTHORITY_REJECTED" in result.reasons
+
+
+def test_response_crossing_plan_reservation_fails_received_after_decision() -> None:
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        transport = MarketBookTransport(
+            before_response=lambda: ledger.reserve_plan(bound.execution_plan)
+        )
+        receipt, canonical_source = _synthetic_authoritative_receipt(transport)
+        plan_view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        result = assess_authoritative_betfair_execution_feasibility(
+            ledger,
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+        )
+
+    expected_decision_at = datetime.fromisoformat(plan_view.plan_reserved_at)
+    assert result.observed_at <= expected_decision_at
+    assert result.received_at > expected_decision_at
+    assert "FUTURE_SNAPSHOT" not in result.reasons
+    assert "RECEIVED_AFTER_DECISION" in result.reasons
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+
+
+def test_snapshot_age_is_measured_at_durable_plan_reservation() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    time.sleep(0.01)
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        result = assess_authoritative_betfair_execution_feasibility(
+            ledger,
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(milliseconds=1),
+        )
+
+    assert "STALE_SNAPSHOT" in result.reasons
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
 
 
 def test_receipt_after_plan_reservation_cannot_be_decision_evidence() -> None:

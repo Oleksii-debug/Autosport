@@ -453,3 +453,34 @@ def test_external_uia_closes_disclosures_and_proves_trigger_focus_handoff() -> N
     assert "Wait-ForFocusedAutomationId -AutomationId '330'" in audit
     assert "manual disclosure close did not restore focus to automation_id=330" in audit
     assert "packaged disclosure focus-handoff audit failed" in audit
+
+
+def test_external_uia_activates_packaged_durable_emergency_stop() -> None:
+    audit = _audit()
+
+    assert "emergency_stop_activation_status = 'NOT_RUN'" in audit
+    assert "emergency_stop_status_text = $null" in audit
+    assert "emergency_stop_journal_path = $null" in audit
+    assert "execution-stop.jsonl" in audit
+    assert "pre-existing STOP journal" in audit
+    assert "-AutomationId 'emergency-stop-action'" in audit
+    assert "Invoke-ExternalAction -Element $stopButton" in audit
+    assert "-AutomationId 'emergency-stop-status'" in audit
+    assert "'^Аварійний STOP (активовано|активний)'" in audit
+    assert "'підтверджено стійкий запис ревізії'" in audit
+    assert "packaged emergency STOP durable journal is empty" in audit
+    assert "$report.emergency_stop_activation_status = 'PASS'" in audit
+
+
+def test_windows_candidate_requires_packaged_durable_emergency_stop_evidence() -> None:
+    workflow = _windows_workflow()
+    step_start = workflow.index("- name: External UIA fresh-extraction gate")
+    step_end = workflow.index("- name: Upload external UIA failure evidence", step_start)
+    step = workflow[step_start:step_end]
+
+    assert "$external.emergency_stop_activation_status -ne 'PASS'" in step
+    assert "$external.emergency_stop_status_text" in step
+    assert "(Join-Path $expectedWorkspace 'execution-stop.jsonl')" in step
+    assert "External UIA evidence did not prove packaged durable emergency STOP activation" in step
+    assert "extracted_external_uia_emergency_stop_activation_status" in step
+    assert "extracted_external_uia_emergency_stop_status_text" in step

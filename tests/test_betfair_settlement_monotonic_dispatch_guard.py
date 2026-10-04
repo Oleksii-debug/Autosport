@@ -18,7 +18,7 @@ def test_baseline_guard_rejects_monotonic_authority_dispatch_rebind(
 ) -> None:
     monkeypatch.setenv(
         "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
-        str((tmp_path / "monotonic-authority").resolve()),
+        str((tmp_path.parent / f"{tmp_path.name}-monotonic-authority").resolve()),
     )
 
     def forged_dispatch(self):

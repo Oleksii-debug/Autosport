@@ -99,7 +99,7 @@ def test_hash_valid_preexisting_journal_without_monotonic_history_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    authority_root = tmp_path / "monotonic-authority"
+    authority_root = tmp_path.parent / f"{tmp_path.name}-monotonic-authority"
     monkeypatch.setenv(
         "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
         str(authority_root.resolve()),
@@ -118,7 +118,7 @@ def test_empty_new_settlement_store_still_bootstraps_without_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    authority_root = tmp_path / "monotonic-authority"
+    authority_root = tmp_path.parent / f"{tmp_path.name}-monotonic-authority"
     monkeypatch.setenv(
         "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
         str(authority_root.resolve()),

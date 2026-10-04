@@ -30,7 +30,7 @@ from autosport.real_execution_ledger import (
 def _isolated_monotonic_authority(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(
         "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
-        str((tmp_path / "monotonic-authority").resolve()),
+        str((tmp_path.parent / f"{tmp_path.name}-monotonic-authority").resolve()),
     )
 
 

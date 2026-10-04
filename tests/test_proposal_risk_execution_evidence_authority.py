@@ -993,5 +993,88 @@ class ProductProposalRiskScenarioPopulationTests(unittest.TestCase):
         finally:
             scenario_population_authority._LEDGER_APPEND = original
 
+
+    def test_result_type_rebind_is_rejected_before_write(self) -> None:
+        before = (self.workspace / "decisions.jsonl").read_bytes()
+        original = scenario_population_authority.ProductProposalRiskScenarioPopulation
+        try:
+            scenario_population_authority.ProductProposalRiskScenarioPopulation = object
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            scenario_population_authority.ProductProposalRiskScenarioPopulation = original
+        self.assertEqual((self.workspace / "decisions.jsonl").read_bytes(), before)
+
+    def test_result_hard_false_getter_code_mutation_is_rejected(self) -> None:
+        descriptor = ProductProposalRiskScenarioPopulation.__dict__[
+            "scenario_execution_proven"
+        ]
+        getter = descriptor.fget
+        self.assertIsNotNone(getter)
+        original_code = getter.__code__
+
+        def forged_scenario_execution_proven(self) -> bool:
+            return True
+
+        try:
+            getter.__code__ = forged_scenario_execution_proven.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            getter.__code__ = original_code
+
+    def test_internal_semantic_helper_rebind_is_rejected_on_resolve(self) -> None:
+        issued = self._issue()
+        self.assertTrue(issued.population_identity_proven)
+        original = scenario_population_authority._population_material
+        try:
+            scenario_population_authority._population_material = (
+                lambda *args, **kwargs: {"forged": True}
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._resolve()
+        finally:
+            scenario_population_authority._population_material = original
+
+    def test_json_dumps_in_place_code_mutation_is_rejected_before_write(self) -> None:
+        before = (self.workspace / "decisions.jsonl").read_bytes()
+        original_code = scenario_population_authority.json.dumps.__code__
+
+        def forged_dumps(
+            obj,
+            *,
+            skipkeys=False,
+            ensure_ascii=True,
+            check_circular=True,
+            allow_nan=True,
+            cls=None,
+            indent=None,
+            separators=None,
+            default=None,
+            sort_keys=False,
+            **kw,
+        ):
+            return "{}"
+
+        try:
+            scenario_population_authority.json.dumps.__code__ = forged_dumps.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            scenario_population_authority.json.dumps.__code__ = original_code
+        self.assertEqual((self.workspace / "decisions.jsonl").read_bytes(), before)
+
 if __name__ == "__main__":
     unittest.main()

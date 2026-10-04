@@ -18,8 +18,35 @@ def _evidence() -> BetdaqEconomicEvidence:
         request_identity_sha256="0e48478b4b2cc067a15dea78acc1f4e549b94f51249935f8ad8e098c698ea824",
         source_payload_sha256="b" * 64,
         observed_at="2026-09-25T00:00:00Z",
-        account_context_id="betdaq-auth-context:test",
+        account_context_id="betdaq-auth-context:" + ("a" * 64),
     )
+
+
+@pytest.mark.parametrize(
+    "account_context_id",
+    [
+        "betdaq-auth-context:test",
+        "betdaq-auth-context:" + ("a" * 63),
+        "betdaq-auth-context:" + ("A" * 64),
+        "wrong-prefix:" + ("a" * 64),
+    ],
+)
+def test_economic_evidence_rejects_noncanonical_account_context_id(
+    account_context_id: str,
+) -> None:
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="account_context_id",
+    ):
+        BetdaqEconomicEvidence(
+            method="GetOrderDetails",
+            request_identity_sha256=(
+                "0e48478b4b2cc067a15dea78acc1f4e549b94f51249935f8ad8e098c698ea824"
+            ),
+            source_payload_sha256="b" * 64,
+            observed_at="2026-09-25T00:00:00Z",
+            account_context_id=account_context_id,
+        )
 
 
 def _observation(**overrides: object) -> BetdaqOrderSettlementObservation:

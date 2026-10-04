@@ -315,13 +315,23 @@ class BetdaqEconomicEvidence:
             raise BetdaqEconomicReadbackError(
                 "observed_at must use canonical UTC timestamp spelling"
             )
+        context_prefix = "betdaq-auth-context:"
         if (
             type(self.account_context_id) is not str
-            or not self.account_context_id.startswith("betdaq-auth-context:")
+            or not self.account_context_id.startswith(context_prefix)
         ):
             raise BetdaqEconomicReadbackError(
                 "account_context_id is not canonical BETDAQ account context"
             )
+        try:
+            _sha256_hex(
+                self.account_context_id.removeprefix(context_prefix),
+                "account_context_id",
+            )
+        except BetdaqEconomicReadbackError as exc:
+            raise BetdaqEconomicReadbackError(
+                "account_context_id must bind an exact canonical context digest"
+            ) from exc
         if self.authenticated_principal_continuity_proven is not False:
             raise BetdaqEconomicReadbackError(
                 "cross-process authenticated-principal continuity is owned elsewhere"

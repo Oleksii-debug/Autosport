@@ -3998,6 +3998,29 @@ class PersistentLiveDecisionLoop:
             raise DecisionLedgerIntegrityError(
                 "committed live decision has unsupported schema_version"
             )
+        if payload_version == 2:
+            expected_payload_keys = {
+                "schema",
+                "schema_version",
+                "loop_id",
+                "mode",
+                "gate",
+                "market_state_sha256",
+                "decision_context_sha256",
+                "intent_strategy_version_id",
+                "intent_model_version_id",
+                "intent_provenance_sha256",
+                "affected_input_ids",
+                "plan_sha256",
+                "plan",
+                MATERIAL_ACTION_ID_PAYLOAD_KEY,
+            }
+            if any(stake > 0 for stake in durable_plan.stakes):
+                expected_payload_keys.add("paper_execution")
+            if set(existing.payload) != expected_payload_keys:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision payload schema is noncanonical"
+                )
 
         context_payload = {
             "schema": "autosport.live_decision_context",

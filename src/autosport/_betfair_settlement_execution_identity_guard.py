@@ -28,6 +28,7 @@ authority.
 
 from __future__ import annotations
 
+from . import _betfair_settlement_provider_row_semantics as _provider_semantics
 from . import betfair_settlement_revisions as _settlement
 
 
@@ -43,6 +44,12 @@ _STORE_TYPE = _settlement.BetfairSettlementRevisionStore
 
 _ORIGINAL_INGEST = _STORE_TYPE.ingest
 _ORIGINAL_INGEST_CODE = getattr(_ORIGINAL_INGEST, "__code__", None)
+_PROVIDER_INGEST_DELEGATE = getattr(_provider_semantics, "_ORIGINAL_INGEST", None)
+_PROVIDER_INGEST_DELEGATE_CODE = getattr(
+    _PROVIDER_INGEST_DELEGATE,
+    "__code__",
+    None,
+)
 _STORE_RELOAD = vars(_STORE_TYPE).get("_reload")
 _STORE_RELOAD_CODE = getattr(_STORE_RELOAD, "__code__", None)
 _STORE_APPEND = vars(_STORE_TYPE).get("_append")
@@ -75,6 +82,8 @@ _LEDGER_DISPATCH_CODE = {
 
 if (
     _ORIGINAL_INGEST_CODE is None
+    or not callable(_PROVIDER_INGEST_DELEGATE)
+    or _PROVIDER_INGEST_DELEGATE_CODE is None
     or not callable(_STORE_RELOAD)
     or _STORE_RELOAD_CODE is None
     or not callable(_STORE_APPEND)
@@ -98,6 +107,10 @@ def _require_dispatch() -> None:
     if (
         _STORE_TYPE.ingest is not _ingest_with_exact_authority
         or getattr(_ORIGINAL_INGEST, "__code__", None) is not _ORIGINAL_INGEST_CODE
+        or getattr(_provider_semantics, "_ORIGINAL_INGEST", None)
+        is not _PROVIDER_INGEST_DELEGATE
+        or getattr(_PROVIDER_INGEST_DELEGATE, "__code__", None)
+        is not _PROVIDER_INGEST_DELEGATE_CODE
         or vars(_STORE_TYPE).get("_reload") is not _STORE_RELOAD
         or getattr(_STORE_RELOAD, "__code__", None) is not _STORE_RELOAD_CODE
         or vars(_STORE_TYPE).get("_append") is not _STORE_APPEND

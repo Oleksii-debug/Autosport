@@ -1678,6 +1678,42 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             resumed.close()
 
+    def test_far_future_causal_timestamp_does_not_overflow_transition_scheduler(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START)
+            far_future = datetime.max.replace(tzinfo=timezone.utc)
+            event = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.00"),
+                observed_ts=far_future.isoformat(),
+                source_id="provider-a",
+                sequence=1,
+                status="open",
+                source_ts=far_future.isoformat(),
+                ingest_ts=far_future.isoformat(),
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(event,)]),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls, [("input-a", ())])
+            self.assertEqual(
+                loop._availability_deadlines["input-a"],
+                far_future,
+            )
+            loop.close()
+
     def test_future_local_availability_after_quote_expiry_does_not_schedule_false_activation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

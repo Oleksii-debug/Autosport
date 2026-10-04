@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
+import stat
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -767,6 +769,7 @@ class SQLiteMarketStore:
         self._connection_lock = RLock()
         self.connection = sqlite3.connect(self.path, check_same_thread=False)
         try:
+            self._database_identity = self._current_database_path_identity()
             self.connection.execute("PRAGMA journal_mode=WAL")
             self.connection.execute("PRAGMA synchronous=FULL")
             self._init_schema()
@@ -779,6 +782,26 @@ class SQLiteMarketStore:
         except Exception:
             self.connection.close()
             raise
+
+    def _current_database_path_identity(self) -> os.stat_result:
+        try:
+            metadata = self.path.lstat()
+        except OSError as exc:
+            raise ValueError(
+                "market database pathname is missing or inaccessible"
+            ) from exc
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError(
+                "market database pathname must be a single-link regular file"
+            )
+        return metadata
+
+    def _require_database_path_identity(self) -> None:
+        current = self._current_database_path_identity()
+        if not os.path.samestat(self._database_identity, current):
+            raise ValueError(
+                "market database pathname no longer identifies the opened database"
+            )
 
     def _create_current_quotes(self) -> None:
         self.connection.execute(
@@ -1000,7 +1023,8 @@ class SQLiteMarketStore:
         return row[0] + 1
 
     def _market_append_authority(self) -> MonotonicWorkspaceAuthority:
-        database_path = self.path.absolute()
+        self._require_database_path_identity()
+        database_path = self.path
         return MonotonicWorkspaceAuthority(
             workspace=database_path.parent,
             domain=_APPEND_MACHINE_DOMAIN,
@@ -1283,7 +1307,8 @@ class SQLiteMarketStore:
         self._recover_positive_append_authority(authority)
 
     def _replay_cutoff_authority(self) -> MonotonicWorkspaceAuthority:
-        database_path = self.path.absolute()
+        self._require_database_path_identity()
+        database_path = self.path
         return MonotonicWorkspaceAuthority(
             workspace=database_path.parent,
             domain=_REPLAY_CUTOFF_MACHINE_DOMAIN,

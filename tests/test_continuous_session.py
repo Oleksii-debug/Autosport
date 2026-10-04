@@ -3450,7 +3450,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_learning_settlement_recovers_when_crash_precedes_bridge_prepare(
+    def test_learning_settlement_recovers_before_bridge_prepare_during_source_outage(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3643,14 +3643,15 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             )
             restarted, restarted_store, *_ = _build_coordinator(
                 root,
-                source,
+                _UnavailableSource(source.page),
                 clock,
                 outcome_authority=authority,
                 settlement_learning_handoff=restarted_bridge,
             )
             try:
                 result = restarted.tick()
-                self.assertGreaterEqual(authority.calls, 2)
+                self.assertTrue(result.source_provider_unavailable)
+                self.assertEqual(authority.calls, 1)
                 self.assertEqual(result.settled_ticket_ids, (ticket.ticket_id,))
                 self.assertIn(
                     resolution.evidence_id,
@@ -3686,6 +3687,11 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 self.assertEqual(
                     session_state["pending_settlement_resolutions"],
                     [],
+                )
+                self.assertEqual(session_state["cycles_completed"], 0)
+                self.assertEqual(
+                    session_state["last_error_code"],
+                    "ProviderUnavailableError",
                 )
             finally:
                 restarted_store.close()

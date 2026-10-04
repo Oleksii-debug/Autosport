@@ -450,6 +450,16 @@ class ProphetXSessionSnapshot:
                 "renewal retry horizon must follow the latest transition"
             )
 
+        if self.state is ProphetXSessionState.RENEWAL_DUE:
+            has_transient_renewal_failure = self.last_renewal_failure_class in {
+                ProphetXRenewalFailureClass.RETRYABLE,
+                ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE,
+            }
+            if (self.retry_not_before is not None) != has_transient_renewal_failure:
+                raise ProphetXSessionLifecycleError(
+                    "renewal-due retry horizon must match transient renewal failure evidence"
+                )
+
         if self.state is ProphetXSessionState.LOGIN_IN_FLIGHT:
             if (
                 self.session_lineage_id is not None
@@ -564,6 +574,19 @@ class ProphetXSessionSnapshot:
                     raise ProphetXSessionLifecycleError(
                         "wait hold is below the conservative refresh floor"
                     )
+
+        if (
+            self.state is ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+            and self.access_expires_at is not None
+            and (
+                self.last_failure_class is not None
+                or self.last_renewal_failure_class is not None
+                or self.transient_failures != 0
+            )
+        ):
+            raise ProphetXSessionLifecycleError(
+                "refresh-success wait evidence cannot carry failure history"
+            )
 
         if (
             self.state is ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY

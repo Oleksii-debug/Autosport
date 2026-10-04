@@ -204,6 +204,13 @@ def _build_constraint_evidence_meta():
     )
 
     class _BetfairConstraintEvidenceMeta(type):
+        def __new__(mcls, name, bases, namespace, **kwargs):
+            if any(base in sealed_classes for base in bases):
+                raise TypeError(
+                    "provider-constraint authority surface classes are final"
+                )
+            return super().__new__(mcls, name, bases, namespace, **kwargs)
+
         def __setattr__(cls, name: str, value: object) -> None:
             if cls in sealed_classes and name in protected_names:
                 raise TypeError(

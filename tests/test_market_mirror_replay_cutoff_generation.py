@@ -13,6 +13,9 @@ from unittest.mock import patch
 import autosport.storage as storage_module
 from autosport.domain import MarketEvent
 from autosport.market_mirror import MarketMirror
+from autosport.market_state_identity import (
+    PROPHETX_REST_MARKET_STATE_CONTRACT,
+)
 from autosport.monotonic_workspace_authority import (
     MonotonicAuthorityRollbackError,
     MonotonicWorkspaceAuthority,
@@ -60,6 +63,43 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             status="open",
             source_ts=source_ts or observed_ts,
             ingest_ts=ingest_ts or observed_ts,
+        )
+
+    @staticmethod
+    def semantic_event(
+        *,
+        sequence: int,
+        observed_ts: str,
+        ingest_ts: str | None = None,
+    ) -> MarketEvent:
+        return MarketEvent(
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            decimal_odds=Decimal("2.00"),
+            observed_ts=observed_ts,
+            source_id="prophetx:sandbox",
+            sequence=sequence,
+            status="open",
+            ingest_ts=ingest_ts or observed_ts,
+            metadata={
+                "provider": "prophetx",
+                "environment": "sandbox",
+                "transport_surface": "v3_affiliate_get_markets",
+                "request_fingerprint_sha256": "a" * 64,
+                "product_acquisition_sequence": sequence,
+                "response_sha256": f"{sequence:x}".rjust(64, "0"),
+                "snapshot_fingerprint_sha256": (
+                    f"{sequence + 100:x}".rjust(64, "0")
+                ),
+                "sequence_authority_id": "prophetx-rest-test-authority",
+                "sequence_source_id": (
+                    "prophetx:sandbox:rest:v3-affiliate-get-markets"
+                ),
+                "semantic_state_contract": (
+                    PROPHETX_REST_MARKET_STATE_CONTRACT
+                ),
+            },
         )
 
     @classmethod
@@ -160,6 +200,44 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             semantic_binding_sha256=binding_sha256,
         )
         return authority
+
+    def test_replay_retains_raw_semantic_refresh_and_uses_latest_liveness(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.semantic_event(
+                    sequence=1,
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                refresh = self.semantic_event(
+                    sequence=2,
+                    observed_ts="2026-09-16T19:00:01+00:00",
+                )
+                self.assertTrue(store.append(first))
+                self.assertTrue(store.append(refresh))
+
+                replay = self.replay(
+                    store,
+                    as_of=datetime(
+                        2026, 9, 16, 19, 0, 1, 500000,
+                        tzinfo=timezone.utc,
+                    ),
+                )
+
+                self.assertEqual(
+                    [event.sequence for event in store.events()],
+                    [1, 2],
+                )
+                self.assertEqual(len(replay.events), 1)
+                self.assertEqual(replay.events[0].sequence, 2)
+                self.assertEqual(
+                    store.current_by_source()[
+                        (refresh.source_id, refresh.quote_key)
+                    ].sequence,
+                    2,
+                )
+            finally:
+                store.close()
 
     def test_generation_zero_baseline_recovers_after_prepare_crash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

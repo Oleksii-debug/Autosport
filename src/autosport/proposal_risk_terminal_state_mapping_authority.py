@@ -1306,6 +1306,14 @@ resolve_product_proposal_risk_terminal_state_mapping = _make_public_resolver(
 _PUBLIC_RESOLVER = resolve_product_proposal_risk_terminal_state_mapping
 _PUBLIC_RESOLVER_CODE = getattr(_PUBLIC_RESOLVER, "__code__", None)
 _PUBLIC_RESOLVER_CLOSURE = getattr(_PUBLIC_RESOLVER, "__closure__", None)
+_PUBLIC_RESOLVER_CLOSURE_WITNESSES = tuple(
+    (
+        cell,
+        cell.cell_contents,
+        getattr(cell.cell_contents, "__code__", None),
+    )
+    for cell in (_PUBLIC_RESOLVER_CLOSURE or ())
+)
 del _make_public_resolver
 
 
@@ -1404,6 +1412,18 @@ def _require_dispatch() -> None:
             None,
         )
         is not _PUBLIC_RESOLVER_CLOSURE
+        or any(
+            cell is not expected_cell
+            or cell.cell_contents is not expected_value
+            or getattr(expected_value, "__code__", None) is not expected_code
+            for cell, (expected_cell, expected_value, expected_code)
+            in zip(
+                _PUBLIC_RESOLVER_CLOSURE or (),
+                _PUBLIC_RESOLVER_CLOSURE_WITNESSES,
+            )
+        )
+        or len(_PUBLIC_RESOLVER_CLOSURE or ())
+        != len(_PUBLIC_RESOLVER_CLOSURE_WITNESSES)
     ):
         raise ProductProposalRiskTerminalStateMappingError(
             "terminal mapping public resolver root changed"

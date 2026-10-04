@@ -368,6 +368,8 @@ def _require_dispatch() -> None:
         or current_book_load_descriptor.__func__ is not _BOOK_LOAD_FUNC
         or getattr(current_book_load_descriptor.__func__, "__code__", None)
         is not _BOOK_LOAD_CODE
+        or getattr(_BOOK_LOAD, "__func__", None) is not _BOOK_LOAD_FUNC
+        or getattr(_BOOK_LOAD, "__self__", None) is not PaperBook
     ):
         raise ProductProposalRiskTargetError(
             "proposal-risk target dispatch authority changed: PaperBook loader"
@@ -419,6 +421,21 @@ def _require_dispatch() -> None:
         ):
             raise ProductProposalRiskTargetError(
                 f"proposal-risk target dispatch authority changed: monotonic authority {name}"
+            )
+
+    helper_witnesses = globals().get("_PROPOSAL_TARGET_HELPER_WITNESSES")
+    if type(helper_witnesses) is not tuple:
+        raise ProductProposalRiskTargetError(
+            "proposal-risk target internal helper witness set is unavailable"
+        )
+    for name, expected, code in helper_witnesses:
+        current = globals().get(name)
+        if (
+            current is not expected
+            or getattr(current, "__code__", None) is not code
+        ):
+            raise ProductProposalRiskTargetError(
+                f"proposal-risk target internal helper authority changed: {name}"
             )
 
 
@@ -1356,3 +1373,33 @@ def resolve_product_proposal_risk_target(
             book=book,
             expected_target_sha256=target_sha256,
         )
+
+
+_PROPOSAL_TARGET_HELPER_WITNESSES = tuple(
+    (
+        name,
+        globals()[name],
+        getattr(globals()[name], "__code__", None),
+    )
+    for name in (
+        "_workspace_path",
+        "_context_payload",
+        "_plain_json",
+        "_context_from_payload",
+        "_validate_context_vector",
+        "_target_material",
+        "_authority_for_workspace",
+        "_target_authority",
+        "_require_target_authority_committed",
+        "_derive",
+        "_current_product_state",
+        "_build_target",
+        "_signal",
+        "_canonical_json",
+        "_digest",
+        "_sha",
+        "_text",
+        "_instant",
+        "_decimal_text",
+    )
+)

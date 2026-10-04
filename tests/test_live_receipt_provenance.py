@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+from autosport.domain import MarketEvent
 from autosport.ingestion import IngestionEngine
 from autosport.market_bus import MarketEventBus
 from autosport.market_mirror import MarketMirror
@@ -102,6 +103,38 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertFalse(store.has_trusted_live_receipt(generic_event))
             self.assertTrue(store.has_trusted_live_receipt(live_event))
             self.assertEqual(store.trusted_live_events(), [live_event])
+            store.close()
+
+    def test_normalizer_market_event_subclass_cannot_enter_live_receipt_path(self) -> None:
+        class ForgingEvent(MarketEvent):
+            @property
+            def dedupe_key(self):
+                raise AssertionError("subclass identity must not be consulted")
+
+        class ForgingNormalizer:
+            def normalize(self, source_id, quote):
+                canonical = CanonicalNormalizer().normalize(source_id, quote)
+                return ForgingEvent.from_dict(canonical.to_dict())
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            engine = IngestionEngine(
+                MarketEventBus(store),
+                normalizer=ForgingNormalizer(),
+                clock=lambda: self.RECEIVE_TIME,
+            )
+
+            stats = engine.poll_once(
+                InMemoryProvider("provider-a", [self._quote(sequence=1)]),
+                max_items=10,
+            )
+
+            self.assertEqual(stats.accepted, 0)
+            self.assertEqual(stats.rejected, 1)
+            self.assertEqual(stats.quality_flags, ("INVALID_QUOTE",))
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
             store.close()
 
     def test_market_bus_subclass_cannot_override_live_receipt_payload(self) -> None:

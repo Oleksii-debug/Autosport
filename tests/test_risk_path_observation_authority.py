@@ -448,6 +448,8 @@ def test_run_suffix_replacement_cannot_mint_path_ancestry(
             membership=membership,
             registry_path=registry_path,
             sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
             settlement_bridge=bridge,
             authority_root=authority_root,
         )
@@ -476,6 +478,77 @@ def test_forged_randomization_root_cannot_rebind_path_member(
             sampling_manifest_json=forged,
             sampling_frame_json=SAMPLING_FRAME_JSON,
             horizon_json=HORIZON_JSON,
+            settlement_bridge=bridge,
+            authority_root=authority_root,
+        )
+
+
+def test_materialized_sampling_frame_mismatch_blocks_run_path_binding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(tmp_path, monkeypatch)
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
+    forged_frame = _canonical(
+        {
+            "schema": "AUTOSPORT_RISK_IID_SAMPLING_FRAME_V1",
+            "units": [
+                {
+                    "payload_sha256": "0" * 64,
+                    "unit_id": "sample-001",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(
+        ProductRunCapitalPathError,
+        match="precommit authority cannot be re-resolved",
+    ):
+        resolve_product_run_capital_path_evidence(
+            workspace=workspace,
+            run_id=RUN_ID,
+            member_index=0,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=forged_frame,
+            horizon_json=HORIZON_JSON,
+            settlement_bridge=bridge,
+            authority_root=authority_root,
+        )
+
+
+def test_materialized_horizon_mismatch_blocks_run_path_binding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(tmp_path, monkeypatch)
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
+    forged_horizon = _canonical(
+        {
+            "draw_count": 2,
+            "schema": "AUTOSPORT_RISK_IID_FIXED_DRAW_HORIZON_V1",
+        }
+    )
+
+    with pytest.raises(
+        ProductRunCapitalPathError,
+        match="precommit authority cannot be re-resolved",
+    ):
+        resolve_product_run_capital_path_evidence(
+            workspace=workspace,
+            run_id=RUN_ID,
+            member_index=0,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=forged_horizon,
             settlement_bridge=bridge,
             authority_root=authority_root,
         )
@@ -540,6 +613,8 @@ def test_bridge_must_use_exact_completed_run_ledger(
             membership=membership,
             registry_path=registry_path,
             sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
             settlement_bridge=bridge,
             authority_root=authority_root,
         )
@@ -566,6 +641,8 @@ def test_bridge_agent_loop_must_belong_to_same_workspace(
             membership=membership,
             registry_path=registry_path,
             sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
             settlement_bridge=bridge,
             authority_root=authority_root,
         )
@@ -602,6 +679,8 @@ def test_replay_dispatch_rebinding_fails_before_attacker_executes(
             membership=membership,
             registry_path=registry_path,
             sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
             settlement_bridge=bridge,
             authority_root=authority_root,
         )
@@ -678,6 +757,8 @@ def test_object_new_forgery_cannot_pass_canonical_evidence_verifier(
             membership=membership,
             registry_path=registry_path,
             sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
             settlement_bridge=bridge,
             authority_root=authority_root,
         )
@@ -716,6 +797,8 @@ def test_saved_resolver_rejects_result_type_rebinding_before_attacker_executes(
             membership=membership,
             registry_path=registry_path,
             sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
             settlement_bridge=bridge,
             authority_root=authority_root,
         )
@@ -766,6 +849,8 @@ def test_verifier_rejects_resolver_rebinding_before_attacker_executes(
             membership=membership,
             registry_path=registry_path,
             sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
             settlement_bridge=bridge,
             authority_root=authority_root,
         )
@@ -803,6 +888,8 @@ def test_base_open_ticket_cannot_mint_run_opening_ancestry(
             membership=membership,
             registry_path=registry_path,
             sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
             settlement_bridge=bridge,
             authority_root=authority_root,
         )

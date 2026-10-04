@@ -412,7 +412,39 @@ class PaperSettlementLearningBridge:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         with WorkspaceEconomicLock(self.state_path.parent):
             if self.state_path.exists():
-                self._read()
+                state = self._read()
+                for binding in state["bindings"].values():
+                    if (
+                        binding["economic_goal_fingerprint"]
+                        != owner_goal_fingerprint
+                    ):
+                        raise PaperSettlementLearningBridgeError(
+                            "durable bridge binding belongs to another economic goal"
+                        )
+                    if binding["risk_fingerprint"] != owner_risk_fingerprint:
+                        raise PaperSettlementLearningBridgeError(
+                            "durable bridge binding belongs to another risk policy"
+                        )
+                    if (
+                        binding["environment_id"]
+                        != agent_loop_snapshot.environment_id
+                        or binding["episode_id"]
+                        != agent_loop_snapshot.episode_id
+                    ):
+                        raise PaperSettlementLearningBridgeError(
+                            "durable bridge binding belongs to another AgentLoop episode"
+                        )
+                    baseline = _checkpoint(binding["baseline_checkpoint"])
+                    if (
+                        baseline.environment_id
+                        != agent_loop_snapshot.environment_id
+                        or baseline.episode_id
+                        != agent_loop_snapshot.episode_id
+                        or baseline.policy_id != agent_loop_snapshot.policy_id
+                    ):
+                        raise PaperSettlementLearningBridgeError(
+                            "durable bridge baseline belongs to another AgentLoop identity"
+                        )
             else:
                 self._write({"bindings": {}})
         self._authority_fields_sealed = True

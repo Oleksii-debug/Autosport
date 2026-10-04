@@ -17,6 +17,7 @@ from .causal_collector import (
     CollectorDeltaStore,
     DesktopDeltaCheckpointStore,
     DesktopDeltaConsumer,
+    canonical_event_digest,
 )
 from .collector_service import CollectorServiceSource, HeadlessCollectorService
 from .continuous_session import (
@@ -519,6 +520,99 @@ def _settlement_authority_identity(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _desktop_applied_current_for_source(
+    *,
+    source_id: str,
+    market_store: SQLiteMarketStore,
+    collector_store: CollectorDeltaStore,
+    canonical_application: CanonicalDesktopApplication,
+) -> tuple[MarketEvent, ...]:
+    """Rebuild restart state only from completed canonical desktop applications.
+
+    Generic/import market history is valid audit evidence but is not sufficient
+    authority for the autonomous product decision mirror.  A row is eligible only
+    when immutable collector evidence binds its exact dedupe identity + canonical
+    event digest and the product-owned desktop application store proves that
+    application reached durable completion.
+    """
+
+    receipt_identities: set[tuple[str, str]] = set()
+    after_delta_id: str | None = None
+    while True:
+        try:
+            batch = collector_store.deltas_after_commit(
+                source_id=source_id,
+                after_delta_id=after_delta_id,
+                max_items=1000,
+            )
+        except Exception as exc:
+            raise ProductCompositionError(
+                "cannot verify collector evidence for product runtime restart"
+            ) from exc
+        if not batch:
+            break
+        for delta in batch:
+            try:
+                receipt = canonical_application.lookup_receipt(delta)
+                if receipt is None:
+                    continue
+                receipt.validate()
+            except Exception as exc:
+                raise ProductCompositionError(
+                    "cannot verify desktop application receipt for product runtime restart"
+                ) from exc
+            if (
+                receipt.delta_id != delta.delta_id
+                or receipt.canonical_event_digest != delta.canonical_event_digest
+            ):
+                raise ProductCompositionError(
+                    "desktop application receipt conflicts with collector evidence"
+                )
+            receipt_identities.add(
+                (delta.event_dedupe_key, delta.canonical_event_digest)
+            )
+        after_delta_id = batch[-1].delta_id
+
+    if not receipt_identities:
+        return ()
+
+    try:
+        history = market_store.events()
+    except Exception as exc:
+        raise ProductCompositionError(
+            "cannot verify canonical market history for product runtime restart"
+        ) from exc
+
+    matched_identities: set[tuple[str, str]] = set()
+    latest: dict[tuple[str, str], MarketEvent] = {}
+    for event in history:
+        if event.source_id != source_id:
+            continue
+        try:
+            identity = (event.dedupe_key, canonical_event_digest(event))
+            quote_key = event.quote_key
+        except Exception as exc:
+            raise ProductCompositionError(
+                "cannot verify canonical market identity for product runtime restart"
+            ) from exc
+        if identity not in receipt_identities:
+            continue
+        matched_identities.add(identity)
+        key = (event.source_id, quote_key)
+        previous = latest.get(key)
+        if previous is None or (event.sequence, event.dedupe_key) > (
+            previous.sequence,
+            previous.dedupe_key,
+        ):
+            latest[key] = event
+
+    if matched_identities != receipt_identities:
+        raise ProductCompositionError(
+            "desktop application receipt references missing canonical market history"
+        )
+    return tuple(latest[key] for key in sorted(latest))
+
+
 @dataclass(slots=True)
 class AutonomousProductRuntime:
     """One supported headless composition of the integrated PAPER product authorities."""
@@ -889,17 +983,7 @@ def build_autonomous_product_runtime(
         mirror = MarketMirror()
         invalidations = BoundedMirrorInvalidationBuffer(mirror)
 
-        # This composition owns exactly one provider/source. Canonical market.db may
-        # legitimately also contain audit/import/live history for other providers;
-        # none of that state may seed this runtime's in-memory decision projection.
-        for (stored_source_id, _quote_key), event in (
-            market_store.current_by_source().items()
-        ):
-            if stored_source_id == source_id:
-                invalidations.accept_persisted(event)
-
         market_bus = MarketEventBus(market_store)
-        market_bus.subscribe(invalidations.accept_persisted)
         source_health = SourceHealthStore(root / "source_health.json")
         canonical_application = CanonicalDesktopApplication(
             market_bus,
@@ -907,9 +991,23 @@ def build_autonomous_product_runtime(
             root / "desktop_application.json",
             clock=resolved_clock,
         )
-
-        dependencies = FocusedMirrorDependencyIndex(mirror)
         collector_store = CollectorDeltaStore(root / "collector_deltas.json")
+
+        # Restart decision state belongs to the collector/DesktopApplicationReceipt
+        # authority family. Generic/import rows remain canonical audit history, but
+        # neither another source nor an unreceipted row from this source may seed the
+        # autonomous decision mirror. A newer generic row also cannot hide an older,
+        # exact desktop-applied row for the same quote.
+        for event in _desktop_applied_current_for_source(
+            source_id=source_id,
+            market_store=market_store,
+            collector_store=collector_store,
+            canonical_application=canonical_application,
+        ):
+            invalidations.accept_persisted(event)
+
+        market_bus.subscribe(invalidations.accept_persisted)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
         collector = HeadlessCollectorService(
             delta_store=collector_store,
             lifecycle=lifecycle,

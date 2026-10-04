@@ -131,7 +131,7 @@ def _build_observation_authority():
         if _readonly.__dict__.get("build_opener") is not readonly_build_opener:
             raise error_cls("provider billing network opener factory drifted")
         if (
-            _readonly.__dict__.get("_RejectAuthenticatedRedirects")
+            _readonly.__dict__.get("_RejectBetfairRedirects")
             is not redirect_handler_cls
             or redirect_handler_cls.__dict__.get("redirect_request")
             is not redirect_request
@@ -170,31 +170,6 @@ def _build_observation_authority():
             is not stdlib_https_response
         ):
             raise error_cls("provider billing HTTPS response executable drifted")
-
-    def opener_dispatch_snapshot(
-        opener: object,
-    ) -> tuple[tuple[str, object, tuple[object, ...]], ...] | None:
-        records: list[tuple[str, object, tuple[object, ...]]] = []
-        for map_name in ("handle_open", "process_request", "process_response"):
-            mapping = getattr(opener, map_name, None)
-            if type(mapping) is not dict:
-                return None
-            for key, handlers in mapping.items():
-                if type(key) not in (str, int) or type(handlers) is not list:
-                    return None
-                records.append((map_name, key, tuple(handlers)))
-        error_mapping = getattr(opener, "handle_error", None)
-        if type(error_mapping) is not dict:
-            return None
-        for protocol, by_code in error_mapping.items():
-            if type(protocol) not in (str, int) or type(by_code) is not dict:
-                return None
-            for code, handlers in by_code.items():
-                if type(code) not in (str, int) or type(handlers) is not list:
-                    return None
-                records.append((f"handle_error:{protocol}", code, tuple(handlers)))
-        records.sort(key=lambda item: (item[0], type(item[1]).__name__, str(item[1])))
-        return tuple(records)
 
     def transport_snapshot(transport: object) -> int:
         """Validate current #1496 transport state and return its bounded size."""

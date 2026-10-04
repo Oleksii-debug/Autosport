@@ -128,6 +128,59 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             contexts=self._contexts(),
         )
 
+    def test_native_path_workspace_is_accepted_without_subclass_widening(self) -> None:
+        self.assertIs(type(self.workspace), proposal_target_authority._PATH_TYPE)
+        self.assertEqual(
+            proposal_target_authority._workspace_path(self.workspace),
+            self.workspace,
+        )
+
+        class ForgedPath(type(self.workspace)):
+            pass
+
+        forged = ForgedPath(str(self.workspace))
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "exact absolute pathlib.Path",
+        ):
+            proposal_target_authority._workspace_path(forged)
+
+    def test_workspace_lock_transitive_dispatch_rebinding_fails_closed(self) -> None:
+        for name in (
+            "__init__",
+            "acquire",
+            "release",
+            "__enter__",
+            "__exit__",
+            "_open_lock_handle",
+            "_open_new_lock_handle",
+            "_validate_existing_lock_path",
+            "_validate_open_handle_identity",
+            "_require_regular_file",
+            "_require_single_link",
+            "_lock_handle",
+            "_unlock_handle",
+        ):
+            with self.subTest(name=name):
+                original = proposal_target_authority.WorkspaceEconomicLock.__dict__[name]
+                try:
+                    setattr(
+                        proposal_target_authority.WorkspaceEconomicLock,
+                        name,
+                        lambda *args, **kwargs: None,
+                    )
+                    with self.assertRaisesRegex(
+                        ProductProposalRiskTargetError,
+                        "WorkspaceEconomicLock",
+                    ):
+                        proposal_target_authority._require_dispatch()
+                finally:
+                    setattr(
+                        proposal_target_authority.WorkspaceEconomicLock,
+                        name,
+                        original,
+                    )
+
     def test_direct_construction_is_not_authority(self) -> None:
         with self.assertRaisesRegex(TypeError, "product-issued"):
             ProductProposalRiskTarget()

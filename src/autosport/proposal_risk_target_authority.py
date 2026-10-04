@@ -45,6 +45,17 @@ _TARGET_AUTHORITY_PREFIX = "target-v1:"
 _HEX = frozenset("0123456789abcdef")
 _MAX_DECIMAL_TEXT = 256
 
+_PATH_TYPE = type(Path("."))
+_PATH_METHOD_WITNESSES = tuple(
+    (
+        name,
+        getattr(_PATH_TYPE, name),
+        getattr(getattr(_PATH_TYPE, name), "__code__", None),
+    )
+    for name in ("is_absolute", "resolve", "is_dir", "is_symlink")
+)
+_PATH_METHOD_WITNESSES_EXPECTED = _PATH_METHOD_WITNESSES
+
 _POLICY_TYPE = PaperRiskPolicy
 _CONTEXT_TYPE = ProposedTicketRiskContext
 _VECTOR_TYPE = StakeVectorDecision
@@ -53,6 +64,37 @@ _GOAL_TYPE = EconomicGoalContract
 _GOAL_STORE_TYPE = EconomicGoalStore
 _LEDGER_TYPE = JsonlDecisionLedger
 _LOCK_TYPE = WorkspaceEconomicLock
+_LOCK_METHOD_WITNESSES = tuple(
+    (
+        name,
+        WorkspaceEconomicLock.__dict__[name],
+        getattr(
+            getattr(
+                WorkspaceEconomicLock.__dict__[name],
+                "__func__",
+                WorkspaceEconomicLock.__dict__[name],
+            ),
+            "__code__",
+            None,
+        ),
+    )
+    for name in (
+        "__init__",
+        "acquire",
+        "release",
+        "__enter__",
+        "__exit__",
+        "_open_lock_handle",
+        "_open_new_lock_handle",
+        "_validate_existing_lock_path",
+        "_validate_open_handle_identity",
+        "_require_regular_file",
+        "_require_single_link",
+        "_lock_handle",
+        "_unlock_handle",
+    )
+)
+_LOCK_METHOD_WITNESSES_EXPECTED = _LOCK_METHOD_WITNESSES
 _AUTHORITY_TYPE = MonotonicWorkspaceAuthority
 _MARKET_EVENT_TYPE = MarketEvent
 _TICKET_LEG_TYPE = TicketLeg
@@ -377,7 +419,7 @@ def _digest(value: object) -> str:
 
 
 def _workspace_path(workspace: object) -> Path:
-    if type(workspace) is not Path or not workspace.is_absolute():
+    if type(workspace) is not _PATH_TYPE or not workspace.is_absolute():
         raise ProductProposalRiskTargetError(
             "workspace must be an exact absolute pathlib.Path"
         )
@@ -403,7 +445,10 @@ def _require_dispatch() -> None:
         (_GOAL_TYPE is EconomicGoalContract, "EconomicGoalContract type"),
         (_GOAL_STORE_TYPE is EconomicGoalStore, "EconomicGoalStore type"),
         (_LEDGER_TYPE is JsonlDecisionLedger, "JsonlDecisionLedger type"),
+        (_PATH_TYPE is type(Path(".")), "native pathlib concrete type"),
+        (_PATH_METHOD_WITNESSES is _PATH_METHOD_WITNESSES_EXPECTED, "path method witness root"),
         (_LOCK_TYPE is WorkspaceEconomicLock, "WorkspaceEconomicLock type"),
+        (_LOCK_METHOD_WITNESSES is _LOCK_METHOD_WITNESSES_EXPECTED, "WorkspaceEconomicLock method witness root"),
         (_AUTHORITY_TYPE is MonotonicWorkspaceAuthority, "MonotonicWorkspaceAuthority type"),
         (_MARKET_EVENT_TYPE is MarketEvent, "MarketEvent type"),
         (_TICKET_LEG_TYPE is TicketLeg, "TicketLeg type"),
@@ -418,6 +463,24 @@ def _require_dispatch() -> None:
         if not valid:
             raise ProductProposalRiskTargetError(
                 f"proposal-risk target dispatch authority changed: {name}"
+            )
+
+    for name, expected, code in _PATH_METHOD_WITNESSES_EXPECTED:
+        current = getattr(_PATH_TYPE, name, None)
+        if current is not expected or getattr(current, "__code__", None) is not code:
+            raise ProductProposalRiskTargetError(
+                f"proposal-risk target dispatch authority changed: pathlib.{name}"
+            )
+
+    for name, expected, code in _LOCK_METHOD_WITNESSES_EXPECTED:
+        current = WorkspaceEconomicLock.__dict__.get(name)
+        current_function = getattr(current, "__func__", current)
+        if (
+            current is not expected
+            or getattr(current_function, "__code__", None) is not code
+        ):
+            raise ProductProposalRiskTargetError(
+                f"proposal-risk target dispatch authority changed: WorkspaceEconomicLock.{name}"
             )
 
     descriptors = (

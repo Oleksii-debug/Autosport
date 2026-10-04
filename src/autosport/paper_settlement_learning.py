@@ -1739,21 +1739,37 @@ class PaperSettlementLearningBridge:
                     raise PaperSettlementLearningBridgeError(
                         "learner outbox changed during acknowledgement"
                     )
-                ack = {
+                expected_ack_identity = {
                     "outbox_id": outbox["outbox_id"],
                     "transition_id": transition.transition_id,
                     "outcome_id": outcome.outcome_id,
                     "reward_id": reward.reward_id,
                     "next_checkpoint_id": checkpoint.checkpoint_id,
-                    "acked_at": _instant_id(at, "acked_at"),
                 }
-                if binding["ack"] is not None and binding["ack"] != ack:
-                    raise PaperSettlementLearningBridgeError(
-                        "learner acknowledgement conflicts with durable state"
-                    )
-                binding["ack"] = ack
-                binding["status"] = ACKED
-                self._write(state)
+                existing_ack = binding["ack"]
+                if binding["status"] == ACKED:
+                    if (
+                        type(existing_ack) is not dict
+                        or any(
+                            existing_ack.get(key) != value
+                            for key, value in expected_ack_identity.items()
+                        )
+                    ):
+                        raise PaperSettlementLearningBridgeError(
+                            "learner acknowledgement conflicts with durable state"
+                        )
+                else:
+                    if binding["status"] != OUTBOX or existing_ack is not None:
+                        raise PaperSettlementLearningBridgeError(
+                            "learner acknowledgement state transition is invalid"
+                        )
+                    ack = {
+                        **expected_ack_identity,
+                        "acked_at": _instant_id(at, "acked_at"),
+                    }
+                    binding["ack"] = ack
+                    binding["status"] = ACKED
+                    self._write(state)
             acknowledged.append(transition.transition_id)
         return tuple(acknowledged)
 

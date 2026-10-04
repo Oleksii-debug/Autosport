@@ -571,6 +571,11 @@ class BoundedMirrorInvalidationBuffer:
     def reconcile_trusted_store(
         self,
         store: SQLiteMarketStore,
+        *,
+        _store_type: type[SQLiteMarketStore] = SQLiteMarketStore,
+        _trusted_current=SQLiteMarketStore.trusted_live_current_by_source,
+        _event_type: type[MarketEvent] = MarketEvent,
+        _quote_key=MarketEvent.quote_key.fget,
     ) -> tuple[MirrorApplyResult, ...]:
         """Reconcile missed receipt-authoritative current state into this live mirror.
 
@@ -584,17 +589,19 @@ class BoundedMirrorInvalidationBuffer:
         live mirror across different workspaces would mix independent market authority
         and is rejected before either mirror truth or invalidation state can move.
         """
-        if type(store) is not SQLiteMarketStore:
+        if type(store) is not _store_type:
             raise TypeError("trusted reconciliation requires an exact SQLiteMarketStore")
+        if _quote_key is None:
+            raise RuntimeError("canonical MarketEvent.quote_key descriptor is unavailable")
 
         store_path = store.path.resolve()
-        current = store.trusted_live_current_by_source()
+        current = _trusted_current(store)
         ordered_events: list[MarketEvent] = []
         for expected_key in sorted(current):
             event = current[expected_key]
-            if type(event) is not MarketEvent:
+            if type(event) is not _event_type:
                 raise TypeError("trusted reconciliation requires exact MarketEvent values")
-            if expected_key != (event.source_id, event.quote_key):
+            if expected_key != (event.source_id, _quote_key(event)):
                 raise ValueError(
                     "trusted live current key does not match MarketEvent identity"
                 )
@@ -682,3 +689,21 @@ class BoundedMirrorInvalidationBuffer:
                 full_refresh_required=False,
                 has_more=bool(self._dirty),
             )
+
+def _seal_bounded_mirror_reconciliation_surface() -> None:
+    """Hide trusted-store dependency bindings from reconciliation callers."""
+
+    reconcile_impl = BoundedMirrorInvalidationBuffer.reconcile_trusted_store
+
+    def reconcile_trusted_store(
+        self: BoundedMirrorInvalidationBuffer,
+        store: SQLiteMarketStore,
+    ) -> tuple[MirrorApplyResult, ...]:
+        return reconcile_impl(self, store)
+
+    BoundedMirrorInvalidationBuffer.reconcile_trusted_store = reconcile_trusted_store
+
+
+_seal_bounded_mirror_reconciliation_surface()
+del _seal_bounded_mirror_reconciliation_surface
+

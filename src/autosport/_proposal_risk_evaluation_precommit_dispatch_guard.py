@@ -154,14 +154,25 @@ def _install_execution_evidence_guard() -> None:
     module = _execution_authority
     error_type = module.ProductProposalRiskExecutionEvidenceError
     canonical_derive = module.derive_product_proposal_risk_execution_evidence
+    canonical_mint = module._mint
     precommit_type = module.ProductProposalRiskEvaluationPrecommit
     row_type = module.CounterfactualMemberExecutionEvidence
     result_type = module.ProductProposalRiskExecutionEvidence
 
-    if type(canonical_derive) is not FunctionType:
+    if type(canonical_derive) is not FunctionType or type(canonical_mint) is not FunctionType:
         raise RuntimeError(
             "proposal risk execution evidence canonical dispatch is unavailable"
         )
+    derive_kwdefaults = canonical_derive.__kwdefaults__
+    if (
+        type(derive_kwdefaults) is not dict
+        or set(derive_kwdefaults) != {"_mint_capability"}
+    ):
+        raise RuntimeError(
+            "proposal risk execution evidence mint capability is unavailable"
+        )
+    canonical_mint_capability = derive_kwdefaults["_mint_capability"]
+    canonical_mint_code = canonical_mint.__code__
 
     helper_names = (
         "_text",
@@ -173,7 +184,6 @@ def _install_execution_evidence_guard() -> None:
         "_digest",
         "_require_estimator_dispatch",
         "_evidence_payload",
-        "_mint",
     )
     precommit_descriptor_names = (
         "__new__",
@@ -228,6 +238,24 @@ def _install_execution_evidence_guard() -> None:
         )
     derive_code = canonical_derive.__code__
 
+    def sealed_mint(values, *, mint_capability):
+        if module._mint is not sealed_mint:
+            raise error_type(
+                "proposal risk execution evidence sealed minter was rebound"
+            )
+        if mint_capability is not canonical_mint_capability:
+            raise error_type(
+                "proposal risk execution evidence mint capability is invalid"
+            )
+        if canonical_mint.__code__ is not canonical_mint_code:
+            raise error_type(
+                "proposal risk execution evidence canonical minter changed"
+            )
+        return canonical_mint(values, mint_capability=mint_capability)
+
+    sealed_mint_code = sealed_mint.__code__
+    module._mint = sealed_mint
+
     def require_surface() -> None:
         if module.ProductProposalRiskEvaluationPrecommit is not precommit_type:
             raise error_type(
@@ -240,6 +268,23 @@ def _install_execution_evidence_guard() -> None:
         if module.ProductProposalRiskExecutionEvidence is not result_type:
             raise error_type(
                 "proposal risk execution evidence result type was rebound"
+            )
+        if module._mint is not sealed_mint or sealed_mint.__code__ is not sealed_mint_code:
+            raise error_type(
+                "proposal risk execution evidence helper _mint changed"
+            )
+        if canonical_mint.__code__ is not canonical_mint_code:
+            raise error_type(
+                "proposal risk execution evidence canonical minter changed"
+            )
+        current_kwdefaults = canonical_derive.__kwdefaults__
+        if (
+            type(current_kwdefaults) is not dict
+            or set(current_kwdefaults) != {"_mint_capability"}
+            or current_kwdefaults["_mint_capability"] is not canonical_mint_capability
+        ):
+            raise error_type(
+                "proposal risk execution evidence derivation mint capability changed"
             )
         for name, expected in precommit_descriptor_witnesses:
             if precommit_type.__dict__.get(name) is not expected:

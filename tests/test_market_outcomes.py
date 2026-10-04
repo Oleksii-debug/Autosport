@@ -491,11 +491,23 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
                 "home": SettlementResult.WIN,
             }
         )
+        settlement = authority.settlement_by_quote(target)
         profit = PortfolioEngine.scenario_profit_settlements(
             [parlay],
-            authority.settlement_by_quote(target),
+            settlement,
         )
         self.assertEqual(profit, Decimal("10"))
+
+        with patch.object(
+            PaperBook,
+            "_settlement_result",
+            side_effect=AssertionError("rebound PaperBook settlement must not execute"),
+        ):
+            sealed_profit = PortfolioEngine.scenario_profit_settlements(
+                [parlay],
+                settlement,
+            )
+        self.assertEqual(sealed_profit, profit)
 
     def test_authoritative_search_rejects_future_authority(self):
         authority = self._authority(("away", "home"))

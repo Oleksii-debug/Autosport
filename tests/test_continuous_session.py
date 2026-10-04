@@ -4021,6 +4021,147 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 continuous_session_module.SettlementResolution = original
                 store.close()
 
+    def test_duplicate_durable_settlement_evidence_fails_closed_on_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-duplicate-durable-settlement",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:duplicate-durable-settlement",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="duplicate-durable-settlement-evidence",
+                evidence_sha256="4" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                state_path = root / "continuous_session.json"
+                raw = json.loads(state_path.read_text(encoding="utf-8"))
+                raw["settlement_evidence"].append(
+                    dict(raw["settlement_evidence"][0])
+                )
+                state_path.write_text(
+                    json.dumps(raw, sort_keys=True, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "durable settlement evidence entry is duplicated",
+                ):
+                    coordinator.status()
+            finally:
+                store.close()
+
+    def test_duplicate_pending_settlement_resolution_fails_closed_on_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-duplicate-pending-settlement",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:duplicate-pending-settlement",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="duplicate-pending-settlement-evidence",
+                evidence_sha256="5" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                state_path = root / "continuous_session.json"
+                raw = json.loads(state_path.read_text(encoding="utf-8"))
+                raw["pending_settlement_resolutions"].append(
+                    {
+                        **raw["pending_settlement_resolutions"][0],
+                        "quote_outcomes": dict(
+                            raw["pending_settlement_resolutions"][0]["quote_outcomes"]
+                        ),
+                    }
+                )
+                state_path.write_text(
+                    json.dumps(raw, sort_keys=True, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "pending settlement resolution entry is duplicated",
+                ):
+                    coordinator.status()
+            finally:
+                store.close()
+
+    def test_pending_settlement_digest_index_tamper_fails_on_status_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-pending-digest-index-tamper",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:pending-digest-index-tamper",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="pending-digest-index-tamper-evidence",
+                evidence_sha256="6" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                state_path = root / "continuous_session.json"
+                raw = json.loads(state_path.read_text(encoding="utf-8"))
+                raw["settlement_outcome_digests"][resolution.evidence_id] = "7" * 64
+                state_path.write_text(
+                    json.dumps(raw, sort_keys=True, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "pending settlement outcome digest conflicts with durable evidence",
+                ):
+                    coordinator.status()
+            finally:
+                store.close()
+
     def test_pending_settlement_outcomes_tamper_fails_digest_reproof(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -4058,7 +4199,12 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(
                     ContinuousSessionError,
-                    "settlement outcome interpretation conflicts with durable evidence",
+                    "pending settlement outcome digest conflicts with durable evidence",
+                ):
+                    coordinator.status()
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "pending settlement outcome digest conflicts with durable evidence",
                 ):
                     coordinator._pending_settlement_resolutions(as_of=clock())
             finally:

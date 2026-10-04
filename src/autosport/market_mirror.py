@@ -11,6 +11,16 @@ from .domain import MarketEvent, _quote_identity
 from .storage import SQLiteMarketStore
 
 
+def _require_market_event(
+    event: object,
+    *,
+    _event_type: type[MarketEvent] = MarketEvent,
+) -> MarketEvent:
+    if type(event) is not _event_type:
+        raise TypeError("event must be an exact MarketEvent")
+    return event
+
+
 def _require_market_store(
     store: object,
     *,
@@ -122,9 +132,15 @@ class MarketMirror:
         return (event.source_id, event.quote_key)
 
     @staticmethod
-    def _snapshot_event(event: MarketEvent) -> MarketEvent:
+    def _snapshot_event(
+        event: MarketEvent,
+        *,
+        _event_type: type[MarketEvent] = MarketEvent,
+    ) -> MarketEvent:
         """Own an independent canonical value snapshot, including nested metadata."""
-        return MarketEvent.from_dict(event.to_dict())
+        if type(event) is not _event_type:
+            raise TypeError("event must be an exact MarketEvent")
+        return _event_type.from_dict(event.to_dict())
 
     @staticmethod
     def _same_sequence_payload(left: MarketEvent, right: MarketEvent) -> bool:
@@ -221,8 +237,7 @@ class MarketMirror:
         and fails closed rather than silently replacing canonical evidence. Material
         updates are serialized with readers and advance one mirror-wide revision.
         """
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event must be a MarketEvent")
+        event = _require_market_event(event)
 
         key = self._key(event)
         with self._lock:
@@ -287,10 +302,12 @@ class MarketMirror:
         but valid provider observations may still be retained in history for audit;
         ``apply`` then keeps the live source-local projection monotonic.
         """
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event must be a MarketEvent")
+        canonical_store = _require_market_store(
+            store,
+            exact=False,
+            error_message="store must be a SQLiteMarketStore",
+        )
+        event = _require_market_event(event)
 
         with self._lock:
             if self._publication_revision_guard is not None:
@@ -300,7 +317,7 @@ class MarketMirror:
             # Keep durable append and live revision advance in one mirror critical
             # section. A decision publication guard can therefore linearize before
             # the append or after the applied revision, never between them.
-            store.append(event)
+            canonical_store.append(event)
             return self.apply(event)
 
     def view(

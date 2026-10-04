@@ -526,16 +526,25 @@ class MarketMirror:
         )
         event = _require_market_event(event)
 
-        with self._lock:
-            if self._publication_revision_guard is not None:
-                raise MarketMirrorRevisionChanged(
-                    "market mirror persistence is blocked during decision publication"
-                )
-            # Keep durable append and live revision advance in one mirror critical
-            # section. A decision publication guard can therefore linearize before
-            # the append or after the applied revision, never between them.
-            canonical_store.append(event)
-            return self.apply(event)
+        # Trusted reconciliation acquires durable store -> mirror. Preserve the
+        # same global order here so persistence cannot deadlock against a reconcile cut.
+        # Check the publication guard optimistically before waiting on the store lock,
+        # then re-check under the mirror lock before the joint mutation linearizes.
+        if self._publication_revision_guard is not None:
+            raise MarketMirrorRevisionChanged(
+                "market mirror persistence is blocked during decision publication"
+            )
+        with canonical_store._connection_lock:
+            with self._lock:
+                if self._publication_revision_guard is not None:
+                    raise MarketMirrorRevisionChanged(
+                        "market mirror persistence is blocked during decision publication"
+                    )
+                # append() and apply() re-enter canonical RLocks. Durable history and
+                # the corresponding mirror revision therefore move under one coherent
+                # store-before-mirror critical section.
+                canonical_store.append(event)
+                return self.apply(event)
 
     def view(
         self,

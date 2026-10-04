@@ -400,6 +400,10 @@ class SourceHealthStore:
         # the exact existing file and directory entry are durable.
         _sync_existing_file(self.path)
         _sync_parent_directory(self.path.parent)
+        if self._current_state_sha256() != observed:
+            raise MonotonicAuthorityRollbackError(
+                "source health state changed during authority bootstrap durability barrier"
+            )
         binding = self._authority_binding(
             None,
             observed,
@@ -438,9 +442,13 @@ class SourceHealthStore:
         if pending is not None:
             if observed == pending.intended_state_sha256:
                 # The local replace happened before the prior writer stopped. Retry
-                # the durability barrier before converting PREPARE into COMMIT.
+                # the durability barrier before converting PREPARE into COMMIT, then
+                # re-hash the exact bytes that survived that barrier. An external
+                # restore/replace racing recovery must never let a stale pre-barrier
+                # digest authorize COMMIT.
                 _sync_existing_file(self.path)
                 _sync_parent_directory(self.path.parent)
+                observed = self._current_state_sha256()
             authority.recover(
                 observed_state_sha256=observed,
                 tx_id=pending.tx_id,

@@ -361,11 +361,14 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
         ticket = self._open_home_ticket(book)
         guard = market_outcomes_module._assert_canonical_market_outcome_authority_dispatch
         original_code = guard.__code__
-        hostile_calls: list[bool] = []
 
         def hostile_guard():
-            hostile_calls.append(True)
+            raise AssertionError("hostile dispatch guard code executed")
 
+        # CPython only permits __code__ replacement when closure shape matches.
+        # Keep the hostile body closure-free so the mutation itself succeeds; the
+        # authoritative scenario fence must reject the changed code identity before
+        # this body can execute.
         self.assertEqual(original_code.co_freevars, ())
         self.assertEqual(hostile_guard.__code__.co_freevars, ())
         guard.__code__ = hostile_guard.__code__
@@ -381,8 +384,6 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
                 )
         finally:
             guard.__code__ = original_code
-
-        self.assertEqual(hostile_calls, [])
 
 
     def test_authoritative_scenario_rejects_subclass_before_hostile_dispatch(

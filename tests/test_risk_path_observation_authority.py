@@ -563,13 +563,17 @@ def test_fixed_n_iid_qualification_rejects_unfrozen_runtime_capital(
     monkeypatch,
 ) -> None:
     membership, workspace, registry_path, authority_root, manifest = (
-        _product_precommit(tmp_path, monkeypatch)
+        _product_precommit(
+            tmp_path,
+            monkeypatch,
+            initial_capital_state_sha256="0" * 64,
+        )
     )
     _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
 
     with pytest.raises(
         ProductFixedNIidQualificationError,
-        match="initial capital state differs",
+        match="product evidence cannot be re-resolved",
     ):
         resolve_product_fixed_n_iid_qualification(
             membership,
@@ -595,13 +599,14 @@ def test_fixed_n_iid_qualification_rejects_unfrozen_stake_policy(
             tmp_path,
             monkeypatch,
             initial_capital_state_sha256=initial_capital_sha256,
+            stake_policy_sha256="0" * 64,
         )
     )
     _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
 
     with pytest.raises(
         ProductFixedNIidQualificationError,
-        match="stake policy differs",
+        match="product evidence cannot be re-resolved",
     ):
         resolve_product_fixed_n_iid_qualification(
             membership,

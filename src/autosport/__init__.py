@@ -199,3 +199,7 @@ from . import _outcome_availability_registry_serialization as _outcome_availabil
 # Seal the two-phase availability clock against mutable function defaults, module
 # dispatch rebinding and direct mutation of cloned UTC-clock/begin globals.
 from . import _outcome_availability_clock_dispatch_guard as _outcome_availability_clock_dispatch_guard  # noqa: F401,E402
+
+# Product-owned risk randomization must expose only the closure-sealed public issuer,
+# never its implementation hook that accepts caller-supplied entropy.
+from . import _risk_randomization_precommit_internal_guard as _risk_randomization_precommit_internal_guard  # noqa: F401,E402

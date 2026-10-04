@@ -4,6 +4,8 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.opportunity as opportunity_module
+
 from autosport.domain import MarketEvent
 from autosport.opportunity import (
     EvidenceRef,
@@ -318,4 +320,125 @@ def test_canonical_typed_subclasses_fail_closed_before_property_dispatch() -> No
             decision=OpportunityDecision.WAIT,
             quotes=(hostile_quote,),
         )
+
+def test_validator_helper_rebinding_cannot_bypass_exact_decimal_ingress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        opportunity_module,
+        "_finite_decimal",
+        lambda value, *_args, **_kwargs: value,
+    )
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="allocation stake must be an exact finite Decimal",
+    ):
+        PlanAllocation(_HASH, _HostileDecimal("1"))
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="quote decimal_odds must be an exact finite Decimal",
+    ):
+        QuoteRef(
+            event_id="event-helper-rebind",
+            market_id="market-helper-rebind",
+            selection_id="selection-helper-rebind",
+            source_id="provider-helper-rebind",
+            sequence=1,
+            decimal_odds=_HostileDecimal("2"),
+            observed_ts="2026-09-16T16:00:00+00:00",
+            source_ts="2026-09-16T15:59:59+00:00",
+            ingest_ts="2026-09-16T16:00:01+00:00",
+            market_event_hash=_HASH,
+        )
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="forecast probability must be an exact finite Decimal",
+    ):
+        ForecastRef(
+            forecast_id="forecast-helper-rebind",
+            forecast_hash=_HASH,
+            quote_key="event|market|selection",
+            probability=_HostileDecimal("0.5"),
+            input_cutoff_ts="2026-09-16T16:00:00+00:00",
+            market_snapshot_hash=_HASH,
+            quote_market_event_hash=_HASH,
+        )
+
+
+def test_evidence_helper_rebinding_cannot_admit_subclass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile = _HostileEvidenceRef(
+        "attacker-helper-authority",
+        "attacker-helper-reference",
+    )
+    monkeypatch.setattr(
+        opportunity_module,
+        "_sorted_unique_evidence",
+        lambda values, *_args, **_kwargs: values,
+    )
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="opportunity evidence_refs must contain only EvidenceRef values",
+    ):
+        Opportunity(
+            strategy_class=StrategyClass.ARBITRAGE,
+            decision=OpportunityDecision.WAIT,
+            quotes=(_quote(),),
+            evidence_refs=(hostile,),
+        )
+
+
+def test_identity_helper_rebinding_cannot_replace_economic_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quote = _quote()
+    opportunity = Opportunity(
+        strategy_class=StrategyClass.ARBITRAGE,
+        decision=OpportunityDecision.ACTIONABLE,
+        quotes=(quote,),
+    )
+    opportunity_set = OpportunitySet((opportunity,))
+    plan = PortfolioPlan(opportunity_set=opportunity_set)
+    expected = (
+        quote.quote_key,
+        quote.market_event_hash,
+        opportunity.conflict_key,
+        opportunity.opportunity_id,
+        opportunity_set.opportunity_set_id,
+        plan.plan_id,
+    )
+
+    monkeypatch.setattr(
+        opportunity_module,
+        "_quote_key",
+        lambda *_args, **_kwargs: "attacker|quote|key",
+    )
+    monkeypatch.setattr(
+        opportunity_module,
+        "_canonical_json_hash",
+        lambda *_args, **_kwargs: "0" * 64,
+    )
+
+    rebuilt_quote = _quote()
+    rebuilt_opportunity = Opportunity(
+        strategy_class=StrategyClass.ARBITRAGE,
+        decision=OpportunityDecision.ACTIONABLE,
+        quotes=(rebuilt_quote,),
+    )
+    rebuilt_set = OpportunitySet((rebuilt_opportunity,))
+    rebuilt_plan = PortfolioPlan(opportunity_set=rebuilt_set)
+
+    assert (
+        rebuilt_quote.quote_key,
+        rebuilt_quote.market_event_hash,
+        rebuilt_opportunity.conflict_key,
+        rebuilt_opportunity.opportunity_id,
+        rebuilt_set.opportunity_set_id,
+        rebuilt_plan.plan_id,
+    ) == expected
 

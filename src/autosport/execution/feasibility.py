@@ -477,14 +477,15 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     *,
     action_id: str,
     max_snapshot_age: timedelta,
+    _verified_execution_view,
 ) -> ExecutionFeasibilitySnapshot:
     """Resolve provider depth against the durable plan and fail closed on limits.
 
     The receipt must have been minted by the authenticated Betfair read-only
-    client. That same authority seam supplies the product-owned decision instant;
-    callers cannot backdate freshness or action expiry. The exact execution plan
-    must already exist in the canonical real execution ledger with the same
-    fingerprint. Positive standard-LIMIT
+    client. The independently durable PLAN_RESERVED event supplies the decision
+    epoch; the provider receipt cannot backdate freshness or action expiry. The
+    exact execution plan must already exist in the canonical real execution
+    ledger with the same fingerprint. Positive standard-LIMIT
     feasibility additionally needs canonical provider/account/currency/market
     admissibility evidence; profile/adapter identity alone is not that authority.
     Until that authority is composed here, the result remains UNKNOWN_UNPROVEN
@@ -505,8 +506,9 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     _require_aware(acquisition_started_at, "acquisition_started_at")
     bound.verify_binding()
     try:
-        plan_view = ledger.verified_execution_view(
-            bound.execution_plan.plan_id
+        plan_view = _verified_execution_view(
+            ledger,
+            bound.execution_plan.plan_id,
         )
     except KeyError as exc:
         raise ValueError(
@@ -679,6 +681,8 @@ def _install_execution_feasibility_result_authority():
     raw_assess_code = raw_assess.__code__
     canonical_assess = _assess_execution_feasibility
     canonical_assess_code = canonical_assess.__code__
+    verified_execution_view = RealExecutionLedger.verified_execution_view
+    verified_execution_view_code = verified_execution_view.__code__
     fingerprint = _feasibility_result_fingerprint
 
     def assess(
@@ -693,9 +697,13 @@ def _install_execution_feasibility_result_authority():
             raw_assess.__code__ is not raw_assess_code
             or _assess_execution_feasibility is not canonical_assess
             or canonical_assess.__code__ is not canonical_assess_code
+            or RealExecutionLedger.verified_execution_view
+            is not verified_execution_view
+            or verified_execution_view.__code__
+            is not verified_execution_view_code
         ):
             raise RuntimeError(
-                "canonical execution feasibility assessor changed"
+                "canonical execution feasibility authority changed"
             )
         result = raw_assess(
             ledger,
@@ -703,6 +711,7 @@ def _install_execution_feasibility_result_authority():
             receipt,
             action_id=action_id,
             max_snapshot_age=max_snapshot_age,
+            _verified_execution_view=verified_execution_view,
         )
         if type(result) is not ExecutionFeasibilitySnapshot:
             raise TypeError("authoritative feasibility resolver returned invalid result type")

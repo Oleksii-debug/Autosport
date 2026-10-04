@@ -537,8 +537,8 @@ class MarketSettlementOutcomeAuthority:
 
     def assert_available_as_of(self, decision_as_of: datetime) -> None:
         self.assert_issued_integrity()
-        if not isinstance(decision_as_of, datetime):
-            raise TypeError("decision_as_of must be a datetime")
+        if type(decision_as_of) is not datetime:
+            raise TypeError("decision_as_of must be an exact datetime")
         if (
             decision_as_of.tzinfo is None
             or decision_as_of.utcoffset() is None
@@ -556,7 +556,7 @@ class MarketSettlementOutcomeAuthority:
             )
 
     def _state_is_derived(self, state: MarketTerminalState) -> bool:
-        if not isinstance(state, MarketTerminalState):
+        if type(state) is not MarketTerminalState:
             return False
         actual_ids = tuple(
             selection_id for selection_id, _ in state.settlements
@@ -605,8 +605,8 @@ class MarketSettlementOutcomeAuthority:
         self, state: MarketTerminalState
     ) -> dict[str, str]:
         self.assert_issued_integrity()
-        if not isinstance(state, MarketTerminalState):
-            raise TypeError("state must be MarketTerminalState")
+        if type(state) is not MarketTerminalState:
+            raise TypeError("state must be exact MarketTerminalState")
         if not self._state_is_derived(state):
             raise ValueError(
                 "terminal state is not derived from this outcome authority"

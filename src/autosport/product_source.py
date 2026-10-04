@@ -108,7 +108,22 @@ class ParlayApiProductSource:
             sealed = object.__getattribute__(self, "_authority_fields_sealed")
         except AttributeError:
             sealed = False
-        if sealed and name in ParlayApiProductSource._AUTHORITY_FIELDS:
+        if sealed and name in (
+            "_authority_fields_sealed",
+            "provider",
+            "source_id",
+            "stream_epoch",
+            "workspace",
+            "lawful_terms_ref",
+            "retention_ref",
+            "clock",
+            "normalizer",
+            "_authority",
+            "workspace_instance_id",
+            "state_dir",
+            "state_path",
+            "_authority_binding_sha256",
+        ):
             raise ProductSourceStateError(
                 f"product source authority field {name} is immutable after construction"
             )

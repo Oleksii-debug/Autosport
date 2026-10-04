@@ -80,25 +80,25 @@ class BetfairStandardLimitAction:
 
     def __post_init__(self) -> None:
         if type(self.selection_id) is not int or self.selection_id <= 0:
-            raise error_type(
+            raise BetfairStandardLimitAdmissionError(
                 "selection_id must be a positive integer"
             )
         if type(self.side) is not str or self.side not in {"BACK", "LAY"}:
-            raise error_type(
+            raise BetfairStandardLimitAdmissionError(
                 "side must be exactly BACK or LAY"
             )
         _positive_decimal(self.size, "size")
         _positive_decimal(self.price, "price")
         if self.price <= Decimal("1"):
-            raise error_type(
+            raise BetfairStandardLimitAdmissionError(
                 "price must be greater than 1"
             )
         if self.order_type != "LIMIT":
-            raise error_type(
+            raise BetfairStandardLimitAdmissionError(
                 "only plain LIMIT belongs to this admission authority"
             )
         if self.bet_target_type is not None:
-            raise error_type(
+            raise BetfairStandardLimitAdmissionError(
                 "target-size orders are outside standard-size LIMIT admission"
             )
 
@@ -181,13 +181,13 @@ class BetfairStandardLimitAdmission(metaclass=_ResultMeta):
 
     def __post_init__(self) -> None:
         if type(self.state) is not BetfairStandardLimitAdmissionState:
-            raise error_type(
+            raise BetfairStandardLimitAdmissionError(
                 "state must be exact BetfairStandardLimitAdmissionState"
             )
         if type(self.reason_codes) is not tuple or any(
             type(reason) is not str or not reason for reason in self.reason_codes
         ):
-            raise error_type(
+            raise BetfairStandardLimitAdmissionError(
                 "reason_codes must be an exact tuple of non-empty strings"
             )
         _utc(self.as_of, "as_of")
@@ -196,7 +196,7 @@ class BetfairStandardLimitAdmission(metaclass=_ResultMeta):
         if self.login_route is not None and (
             type(self.login_route) is not str or not self.login_route
         ):
-            raise error_type(
+            raise BetfairStandardLimitAdmissionError(
                 "login_route must be non-empty text or None"
             )
         _positive_decimal(self.submitted_payout, "submitted_payout")
@@ -211,7 +211,7 @@ class BetfairStandardLimitAdmission(metaclass=_ResultMeta):
             if value is not None:
                 _sha256_hex(value, field)
         if type(self.policy_version) is not int or self.policy_version != POLICY_VERSION:
-            raise error_type(
+            raise BetfairStandardLimitAdmissionError(
                 "policy_version must be the current product-owned version"
             )
         _sha256_hex(self.result_sha256, "result_sha256")
@@ -227,7 +227,7 @@ class BetfairStandardLimitAdmission(metaclass=_ResultMeta):
             constraint_resolution_sha256=self.constraint_resolution_sha256,
         )
         if expected != self.result_sha256:
-            raise error_type(
+            raise BetfairStandardLimitAdmissionError(
                 "result_sha256 does not match admission projection"
             )
 
@@ -607,15 +607,15 @@ def _snapshot_action(
     size = action.size
     price = action.price
     if type(selection_id) is not int or selection_id <= 0:
-        raise error_type("selection_id changed after construction")
+        raise BetfairStandardLimitAdmissionError("selection_id changed after construction")
     if type(side) is not str or side not in {"BACK", "LAY"}:
-        raise error_type("side changed after construction")
+        raise BetfairStandardLimitAdmissionError("side changed after construction")
     _positive_decimal(size, "size")
     _positive_decimal(price, "price")
     if price <= Decimal("1"):
-        raise error_type("price must be greater than 1")
+        raise BetfairStandardLimitAdmissionError("price must be greater than 1")
     if action.order_type != "LIMIT" or action.bet_target_type is not None:
-        raise error_type(
+        raise BetfairStandardLimitAdmissionError(
             "action changed outside plain standard-size LIMIT"
         )
     return selection_id, side, size, price
@@ -623,12 +623,12 @@ def _snapshot_action(
 
 def _positive_decimal(value: object, field: str) -> Decimal:
     if type(value) is not Decimal or not value.is_finite() or value <= 0:
-        raise error_type(
+        raise BetfairStandardLimitAdmissionError(
             f"{field} must be exact positive finite Decimal"
         )
     _sign, digits, exponent = value.as_tuple()
     if len(digits) > _MAX_DECIMAL_DIGITS or abs(exponent) > _MAX_ABS_EXPONENT:
-        raise error_type(
+        raise BetfairStandardLimitAdmissionError(
             f"{field} exceeds bounded Decimal shape"
         )
     return value
@@ -653,7 +653,7 @@ def _exact_multiply(left: Decimal, right: Decimal) -> Decimal:
 
 def _utc(value: object, field: str) -> datetime:
     if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
-        raise error_type(
+        raise BetfairStandardLimitAdmissionError(
             f"{field} must be timezone-aware datetime"
         )
     return value.astimezone(timezone.utc)
@@ -667,7 +667,7 @@ def _currency(value: object) -> str:
         or not value.isalpha()
         or value != value.upper()
     ):
-        raise error_type(
+        raise BetfairStandardLimitAdmissionError(
             "currency_code must be three-letter uppercase ASCII"
         )
     return value
@@ -679,7 +679,7 @@ def _sha256_hex(value: object, field: str) -> str:
         or len(value) != 64
         or any(character not in "0123456789abcdef" for character in value)
     ):
-        raise error_type(
+        raise BetfairStandardLimitAdmissionError(
             f"{field} must be lowercase SHA-256 hex"
         )
     return value

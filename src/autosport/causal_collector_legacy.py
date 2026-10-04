@@ -577,15 +577,26 @@ class CanonicalDesktopApplication:
             health_before=_SourceHealthSnapshot.from_state(health_before),
         )
 
-    def apply(self, delta: CollectorDelta, event: Any) -> DesktopApplicationReceipt:
+    def _apply_impl(
+        self,
+        delta: CollectorDelta,
+        event: Any,
+        *,
+        _market_event_type,
+        _canonical_digest,
+    ) -> DesktopApplicationReceipt:
         delta.validate()
+        if type(event) is not _market_event_type:
+            raise DeltaConflictError(
+                "canonical desktop application requires an exact MarketEvent"
+            )
         if getattr(event, "source_id", None) != delta.source_id:
             raise DeltaConflictError("canonical market event source_id conflicts with collector delta")
         if getattr(event, "event_id", None) != delta.event_id:
             raise DeltaConflictError("canonical market event event_id conflicts with collector delta")
         if getattr(event, "dedupe_key", None) != delta.event_dedupe_key:
             raise DeltaConflictError("canonical market event dedupe identity conflicts with collector delta")
-        digest = canonical_event_digest(event)
+        digest = _canonical_digest(event)
         if digest != delta.canonical_event_digest:
             raise DeltaConflictError("canonical market event digest conflicts with collector delta")
 
@@ -648,6 +659,35 @@ class CanonicalDesktopApplication:
         if receipt is None:
             raise ApplicationReceiptError("canonical application did not reach durable completion")
         return receipt
+
+
+def _bind_canonical_desktop_application_apply(implementation):
+    """Seal the exact market-event type and digest authority for desktop application."""
+
+    market_event_type = MarketEvent
+    canonical_digest = canonical_event_digest
+
+    def apply(
+        self: CanonicalDesktopApplication,
+        delta: CollectorDelta,
+        event: Any,
+    ) -> DesktopApplicationReceipt:
+        return implementation(
+            self,
+            delta,
+            event,
+            _market_event_type=market_event_type,
+            _canonical_digest=canonical_digest,
+        )
+
+    return apply
+
+
+CanonicalDesktopApplication.apply = _bind_canonical_desktop_application_apply(
+    CanonicalDesktopApplication._apply_impl
+)
+del CanonicalDesktopApplication._apply_impl
+del _bind_canonical_desktop_application_apply
 
 
 class CollectorDeltaStore(_JsonAtomicStore):
@@ -995,6 +1035,7 @@ class DesktopDeltaConsumer:
         _receipt_type,
         _validate_receipt,
         _canonical_digest,
+        _market_event_type,
     ) -> tuple[str, ...]:
         now = _instant(as_of, "as_of")
         available = self.collector.deltas_available_through(as_of=as_of, view=view)
@@ -1056,6 +1097,10 @@ class DesktopDeltaConsumer:
                     continue
 
                 event = self.resolve_event(delta)
+                if type(event) is not _market_event_type:
+                    raise DeltaConflictError(
+                        "desktop delta resolver must return an exact MarketEvent"
+                    )
                 digest = _canonical_digest(event)
                 if digest != delta.canonical_event_digest:
                     raise DeltaConflictError(f"canonical event digest mismatch for delta {delta.delta_id}")
@@ -1087,6 +1132,7 @@ def _bind_desktop_delta_consumer_drain(implementation):
     receipt_type = DesktopApplicationReceipt
     validate_receipt = DesktopApplicationReceipt.validate
     canonical_digest = canonical_event_digest
+    market_event_type = MarketEvent
 
     def drain(
         self,
@@ -1101,6 +1147,7 @@ def _bind_desktop_delta_consumer_drain(implementation):
             _receipt_type=receipt_type,
             _validate_receipt=validate_receipt,
             _canonical_digest=canonical_digest,
+            _market_event_type=market_event_type,
         )
 
     return drain

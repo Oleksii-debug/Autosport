@@ -804,6 +804,41 @@ class CollectorDeltaTests(unittest.TestCase):
 
             self.assertFalse(checkpoint.has_ack("d1"))
 
+
+    def test_consumer_rejects_market_event_subclass_before_application_or_ack(self):
+        expected_payload = event_payload()
+
+        class ForgedMarketEvent(MarketEvent):
+            def to_dict(self):
+                return dict(expected_payload)
+
+        forged = ForgedMarketEvent.from_dict(
+            {**expected_payload, "decimal_odds": "9.99"}
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            delta = self.make_delta(payload=expected_payload)
+            collector.append(delta)
+            apply_calls = []
+
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda _: forged,
+                apply_event=lambda *_: apply_calls.append(True),
+                lookup_application_receipt=lambda _: None,
+            )
+            with self.assertRaisesRegex(
+                DeltaConflictError,
+                "exact MarketEvent",
+            ):
+                consumer.drain(as_of="2026-01-01T00:00:05+00:00")
+
+            self.assertEqual(apply_calls, [])
+            self.assertFalse(checkpoint.has_ack(delta.delta_id))
+
     def test_consumer_rejects_receipt_subclass_before_delivery_or_ack(self):
         class ForgedReceipt(DesktopApplicationReceipt):
             pass
@@ -1318,6 +1353,40 @@ class CollectorDeltaTests(unittest.TestCase):
             )
             self.assertEqual(replayed, [])
             self.assertTrue(DesktopDeltaCheckpointStore(desktop_path).has_ack("d1"))
+
+
+    def test_canonical_application_rejects_market_event_subclass_before_durable_effects(self):
+        expected_payload = event_payload()
+
+        class ForgedMarketEvent(MarketEvent):
+            def to_dict(self):
+                return dict(expected_payload)
+
+        forged = ForgedMarketEvent.from_dict(
+            {**expected_payload, "decimal_odds": "9.99"}
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            delta = self.make_delta(payload=expected_payload)
+            market_store = SQLiteMarketStore(root / "market.db")
+            health_store = SourceHealthStore(root / "health.json")
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                health_store,
+                root / "canonical-application.json",
+                clock=lambda: "2026-01-01T00:00:04+00:00",
+            )
+
+            with self.assertRaisesRegex(
+                DeltaConflictError,
+                "exact MarketEvent",
+            ):
+                application.apply(delta, forged)
+
+            self.assertEqual(market_store.events("e1"), [])
+            self.assertEqual(health_store.get("source-x").poll_count, 0)
+            self.assertIsNone(application.lookup_receipt(delta))
+            market_store.close()
 
     def test_canonical_application_receipt_time_is_after_durable_completion(self):
         event = MarketEvent.from_dict(event_payload())

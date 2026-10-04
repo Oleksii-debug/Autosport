@@ -97,6 +97,14 @@ def test_module_rebinding_cannot_mint_provider_or_execution_truth(monkeypatch):
     monkeypatch.setattr(commission_ev, "SETTLEMENT_RATE_AUTHORITATIVE", True)
     monkeypatch.setattr(commission_ev, "EXECUTION_AUTHORIZED", True)
     monkeypatch.setattr(commission_ev, "REAL_MONEY_EXECUTION", True)
+    monkeypatch.setattr(commission_ev, "SCHEMA_VERSION", 999)
+    monkeypatch.setattr(commission_ev, "SOURCE_FAMILY", "forged.source.family")
+    monkeypatch.setattr(commission_ev, "COMMISSION_QUANTUM", Decimal("1"))
+    monkeypatch.setattr(commission_ev, "COMMISSION_ROUNDING", "ROUND_DOWN")
+    monkeypatch.setattr(commission_ev, "ROUND_HALF_UP", "ROUND_DOWN")
+    monkeypatch.setattr(commission_ev, "MAX_OUTCOMES", 0)
+    monkeypatch.setattr(commission_ev, "MAX_SIGNIFICANT_DIGITS", 1)
+    monkeypatch.setattr(commission_ev, "MAX_ADJUSTED_EXPONENT", 1)
 
     rebound = projection()
 
@@ -107,5 +115,7 @@ def test_module_rebinding_cannot_mint_provider_or_execution_truth(monkeypatch):
     assert rebound.execution_authorized is False
     assert rebound.real_money_execution is False
     assert rebound.decision_authorized is False
+    assert rebound.commission_quantum == Decimal("0.01")
+    assert rebound.commission_rounding == "ROUND_HALF_UP"
     assert rebound.calculation_sha256 == baseline.calculation_sha256
 

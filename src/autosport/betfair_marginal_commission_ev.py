@@ -159,9 +159,9 @@ class BetfairMarginalCommissionEVProjection:
                 "commission_rate_evidence_sha256",
             ),
         }
-        if type(self.outcomes) is not tuple or not self.outcomes or len(self.outcomes) > MAX_OUTCOMES:
+        if type(self.outcomes) is not tuple or not self.outcomes or len(self.outcomes) > 512:
             raise BetfairMarginalCommissionEVError(
-                f"outcomes must contain between 1 and {MAX_OUTCOMES} items"
+                "outcomes must contain between 1 and 512 items"
             )
         if any(type(row) is not BetfairOutcomeCommissionDelta for row in self.outcomes):
             raise BetfairMarginalCommissionEVError(
@@ -225,15 +225,15 @@ class BetfairMarginalCommissionEVProjection:
             ) from exc
 
         payload = {
-            "schema_version": SCHEMA_VERSION,
-            "source_family": SOURCE_FAMILY,
+            "schema_version": 1,
+            "source_family": "betfair.marginal-market-commission-ev.v1",
             "account_id": account,
             "market_id": market,
             "currency": self.currency,
             "effective_commission_rate": _decimal_text(rate),
             "commission_rate_basis": "DECISION_SNAPSHOT_CONDITIONAL",
-            "commission_quantum": _decimal_text(COMMISSION_QUANTUM),
-            "commission_rounding": COMMISSION_ROUNDING,
+            "commission_quantum": _decimal_text(Decimal("0.01")),
+            "commission_rounding": "ROUND_HALF_UP",
             "provider_applicability_proven": False,
             "provider_posted_exact": False,
             "settlement_rate_authoritative": False,
@@ -266,8 +266,8 @@ class BetfairMarginalCommissionEVProjection:
         ).hexdigest()
 
         object.__setattr__(self, "outcomes", canonical_rows)
-        object.__setattr__(self, "commission_quantum", COMMISSION_QUANTUM)
-        object.__setattr__(self, "commission_rounding", COMMISSION_ROUNDING)
+        object.__setattr__(self, "commission_quantum", Decimal("0.01"))
+        object.__setattr__(self, "commission_rounding", "ROUND_HALF_UP")
         object.__setattr__(self, "gross_candidate_ev", gross_ev)
         object.__setattr__(
             self,
@@ -352,12 +352,18 @@ def calculate_betfair_marginal_commission_ev(
         "candidate_evidence_sha256": _sha(candidate_evidence_sha256, "candidate_evidence_sha256"),
         "commission_rate_evidence_sha256": _sha(commission_rate_evidence_sha256, "commission_rate_evidence_sha256"),
     }
-    if isinstance(outcomes, (str, bytes, bytearray)) or not isinstance(outcomes, Sequence):
-        raise BetfairMarginalCommissionEVError("outcomes must be a finite sequence")
-    snapshot = tuple(outcomes)
-    if not snapshot or len(snapshot) > MAX_OUTCOMES:
+    if type(outcomes) not in (list, tuple):
         raise BetfairMarginalCommissionEVError(
-            f"outcomes must contain between 1 and {MAX_OUTCOMES} items"
+            "outcomes must be an exact finite list or tuple"
+        )
+    snapshot = tuple(outcomes[:513])
+    if (
+        not snapshot
+        or len(snapshot) > 512
+        or len(outcomes) != len(snapshot)
+    ):
+        raise BetfairMarginalCommissionEVError(
+            "outcomes must contain between 1 and 512 items"
         )
     if any(type(item) is not BetfairMarketOutcomeEconomicInput for item in snapshot):
         raise BetfairMarginalCommissionEVError(
@@ -398,8 +404,8 @@ def _net(gross_pnl: Decimal, rate: Decimal) -> Decimal:
     with localcontext(_CTX) as rounding_context:
         rounding_context.traps[Inexact] = False
         charge = unrounded_charge.quantize(
-            COMMISSION_QUANTUM,
-            rounding=ROUND_HALF_UP,
+            Decimal("0.01"),
+            rounding="ROUND_HALF_UP",
             context=rounding_context,
         )
     return gross_pnl - charge
@@ -422,7 +428,7 @@ def _decimal(value: object, label: str) -> Decimal:
         raise BetfairMarginalCommissionEVError(f"{label} must be a finite Decimal")
     _, digits, exponent = value.as_tuple()
     adjusted = value.adjusted() if value != 0 else 0
-    if len(digits) > MAX_SIGNIFICANT_DIGITS or abs(adjusted) > MAX_ADJUSTED_EXPONENT:
+    if len(digits) > 80 or abs(adjusted) > 1000:
         raise BetfairMarginalCommissionEVError(f"{label} exceeds the bounded Decimal envelope")
     if not isinstance(exponent, int):
         raise BetfairMarginalCommissionEVError(f"{label} must have a finite exponent")

@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from dataclasses import replace
 from decimal import Decimal, getcontext, setcontext
 
@@ -294,3 +295,18 @@ def test_replacing_outcome_input_recomputes_projection_identity_and_economics():
 
     assert changed == expected
     assert changed.calculation_sha256 != original.calculation_sha256
+
+
+def test_custom_sequence_is_rejected_before_hostile_iteration_or_length():
+    class HostileSequence(Sequence):
+        def __len__(self):
+            raise AssertionError("hostile length access")
+
+        def __getitem__(self, index):
+            raise AssertionError("hostile item access")
+
+    with pytest.raises(
+        BetfairMarginalCommissionEVError,
+        match="exact finite list or tuple",
+    ):
+        calculate(HostileSequence())

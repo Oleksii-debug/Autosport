@@ -679,6 +679,12 @@ _RUN_ADMISSION_TX_TERMINAL_CODE = getattr(
     None,
 )
 _RUN_ADMISSION_AUTHORITY_TYPE = MonotonicWorkspaceAuthority
+_RUN_ADMISSION_OPEN_DESCRIPTOR = _open_read_only_descriptor
+_RUN_ADMISSION_OPEN_DESCRIPTOR_CODE = getattr(
+    _RUN_ADMISSION_OPEN_DESCRIPTOR,
+    "__code__",
+    None,
+)
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -768,6 +774,12 @@ def _require_run_admission_dispatch() -> None:
         is not _RUN_ADMISSION_TX_TERMINAL_CODE
         or ProductIidRunAdmissionReceipt is not _RUN_ADMISSION_TYPE
         or MonotonicWorkspaceAuthority is not _RUN_ADMISSION_AUTHORITY_TYPE
+        or _open_read_only_descriptor is not _RUN_ADMISSION_OPEN_DESCRIPTOR
+        or getattr(_RUN_ADMISSION_OPEN_DESCRIPTOR, "__code__", None)
+        is not _RUN_ADMISSION_OPEN_DESCRIPTOR_CODE
+        or _read_stable_run_admission_state is not _RUN_ADMISSION_STABLE_READ
+        or getattr(_RUN_ADMISSION_STABLE_READ, "__code__", None)
+        is not _RUN_ADMISSION_STABLE_READ_CODE
     ):
         raise ProductIidDrawPlanError(
             "IID run-admission authority dispatch changed"
@@ -875,7 +887,7 @@ def _read_stable_run_admission_state(path: Path) -> dict[str, object]:
     descriptor: int | None = None
     primary_error: BaseException | None = None
     try:
-        descriptor = _open_read_only_descriptor(path)
+        descriptor = _RUN_ADMISSION_OPEN_DESCRIPTOR(path)
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
@@ -951,6 +963,14 @@ def _read_stable_run_admission_state(path: Path) -> dict[str, object]:
             "IID run-admission state must be a JSON object"
         )
     return state
+
+
+_RUN_ADMISSION_STABLE_READ = _read_stable_run_admission_state
+_RUN_ADMISSION_STABLE_READ_CODE = getattr(
+    _RUN_ADMISSION_STABLE_READ,
+    "__code__",
+    None,
+)
 
 
 def _run_admission_registry_item(
@@ -1119,7 +1139,7 @@ def _resolve_run_admission_state(
         member_index=member_index,
     )
     try:
-        state = _read_stable_run_admission_state(path)
+        state = _RUN_ADMISSION_STABLE_READ(path)
     except ProductIidDrawPlanError as exc:
         raise ProductIidDrawPlanError(
             "IID run-admission state cannot be re-resolved"
@@ -1287,7 +1307,7 @@ def issue_product_iid_run_admission(
             )
             atomic_write_json(path, state)
             try:
-                readback = _read_stable_run_admission_state(path)
+                readback = _RUN_ADMISSION_STABLE_READ(path)
             except ProductIidDrawPlanError as exc:
                 raise ProductIidDrawPlanError(
                     "IID run-admission state cannot be read back after prepare"

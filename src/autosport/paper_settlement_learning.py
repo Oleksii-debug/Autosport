@@ -307,6 +307,29 @@ def _expected_ticket_economics(
 class PaperSettlementLearningBridge:
     """Durable identity bridge from settled PAPER economics to one AgentLoop resolution."""
 
+    _AUTHORITY_FIELDS = frozenset(
+        {
+            "_authority_fields_sealed",
+            "state_path",
+            "paper_book_path",
+            "decision_ledger",
+            "agent_loop",
+            "economic_goal",
+            "risk_policy",
+        }
+    )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        try:
+            sealed = object.__getattribute__(self, "_authority_fields_sealed")
+        except AttributeError:
+            sealed = False
+        if sealed and name in PaperSettlementLearningBridge._AUTHORITY_FIELDS:
+            raise PaperSettlementLearningBridgeError(
+                f"settlement learning authority field {name} is immutable after construction"
+            )
+        object.__setattr__(self, name, value)
+
     def __init__(
         self,
         state_path: str | Path,
@@ -329,6 +352,7 @@ class PaperSettlementLearningBridge:
             raise PaperSettlementLearningBridgeError(
                 "risk policy is not bound to supplied EconomicGoalContract"
             )
+        self._authority_fields_sealed = False
         self.state_path = Path(state_path)
         self.paper_book_path = Path(paper_book_path)
         self.decision_ledger = decision_ledger
@@ -341,6 +365,7 @@ class PaperSettlementLearningBridge:
                 self._read()
             else:
                 self._write({"bindings": {}})
+        self._authority_fields_sealed = True
 
     @property
     def goal_fingerprint(self) -> str:

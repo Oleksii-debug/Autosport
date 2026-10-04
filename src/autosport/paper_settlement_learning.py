@@ -328,7 +328,16 @@ class PaperSettlementLearningBridge:
             sealed = object.__getattribute__(self, "_authority_fields_sealed")
         except AttributeError:
             sealed = False
-        if sealed and name in PaperSettlementLearningBridge._AUTHORITY_FIELDS:
+        if sealed and name in (
+            "_authority_fields_sealed",
+            "state_path",
+            "paper_book_path",
+            "decision_ledger",
+            "agent_loop",
+            "economic_goal",
+            "risk_policy",
+            "settlement_learning_configuration_sha256",
+        ):
             raise PaperSettlementLearningBridgeError(
                 f"settlement learning authority field {name} is immutable after construction"
             )

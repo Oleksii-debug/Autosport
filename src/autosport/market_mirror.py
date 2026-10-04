@@ -222,9 +222,14 @@ class MarketMirror:
             raise TypeError("event must be a MarketEvent")
 
         prior = self.event_for_quote_key(event.source_id, event.quote_key)
-        accepted = store.append(event)
+        accepted = store.append_batch_accepted((event,))
         if accepted:
-            return self.apply(event)
+            if len(accepted) != 1:
+                raise RuntimeError("single market append returned invalid accepted cardinality")
+            # Apply the exact canonical value snapshot that storage admitted, not the
+            # caller-owned object. Nested MarketEvent metadata is mutable even though
+            # the dataclass is frozen; this closes SQLite-COMMIT -> mirror-apply TOCTOU.
+            return self.apply(accepted[0])
 
         # If this mirror already reached this sequence (or a later one), applying a
         # storage duplicate cannot advance live state: same-sequence retries remain

@@ -1,10 +1,9 @@
-"""Durable operator confirmation for one exact Betfair final-send decision.
+"""Durable operator confirmation for one exact Betfair final send.
 
-This module composes the generic supervised confirmation journal with the exact
-Betfair execution plan/action/attempt that may reach ``placeOrders``.  It does
-not perform provider I/O and possession of any returned dataclass is not an
-execution capability.  Positive authority is re-resolved from the durable
-confirmation journal immediately before the provider transport is invoked.
+This composes the generic supervised-confirmation journal with the exact
+plan/action/attempt that may reach Betfair ``placeOrders``.  It performs no
+provider I/O.  Returned values are audit evidence, never transferable execution
+capabilities.
 """
 from __future__ import annotations
 
@@ -16,11 +15,7 @@ from pathlib import Path
 from typing import Mapping
 
 from .real_execution_ledger import ExecutionAction
-from .supervised_confirmation import (
-    SupervisedConfirmationAuthority,
-    SupervisedConfirmationBinding,
-    SupervisedConfirmationError,
-)
+from . import supervised_confirmation as _confirmation
 from .supervised_execution import (
     BoundSupervisedExecutionPlan,
     SupervisedApproval,
@@ -34,9 +29,33 @@ _DECISION_DOMAIN = "autosport.betfair-final-send-decision.v1"
 _CONSUMER_DOMAIN = "autosport.betfair-final-send-consumer.v1"
 _WITNESS_DOMAIN = "autosport.betfair-final-send-confirmation-witness.v1"
 
+_AUTHORITY_TYPE = _confirmation.SupervisedConfirmationAuthority
+_AUTHORITY_INIT = _AUTHORITY_TYPE.__init__
+_AUTHORITY_INIT_CODE = _AUTHORITY_INIT.__code__
+_RESOLVE_BINDING = _AUTHORITY_TYPE.resolve_receipt_binding
+_RESOLVE_BINDING_CODE = _RESOLVE_BINDING.__code__
+_CONSUME_RECEIPT = _AUTHORITY_TYPE.consume_receipt
+_CONSUME_RECEIPT_CODE = _CONSUME_RECEIPT.__code__
+_BINDING_TYPE = _confirmation.SupervisedConfirmationBinding
+_CONFIRMATION_ERROR = _confirmation.SupervisedConfirmationError
+
 
 class BetfairExecutionConfirmationError(RuntimeError):
-    """Durable operator confirmation does not authorize this exact Betfair send."""
+    """Durable operator confirmation does not authorize this exact send."""
+
+
+def _authority_graph_unchanged() -> bool:
+    return (
+        _confirmation.SupervisedConfirmationAuthority is _AUTHORITY_TYPE
+        and _confirmation.SupervisedConfirmationBinding is _BINDING_TYPE
+        and _confirmation.SupervisedConfirmationError is _CONFIRMATION_ERROR
+        and _AUTHORITY_TYPE.__init__ is _AUTHORITY_INIT
+        and getattr(_AUTHORITY_INIT, "__code__", None) is _AUTHORITY_INIT_CODE
+        and _AUTHORITY_TYPE.resolve_receipt_binding is _RESOLVE_BINDING
+        and getattr(_RESOLVE_BINDING, "__code__", None) is _RESOLVE_BINDING_CODE
+        and _AUTHORITY_TYPE.consume_receipt is _CONSUME_RECEIPT
+        and getattr(_CONSUME_RECEIPT, "__code__", None) is _CONSUME_RECEIPT_CODE
+    )
 
 
 def _text(value: object, name: str, *, max_length: int = 512) -> str:
@@ -94,7 +113,9 @@ def _canonical_bytes(value: object) -> bytes:
 
 
 def _domain_digest(domain: str, value: object) -> str:
-    return hashlib.sha256(domain.encode("utf-8") + b"\0" + _canonical_bytes(value)).hexdigest()
+    return hashlib.sha256(
+        domain.encode("utf-8") + b"\0" + _canonical_bytes(value)
+    ).hexdigest()
 
 
 def _require_bound_action(
@@ -166,8 +187,6 @@ def _decision_material(
 
 @dataclass(frozen=True, slots=True)
 class BetfairExecutionConfirmationSpec:
-    """Exact values an operator-review surface must submit to the generic journal."""
-
     review_id: str
     decision_id: str
     decision_sha256: str
@@ -187,13 +206,7 @@ def betfair_execution_confirmation_spec(
     review_id: str,
     risk_evidence_sha256: str,
 ) -> BetfairExecutionConfirmationSpec:
-    """Build the exact operator-visible final-send decision for one attempt.
-
-    Merely building this spec is side-effect free: it does not prepare, confirm,
-    or consume a receipt.  The caller may pass these fields to
-    ``SupervisedConfirmationAuthority.prepare_review`` and then explicitly
-    confirm that durable review.
-    """
+    """Return the exact review material; this has no durable side effect."""
 
     action = _require_bound_action(bound, approval, action_id=action_id)
     attempt_id = _text(attempt_id, "attempt_id", max_length=256)
@@ -228,14 +241,15 @@ def betfair_execution_confirmation_spec(
 
 
 def _require_confirmation_binding(
-    binding: SupervisedConfirmationBinding,
+    binding: _confirmation.SupervisedConfirmationBinding,
     *,
     bound: BoundSupervisedExecutionPlan,
     approval: SupervisedApproval,
     action: ExecutionAction,
     attempt_id: str,
+    submitted_at: str,
 ) -> None:
-    if type(binding) is not SupervisedConfirmationBinding:
+    if type(binding) is not _BINDING_TYPE:
         raise BetfairExecutionConfirmationError(
             "confirmation binding must come from canonical durable authority"
         )
@@ -249,18 +263,11 @@ def _require_confirmation_binding(
         review_id=review.review_id,
         risk_evidence_sha256=review.risk_evidence_sha256,
     )
-    if review.decision_id != spec.decision_id:
+    if review.decision_id != spec.decision_id or review.decision_sha256 != spec.decision_sha256:
         raise BetfairExecutionConfirmationError(
             "operator confirmation does not bind this exact Betfair attempt decision"
         )
-    if review.decision_sha256 != spec.decision_sha256:
-        raise BetfairExecutionConfirmationError(
-            "operator confirmation decision digest does not match exact Betfair send"
-        )
-    if (
-        review.bookmaker_id != action.bookmaker_id
-        or review.account_id != action.account_id
-    ):
+    if review.bookmaker_id != action.bookmaker_id or review.account_id != action.account_id:
         raise BetfairExecutionConfirmationError(
             "operator confirmation bookmaker/account does not match execution action"
         )
@@ -274,20 +281,26 @@ def _require_confirmation_binding(
     )
     if review.review_payload_sha256 != expected_payload_sha256:
         raise BetfairExecutionConfirmationError(
-            "operator confirmation review payload does not match canonical Betfair final-send review"
+            "operator confirmation review payload does not match canonical final-send review"
         )
     try:
         approval.require_active(review.reviewed_at)
+        approval.require_active(submitted_at)
     except SupervisedExecutionError as exc:
         raise BetfairExecutionConfirmationError(
-            "SupervisedApproval was not active when operator review was created"
+            "SupervisedApproval is not active across review and final send"
         ) from exc
+    submitted = _instant(submitted_at, "submitted_at")
     if _instant(review.expires_at, "review.expires_at") > _instant(
         approval.expires_at,
         "approval.expires_at",
     ):
         raise BetfairExecutionConfirmationError(
             "operator confirmation lifetime exceeds underlying SupervisedApproval"
+        )
+    if _instant(receipt.confirmed_at, "receipt.confirmed_at") > submitted:
+        raise BetfairExecutionConfirmationError(
+            "operator confirmation was recorded after final-send admission"
         )
     if (
         receipt.review_id != review.review_id
@@ -326,8 +339,6 @@ def _consumer_key(
 
 @dataclass(frozen=True, slots=True)
 class BetfairExecutionConfirmationWitness:
-    """Audit projection of a consumed receipt; not a transferable capability."""
-
     execution_plan_id: str
     action_id: str
     attempt_id: str
@@ -355,8 +366,7 @@ class BetfairExecutionConfirmationWitness:
             _sha(getattr(self, name), name)
         _instant(self.confirmed_at, "confirmed_at")
         _instant(self.consumed_at, "consumed_at")
-        expected = _domain_digest(_WITNESS_DOMAIN, self._material())
-        if self.evidence_id != expected:
+        if self.evidence_id != _domain_digest(_WITNESS_DOMAIN, self._material()):
             raise BetfairExecutionConfirmationError(
                 "Betfair confirmation witness evidence_id mismatch"
             )
@@ -387,12 +397,15 @@ def consume_betfair_execution_confirmation(
     receipt_id: str,
     expected_review_sha256: str,
     request_sha256: str,
+    submitted_at: str,
 ) -> BetfairExecutionConfirmationWitness:
-    """Consume one exact durable confirmation immediately before provider send.
+    """Consume one exact receipt at the already-durable SUBMITTED instant.
 
-    ``request_sha256`` is the exact request digest already persisted in the
-    execution ledger's SUBMITTED transition.  The durable consumption key commits
-    that request together with the exact attempt and upstream intent hash.
+    The caller of this authority must derive ``submitted_at`` and
+    ``request_sha256`` from the verified execution ledger after the SUBMITTED
+    transition.  This keeps confirmation expiry in the same causal clock domain
+    as the irreversible provider-send boundary and avoids a second wall-clock
+    trust root.
     """
 
     if type(execution_workspace) is not Path:
@@ -403,15 +416,18 @@ def consume_betfair_execution_confirmation(
     action = _require_bound_action(bound, approval, action_id=action_id)
     attempt_id = _text(attempt_id, "attempt_id", max_length=256)
     receipt_id = _sha(receipt_id, "receipt_id")
-    expected_review_sha256 = _sha(
-        expected_review_sha256,
-        "expected_review_sha256",
-    )
+    expected_review_sha256 = _sha(expected_review_sha256, "expected_review_sha256")
     request_sha256 = _sha(request_sha256, "request_sha256")
+    submitted_instant = _instant(submitted_at, "submitted_at")
+    if not _authority_graph_unchanged():
+        raise BetfairExecutionConfirmationError(
+            "supervised confirmation authority executable graph changed"
+        )
     authority_path = workspace / CONFIRMATION_FILENAME
     try:
-        authority = SupervisedConfirmationAuthority(authority_path)
-        before = authority.resolve_receipt_binding(
+        authority = _AUTHORITY_TYPE(authority_path, clock=lambda: submitted_instant)
+        before = _RESOLVE_BINDING(
+            authority,
             receipt_id=receipt_id,
             expected_review_sha256=expected_review_sha256,
             require_unconsumed=True,
@@ -422,6 +438,7 @@ def consume_betfair_execution_confirmation(
             approval=approval,
             action=action,
             attempt_id=attempt_id,
+            submitted_at=submitted_at,
         )
         consumer_key = _consumer_key(
             bound=bound,
@@ -430,30 +447,41 @@ def consume_betfair_execution_confirmation(
             request_sha256=request_sha256,
             review_sha256=before.review.review_sha256,
         )
-        authority.consume_receipt(
+        _CONSUME_RECEIPT(
+            authority,
             receipt_id=receipt_id,
             expected_review_sha256=expected_review_sha256,
             consumer_key=consumer_key,
         )
-        after = authority.resolve_receipt_binding(
+        after = _RESOLVE_BINDING(
+            authority,
             receipt_id=receipt_id,
             expected_review_sha256=expected_review_sha256,
             require_unconsumed=False,
         )
-    except SupervisedConfirmationError as exc:
+    except _CONFIRMATION_ERROR as exc:
         raise BetfairExecutionConfirmationError(
             "durable Betfair operator confirmation could not be consumed"
         ) from exc
+    if not _authority_graph_unchanged():
+        raise BetfairExecutionConfirmationError(
+            "supervised confirmation authority changed during final-send admission"
+        )
     _require_confirmation_binding(
         after,
         bound=bound,
         approval=approval,
         action=action,
         attempt_id=attempt_id,
+        submitted_at=submitted_at,
     )
     if after.receipt.consumed_by != consumer_key or after.receipt.consumed_at is None:
         raise BetfairExecutionConfirmationError(
             "durable Betfair confirmation was not consumed by this exact send identity"
+        )
+    if _instant(after.receipt.consumed_at, "consumed_at") != submitted_instant:
+        raise BetfairExecutionConfirmationError(
+            "Betfair confirmation consumption time does not match durable send admission"
         )
     material = {
         "execution_plan_id": bound.execution_plan.plan_id,

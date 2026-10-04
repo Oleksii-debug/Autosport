@@ -118,6 +118,7 @@ def _bind_canonical_settlement_engine(method):
         book: PaperBook,
         event_identity: str,
         settlement_ref: str,
+        settled_at: str,
     ) -> set[str]:
         live_source_id = canonical_collector_source_id_get(coordinator.collector)
         if live_source_id != coordinator._settlement_source_id:
@@ -143,8 +144,10 @@ def _bind_canonical_settlement_engine(method):
             book,
             event_identity,
             settlement_ref,
+            settled_at,
             _lifecycle_get=canonical_lifecycle_get,
             _lifecycle_record_type=canonical_lifecycle_record_type,
+            _settlement_instant=canonical_instant,
         )
 
     def guarded(self, *args, **kwargs):
@@ -986,6 +989,7 @@ def _bind_canonical_settlement_resolution_collection(method):
             _settlement_resolution_validate=validate_resolution,
             _lifecycle_records=canonical_records,
             _collector_source_id_get=collector_source_id_get,
+            _settlement_instant=canonical_instant,
         )
 
     guarded.__name__ = method.__name__
@@ -1000,9 +1004,11 @@ def _canonical_open_quote_keys_for_book(
     book: PaperBook,
     event_identity: str,
     settlement_ref: str,
+    settled_at: str,
     *,
     _lifecycle_get: Callable[[ContinuousEventLifecycle, str], EventLifecycleRecord | None],
     _lifecycle_record_type: type[EventLifecycleRecord],
+    _settlement_instant: Callable[[object, str], datetime],
 ) -> set[str]:
     """Resolve the exact provider/sport/native-event scope allowed to mutate P&L."""
 
@@ -1022,6 +1028,17 @@ def _canonical_open_quote_keys_for_book(
     if record.settlement_ref != settlement_ref:
         raise ContinuousSessionError(
             "settlement evidence reference differs from durable lifecycle"
+        )
+    if record.settlement_discovered_at is None:
+        raise ContinuousSessionError(
+            "settlement lifecycle lacks durable discovery chronology"
+        )
+    if _settlement_instant(
+        record.settlement_discovered_at,
+        "settlement_discovered_at",
+    ) > _settlement_instant(settled_at, "settled_at"):
+        raise ContinuousSessionError(
+            "settlement lifecycle was discovered after the economic cutoff"
         )
     source_id = coordinator._settlement_source_id
     if record.source_id != source_id:
@@ -1366,6 +1383,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _settlement_resolution_validate: Callable[..., None],
         _lifecycle_records: Callable[[ContinuousEventLifecycle], tuple[EventLifecycleRecord, ...]],
         _collector_source_id_get: Callable[[HeadlessCollectorService], str],
+        _settlement_instant: Callable[[object, str], datetime],
     ) -> tuple[SettlementResolution, ...]:
         if self._outcome_resolver is None:
             return ()
@@ -1373,6 +1391,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "collector source identity changed after settlement authority binding"
             )
+        cutoff = _settlement_instant(as_of, "as_of")
         resolutions: list[SettlementResolution] = []
         for record in _lifecycle_records(self.lifecycle):
             # A continuous session is bound to exactly one collector source. A
@@ -1382,6 +1401,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 continue
             if record.phase is not EventPhase.COMPLETED or record.settlement_ref is None:
                 continue
+            if record.settlement_discovered_at is None:
+                raise ContinuousSessionError(
+                    "settlement lifecycle lacks durable discovery chronology"
+                )
+            if _settlement_instant(
+                record.settlement_discovered_at,
+                "settlement_discovered_at",
+            ) > cutoff:
+                raise ContinuousSessionError(
+                    "settlement lifecycle was discovered after the evidence cutoff"
+                )
             resolution = self._outcome_resolver(record, as_of=as_of)
             if resolution is None:
                 continue
@@ -1495,6 +1525,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     book,
                     resolution.event_identity,
                     resolution.settlement_ref,
+                    canonical_settled_at,
                 )
                 scoped = {
                     quote_key: outcome

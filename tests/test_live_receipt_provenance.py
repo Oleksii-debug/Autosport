@@ -236,6 +236,46 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertTrue(store.has_trusted_live_receipt(trusted))
             store.close()
 
+    def test_live_receipt_type_override_cannot_authorize_event_subclass(self) -> None:
+        class ForgingEvent(MarketEvent):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            canonical = self._direct_event(sequence=1)
+            forged = ForgingEvent.from_dict(canonical.to_dict())
+
+            with self.assertRaisesRegex(TypeError, "type override is not allowed"):
+                store._append_live_batch_accepted(
+                    [forged],
+                    _market_event_type=ForgingEvent,
+                )
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
+    def test_trusted_receipt_type_override_cannot_reclassify_subclass(self) -> None:
+        class ForgingEvent(MarketEvent):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            self._ingest(store)
+            trusted = store.trusted_live_events()[0]
+            forged = ForgingEvent.from_dict(trusted.to_dict())
+
+            with self.assertRaisesRegex(TypeError, "type override is not allowed"):
+                store.has_trusted_live_receipt(
+                    forged,
+                    _market_event_type=ForgingEvent,
+                )
+
+            self.assertTrue(store.has_trusted_live_receipt(trusted))
+            store.close()
+
     def test_live_receipt_authority_does_not_leak_into_reentrant_generic_batch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

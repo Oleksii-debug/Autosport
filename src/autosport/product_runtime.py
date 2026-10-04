@@ -2297,6 +2297,7 @@ def _build_autonomous_product_runtime_impl(
     _desktop_restart_reader,
     _desktop_delivery_resolver,
     _desktop_consumer_type,
+    _desktop_consumer_init,
     _canonical_application_type,
     _canonical_application_init,
     _canonical_application_apply,
@@ -2304,6 +2305,7 @@ def _build_autonomous_product_runtime_impl(
     _paper_book_type,
     _paper_book_init,
     _runtime_type,
+    _runtime_init,
     _runtime_lease_type,
     _runtime_lease_init,
     _runtime_lease_acquire,
@@ -2348,6 +2350,7 @@ def _build_autonomous_product_runtime_impl(
     _checkpoint_type,
     _checkpoint_init,
     _coordinator_type,
+    _coordinator_init,
     _start_transition_store_type,
     _start_transition_store_init,
     _start_transition_read,
@@ -3067,19 +3070,22 @@ def _build_autonomous_product_runtime_impl(
             )
             accept_persisted(event)
 
-        desktop = _desktop_consumer_type(
+        checkpoint = object.__new__(_checkpoint_type)
+        _checkpoint_init(checkpoint, root / "desktop_acks.json")
+        desktop = object.__new__(_desktop_consumer_type)
+        _desktop_consumer_init(
+            desktop,
             collector_store,
-            (lambda checkpoint: (
-                _checkpoint_init(checkpoint, root / "desktop_acks.json"),
-                checkpoint,
-            )[1])(object.__new__(_checkpoint_type)),
+            checkpoint,
             resolve_event=resolve_product_event,
             apply_event=apply_completed_desktop_application,
             lookup_application_receipt=lookup_completed_desktop_application,
             acknowledgement_clock=resolved_clock,
             on_application_receipt=deliver_completed_desktop_application,
         )
-        coordinator = _coordinator_type(
+        coordinator = object.__new__(_coordinator_type)
+        _coordinator_init(
+            coordinator,
             workspace=root,
             collector=collector,
             lifecycle=lifecycle,
@@ -3252,7 +3258,9 @@ def _build_autonomous_product_runtime_impl(
         )
         product_runtime_lease = ProductRuntimeLeaseProxy()
 
-        runtime = _runtime_type(
+        runtime = object.__new__(_runtime_type)
+        _runtime_init(
+            runtime,
             workspace=root,
             manifest=manifest,
             coordinator=coordinator,
@@ -3276,6 +3284,7 @@ def _bind_autonomous_product_runtime_builder(
     desktop_restart_reader,
     desktop_delivery_resolver,
     desktop_consumer_type,
+    desktop_consumer_init,
     canonical_application_type,
     canonical_application_init,
     canonical_application_apply,
@@ -3283,6 +3292,7 @@ def _bind_autonomous_product_runtime_builder(
     paper_book_type,
     paper_book_init,
     runtime_type,
+    runtime_init,
     runtime_lease_type,
     runtime_lease_init,
     runtime_lease_acquire,
@@ -3327,6 +3337,7 @@ def _bind_autonomous_product_runtime_builder(
     checkpoint_type,
     checkpoint_init,
     coordinator_type,
+    coordinator_init,
     start_transition_store_type,
     start_transition_store_init,
     start_transition_read,
@@ -3355,6 +3366,7 @@ def _bind_autonomous_product_runtime_builder(
             _desktop_restart_reader=desktop_restart_reader,
             _desktop_delivery_resolver=desktop_delivery_resolver,
             _desktop_consumer_type=desktop_consumer_type,
+            _desktop_consumer_init=desktop_consumer_init,
             _canonical_application_type=canonical_application_type,
             _canonical_application_init=canonical_application_init,
             _canonical_application_apply=canonical_application_apply,
@@ -3362,6 +3374,7 @@ def _bind_autonomous_product_runtime_builder(
             _paper_book_type=paper_book_type,
             _paper_book_init=paper_book_init,
             _runtime_type=runtime_type,
+            _runtime_init=runtime_init,
             _runtime_lease_type=runtime_lease_type,
             _runtime_lease_init=runtime_lease_init,
             _runtime_lease_acquire=runtime_lease_acquire,
@@ -3406,6 +3419,7 @@ def _bind_autonomous_product_runtime_builder(
             _checkpoint_type=checkpoint_type,
             _checkpoint_init=checkpoint_init,
             _coordinator_type=coordinator_type,
+            _coordinator_init=coordinator_init,
             _start_transition_store_type=start_transition_store_type,
             _start_transition_store_init=start_transition_store_init,
             _start_transition_read=start_transition_read,
@@ -3421,6 +3435,7 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     _desktop_applied_current_for_source,
     _desktop_applied_event_for_receipt,
     _ProductDesktopDeltaConsumer,
+    _ProductDesktopDeltaConsumer.__init__,
     CanonicalDesktopApplication,
     CanonicalDesktopApplication.__init__,
     CanonicalDesktopApplication.apply,
@@ -3428,6 +3443,7 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     PaperBook,
     PaperBook.__init__,
     _ProductAutonomousProductRuntime,
+    _ProductAutonomousProductRuntime.__init__,
     _ProductRuntimeLease,
     _product_runtime_lease_init,
     _product_runtime_lease_acquire,
@@ -3472,6 +3488,7 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     DesktopDeltaCheckpointStore,
     DesktopDeltaCheckpointStore.__init__,
     _ProductContinuousSessionCoordinator,
+    _ProductContinuousSessionCoordinator.__init__,
     _ProductStartTransitionStore,
     _ProductStartTransitionStore.__init__,
     _read_product_start_transition,

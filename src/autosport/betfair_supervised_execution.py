@@ -73,6 +73,10 @@ _CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL = (
 _CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL_CODE = (
     _CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL.__code__
 )
+_CANONICAL_LEDGER_MARK_SUBMITTED = RealExecutionLedger.mark_submitted
+_CANONICAL_LEDGER_MARK_SUBMITTED_CODE = (
+    _CANONICAL_LEDGER_MARK_SUBMITTED.__code__
+)
 
 # Terminal provider-effect authority must not depend on caller-rebindable method
 # dispatch.  These product-owned implementations are captured once and are used
@@ -2194,6 +2198,14 @@ def execute_betfair_supervised_action(
                     None,
                 )
                 is not _CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL_CODE
+                or RealExecutionLedger.mark_submitted
+                is not _CANONICAL_LEDGER_MARK_SUBMITTED
+                or getattr(
+                    _CANONICAL_LEDGER_MARK_SUBMITTED,
+                    "__code__",
+                    None,
+                )
+                is not _CANONICAL_LEDGER_MARK_SUBMITTED_CODE
             ):
                 raise BetfairSupervisedExecutionError(
                     "final supervised approval authority changed"
@@ -2208,7 +2220,8 @@ def execute_betfair_supervised_action(
                 bound,
                 approval,
             )
-            ledger.mark_submitted(
+            _CANONICAL_LEDGER_MARK_SUBMITTED(
+                ledger,
                 attempt_id,
                 submitted_at=submitted_at,
                 request_sha256=request_sha256,

@@ -463,9 +463,14 @@ def _validate_legacy_current_table(connection: sqlite3.Connection) -> None:
 
 def _validate_live_receipt_rows(connection: sqlite3.Connection) -> None:
     rows = connection.execute(
-        f"SELECT {_LIVE_RECEIPT_COLUMNS_SQL} FROM market_event_live_receipts"
+        f"""SELECT r.dedupe_key,r.ingest_ts,r.authority,
+                   {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)}
+            FROM market_event_live_receipts AS r
+            LEFT JOIN market_events AS m
+            ON m.dedupe_key=r.dedupe_key"""
     ).fetchall()
-    for dedupe_key, ingest_ts, authority in rows:
+    for row in rows:
+        dedupe_key, ingest_ts, authority = row[:3]
         if (
             not isinstance(dedupe_key, str)
             or not dedupe_key
@@ -476,13 +481,12 @@ def _validate_live_receipt_rows(connection: sqlite3.Connection) -> None:
         if authority != _LIVE_RECEIPT_AUTHORITY:
             raise ValueError("live receipt authority kind is not canonical")
         _timezone_aware_instant(ingest_ts, "live receipt ingest_ts")
-        history_row = connection.execute(
-            f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE dedupe_key=?",
-            (dedupe_key,),
-        ).fetchone()
-        if history_row is None:
+        history_row = row[3:]
+        if not history_row or history_row[0] is None:
             raise ValueError("live receipt authority references missing market history")
         event = _event_from_history_row(history_row)
+        if event.dedupe_key != dedupe_key:
+            raise ValueError("live receipt authority dedupe identity does not match market history")
         if event.ingest_ts != ingest_ts:
             raise ValueError("live receipt authority ingest_ts does not match market history")
 

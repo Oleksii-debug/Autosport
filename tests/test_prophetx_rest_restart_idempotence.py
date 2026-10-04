@@ -6,7 +6,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import hashlib
 import json
+from threading import Event, Thread
 import unittest
+from unittest.mock import patch
 
 from autosport.ingestion import IngestionEngine
 from autosport.ingestion_health import SourceHealthStore
@@ -22,6 +24,7 @@ from autosport.prophetx_marketdata import (
 )
 from autosport.provider_sequence_authority import SQLiteProviderSequenceAuthority
 from autosport.providers import CanonicalNormalizer
+import autosport.storage as storage_module
 from autosport.storage import SQLiteMarketStore
 
 
@@ -597,6 +600,102 @@ class ProphetXRestRestartIdempotenceTests(unittest.TestCase):
             self.assertEqual(len(store.events()), 2)
         finally:
             store.close()
+
+    def test_cross_connection_same_transition_is_serialized_before_suppression(
+        self,
+    ) -> None:
+        initial_payload = _payload()
+        changed_payload = _payload()
+        changed_payload["data"]["markets"][0]["selections"][0][0]["price"] = 160
+
+        provider = self._provider(
+            self._authority(create=True),
+            [initial_payload, changed_payload, changed_payload],
+            clocks=[
+                "2026-10-04T12:00:00+00:00",
+                "2026-10-04T12:00:01+00:00",
+                "2026-10-04T12:00:02+00:00",
+            ],
+        )
+        _first_batch, first = self._normalized(provider)
+        _second_batch, second = self._normalized(provider)
+        _third_batch, third = self._normalized(provider)
+
+        seed_store = SQLiteMarketStore(self.market_path)
+        self.assertTrue(seed_store.append(first[0]))
+        seed_store.close()
+
+        store_a = SQLiteMarketStore(self.market_path)
+        store_b = SQLiteMarketStore(self.market_path)
+        first_comparison_entered = Event()
+        release_first_comparison = Event()
+        second_comparison_entered = Event()
+        real_compare = storage_module.same_semantic_market_state
+        results: dict[str, bool] = {}
+        failures: list[BaseException] = []
+
+        def controlled_compare(previous, incoming):
+            if incoming.sequence == second[0].sequence:
+                first_comparison_entered.set()
+                if not release_first_comparison.wait(timeout=5):
+                    raise AssertionError("timed out waiting to release first writer")
+            elif incoming.sequence == third[0].sequence:
+                second_comparison_entered.set()
+            return real_compare(previous, incoming)
+
+        def writer(name: str, store: SQLiteMarketStore, event) -> None:
+            try:
+                results[name] = store.append(event)
+            except BaseException as exc:
+                failures.append(exc)
+
+        with patch.object(
+            storage_module,
+            "same_semantic_market_state",
+            side_effect=controlled_compare,
+        ):
+            thread_a = Thread(
+                target=writer,
+                args=("a", store_a, second[0]),
+                daemon=True,
+            )
+            thread_b = Thread(
+                target=writer,
+                args=("b", store_b, third[0]),
+                daemon=True,
+            )
+            thread_a.start()
+            self.assertTrue(first_comparison_entered.wait(timeout=5))
+            thread_b.start()
+
+            # Writer A has already INSERTed its row and therefore owns SQLite's
+            # write transaction. Writer B must not reach semantic comparison against
+            # the stale pre-A current projection.
+            self.assertFalse(second_comparison_entered.wait(timeout=0.1))
+            release_first_comparison.set()
+
+            thread_a.join(timeout=5)
+            thread_b.join(timeout=5)
+
+        try:
+            self.assertFalse(thread_a.is_alive())
+            self.assertFalse(thread_b.is_alive())
+            self.assertEqual(failures, [])
+            self.assertEqual(results, {"a": True, "b": False})
+            self.assertTrue(second_comparison_entered.is_set())
+
+            verification_store = SQLiteMarketStore(self.market_path)
+            try:
+                events = verification_store.events()
+                self.assertEqual(len(events), 2)
+                current = verification_store.current_by_source()
+                current_event = current[(second[0].source_id, second[0].quote_key)]
+                self.assertEqual(current_event.sequence, second[0].sequence)
+            finally:
+                verification_store.close()
+        finally:
+            store_a.close()
+            store_b.close()
 
     def test_non_prophetx_event_storage_semantics_are_unchanged(self) -> None:
         provider = self._provider(

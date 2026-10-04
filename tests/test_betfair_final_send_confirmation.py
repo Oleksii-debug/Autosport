@@ -12,6 +12,7 @@ import pytest
 import test_betfair_supervised_execution as provider_tests
 
 import autosport.betfair_execution_confirmation as confirmation_runtime
+import autosport.real_execution_ledger as ledger_runtime
 from autosport.betfair_execution_confirmation import (
     CONFIRMATION_FILENAME,
     betfair_execution_confirmation_spec,
@@ -965,7 +966,10 @@ def test_trusted_approval_expiry_at_final_boundary_stays_reserved_and_unconsumed
             lambda: next(trusted_times, provider_tests.APPROVAL_EXPIRES_AT),
         )
 
-        with pytest.raises(SupervisedExecutionError):
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="supervised approval is not active",
+        ):
             execute_betfair_supervised_action(
                 ledger,
                 bound,
@@ -1022,6 +1026,113 @@ def test_trusted_quote_expiry_at_final_boundary_stays_reserved_and_unconsumed(
                 profile=profile,
                 client=client,
                 clock=lambda: provider_tests.RESERVED_AT,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
+        assert _audit_receipt(authority, review, receipt).receipt.consumed_at is None
+
+
+
+def test_final_durable_approval_read_authority_rebinding_fails_closed(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-final-durable-active-authority-rebound"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        authority, review, receipt = _confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _accepted_transport(action)
+        client = _enabled_client(profile, transport, store=goal_store)
+        original_bind = ledger.bind_provider_order_reference
+
+        def bind_then_rebind(*args, **kwargs):
+            provider_ref = original_bind(*args, **kwargs)
+            monkeypatch.setattr(
+                RealExecutionLedger,
+                "supervised_approval_is_active",
+                lambda *_args, **_kwargs: True,
+            )
+            return provider_ref
+
+        monkeypatch.setattr(
+            ledger,
+            "bind_provider_order_reference",
+            bind_then_rebind,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair internal provider-write authority changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
+        assert _audit_receipt(authority, review, receipt).receipt.consumed_at is None
+
+
+def test_final_writer_lock_code_rebinding_fails_closed_before_submission(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-final-writer-lock-authority-rebound"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        authority, review, receipt = _confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _accepted_transport(action)
+        client = _enabled_client(profile, transport, store=goal_store)
+        original_bind = ledger.bind_provider_order_reference
+
+        def bind_then_rebind(*args, **kwargs):
+            provider_ref = original_bind(*args, **kwargs)
+            monkeypatch.setattr(
+                ledger_runtime.WorkspaceEconomicLock,
+                "acquire",
+                lambda self: None,
+            )
+            return provider_ref
+
+        monkeypatch.setattr(
+            ledger,
+            "bind_provider_order_reference",
+            bind_then_rebind,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="canonical Betfair internal provider-write authority changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
                 confirmation_receipt_id=receipt.receipt_id,
                 confirmation_review_sha256=review.review_sha256,
             )

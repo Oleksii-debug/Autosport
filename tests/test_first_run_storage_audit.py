@@ -56,11 +56,14 @@ def test_audit_projects_cwd_independent_unicode_storage_identity(
     )
     assert first["launch_cwd"] == str(cwd_a)
     assert second["launch_cwd"] == str(cwd_b)
-    assert first["webview_environment_overrides_clear"] is True
-    assert second["webview_environment_overrides_clear"] is True
-    assert first["real_money_execution"] is False
-    assert first["human_tested"] is False
-    assert first["nvda_verified"] is False
+    for evidence in (first, second):
+        assert evidence["workspace_canonical_atomic_publication_proven"] is True
+        assert evidence["webview_host_writability_proven"] is True
+        assert evidence["webview_child_profile_access_proven"] is False
+        assert evidence["webview_environment_overrides_clear"] is True
+        assert evidence["real_money_execution"] is False
+        assert evidence["human_tested"] is False
+        assert evidence["nvda_verified"] is False
 
 
 def test_audit_uses_windows_known_folder_when_localappdata_is_absent(
@@ -84,6 +87,9 @@ def test_audit_uses_windows_known_folder_when_localappdata_is_absent(
     assert evidence["webview_storage"] == str(
         known_folder / "Autosport" / "webview2"
     )
+    assert evidence["workspace_canonical_atomic_publication_proven"] is True
+    assert evidence["webview_host_writability_proven"] is True
+    assert evidence["webview_child_profile_access_proven"] is False
     assert resolve_known_folder.call_count == 2
 
 
@@ -106,6 +112,9 @@ def test_audit_rejects_workspace_nested_inside_webview_storage(
     assert evidence["status"] == "FAIL"
     assert evidence["failure_stage"] == "storage_root_separation"
     assert evidence["error_type"] == "ValueError"
+    assert evidence["workspace_canonical_atomic_publication_proven"] is False
+    assert evidence["webview_host_writability_proven"] is False
+    assert evidence["webview_child_profile_access_proven"] is False
     assert evidence["real_money_execution"] is False
     assert evidence["human_tested"] is False
     assert evidence["nvda_verified"] is False
@@ -131,6 +140,9 @@ def test_audit_failure_is_bounded_and_does_not_echo_invalid_path(
     assert evidence["failure_stage"] == "workspace_identity"
     assert evidence["error_type"] == "ValueError"
     assert secretish_invalid_value not in raw
+    assert evidence["workspace_canonical_atomic_publication_proven"] is False
+    assert evidence["webview_host_writability_proven"] is False
+    assert evidence["webview_child_profile_access_proven"] is False
     assert evidence["real_money_execution"] is False
     assert evidence["human_tested"] is False
     assert evidence["nvda_verified"] is False
@@ -158,6 +170,42 @@ def test_windows_entry_dispatches_first_run_storage_audit_without_gui() -> None:
 
     assert exit_code == 0
     run_audit.assert_called_once_with("evidence.json")
+
+
+def test_audit_fails_closed_when_canonical_workspace_writer_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_app_data = tmp_path / "Local"
+    output = tmp_path / "audit.json"
+    calls: list[str] = []
+    secret_detail = "secret canonical writer detail"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.delenv("AUTOSPORT_WORKSPACE", raising=False)
+
+    def deny_canonical_writer(_path: Path, _payload: dict[str, object]) -> None:
+        raise PermissionError(secret_detail)
+
+    monkeypatch.setattr(
+        "autosport.storage_preflight.atomic_write_json",
+        deny_canonical_writer,
+    )
+    monkeypatch.setattr(
+        "autosport.first_run_storage_audit.probe_webview_storage_writable",
+        lambda _path: calls.append("webview"),
+    )
+
+    assert run_first_run_storage_audit(output) == 1
+    evidence = _read(output)
+    assert calls == []
+    assert evidence["status"] == "FAIL"
+    assert evidence["failure_stage"] == "workspace_writability"
+    assert evidence["error_type"] == "PermissionError"
+    assert evidence["workspace_canonical_atomic_publication_proven"] is False
+    assert evidence["webview_host_writability_proven"] is False
+    assert evidence["webview_child_profile_access_proven"] is False
+    assert secret_detail not in output.read_text(encoding="utf-8")
+
 
 def test_audit_fails_closed_before_webview_probe_when_workspace_is_unwritable(
     tmp_path: Path,
@@ -191,6 +239,9 @@ def test_audit_fails_closed_before_webview_probe_when_workspace_is_unwritable(
     assert evidence["status"] == "FAIL"
     assert evidence["failure_stage"] == "workspace_writability"
     assert evidence["error_type"] == "PermissionError"
+    assert evidence["workspace_canonical_atomic_publication_proven"] is False
+    assert evidence["webview_host_writability_proven"] is False
+    assert evidence["webview_child_profile_access_proven"] is False
     assert "secret workspace detail" not in output.read_text(encoding="utf-8")
 
 
@@ -229,6 +280,9 @@ def test_audit_fails_closed_when_webview_storage_is_unwritable(
     assert evidence["status"] == "FAIL"
     assert evidence["failure_stage"] == "webview_storage_writability"
     assert evidence["error_type"] == "PermissionError"
+    assert evidence["workspace_canonical_atomic_publication_proven"] is True
+    assert evidence["webview_host_writability_proven"] is False
+    assert evidence["webview_child_profile_access_proven"] is False
     assert "secret WebView detail" not in output.read_text(encoding="utf-8")
 
 
@@ -259,4 +313,7 @@ def test_audit_rejects_release_sensitive_webview_override_before_writability_pro
     assert evidence["status"] == "FAIL"
     assert evidence["failure_stage"] == "webview_release_environment"
     assert evidence["error_type"] == "ValueError"
+    assert evidence["workspace_canonical_atomic_publication_proven"] is False
+    assert evidence["webview_host_writability_proven"] is False
+    assert evidence["webview_child_profile_access_proven"] is False
     assert secretish_override not in output.read_text(encoding="utf-8")

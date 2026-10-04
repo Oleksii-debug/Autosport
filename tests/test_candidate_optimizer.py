@@ -383,6 +383,78 @@ class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
             Decimal("0.5"),
         )
 
+    def test_exact_engine_instance_analyse_override_cannot_steer_ranking(self):
+        a = CandidateLeg(
+            "e1|winner|a",
+            "e1",
+            Decimal("2"),
+            Decimal("0.5"),
+        )
+        b = CandidateLeg(
+            "e1|winner|b",
+            "e1",
+            Decimal("2"),
+            Decimal("0.5"),
+        )
+        group = ScenarioGroup(
+            "e1",
+            (
+                ScenarioOutcome(a.quote_key, Decimal("0.5")),
+                ScenarioOutcome(b.quote_key, Decimal("0.5")),
+            ),
+        )
+        engine = ScenarioSearchEngine()
+
+        def forged_analyse(tickets, groups):
+            raise AssertionError("instance-substituted analyse must not execute")
+
+        engine.analyse = forged_analyse  # type: ignore[method-assign]
+        impact = PortfolioAwareCandidateOptimizer(
+            scenario_engine=engine
+        ).evaluate_candidates(
+            [],
+            [_single_candidate(a)],
+            [group],
+            stake="1",
+        )[0]
+
+        self.assertTrue(impact.scenario_reports_authoritative)
+        self.assertTrue(impact.scenario_worst_case_change_proven)
+        self.assertEqual(
+            impact.ranking_risk_change,
+            Decimal("-1"),
+        )
+
+    def test_exact_engine_mutated_invalid_config_fails_closed_on_reconstruction(self):
+        a = CandidateLeg(
+            "e1|winner|a",
+            "e1",
+            Decimal("2"),
+            Decimal("0.5"),
+        )
+        group = ScenarioGroup(
+            "e1",
+            (
+                ScenarioOutcome(a.quote_key, Decimal("0.5")),
+                ScenarioOutcome("e1|winner|b", Decimal("0.5")),
+            ),
+        )
+        engine = ScenarioSearchEngine()
+        engine.exact_state_limit = 0
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact_state_limit must be a positive non-boolean integer",
+        ):
+            PortfolioAwareCandidateOptimizer(
+                scenario_engine=engine
+            ).evaluate_candidates(
+                [],
+                [_single_candidate(a)],
+                [group],
+                stake="1",
+            )
+
     def test_existing_ticket_outside_supplied_scenario_space_fails_closed(self):
         book = PaperBook("100")
         existing = book.open_ticket([TicketLeg("outside", "winner", "a", Decimal("2"))], "1")

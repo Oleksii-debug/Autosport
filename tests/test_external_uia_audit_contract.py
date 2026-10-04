@@ -395,3 +395,32 @@ def test_external_uia_gate_scrubs_prior_runner_state_and_restores_environment() 
     assert "Remove-Item Env:AUTOSPORT_WORKSPACE -ErrorAction SilentlyContinue" in step
     assert "extracted_external_uia_isolated_workspace" in step
     assert "extracted_external_uia_isolated_localappdata" in step
+
+
+def test_external_uia_exercises_packaged_f2_and_f8_focus_contract() -> None:
+    audit = _audit()
+
+    assert "keyboard_shortcuts_status = 'NOT_RUN'" in audit
+    assert "f2_focus_automation_id = $null" in audit
+    assert "f8_focus_automation_id = $null" in audit
+    assert "[System.Windows.Forms.SendKeys]::SendWait('{F2}')" in audit
+    assert "[System.Windows.Forms.SendKeys]::SendWait('{F8}')" in audit
+    assert "[System.Windows.Automation.AutomationElement]::FocusedElement" in audit
+    assert "$report.f2_focus_automation_id -ne '301'" in audit
+    assert "$report.f8_focus_automation_id -ne '204'" in audit
+    assert "$report.keyboard_shortcuts_status = 'PASS'" in audit
+
+
+def test_windows_candidate_requires_external_keyboard_shortcut_evidence() -> None:
+    workflow = _windows_workflow()
+    step_start = workflow.index("- name: External UIA fresh-extraction gate")
+    step_end = workflow.index("- name: Upload external UIA failure evidence", step_start)
+    step = workflow[step_start:step_end]
+
+    assert "$external.keyboard_shortcuts_status -ne 'PASS'" in step
+    assert "[string]$external.f2_focus_automation_id -ne '301'" in step
+    assert "[string]$external.f8_focus_automation_id -ne '204'" in step
+    assert "External UIA evidence did not prove packaged F2/F8 keyboard focus navigation" in step
+    assert "extracted_external_uia_keyboard_shortcuts_status" in step
+    assert "extracted_external_uia_f2_focus_automation_id" in step
+    assert "extracted_external_uia_f8_focus_automation_id" in step

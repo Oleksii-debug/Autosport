@@ -1169,6 +1169,20 @@ class _ContinuousSessionState:
                 schema_version=self._V2_VERSION,
             )
         ]
+        if raw["last_success_at"] is None and raw["settlement_evidence"]:
+            raise ContinuousSessionError(
+                "embedded settlement evidence lacks a durable success cutoff"
+            )
+        if raw["last_success_at"] is not None:
+            cutoff = _instant(raw["last_success_at"], "last_success_at")
+            if any(
+                _instant(item["available_at"], "settlement evidence available_at")
+                > cutoff
+                for item in raw["settlement_evidence"]
+            ):
+                raise ContinuousSessionError(
+                    "embedded settlement evidence is newer than durable success"
+                )
         return raw
 
     def _validate_v3(self, raw: dict[str, Any]) -> dict[str, Any]:
@@ -1188,6 +1202,20 @@ class _ContinuousSessionState:
                 schema_version=self._V3_VERSION,
             )
         ]
+        if raw["last_success_at"] is None and raw["settlement_evidence"]:
+            raise ContinuousSessionError(
+                "embedded settlement evidence lacks a durable success cutoff"
+            )
+        if raw["last_success_at"] is not None:
+            cutoff = _instant(raw["last_success_at"], "last_success_at")
+            if any(
+                _instant(item["available_at"], "settlement evidence available_at")
+                > cutoff
+                for item in raw["settlement_evidence"]
+            ):
+                raise ContinuousSessionError(
+                    "embedded settlement evidence is newer than durable success"
+                )
         return raw
 
     @staticmethod
@@ -1334,6 +1362,13 @@ class _ContinuousSessionState:
         seen_event_refs: set[tuple[str, str]] = set()
         for item in records:
             record = self._validate_evidence_record(item)
+            if _instant(
+                record["available_at"],
+                "settlement evidence available_at",
+            ) > success_at:
+                raise ContinuousSessionError(
+                    "settlement evidence pending record is newer than success cutoff"
+                )
             if record["sequence"] != expected_sequence:
                 raise ContinuousSessionError(
                     "settlement evidence pending sequence is not contiguous"
@@ -1582,10 +1617,26 @@ class _ContinuousSessionState:
             (self._read_evidence_path(path) for path in paths),
             key=lambda item: item["sequence"],
         )
+        success_cutoff = (
+            None
+            if state["last_success_at"] is None
+            else _instant(state["last_success_at"], "last_success_at")
+        )
+        if success_cutoff is None:
+            raise ContinuousSessionError(
+                "settlement evidence journal lacks a durable success cutoff"
+            )
         previous = self._EMPTY_EVIDENCE_TIP
         evidence_ids: set[str] = set()
         event_refs: set[tuple[str, str]] = set()
         for expected_sequence, record in enumerate(records, start=1):
+            if _instant(
+                record["available_at"],
+                "settlement evidence available_at",
+            ) > success_cutoff:
+                raise ContinuousSessionError(
+                    "settlement evidence journal record is newer than durable success"
+                )
             if record["sequence"] != expected_sequence:
                 raise ContinuousSessionError(
                     "settlement evidence journal sequence is not contiguous"
@@ -2172,6 +2223,13 @@ class _ContinuousSessionState:
                 tuple[str, str], dict[str, str | None]
             ] = {}
             for evidence in settlement_evidence:
+                if _instant(
+                    evidence.available_at,
+                    "settlement evidence available_at",
+                ) > _instant(timestamp, "at"):
+                    raise ContinuousSessionError(
+                        "settlement evidence is newer than successful cycle cutoff"
+                    )
                 normalized = self._normalized_settlement_evidence(evidence)
                 prior = incoming.get(evidence.evidence_id)
                 if prior is not None and prior != normalized:

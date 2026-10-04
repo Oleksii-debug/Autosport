@@ -132,6 +132,133 @@ def _journal_snapshot(root: Path) -> dict[str, bytes]:
 
 
 
+def test_success_rejects_settlement_evidence_newer_than_cycle_cutoff() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        state = continuous_session._ContinuousSessionState(
+            path,
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        before = path.read_bytes()
+        future = continuous_session.SettlementResolution(
+            event_identity="provider-a:event-future",
+            settlement_ref="provider-result:future",
+            quote_outcomes={"provider-a:event-future:winner:home": "win"},
+            evidence_id="receipt-future",
+            evidence_sha256="d" * 64,
+            available_at="2026-09-22T06:20:01+00:00",
+        )
+
+        try:
+            state.record_success(
+                at=_AT,
+                full_refresh=False,
+                settlement_evidence=(future,),
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "successful checkpoint committed causally future settlement evidence"
+            )
+
+        assert path.read_bytes() == before
+        assert not (root / "continuous_session.settlement-evidence").exists()
+
+
+def test_pending_recovery_rejects_record_newer_than_success_before_tail_write() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        state = _state_with_history(root, 1)
+        checkpoint = json.loads(path.read_text(encoding="utf-8"))
+        future = continuous_session.SettlementResolution(
+            event_identity="provider-a:event-future-pending",
+            settlement_ref="provider-result:future-pending",
+            quote_outcomes={
+                "provider-a:event-future-pending:winner:home": "win"
+            },
+            evidence_id="receipt-future-pending",
+            evidence_sha256="e" * 64,
+            available_at="2026-09-22T06:20:01+00:00",
+        )
+        record = state._build_evidence_record(
+            state._normalized_settlement_evidence(future),
+            sequence=2,
+            previous_record_sha256=checkpoint[
+                "settlement_evidence_tip_sha256"
+            ],
+        )
+        checkpoint["settlement_evidence_pending"] = {
+            "base_count": 1,
+            "base_tip_sha256": checkpoint[
+                "settlement_evidence_tip_sha256"
+            ],
+            "success_at": _AT,
+            "full_refresh": False,
+            "records": [record],
+        }
+        path.write_text(json.dumps(checkpoint, sort_keys=True), encoding="utf-8")
+        before = _journal_snapshot(root)
+
+        try:
+            continuous_session._ContinuousSessionState(
+                path,
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "pending recovery published evidence newer than its success cutoff"
+            )
+
+        assert _journal_snapshot(root) == before
+        assert json.loads(path.read_text(encoding="utf-8"))[
+            "settlement_evidence_pending"
+        ] is not None
+
+
+def test_wave_m_migration_rejects_evidence_newer_than_last_success() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        embedded = _checkpoint_payload(1)
+        embedded["schema_version"] = 3
+        embedded["settlement_evidence"][0]["available_at"] = (
+            "2026-09-22T06:20:01+00:00"
+        )
+        embedded["settlement_evidence"][0]["quote_outcomes_sha256"] = (
+            continuous_session._settlement_quote_outcomes_sha256(
+                {"provider-a:event-0:winner:home": "win"}
+            )
+        )
+        path.write_text(json.dumps(embedded, sort_keys=True), encoding="utf-8")
+        before = path.read_bytes()
+
+        try:
+            continuous_session._ContinuousSessionState(
+                path,
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "Wave M migration accepted evidence newer than durable success"
+            )
+
+        assert path.read_bytes() == before
+        assert not (root / "continuous_session.settlement-evidence").exists()
+
+
 def test_success_clock_rollback_cannot_rewind_operational_checkpoint() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

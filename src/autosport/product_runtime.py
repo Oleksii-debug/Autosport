@@ -1725,7 +1725,43 @@ def _build_autonomous_product_runtime_impl(
             settlement_authority_identity=settlement_authority_identity,
         )
 
+        declared_source_authority_fields = getattr(
+            type(source),
+            "_AUTHORITY_FIELDS",
+            frozenset(),
+        )
+        if type(declared_source_authority_fields) is not frozenset or any(
+            type(name) is not str or not name
+            for name in declared_source_authority_fields
+        ):
+            raise ProductCompositionError(
+                "product source _AUTHORITY_FIELDS must be a frozenset of non-empty strings"
+            )
+        source_authority_snapshot: tuple[tuple[str, object], ...] = tuple(
+            (
+                name,
+                object.__getattribute__(source, name),
+            )
+            for name in sorted(
+                declared_source_authority_fields.difference({"stream_epoch"})
+            )
+        )
+
+        def require_declared_source_authority_roots() -> None:
+            for name, expected in source_authority_snapshot:
+                try:
+                    current = object.__getattribute__(source, name)
+                except AttributeError as exc:
+                    raise ProductCompositionError(
+                        f"product source authority field {name!r} disappeared after composition"
+                    ) from exc
+                if current is not expected:
+                    raise ProductCompositionError(
+                        f"product source authority field {name!r} changed after composition"
+                    )
+
         def require_source_resolver_authority() -> None:
+            require_declared_source_authority_roots()
             current_identity = _source_resolver_identity_fn(
                 source=source,
                 source_id=source_id,
@@ -1734,6 +1770,7 @@ def _build_autonomous_product_runtime_impl(
                 raise ProductCompositionError(
                     "source resolver authority changed after product composition"
                 )
+            require_declared_source_authority_roots()
 
         product_outcome_authority: SettlementOutcomeAuthority | None = None
         if outcome_authority is not None:

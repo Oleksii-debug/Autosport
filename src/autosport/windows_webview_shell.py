@@ -505,7 +505,7 @@ class AutosportWebController:
                 }
                 for candidate in list_product_source_entries()
             ],
-            "can_configure": not self._busy(),
+            "can_configure": not self._closing and not self._busy(),
         }
 
     def _selected_configuration(self) -> tuple[str, ResearchStrategyPlan | None]:
@@ -517,7 +517,7 @@ class AutosportWebController:
         return Path(workspace_for_strategy(self.workspace, strategy_id, plan))
 
     def _product_runtime_can_start(self, *, source_ready: bool | None = None) -> bool:
-        if self._busy():
+        if self._closing or self._busy():
             return False
         if source_ready is None:
             _selection, entry = self._resolve_operator_source()
@@ -1275,6 +1275,7 @@ class AutosportWebController:
             return {
                 "status": self.status,
                 "last_error": self._bridge_validation_error or self.last_error,
+                "closing": self._closing,
                 "workspace": str(self.workspace),
                 "active_workspace": str(self._active_workspace),
                 "bank": self.bank,
@@ -2002,6 +2003,12 @@ class AutosportWebController:
             if self._closing:
                 raise RuntimeError("Autosport close is already in progress")
             self._closing = True
+            self.last_error = ""
+            self.status = (
+                "Автоспорт завершує роботу. "
+                "Дочекайтеся безпечного завершення фонових операцій."
+            )
+            self._append_log(self.status)
 
         try:
             # Request cooperative STOP first so the long-running product runtime can
@@ -2232,19 +2239,63 @@ def launch_windows_shell(
             return
         trusted_document_observed = True
 
-    def close_trusted_window_safely() -> bool:
-        """Keep the native window present until canonical teardown is proven."""
+    close_teardown_lock = threading.Lock()
+    close_teardown_thread: threading.Thread | None = None
+    close_teardown_succeeded = False
 
-        if not canonical_bridge:
-            return True
+    def run_close_teardown() -> None:
+        nonlocal close_teardown_thread, close_teardown_succeeded
         try:
             api._close_from_host()
         except Exception:
-            # pywebview treats False from the blocking closing event as a veto.
-            # Controller.close() already published bounded operator-safe failure
-            # state and reset its retry fence.
-            return False
-        return True
+            # The controller publishes bounded operator-safe failure state and
+            # resets its retry fence. Leave the window open for state readback and
+            # a later operator close retry.
+            pass
+        else:
+            with close_teardown_lock:
+                close_teardown_succeeded = True
+            current_window = window
+            if current_window is not None:
+                try:
+                    # This runs after the blocking FormClosing callback returned.
+                    # pywebview marshals destroy() onto the native UI thread; the
+                    # second closing callback observes success and allows close.
+                    current_window.destroy()
+                except Exception:
+                    # Canonical backend teardown already completed. If native
+                    # destruction fails, keep the inert window available for one
+                    # ordinary close retry rather than reviving backend authority.
+                    pass
+        finally:
+            with close_teardown_lock:
+                close_teardown_thread = None
+
+    def close_trusted_window_safely() -> bool:
+        """Veto native close until canonical teardown completes off the UI thread."""
+
+        nonlocal close_teardown_thread
+        if not canonical_bridge:
+            return True
+        with close_teardown_lock:
+            if close_teardown_succeeded:
+                return True
+            if close_teardown_thread is not None:
+                return False
+            candidate = threading.Thread(
+                target=run_close_teardown,
+                name="autosport-webview-safe-close",
+                daemon=False,
+            )
+            close_teardown_thread = candidate
+            try:
+                candidate.start()
+            except Exception:
+                close_teardown_thread = None
+                return False
+        # pywebview's blocking closing event treats False as cancellation. The
+        # semantic window therefore stays present while teardown runs.
+        return False
 
     try:
         window = webview.create_window(
@@ -2263,9 +2314,9 @@ def launch_windows_shell(
             # injects window.pywebview into each document. Re-check every load so
             # a navigated document cannot inherit the privileged Python API.
             window.events.before_load += bind_trusted_document
-            # closing is also blocking. Safe teardown therefore finishes while the
-            # semantic operator window is still present, and a teardown failure
-            # vetoes native close instead of orphaning unresolved economic work.
+            # closing is blocking on WinForms. The first close is vetoed quickly;
+            # canonical teardown runs off the UI thread and destroys the window
+            # only after STOP/worker terminalization succeeds.
             window.events.closing += close_trusted_window_safely
         webview.start(
             gui=required_renderer,

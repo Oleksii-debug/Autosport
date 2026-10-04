@@ -109,7 +109,13 @@
   }
 
   function isAnyWorkerBusy(state) {
-    return Boolean(state && state.busy && Object.values(state.busy).some(Boolean));
+    return Boolean(
+      state
+      && (
+        state.closing === true
+        || (state.busy && Object.values(state.busy).some(Boolean))
+      )
+    );
   }
 
   function syncOwnerConfirmationAvailability(canInitialize) {

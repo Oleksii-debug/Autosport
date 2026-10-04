@@ -27,6 +27,9 @@ def _bare_controller(tmp_path: Path) -> AutosportWebController:
     controller = AutosportWebController.__new__(AutosportWebController)
     controller._lock = threading.RLock()
     controller._closing = False
+    controller.status = ""
+    controller.last_error = ""
+    controller.log = []
     controller.workspace = tmp_path
     controller._active_workspace = tmp_path
     controller.dataset_worker = _IdleWorker()
@@ -78,6 +81,8 @@ def test_webview_close_does_not_return_while_committed_replay_is_still_active(
             "was still active; the WebView can disappear while economic work "
             "continues without an operator surface"
         )
+        assert "Автоспорт завершує роботу" in controller.status
+        assert controller.last_error == ""
     finally:
         release.set()
         close_thread.join(2.0)

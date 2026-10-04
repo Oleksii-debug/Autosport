@@ -38,9 +38,16 @@ class _Window:
             before_load=_Event(),
             closing=_Event(),
         )
+        self.destroy_calls = 0
+        self.destroy_callback = None
 
     def get_current_url(self):
         return self.current_url
+
+    def destroy(self) -> None:
+        self.destroy_calls += 1
+        if self.destroy_callback is not None:
+            self.destroy_callback()
 
 
 class _Event:
@@ -213,10 +220,12 @@ class _FailingCloseController(_Controller):
     def __init__(self) -> None:
         super().__init__()
         self.fail_close = True
+        self.failed_close_returned = threading.Event()
 
     def close(self) -> None:
         self.events.append(("close", None))
         if self.fail_close:
+            self.failed_close_returned.set()
             raise RuntimeError("synthetic teardown failure")
 
 
@@ -225,23 +234,41 @@ class _NativeClosingWebview(_FakeWebview):
         super().__init__()
         self.controller = controller
         self.first_close_result: list[object] | None = None
-        self.second_close_result: list[object] | None = None
+        self.destroy_close_result: list[object] | None = None
+        self.retry_close_results: list[list[object]] = []
         self.state_after_failed_close: dict[str, object] | None = None
+        self.destroyed = threading.Event()
+        self.window.destroy_callback = self._native_destroy
+
+    def _native_destroy(self) -> None:
+        self.destroy_close_result = self.window.events.closing.fire()
+        self.destroyed.set()
 
     def start(self, *, gui: str, **kwargs) -> None:
         self.requested_gui = gui
         assert self.window.events.initialized.fire("edgechromium") == [True]
         self.window.events.before_load.fire()
         self.first_close_result = self.window.events.closing.fire()
-        if self.first_close_result == [False]:
-            # The trusted bridge must remain usable after a vetoed native close.
+        assert self.first_close_result == [False]
+
+        if isinstance(self.controller, _FailingCloseController):
+            assert self.controller.failed_close_returned.wait(1.0)
             self.state_after_failed_close = self.api.get_state()
-            assert isinstance(self.controller, _FailingCloseController)
             self.controller.fail_close = False
-            self.second_close_result = self.window.events.closing.fire()
+
+            # A close retry that races the tail of the failed teardown may still
+            # be vetoed. Repeating is deterministic: at most one teardown worker
+            # exists, and the first post-failure retry starts the successful one.
+            for _ in range(100):
+                self.retry_close_results.append(self.window.events.closing.fire())
+                if len([event for event in self.controller.events if event[0] == "close"]) >= 2:
+                    break
+                threading.Event().wait(0.01)
+
+        assert self.destroyed.wait(1.0)
 
 
-def test_native_window_close_finishes_canonical_teardown_before_allowing_close(
+def test_native_window_close_vetoes_first_close_until_canonical_teardown_finishes(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -253,11 +280,13 @@ def test_native_window_close_finishes_canonical_teardown_before_allowing_close(
     assert launch_windows_shell(bridge, storage_path=tmp_path / "webview") == 0
 
     assert fake.window.events.closing.handlers
-    assert fake.first_close_result == [True]
+    assert fake.first_close_result == [False]
+    assert fake.destroy_close_result == [True]
+    assert fake.window.destroy_calls == 1
     assert controller.events == [("close", None)]
 
 
-def test_native_window_close_vetoes_teardown_failure_and_preserves_trusted_retry(
+def test_native_window_close_failure_stays_open_then_retries_teardown(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -270,7 +299,10 @@ def test_native_window_close_vetoes_teardown_failure_and_preserves_trusted_retry
 
     assert fake.first_close_result == [False]
     assert fake.state_after_failed_close == {"ok": True, "state": {"status": "ok"}}
-    assert fake.second_close_result == [True]
+    assert fake.retry_close_results
+    assert all(result == [False] for result in fake.retry_close_results)
+    assert fake.destroy_close_result == [True]
+    assert fake.window.destroy_calls == 1
     assert controller.events == [
         ("close", None),
         ("state", None),

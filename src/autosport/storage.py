@@ -1745,6 +1745,7 @@ class SQLiteMarketStore:
 
                 assert prepared is not None
                 tx_id, binding_sha256, _previous_state_sha256 = prepared
+                self._require_database_path_identity()
                 authority.recover(
                     observed_state_sha256=intended_state_sha256,
                     tx_id=tx_id,
@@ -1949,6 +1950,7 @@ class SQLiteMarketStore:
                     observed_state_sha256 = (
                         self._replay_cutoff_authority_state_sha256(cutoff_rows)
                     )
+                    self._require_database_path_identity()
                     self._recover_replay_cutoff_authority(
                         authority,
                         observed_state_sha256,

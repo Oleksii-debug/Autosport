@@ -1946,20 +1946,47 @@ def _install_market_price_ladder_authority():
                 "canonical price-ladder parser/hash authority changed"
             )
         origin_at_read_start = source_origin_authoritative(self)
+        market = canonical_required_text(market_id, "market_id")
+        market_key_at_start = (
+            canonical_required_text(
+                getattr(self, "_venue_id", None),
+                "venue_id",
+            ),
+            market,
+        )
         with generation_lock:
             read_sequence += 1
             acquisition_sequence = read_sequence
+            if origin_at_read_start:
+                previous = latest_definitions.get(market_key_at_start)
+                pending_generation = (
+                    0 if previous is None else previous[0] + 1
+                )
+                # A canonical refresh attempt immediately revokes the prior
+                # current generation for this exact market. If provider I/O
+                # fails or the authority graph changes mid-read, the market
+                # remains unresolved until a later fresh canonical read.
+                latest_definitions[market_key_at_start] = (
+                    pending_generation,
+                    None,
+                    acquisition_sequence,
+                )
         acquisition_started_at = canonical_now("acquisition-start instant")
-        observation = raw_read(self, market_id)
+        observation = raw_read(self, market)
         if (
             not origin_at_read_start
             or not source_origin_authoritative(self)
             or not ladder_read_dispatch_intact()
+            or (
+                observation.venue_id,
+                observation.market_id,
+            )
+            != market_key_at_start
         ):
             return observation
 
         observation_id = id(observation)
-        market_key = (observation.venue_id, observation.market_id)
+        market_key = market_key_at_start
         definition = (
             observation.ladder_type,
             observation.line_range_min,
@@ -1975,12 +2002,12 @@ def _install_market_price_ladder_authority():
                     issued.pop(key, None)
 
         # listMarketCatalogue does not expose a monotonic MarketDescription
-        # version. Preserve the stronger process fact we do have. Sequential
-        # incompatible observations advance the generation. If an older request
-        # completes after a newer request with an incompatible definition, neither
-        # response is allowed to win by network timing: mark the market definition
-        # ambiguous and require one fresh post-conflict read. Same-definition
-        # overlap is harmless and keeps the existing generation.
+        # version. Each trusted refresh start already moved this market to a new
+        # unresolved generation, so a failed refresh cannot leave a prior positive
+        # receipt consumable. Completion establishes a fresh generation only when
+        # this exact acquisition is still causally current. If an older request
+        # completes after a newer request, neither response may win by network
+        # timing: keep the definition unresolved until a later fresh read.
         with generation_lock:
             previous = latest_definitions.get(market_key)
             if previous is None:

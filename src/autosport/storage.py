@@ -961,22 +961,34 @@ class SQLiteMarketStore:
     def _frozen_replay_corpus_sha256(self, max_generation: int) -> str:
         if type(max_generation) is not int or max_generation < 0:
             raise ValueError("max_generation must be a non-negative int")
+        qualified_columns = ",".join(
+            f"m.{column}" for column in _HISTORY_COLUMNS
+        )
         rows = self.connection.execute(
-            """SELECT c.append_generation, m.dedupe_key, m.payload_json
-               FROM market_event_commit_order AS c
-               JOIN market_events AS m ON m.dedupe_key = c.dedupe_key
-               WHERE c.append_generation <= ?
-               ORDER BY c.append_generation, m.dedupe_key""",
+            f"""SELECT c.append_generation, {qualified_columns}
+                FROM market_event_commit_order AS c
+                JOIN market_events AS m ON m.dedupe_key = c.dedupe_key
+                WHERE c.append_generation <= ?
+                ORDER BY c.append_generation, m.dedupe_key""",
             (max_generation,),
         ).fetchall()
         encoded_rows: list[list[object]] = []
-        for generation, dedupe_key, payload_json in rows:
-            if (
-                type(generation) is not int
-                or generation < 0
-                or type(dedupe_key) is not str
-                or type(payload_json) is not str
-            ):
+        for row in rows:
+            if len(row) != len(_HISTORY_COLUMNS) + 1:
+                raise ValueError("causal replay corpus authority is invalid")
+            generation = row[0]
+            history_row = tuple(row[1:])
+            if type(generation) is not int or generation < 0:
+                raise ValueError("causal replay corpus authority is invalid")
+
+            # Do not let the independent machine authority bless malformed durable
+            # event bytes. The digest format remains unchanged for compatibility,
+            # but every row is first proven to be the exact canonical MarketEvent
+            # represented by its redundant SQLite columns.
+            _event_from_history_row(history_row)
+            dedupe_key = history_row[0]
+            payload_json = history_row[-1]
+            if type(dedupe_key) is not str or type(payload_json) is not str:
                 raise ValueError("causal replay corpus authority is invalid")
             encoded_rows.append([generation, dedupe_key, payload_json])
         return _canonical_sha256(

@@ -327,3 +327,32 @@ def test_outer_boundary_path_rebinding_fails_closed(monkeypatch) -> None:
 
     assert not boundary._canonical_internal_dispatch_unchanged()
 
+def test_place_action_descriptor_method_rebinding_fails_closed(monkeypatch) -> None:
+    assert boundary._canonical_internal_dispatch_unchanged()
+
+    monkeypatch.setattr(
+        boundary._PLACE_ACTION_BOUNDARY_TYPE,
+        "__get__",
+        lambda self, instance, owner=None: boundary._TRUSTED_PRIVATE_PLACE_ACTION,
+    )
+
+    assert not boundary._canonical_internal_dispatch_unchanged()
+
+
+def test_rebound_boundary_sys_cannot_forge_canonical_caller(monkeypatch) -> None:
+    assert boundary._canonical_internal_dispatch_unchanged()
+
+    class ForgedFrame:
+        f_code = boundary._CANONICAL_EXECUTE_CODE
+
+    class ForgedSys:
+        @staticmethod
+        def _getframe(depth):
+            return ForgedFrame()
+
+    monkeypatch.setattr(boundary, "sys", ForgedSys())
+    dispatch = boundary._BOUNDARY.__get__(None, boundary._CLIENT_TYPE)
+
+    assert dispatch is boundary._public_place_action
+    assert boundary._canonical_internal_dispatch_unchanged()
+

@@ -748,6 +748,8 @@ def _durable_submitted_at(
 
 
 def _build_trusted_private_place_action(private_place_action, private_place_action_code):
+    frame_getter = sys._getframe
+
     def _trusted_private_place_action(
         self: _impl.BetfairSupervisedPlaceOrdersClient,
         action: _impl.ExecutionAction,
@@ -762,7 +764,7 @@ def _build_trusted_private_place_action(private_place_action, private_place_acti
         _observation_clock=None,
     ):
         try:
-            caller_code = sys._getframe(1).f_code
+            caller_code = frame_getter(1).f_code
         except (AttributeError, ValueError):
             caller_code = None
         if caller_code is not _CANONICAL_EXECUTE_CODE:
@@ -993,6 +995,13 @@ _TRUSTED_PRIVATE_PLACE_ACTION = _build_trusted_private_place_action(
 )
 del _RAW_PLACE_ACTION, _RAW_PLACE_ACTION_CODE
 _TRUSTED_PRIVATE_PLACE_ACTION_CODE = _TRUSTED_PRIVATE_PLACE_ACTION.__code__
+_TRUSTED_PRIVATE_PLACE_ACTION_FREEVARS = (
+    _TRUSTED_PRIVATE_PLACE_ACTION.__code__.co_freevars
+)
+_TRUSTED_PRIVATE_PLACE_ACTION_CLOSURE = tuple(
+    cell.cell_contents
+    for cell in (_TRUSTED_PRIVATE_PLACE_ACTION.__closure__ or ())
+)
 _impl._CANONICAL_BETFAIR_PLACE_ACTION = _TRUSTED_PRIVATE_PLACE_ACTION
 _impl._CANONICAL_BETFAIR_PLACE_ACTION_CODE = _TRUSTED_PRIVATE_PLACE_ACTION_CODE
 
@@ -1063,6 +1072,34 @@ def _canonical_internal_dispatch_unchanged() -> bool:
         and _impl._CANONICAL_BETFAIR_PLACE_ACTION_CODE is _TRUSTED_PRIVATE_PLACE_ACTION_CODE
         and getattr(_TRUSTED_PRIVATE_PLACE_ACTION, "__code__", None)
         is _TRUSTED_PRIVATE_PLACE_ACTION_CODE
+        and _TRUSTED_PRIVATE_PLACE_ACTION.__code__.co_freevars
+        == _TRUSTED_PRIVATE_PLACE_ACTION_FREEVARS
+        and _TRUSTED_PRIVATE_PLACE_ACTION.__closure__ is not None
+        and len(_TRUSTED_PRIVATE_PLACE_ACTION.__closure__)
+        == len(_TRUSTED_PRIVATE_PLACE_ACTION_CLOSURE)
+        and all(
+            cell.cell_contents is expected
+            for cell, expected in zip(
+                _TRUSTED_PRIVATE_PLACE_ACTION.__closure__,
+                _TRUSTED_PRIVATE_PLACE_ACTION_CLOSURE,
+            )
+        )
+        and type(_BOUNDARY) is _PLACE_ACTION_BOUNDARY_TYPE
+        and _PLACE_ACTION_BOUNDARY_TYPE.__get__ is _PLACE_ACTION_BOUNDARY_GET
+        and getattr(_PLACE_ACTION_BOUNDARY_GET, "__code__", None)
+        is _PLACE_ACTION_BOUNDARY_GET_CODE
+        and _PLACE_ACTION_BOUNDARY_GET.__code__.co_freevars
+        == _PLACE_ACTION_BOUNDARY_GET_FREEVARS
+        and _PLACE_ACTION_BOUNDARY_GET.__closure__ is not None
+        and len(_PLACE_ACTION_BOUNDARY_GET.__closure__)
+        == len(_PLACE_ACTION_BOUNDARY_GET_CLOSURE)
+        and all(
+            cell.cell_contents is expected
+            for cell, expected in zip(
+                _PLACE_ACTION_BOUNDARY_GET.__closure__,
+                _PLACE_ACTION_BOUNDARY_GET_CLOSURE,
+            )
+        )
         and "_RAW_PLACE_ACTION" not in globals()
         and "_RAW_PLACE_ACTION_CODE" not in globals()
         and "_PRIVATE_PLACE_ACTION" not in globals()
@@ -1103,32 +1140,43 @@ _public_place_action.__qualname__ = f"{_CLIENT_TYPE.__name__}.place_action"
 _public_place_action.__module__ = _impl.__name__
 
 
-class _PlaceActionBoundary:
-    __slots__ = ()
+def _build_place_action_boundary(frame_getter):
+    class _PlaceActionBoundary:
+        __slots__ = ()
 
-    def __get__(self, instance: object, owner: type | None = None):
-        try:
-            caller_code = sys._getframe(1).f_code
-        except (AttributeError, ValueError):
-            caller_code = None
-        if caller_code is _CANONICAL_EXECUTE_CODE:
-            if not _trusted_profile_graph_unchanged():
-                raise _impl.BetfairSupervisedExecutionError(
-                    "trusted runtime profile authority changed"
-                )
-            if not _canonical_internal_dispatch_unchanged():
-                raise _impl.BetfairSupervisedExecutionError(
-                    "terminal Betfair execution requires canonical client, transport, "
-                    "parser, ledger and confirmation authority"
-                )
-            dispatch = _TRUSTED_PRIVATE_PLACE_ACTION
-        else:
-            dispatch = _public_place_action
-        if instance is None:
-            return dispatch
-        return dispatch.__get__(instance, owner or _CLIENT_TYPE)
+        def __get__(self, instance: object, owner: type | None = None):
+            try:
+                caller_code = frame_getter(1).f_code
+            except (AttributeError, ValueError):
+                caller_code = None
+            if caller_code is _CANONICAL_EXECUTE_CODE:
+                if not _trusted_profile_graph_unchanged():
+                    raise _impl.BetfairSupervisedExecutionError(
+                        "trusted runtime profile authority changed"
+                    )
+                if not _canonical_internal_dispatch_unchanged():
+                    raise _impl.BetfairSupervisedExecutionError(
+                        "terminal Betfair execution requires canonical client, transport, "
+                        "parser, ledger and confirmation authority"
+                    )
+                dispatch = _TRUSTED_PRIVATE_PLACE_ACTION
+            else:
+                dispatch = _public_place_action
+            if instance is None:
+                return dispatch
+            return dispatch.__get__(instance, owner or _CLIENT_TYPE)
+
+    return _PlaceActionBoundary, _PlaceActionBoundary()
 
 
-_BOUNDARY = _PlaceActionBoundary()
+_PLACE_ACTION_BOUNDARY_TYPE, _BOUNDARY = _build_place_action_boundary(sys._getframe)
+del _build_place_action_boundary
+_PLACE_ACTION_BOUNDARY_GET = _PLACE_ACTION_BOUNDARY_TYPE.__get__
+_PLACE_ACTION_BOUNDARY_GET_CODE = _PLACE_ACTION_BOUNDARY_GET.__code__
+_PLACE_ACTION_BOUNDARY_GET_FREEVARS = _PLACE_ACTION_BOUNDARY_GET.__code__.co_freevars
+_PLACE_ACTION_BOUNDARY_GET_CLOSURE = tuple(
+    cell.cell_contents
+    for cell in (_PLACE_ACTION_BOUNDARY_GET.__closure__ or ())
+)
 _CLIENT_TYPE.place_action = _BOUNDARY
 _impl.execute_betfair_supervised_action = _PUBLIC_EXECUTE

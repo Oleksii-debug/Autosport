@@ -758,6 +758,9 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     "settlement_learning_handoff": (
                         coordinator.settlement_learning_handoff
                     ),
+                    "_settlement_prepared_resolutions": (
+                        coordinator._settlement_prepared_resolutions
+                    ),
                     "_settlement_source_id": coordinator._settlement_source_id,
                     "clock": coordinator.clock,
                     "causal_view": coordinator.causal_view,
@@ -1252,10 +1255,15 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
         class Handoff:
             def __init__(self) -> None:
                 self.prepare_calls = 0
+                self.recovery_calls = 0
                 self.reconcile_calls = 0
 
             def prepare_settlement(self, **_kwargs):
                 self.prepare_calls += 1
+                return ()
+
+            def prepared_settlement_resolutions(self, **_kwargs):
+                self.recovery_calls += 1
                 return ()
 
             def reconcile_after_settlement(self, **_kwargs):
@@ -1284,13 +1292,75 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             handoff.prepare_settlement = (
                 lambda **_kwargs: self.fail("retargeted prepare called")
             )
+            handoff.prepared_settlement_resolutions = (
+                lambda **_kwargs: self.fail("retargeted recovery called")
+            )
             handoff.reconcile_after_settlement = (
                 lambda **_kwargs: self.fail("retargeted reconcile called")
             )
             try:
                 coordinator.tick()
                 self.assertEqual(handoff.prepare_calls, 1)
+                self.assertEqual(handoff.recovery_calls, 1)
                 self.assertEqual(handoff.reconcile_calls, 1)
+            finally:
+                store.close()
+
+    def test_recovered_settlement_resolution_collection_is_sealed(self) -> None:
+        original = ContinuousSessionCoordinator._recovered_settlement_resolutions
+        with self.assertRaisesRegex(
+            TypeError,
+            "canonical settlement consumer entry binding is immutable",
+        ):
+            ContinuousSessionCoordinator._recovered_settlement_resolutions = (
+                lambda *_args, **_kwargs: ()
+            )
+        self.assertIs(
+            ContinuousSessionCoordinator._recovered_settlement_resolutions,
+            original,
+        )
+
+    def test_recovered_settlement_evidence_cannot_mint_new_truth(self) -> None:
+        class Handoff:
+            def prepared_settlement_resolutions(self, *, paper_book_path):
+                return (
+                    SettlementResolution(
+                        event_identity="provider-a:event-1",
+                        settlement_ref="result:recovery-only",
+                        quote_outcomes={"event-1|winner|home": "win"},
+                        evidence_id="recovery-only-evidence",
+                        evidence_sha256="a" * 64,
+                        available_at="2026-09-19T21:19:30+00:00",
+                    ),
+                )
+
+            def reconcile_after_settlement(self, **_kwargs):
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-recovery-only",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                settlement_learning_handoff=Handoff(),
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "was not durably staged before P&L",
+                ):
+                    coordinator._recovered_settlement_resolutions(as_of=clock())
             finally:
                 store.close()
 

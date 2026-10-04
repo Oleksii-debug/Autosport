@@ -234,7 +234,11 @@ def test_programmatic_focus_routes_away_from_unavailable_targets() -> None:
     assert 'const sectionHeading = section ? section.querySelector("h2") : null;' in source
     assert 'sectionHeading.closest("[hidden]") === null' in source
     assert "fallback.tabIndex = -1;" in source
-    assert "return document.activeElement === fallback;" in source
+    assert "if (document.activeElement === fallback) return true;" in source
+    assert "const statusFallback = errorNode.hidden ? statusNode : errorNode;" in source
+    assert "statusFallback.tabIndex = -1;" in source
+    assert "statusFallback.focus();" in source
+    assert "return document.activeElement === statusFallback;" in source
 
     assert "focusOperatorTarget(byId(result.focus_id));" in source
     assert "focusOperatorTarget(byId(selectedSurfaceTarget()));" in source
@@ -255,3 +259,23 @@ def test_poll_and_native_accessibility_contract_remain_intact() -> None:
     assert 'event.key.toLowerCase() === "r"' not in source
     assert "refreshInFlight" in source
     assert "refreshPending" in source
+
+
+def test_disclosure_close_moves_focus_before_hiding_focused_subtree() -> None:
+    source = _source()
+
+    owner_start = source.index('byId(329).addEventListener("click", () => {')
+    owner_end = source.index("\n  });", owner_start)
+    owner_close = source[owner_start:owner_end]
+    assert owner_close.index("byId(305).focus();") < owner_close.index("ownerPanel.hidden = true;")
+    assert owner_close.index("ownerPanel.hidden = true;") < owner_close.index(
+        'byId(305).setAttribute("aria-expanded", "false");'
+    )
+
+    manual_start = source.index('byId(336).addEventListener("click", () => {')
+    manual_end = source.index("\n  });", manual_start)
+    manual_close = source[manual_start:manual_end]
+    assert manual_close.index("byId(330).focus();") < manual_close.index("manualPanel.hidden = true;")
+    assert manual_close.index("manualPanel.hidden = true;") < manual_close.index(
+        'byId(330).setAttribute("aria-expanded", "false");'
+    )

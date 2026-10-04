@@ -25,6 +25,8 @@ SOURCE = "https://betfair-developer-docs.atlassian.net/wiki/example"
 
 def observation(
     *,
+    provider_id: str = "betfair",
+    order_family: str = constraint_evidence.ORDER_FAMILY,
     min_size: Decimal = Decimal("1"),
     min_payout: Decimal | None = Decimal("10"),
     lower_enabled: bool = True,
@@ -41,7 +43,7 @@ def observation(
     review_expires_at: datetime = T0 + timedelta(days=7),
 ) -> BetfairProviderConstraintObservation:
     return BetfairProviderConstraintObservation(
-        provider_id="betfair",
+        provider_id=provider_id,
         jurisdiction_scope=scope,
         currency_code=currency,
         min_standard_size=min_size,
@@ -56,6 +58,7 @@ def observation(
         effective_from=effective_from,
         effective_until=effective_until,
         review_expires_at=review_expires_at,
+        order_family=order_family,
     )
 
 
@@ -71,6 +74,32 @@ def resolve(
         jurisdiction_scope=scope,
         currency_code=currency,
     )
+
+
+class _EqualitySpoofText(str):
+    def __eq__(self, _other: object) -> bool:
+        return True
+
+    def __ne__(self, _other: object) -> bool:
+        return False
+
+    __hash__ = str.__hash__
+
+
+def test_provider_identity_rejects_equality_spoofing_text() -> None:
+    with pytest.raises(
+        BetfairProviderConstraintError,
+        match="provider_id must be exact canonical betfair text",
+    ):
+        observation(provider_id=_EqualitySpoofText("attacker-provider"))
+
+
+def test_order_family_rejects_equality_spoofing_text() -> None:
+    with pytest.raises(
+        BetfairProviderConstraintError,
+        match="order_family must be exact LIMIT_STANDARD_SIZE text",
+    ):
+        observation(order_family=_EqualitySpoofText("OTHER_ORDER_FAMILY"))
 
 
 def test_consistent_records_are_structural_only() -> None:

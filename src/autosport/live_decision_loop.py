@@ -38,6 +38,7 @@ from .paper_execution_adoption import (
     PaperExecutionAdoptionRuntime,
     PreparedPaperExecution,
 )
+from .paper_execution_reality import PaperExecutionIntegrityError
 from .portfolio_plan import (
     PortfolioDependencyGraph,
     PortfolioPlan,
@@ -2820,6 +2821,217 @@ class PersistentLiveDecisionLoop:
         record = JsonlDecisionLedger._validate_record(envelope["record"])
         return DecisionRecord(**record)
 
+    def _verify_committed_execution_binding(
+        self,
+        *,
+        existing: DecisionRecord,
+        durable_plan: PortfolioPlan,
+        progress: _Progress,
+    ) -> None:
+        has_positive_stake = any(stake > 0 for stake in durable_plan.stakes)
+        execution_payload = existing.payload.get("paper_execution")
+        if not has_positive_stake:
+            if execution_payload is not None:
+                raise DecisionLedgerIntegrityError(
+                    "zero-stake committed live decision carries unexpected execution evidence"
+                )
+            return
+
+        runtime = self.paper_execution
+        if runtime is None:
+            raise DecisionLedgerIntegrityError(
+                "positive committed live decision requires canonical #623 execution runtime"
+            )
+        expected_keys = {
+            "schema",
+            "schema_version",
+            "plan_id",
+            "plan_fingerprint",
+            "model_fingerprint",
+            "run_id",
+            "intent_evidence_json",
+        }
+        if (
+            type(execution_payload) is not dict
+            or set(execution_payload) != expected_keys
+            or execution_payload.get("schema")
+            != "autosport.paper_execution_adoption"
+            or execution_payload.get("schema_version") != 1
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision execution-adoption evidence is invalid"
+            )
+
+        try:
+            plan_id = _canonical_text(
+                "execution-adoption plan_id",
+                execution_payload["plan_id"],
+            )
+            plan_fingerprint = _canonical_text(
+                "execution-adoption plan_fingerprint",
+                execution_payload["plan_fingerprint"],
+            )
+            model_fingerprint = _canonical_text(
+                "execution-adoption model_fingerprint",
+                execution_payload["model_fingerprint"],
+            )
+            run_id = _canonical_text(
+                "execution-adoption run_id",
+                execution_payload["run_id"],
+            )
+            intent_evidence_json = _canonical_text(
+                "execution-adoption intent_evidence_json",
+                execution_payload["intent_evidence_json"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision execution-adoption identity is invalid"
+            ) from exc
+
+        if model_fingerprint != runtime.config.fingerprint:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision execution model conflicts with runtime"
+            )
+        try:
+            intent_evidence = strict_json_loads(intent_evidence_json)
+            canonical_intent_evidence = json.dumps(
+                intent_evidence,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision intent execution evidence is invalid"
+            ) from exc
+        if canonical_intent_evidence != intent_evidence_json:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision intent execution evidence is not canonical"
+            )
+        if (
+            type(intent_evidence) is not dict
+            or set(intent_evidence) != {"schema", "schema_version", "intents"}
+            or intent_evidence.get("schema")
+            != "autosport.portfolio_plan_intent_evidence"
+            or intent_evidence.get("schema_version") != 1
+            or type(intent_evidence.get("intents")) is not list
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision intent execution evidence schema is invalid"
+            )
+        intent_items = intent_evidence["intents"]
+        if (
+            tuple(
+                item.get("intent_id") if type(item) is dict else None
+                for item in intent_items
+            )
+            != durable_plan.intent_ids
+            or tuple(
+                item.get("intent_sha256") if type(item) is dict else None
+                for item in intent_items
+            )
+            != durable_plan.intent_sha256s
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision intent execution evidence conflicts with plan"
+            )
+        provenance = self.intent_provenance
+        for item in intent_items:
+            if (
+                type(item) is not dict
+                or item.get("strategy_id") != provenance.strategy_version_id
+                or item.get("model_id") != provenance.model_version_id
+                or item.get("config_sha256") != provenance.config_sha256
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision intent execution provenance conflicts"
+                )
+
+        try:
+            execution_events = runtime.ledger.events(run_id)
+        except PaperExecutionIntegrityError as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision execution ledger is invalid"
+            ) from exc
+        reservations = tuple(
+            event
+            for event in execution_events
+            if event.get("event_type") == "RUN_RESERVED"
+        )
+        scopes = tuple(
+            event
+            for event in execution_events
+            if event.get("event_type")
+            == PaperExecutionAdoptionRuntime._EXPOSURE_SCOPE_EVENT_TYPE
+        )
+        if len(reservations) != 1 or len(scopes) != 1:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision lacks exact #623 reservation/scope evidence"
+            )
+
+        reservation = reservations[0].get("payload")
+        if type(reservation) is not dict:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 reservation is invalid"
+            )
+        action_ids = reservation.get("action_ids")
+        positive_count = sum(stake > 0 for stake in durable_plan.stakes)
+        if (
+            reservation.get("trigger_id") != progress.decision_id
+            or reservation.get("plan_id") != plan_id
+            or reservation.get("plan_fingerprint") != plan_fingerprint
+            or reservation.get("model_fingerprint") != model_fingerprint
+            or reservation.get("started_at") != progress.decision_ts
+            or type(action_ids) is not list
+            or len(action_ids) != positive_count
+            or len(action_ids) != len(set(action_ids))
+            or any(type(action_id) is not str or not action_id for action_id in action_ids)
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 reservation conflicts with decision evidence"
+            )
+
+        scope = scopes[0].get("payload")
+        if (
+            type(scope) is not dict
+            or set(scope)
+            != {
+                "schema",
+                "schema_version",
+                "plan_id",
+                "plan_fingerprint",
+                "intent_evidence_sha256",
+                "bindings",
+                "binding_sha256",
+            }
+            or scope.get("schema")
+            != PaperExecutionAdoptionRuntime._EXPOSURE_SCOPE_SCHEMA
+            or scope.get("schema_version") != 1
+            or scope.get("plan_id") != plan_id
+            or scope.get("plan_fingerprint") != plan_fingerprint
+            or scope.get("intent_evidence_sha256")
+            != hashlib.sha256(intent_evidence_json.encode("utf-8")).hexdigest()
+            or type(scope.get("bindings")) is not list
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 exposure scope conflicts with decision evidence"
+            )
+        bindings = scope["bindings"]
+        if tuple(
+            binding.get("action_id") if type(binding) is dict else None
+            for binding in bindings
+        ) != tuple(action_ids):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 exposure bindings conflict with reservation"
+            )
+        scope_body = dict(scope)
+        binding_sha256 = scope_body.pop("binding_sha256")
+        if binding_sha256 != _canonical_json_sha256(scope_body):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 exposure scope digest is invalid"
+            )
+
     def _verify_committed_progress_ledger_binding(
         self,
         progress: _Progress,
@@ -2857,6 +3069,11 @@ class PersistentLiveDecisionLoop:
             raise DecisionLedgerIntegrityError(
                 "committed live decision PortfolioPlan conflicts with progress"
             )
+        self._verify_committed_execution_binding(
+            existing=existing,
+            durable_plan=durable_plan,
+            progress=progress,
+        )
         payload_version = existing.payload.get("schema_version")
         if payload_version not in {1, 2}:
             raise DecisionLedgerIntegrityError(

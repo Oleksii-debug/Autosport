@@ -227,6 +227,11 @@ def test_programmatic_focus_routes_away_from_unavailable_targets() -> None:
     source = _source()
 
     assert "function focusOperatorTarget(target)" in source
+    assert "const statusFallback = errorNode.hidden ? statusNode : errorNode;" in source
+    assert "if (!(target instanceof HTMLElement)) {" in source
+    assert "statusFallback.tabIndex = -1;" in source
+    assert "statusFallback.focus();" in source
+    assert "return document.activeElement === statusFallback;" in source
     assert 'target.closest("[hidden]") !== null' in source
     assert 'target.matches(":disabled")' in source
     assert "if (document.activeElement === target) return true;" in source

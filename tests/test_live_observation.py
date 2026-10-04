@@ -13,6 +13,7 @@ from autosport.live_observation import (
     observe_workspace_once,
     poll_open_market_store_once,
 )
+from autosport.market_bus import MarketEventDeliveryError
 from autosport.market_mirror import MarketMirror
 from autosport.market_mirror_runtime import BoundedMirrorInvalidationBuffer
 from autosport.providers import InMemoryProvider, ProviderQuote
@@ -209,6 +210,82 @@ class LiveObservationTests(unittest.TestCase):
             self.assertEqual(
                 {event.ingest_ts for event in after_receipt.events},
                 {_RECEIVE_TIME},
+            )
+
+    def test_open_store_poll_repairs_post_commit_delivery_gap_before_next_provider_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                mirror = MarketMirror.from_live_store(store)
+                updates = BoundedMirrorInvalidationBuffer(mirror)
+                health_store = SourceHealthStore(root / "source_health.json")
+
+                with mirror.hold_revision(0):
+                    with self.assertRaises(MarketEventDeliveryError):
+                        poll_open_market_store_once(
+                            store,
+                            health_store,
+                            self._provider(),
+                            mirror_updates=updates,
+                            max_items=10,
+                            clock=lambda: _RECEIVE_TIME,
+                        )
+
+                self.assertEqual(len(store.trusted_live_events()), 2)
+                self.assertEqual(mirror.snapshot(), ())
+                self.assertEqual(updates.pending_recovery_count, 2)
+                self.assertEqual(updates.pending_count, 0)
+
+                duplicate = poll_open_market_store_once(
+                    store,
+                    health_store,
+                    self._provider(),
+                    mirror_updates=updates,
+                    max_items=10,
+                    clock=lambda: "2026-09-12T20:00:05+00:00",
+                )
+
+                self.assertEqual(duplicate.accepted, 0)
+                self.assertEqual(updates.pending_recovery_count, 0)
+                self.assertEqual(updates.pending_count, 2)
+                self.assertEqual(
+                    {event.selection_id for event in mirror.snapshot()},
+                    {"player-a", "player-b"},
+                )
+                self.assertEqual(
+                    {event.ingest_ts for event in mirror.snapshot()},
+                    {_RECEIVE_TIME},
+                )
+            finally:
+                store.close()
+
+    def test_workspace_trusted_history_repair_publishes_missing_invalidations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = self._observe(tmp)
+            self.assertEqual(first.stats.accepted, 2)
+
+            mirror = MarketMirror()
+            updates = BoundedMirrorInvalidationBuffer(mirror)
+            repaired = observe_workspace_once(
+                tmp,
+                self._provider(),
+                mirror_updates=updates,
+                max_items=10,
+                clock=lambda: "2026-09-12T20:00:05+00:00",
+            )
+
+            self.assertEqual(repaired.stats.accepted, 0)
+            self.assertEqual(len(repaired.current_quotes), 2)
+            self.assertEqual(len(mirror.snapshot()), 2)
+            self.assertEqual(updates.pending_recovery_count, 0)
+            self.assertEqual(updates.pending_count, 2)
+            self.assertEqual(
+                set(updates.drain().changed_keys),
+                {
+                    ("live-fixture", "match-1|winner|player-a"),
+                    ("live-fixture", "match-1|winner|player-b"),
+                },
             )
 
     def test_duplicate_provider_sequence_preserves_first_receipt_time(self):

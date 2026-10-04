@@ -2051,6 +2051,44 @@ def test_effect_authority_is_revoked_after_login_completion(tmp_path):
     assert lifecycle.effect_authorized(issued) is False
 
 
+def test_completed_login_attempt_is_removed_from_effect_registry(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    issued = lifecycle.begin_login(now=NOW, access_token_available=False)
+    assert issued.attempt_id in lifecycle._issued_effect_admissions
+
+    lifecycle.complete_login_success(
+        attempt_id=issued.attempt_id,
+        now=NOW + timedelta(seconds=1),
+        access_expires_at=NOW + timedelta(minutes=10),
+    )
+
+    assert issued.attempt_id not in lifecycle._issued_effect_admissions
+
+
+def test_completed_renewal_attempt_is_removed_from_effect_registry(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
+    issued = lifecycle.begin_renewal(
+        now=due_at,
+        refresh_token_lineage_id=active.session_lineage_id,
+    )
+    assert issued.attempt_id in lifecycle._issued_effect_admissions
+
+    lifecycle.complete_renewal_failure(
+        attempt_id=issued.attempt_id,
+        now=due_at + timedelta(seconds=1),
+        failure=ProphetXRenewalFailureClass.RETRYABLE,
+    )
+
+    assert issued.attempt_id not in lifecycle._issued_effect_admissions
+
+
 def test_reconstructed_renewal_admission_cannot_reuse_issued_authority(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)

@@ -1097,7 +1097,7 @@ class ProphetXSessionLifecycle:
                 raise ProphetXSessionLifecycleError(
                     "cannot acquire ProphetX session-pool coordination lock"
                 ) from exc
-            self._owned_attempts.discard(attempt)
+            self._discard_owned_attempt(attempt)
             return updated
 
     def complete_login_success(
@@ -1143,7 +1143,7 @@ class ProphetXSessionLifecycle:
                 raise ProphetXSessionLifecycleError(
                     "cannot acquire ProphetX session-pool coordination lock"
                 ) from exc
-            self._owned_attempts.discard(attempt)
+            self._discard_owned_attempt(attempt)
             return updated
 
     def complete_login_failure(
@@ -1204,7 +1204,7 @@ class ProphetXSessionLifecycle:
                 raise ProphetXSessionLifecycleError(
                     "cannot acquire ProphetX session-pool coordination lock"
                 ) from exc
-            self._owned_attempts.discard(attempt)
+            self._discard_owned_attempt(attempt)
             return updated
 
     def record_credential_revoked(
@@ -1350,7 +1350,7 @@ class ProphetXSessionLifecycle:
                     retry_at=current.slot_hold_until,
                 )
             if current.attempt_id is not None:
-                self._owned_attempts.discard(current.attempt_id)
+                self._discard_owned_attempt(current.attempt_id)
             return self._grant_login(
                 now,
                 generation=current.generation + 1,
@@ -1375,7 +1375,7 @@ class ProphetXSessionLifecycle:
                     retry_at=uncertainty_deadline,
                 )
             if current.attempt_id is not None:
-                self._owned_attempts.discard(current.attempt_id)
+                self._discard_owned_attempt(current.attempt_id)
             return self._grant_login(
                 now,
                 generation=current.generation + 1,

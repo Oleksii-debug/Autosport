@@ -1534,6 +1534,66 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_direct_settle_rejects_noncompleted_lifecycle_before_pnl(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.PRE_MATCH,
+                settlement_ref=None,
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-1",
+                        position=1,
+                        events=(event,),
+                    )
+                ),
+                clock,
+            )
+            try:
+                coordinator.tick()
+                leg = TicketLeg(
+                    event_id="event-1",
+                    market_id="winner",
+                    selection_id="home",
+                    locked_odds=Decimal("2.00"),
+                    sport="table_tennis",
+                )
+                book = PaperBook("100")
+                ticket = book.open_ticket(
+                    (leg,),
+                    Decimal("10"),
+                    placed_at="2026-09-19T21:19:30+00:00",
+                    provider_source_ids=("provider-a",),
+                )
+                book.save(root / "paper_book.json")
+                resolution = SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="result:premature",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="premature-evidence",
+                    evidence_sha256="f" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "event is not durably completed",
+                ):
+                    coordinator._settle(
+                        resolutions=(resolution,),
+                        settled_at=clock(),
+                    )
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("90"))
+                self.assertEqual(durable.tickets[ticket.ticket_id].status.value, "open")
+            finally:
+                store.close()
+
     def test_direct_settle_keeps_canonical_provider_scoped_path_working(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

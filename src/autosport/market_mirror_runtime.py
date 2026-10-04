@@ -653,10 +653,9 @@ class BoundedMirrorInvalidationBuffer:
             key = (result.source_id, result.quote_key)
             if key in self._dirty:
                 # Coalescing must never relabel a batch containing a material update
-                # as refresh-only. A later APPLIED update therefore revokes an earlier
-                # refresh classification. Repeated refreshes retain refresh-only status
-                # but advance its provenance to the exact latest acquisition sequence.
-                if result.status is MirrorUpdate.APPLIED:
+                # or a loss of decision-causal authority as refresh-only. Repeated
+                # causal refreshes retain refresh-only status and advance provenance.
+                if result.status is MirrorUpdate.APPLIED or not decision_causal:
                     self._semantic_refresh.pop(key, None)
                 elif (
                     result.status is MirrorUpdate.SEMANTIC_REFRESH
@@ -675,7 +674,10 @@ class BoundedMirrorInvalidationBuffer:
                 return result
 
             self._dirty[key] = None
-            if result.status is MirrorUpdate.SEMANTIC_REFRESH:
+            if (
+                result.status is MirrorUpdate.SEMANTIC_REFRESH
+                and decision_causal
+            ):
                 self._semantic_refresh[key] = event.sequence
             return result
 

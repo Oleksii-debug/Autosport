@@ -6,16 +6,31 @@ import shutil
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
 from autosport.decision_ledger import JsonlDecisionLedger
-from autosport.domain import MarketEvent, TicketLeg
+from autosport.domain import MarketEvent, MarketType, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_store import EconomicGoalStore
 from autosport.paper import PaperBook
 from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
+from autosport.market_mirror import MarketMirror
+from autosport.market_outcomes import (
+    OutcomeAuthorityStatus,
+    assess_betfair_historical_market_definition_authority,
+)
+from autosport.storage import SQLiteMarketStore
+import autosport.proposal_risk_outcome_input_authority as outcome_input_authority
+from autosport.proposal_risk_outcome_input_authority import (
+    ProductProposalRiskOutcomeInputMapping,
+    ProductProposalRiskOutcomeInputMappingError,
+    ProposalRiskMarketInput,
+    issue_product_proposal_risk_outcome_input_mapping,
+    resolve_product_proposal_risk_outcome_input_mapping,
+)
 import autosport.proposal_risk_target_authority as proposal_target_authority
 from autosport.proposal_risk_target_authority import (
     ProductProposalRiskTarget,
@@ -1157,6 +1172,305 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             ).target_sha256,
             second.target_sha256,
         )
+
+
+    def _winner_target_market_fixture(
+        self,
+    ) -> tuple[
+        ProductProposalRiskTarget,
+        ProposalRiskMarketInput,
+        SQLiteMarketStore,
+    ]:
+        decision_ts = "2026-09-18T15:05:00Z"
+        quote_ts = "2026-09-18T15:04:00Z"
+        source_id = "betfair_exchange_historical"
+        sport = "table_tennis"
+        event_id = "event-outcome-map"
+        market_id = "match_odds"
+
+        contexts: list[ProposedTicketRiskContext] = []
+        for selection_id in ("away", "home"):
+            leg = TicketLeg(
+                event_id=event_id,
+                market_id=market_id,
+                selection_id=selection_id,
+                locked_odds=Decimal("3"),
+                sport=sport,
+            )
+            quote = MarketEvent(
+                event_id=event_id,
+                market_id=market_id,
+                selection_id=selection_id,
+                decimal_odds=Decimal("3"),
+                observed_ts=quote_ts,
+                source_id=source_id,
+                sequence=1 if selection_id == "away" else 3,
+                market_type=MarketType.WINNER,
+                source_ts=quote_ts,
+                ingest_ts=quote_ts,
+                metadata={},
+                sport=sport,
+            )
+            contexts.append(
+                ProposedTicketRiskContext(
+                    legs=(leg,),
+                    quotes=(quote,),
+                    bankroll_id=self.goal.bankroll_id,
+                    currency=self.goal.currency,
+                    proposal_ts=decision_ts,
+                )
+            )
+
+        target = issue_product_proposal_risk_target(
+            self.workspace,
+            signal_strengths=(Decimal("1"), Decimal("0.8")),
+            contexts=tuple(contexts),
+        )
+
+        store = SQLiteMarketStore(self.workspace / "proposal_outcome_inputs.db")
+        self.addCleanup(store.close)
+        mirror = MarketMirror()
+        for sequence, selection_id in enumerate(("away", "draw", "home"), start=1):
+            mirror.persist_and_apply(
+                store,
+                MarketEvent(
+                    event_id=event_id,
+                    market_id=market_id,
+                    selection_id=selection_id,
+                    decimal_odds=Decimal("3"),
+                    observed_ts=quote_ts,
+                    source_id=source_id,
+                    sequence=sequence,
+                    market_type=MarketType.WINNER,
+                    source_ts=quote_ts,
+                    ingest_ts=quote_ts,
+                    metadata={},
+                    sport=sport,
+                ),
+            )
+
+        assessment = assess_betfair_historical_market_definition_authority(
+            market_id=market_id,
+            market_definition={
+                "eventId": event_id,
+                "eventTypeId": "2593174",
+                "marketType": "MATCH_ODDS",
+                "status": "OPEN",
+                "runners": [
+                    {"id": "away"},
+                    {"id": "draw"},
+                    {"id": "home"},
+                ],
+            },
+            provider_publish_at="2026-09-18T15:00:00Z",
+            observed_at="2026-09-18T15:00:01Z",
+        )
+        self.assertEqual(
+            assessment.status,
+            OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE,
+        )
+        self.assertIsNotNone(assessment.authority)
+        market_input = ProposalRiskMarketInput(
+            store=store,
+            outcome_authority=assessment.authority,  # type: ignore[arg-type]
+            max_age=timedelta(minutes=10),
+        )
+        return target, market_input, store
+
+    def test_outcome_input_mapping_is_durable_exact_and_non_authorizing(self) -> None:
+        target, market_input, _store = self._winner_target_market_fixture()
+
+        mapping = issue_product_proposal_risk_outcome_input_mapping(
+            self.workspace,
+            target_sha256=target.target_sha256,
+            market_inputs=(market_input,),
+        )
+
+        self.assertIs(type(mapping), ProductProposalRiskOutcomeInputMapping)
+        self.assertTrue(mapping.mapping_identity_proven)
+        self.assertTrue(mapping.exact_target_market_coverage_proven)
+        self.assertTrue(mapping.decision_time_market_inputs_rebuilt)
+        self.assertFalse(mapping.provider_outcome_origin_independently_proven)
+        self.assertFalse(mapping.joint_probability_model_proven)
+        self.assertFalse(mapping.proposal_target_counterfactual_execution_proven)
+        self.assertFalse(mapping.risk_upper_bound_for_target)
+        self.assertFalse(mapping.proposal_target_risk_qualified)
+        self.assertFalse(mapping.grants_risk_approval_authority)
+        self.assertFalse(mapping.grants_ticket_authority)
+        self.assertFalse(mapping.grants_broker_execution_authority)
+        self.assertFalse(mapping.grants_real_money_authority)
+        self.assertFalse(mapping.grants_state_mutation_authority)
+        self.assertEqual(mapping.target_sha256, target.target_sha256)
+        self.assertEqual(mapping.candidate_vector_sha256, target.candidate_vector_sha256)
+        self.assertEqual(len(mapping.market_identity_json), 1)
+        self.assertEqual(len(mapping.outcome_authority_sha256s), 1)
+        self.assertEqual(len(mapping.baseline_evidence_sha256s), 1)
+        probabilities = json.loads(mapping.probability_vector_json[0])
+        self.assertEqual(
+            tuple(
+                (
+                    row["selection_id"],
+                    row["numerator"],
+                    row["denominator"],
+                )
+                for row in probabilities
+            ),
+            (
+                ("away", 1, 3),
+                ("draw", 1, 3),
+                ("home", 1, 3),
+            ),
+        )
+
+        resolved = resolve_product_proposal_risk_outcome_input_mapping(
+            self.workspace,
+            mapping_sha256=mapping.mapping_sha256,
+            target_sha256=target.target_sha256,
+            market_inputs=(market_input,),
+        )
+        self.assertEqual(resolved, mapping)
+
+        records = JsonlDecisionLedger(
+            self.workspace / "decisions.jsonl"
+        ).verified_records()
+        mapping_records = tuple(
+            record
+            for record in records
+            if record.action == "PROPOSAL_RISK_OUTCOME_INPUT_MAPPING"
+        )
+        self.assertEqual(len(mapping_records), 1)
+        self.assertEqual(
+            mapping_records[0].payload["mapping_sha256"],
+            mapping.mapping_sha256,
+        )
+        self.assertFalse(
+            mapping_records[0].payload["joint_probability_model_proven"]
+        )
+        self.assertFalse(
+            mapping_records[0].payload[
+                "proposal_target_counterfactual_execution_proven"
+            ]
+        )
+
+    def test_outcome_input_mapping_requires_exact_target_market_coverage(self) -> None:
+        target, market_input, _store = self._winner_target_market_fixture()
+
+        with self.assertRaisesRegex(
+            ProductProposalRiskOutcomeInputMappingError,
+            "non-empty exact tuple",
+        ):
+            issue_product_proposal_risk_outcome_input_mapping(
+                self.workspace,
+                target_sha256=target.target_sha256,
+                market_inputs=(),
+            )
+
+        duplicate = ProposalRiskMarketInput(
+            store=market_input.store,
+            outcome_authority=market_input.outcome_authority,
+            max_age=market_input.max_age,
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskOutcomeInputMappingError,
+            "duplicate market authority identity",
+        ):
+            issue_product_proposal_risk_outcome_input_mapping(
+                self.workspace,
+                target_sha256=target.target_sha256,
+                market_inputs=(market_input, duplicate),
+            )
+
+    def test_outcome_input_mapping_rebuild_detects_changed_predecision_history(
+        self,
+    ) -> None:
+        target, market_input, store = self._winner_target_market_fixture()
+        mapping = issue_product_proposal_risk_outcome_input_mapping(
+            self.workspace,
+            target_sha256=target.target_sha256,
+            market_inputs=(market_input,),
+        )
+
+        mirror = MarketMirror.from_store(store)
+        mirror.persist_and_apply(
+            store,
+            MarketEvent(
+                event_id="event-outcome-map",
+                market_id="match_odds",
+                selection_id="home",
+                decimal_odds=Decimal("2"),
+                observed_ts="2026-09-18T15:04:30Z",
+                source_id="betfair_exchange_historical",
+                sequence=10,
+                market_type=MarketType.WINNER,
+                source_ts="2026-09-18T15:04:30Z",
+                ingest_ts="2026-09-18T15:04:30Z",
+                metadata={},
+                sport="table_tennis",
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            ProductProposalRiskOutcomeInputMappingError,
+            "differs from current target/market input roots",
+        ):
+            resolve_product_proposal_risk_outcome_input_mapping(
+                self.workspace,
+                mapping_sha256=mapping.mapping_sha256,
+                target_sha256=target.target_sha256,
+                market_inputs=(market_input,),
+            )
+
+    def test_outcome_input_mapping_rejects_unsupported_target_market_semantics(
+        self,
+    ) -> None:
+        target = self._issue()
+        store = SQLiteMarketStore(self.workspace / "unsupported_outcome_inputs.db")
+        self.addCleanup(store.close)
+        forged_authority = object.__new__(
+            outcome_input_authority.MarketSettlementOutcomeAuthority
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskOutcomeInputMappingError,
+            "winner markets only",
+        ):
+            issue_product_proposal_risk_outcome_input_mapping(
+                self.workspace,
+                target_sha256=target.target_sha256,
+                market_inputs=(
+                    ProposalRiskMarketInput(
+                        store=store,
+                        outcome_authority=forged_authority,
+                        max_age=timedelta(minutes=10),
+                    ),
+                ),
+            )
+
+    def test_outcome_input_mapping_direct_construction_and_dispatch_rebind_fail_closed(
+        self,
+    ) -> None:
+        with self.assertRaises(TypeError):
+            ProductProposalRiskOutcomeInputMapping()
+
+        target, market_input, _store = self._winner_target_market_fixture()
+        original = outcome_input_authority.build_market_implied_baseline_evidence
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        with patch.object(
+            outcome_input_authority,
+            "build_market_implied_baseline_evidence",
+            fake,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskOutcomeInputMappingError,
+                "dispatch authority changed",
+            ):
+                issue_product_proposal_risk_outcome_input_mapping(
+                    self.workspace,
+                    target_sha256=target.target_sha256,
+                    market_inputs=(market_input,),
+                )
 
 
 if __name__ == "__main__":

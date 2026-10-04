@@ -1553,15 +1553,25 @@ def _build_autonomous_product_runtime_impl(
                 return getattr(source, "stream_epoch")
 
             def fetch_catalog_page(self, checkpoint):
+                expected_stream_epoch = self.stream_epoch
                 require_source_resolver_authority()
                 page = source_fetch_catalog_page(checkpoint)
                 require_source_resolver_authority()
+                if self.stream_epoch != expected_stream_epoch:
+                    raise ProductCompositionError(
+                        "source stream_epoch changed during catalog acquisition"
+                    )
                 return page
 
             def fetch_deltas(self, checkpoint, records, max_items):
+                expected_stream_epoch = self.stream_epoch
                 require_source_resolver_authority()
                 deltas = source_fetch_deltas(checkpoint, records, max_items)
                 require_source_resolver_authority()
+                if self.stream_epoch != expected_stream_epoch:
+                    raise ProductCompositionError(
+                        "source stream_epoch changed during delta acquisition"
+                    )
                 return deltas
 
         collector_source = ProductCollectorSourceProxy()

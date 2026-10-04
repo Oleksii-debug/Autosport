@@ -1090,6 +1090,65 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_builder_ignores_base_runtime_coordinator_and_collector_method_rebinding(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime_base = product_runtime_module.AutonomousProductRuntime
+            coordinator_base = product_runtime_module.ContinuousSessionCoordinator
+            collector_base = product_runtime_module.HeadlessCollectorService
+            originals = {
+                "runtime_init": runtime_base.__init__,
+                "coordinator_init": coordinator_base.__init__,
+                "collector_init": collector_base.__init__,
+                "collector_status": collector_base.status,
+                "collector_resume": collector_base.resume,
+                "collector_stop": collector_base.stop,
+                "collector_run_cycle": collector_base.run_cycle,
+                "collector_bounded": collector_base._bounded_provider_call,
+            }
+
+            def forged(*_args, **_kwargs):
+                raise AssertionError(
+                    "rebound base product authority must not execute"
+                )
+
+            try:
+                runtime_base.__init__ = forged
+                coordinator_base.__init__ = forged
+                collector_base.__init__ = forged
+                collector_base.status = forged
+                collector_base.resume = forged
+                collector_base.stop = forged
+                collector_base.run_cycle = forged
+                collector_base._bounded_provider_call = forged
+
+                runtime = build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+                try:
+                    self.assertEqual(runtime.status().source_id, "provider-a")
+                    runtime.start()
+                    self.assertEqual(runtime.status().state.value, "RUNNING")
+                finally:
+                    runtime.close()
+            finally:
+                runtime_base.__init__ = originals["runtime_init"]
+                coordinator_base.__init__ = originals["coordinator_init"]
+                collector_base.__init__ = originals["collector_init"]
+                collector_base.status = originals["collector_status"]
+                collector_base.resume = originals["collector_resume"]
+                collector_base.stop = originals["collector_stop"]
+                collector_base.run_cycle = originals["collector_run_cycle"]
+                collector_base._bounded_provider_call = originals[
+                    "collector_bounded"
+                ]
+
     def test_builder_closure_binds_canonical_application_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

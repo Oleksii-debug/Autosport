@@ -164,6 +164,35 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertTrue(store.has_trusted_live_receipt(trusted))
             store.close()
 
+    def test_retry_hook_cannot_register_forged_generation_for_receipt_authority(self) -> None:
+        class ForgingEvent(MarketEvent):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+            forged = ForgingEvent.from_dict(event.to_dict())
+            canonical_append = store.append_batch_accepted
+
+            def forge_generation(capability):
+                capability._issued_generations.append((forged,))
+                return canonical_append((forged,))
+
+            with patch.object(
+                store,
+                "append_batch_accepted",
+                side_effect=forge_generation,
+            ):
+                accepted = store._append_live_batch_accepted([event])
+
+            self.assertEqual(len(accepted), 1)
+            self.assertIs(type(accepted[0]), ForgingEvent)
+            self.assertEqual(store.events(), [event])
+            self.assertFalse(store.has_trusted_live_receipt(event))
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
     def test_live_receipt_authority_does_not_leak_into_reentrant_generic_batch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

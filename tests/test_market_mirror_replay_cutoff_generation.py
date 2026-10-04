@@ -4759,6 +4759,27 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_append_generation_hint_cannot_authorize_unissued_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                forged = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.direct_insert_positive_generation(
+                    store,
+                    forged,
+                    generation=1,
+                )
+
+                self.assertEqual(store.append_generation_hint(), 1)
+                with self.assertRaises(MonotonicAuthorityRollbackError):
+                    store.require_committed_append_generation(1)
+            finally:
+                store.close()
+
     def test_committed_append_boundary_reader_rejects_split_batch_and_preserves_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

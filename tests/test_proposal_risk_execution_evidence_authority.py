@@ -5,6 +5,7 @@ import unittest
 from decimal import Decimal
 
 import autosport.proposal_risk_evaluation_precommit_authority as precommit_authority
+import autosport.proposal_risk_execution_evidence_authority as evidence_authority
 from autosport.proposal_risk_evaluation_precommit_authority import (
     ProductProposalRiskEvaluationPrecommit,
 )
@@ -14,13 +15,19 @@ from autosport.proposal_risk_execution_evidence_authority import (
     ProductProposalRiskExecutionEvidenceError,
     derive_product_proposal_risk_execution_evidence,
 )
+from autosport.risk_of_ruin_evaluator import (
+    clopper_pearson_upper_bound,
+    evaluator_source_sha256,
+)
 
 
 def _sha(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
 
 
-def _precommit(*, threshold: Decimal = Decimal("0.9")) -> ProductProposalRiskEvaluationPrecommit:
+def _precommit(
+    *, threshold: Decimal = Decimal("10")
+) -> ProductProposalRiskEvaluationPrecommit:
     value = object.__new__(ProductProposalRiskEvaluationPrecommit)
     attrs = {
         "workspace_instance_id": "workspace-test",
@@ -89,6 +96,8 @@ class ProductProposalRiskExecutionEvidenceTests(unittest.TestCase):
         forged = object.__new__(ProductProposalRiskExecutionEvidence)
         self.assertFalse(forged.execution_evidence_identity_proven)
         self.assertFalse(forged.fixed_n_cohort_complete)
+        self.assertFalse(forged.statistical_bound_computed)
+        self.assertFalse(forged.product_execution_provenance_proven)
         self.assertFalse(forged.proposal_target_counterfactual_execution_proven)
         self.assertFalse(forged.risk_upper_bound_for_target)
         self.assertFalse(forged.proposal_target_risk_qualified)
@@ -98,37 +107,8 @@ class ProductProposalRiskExecutionEvidenceTests(unittest.TestCase):
         self.assertFalse(forged.grants_real_money_authority)
         self.assertFalse(forged.grants_state_mutation_authority)
 
-    def test_complete_fixed_n_cohort_derives_target_bound_without_live_authority(self) -> None:
+    def test_complete_assertion_cohort_computes_canonical_bound_but_no_execution_authority(self) -> None:
         precommit = _precommit()
-        rows = (
-            _row("member-a", source="source-a"),
-            _row("member-b", source="source-b"),
-        )
-
-        result = derive_product_proposal_risk_execution_evidence(
-            precommit,
-            rows,
-            evaluated_at="2026-10-04T10:02:00+00:00",
-        )
-
-        self.assertTrue(result.execution_evidence_identity_proven)
-        self.assertTrue(result.fixed_n_cohort_complete)
-        self.assertTrue(result.proposal_target_counterfactual_execution_proven)
-        self.assertTrue(result.risk_upper_bound_for_target)
-        self.assertTrue(result.proposal_target_risk_qualified)
-        self.assertEqual(result.sample_size, 2)
-        self.assertEqual(result.ruin_count, 0)
-        self.assertEqual(result.ruin_observations, (False, False))
-        self.assertGreater(result.ruin_probability_upper_bound, Decimal("0"))
-        self.assertLess(result.ruin_probability_upper_bound, Decimal("0.9"))
-        self.assertFalse(result.grants_risk_approval_authority)
-        self.assertFalse(result.grants_ticket_authority)
-        self.assertFalse(result.grants_broker_execution_authority)
-        self.assertFalse(result.grants_real_money_authority)
-        self.assertFalse(result.grants_state_mutation_authority)
-
-    def test_bound_can_be_valid_without_qualifying_target(self) -> None:
-        precommit = _precommit(threshold=Decimal("0.1"))
         result = derive_product_proposal_risk_execution_evidence(
             precommit,
             (
@@ -137,16 +117,42 @@ class ProductProposalRiskExecutionEvidenceTests(unittest.TestCase):
             ),
             evaluated_at="2026-10-04T10:02:00+00:00",
         )
-        self.assertTrue(result.risk_upper_bound_for_target)
-        self.assertFalse(result.proposal_target_risk_qualified)
-        self.assertFalse(result.grants_risk_approval_authority)
 
-    def test_ruin_is_derived_from_minimum_equity_not_caller_boolean(self) -> None:
-        precommit = _precommit()
+        self.assertTrue(result.execution_evidence_identity_proven)
+        self.assertTrue(result.fixed_n_cohort_complete)
+        self.assertTrue(result.statistical_bound_computed)
+        self.assertFalse(result.product_execution_provenance_proven)
+        self.assertFalse(result.proposal_target_counterfactual_execution_proven)
+        self.assertFalse(result.risk_upper_bound_for_target)
+        self.assertFalse(result.proposal_target_risk_qualified)
+        self.assertEqual(result.sample_size, 2)
+        self.assertEqual(result.ruin_count, 0)
+        self.assertEqual(result.ruin_observations, (False, False))
+        self.assertEqual(
+            result.ruin_probability_upper_bound,
+            clopper_pearson_upper_bound(
+                ruin_count=0,
+                independent_units=2,
+                confidence_level=Decimal("0.95"),
+            ),
+        )
+        self.assertEqual(
+            result.bound_method,
+            "CLOPPER_PEARSON_EXACT_ONE_SIDED_BERNOULLI_V1",
+        )
+        self.assertEqual(result.evaluator_source_sha256, evaluator_source_sha256())
+        self.assertFalse(result.grants_risk_approval_authority)
+        self.assertFalse(result.grants_ticket_authority)
+        self.assertFalse(result.grants_broker_execution_authority)
+        self.assertFalse(result.grants_real_money_authority)
+        self.assertFalse(result.grants_state_mutation_authority)
+
+    def test_ruin_threshold_is_equity_boundary_not_probability_cutoff(self) -> None:
+        precommit = _precommit(threshold=Decimal("10"))
         ruined = _row(
             "member-a",
             source="source-a",
-            minimum=Decimal("-2"),
+            minimum=Decimal("5"),
             terminal=Decimal("95"),
             gross=Decimal("-4"),
             costs=Decimal("1"),
@@ -159,8 +165,49 @@ class ProductProposalRiskExecutionEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(result.ruin_observations, (True, False))
         self.assertEqual(result.ruin_count, 1)
-        self.assertEqual(result.ruin_probability_upper_bound, Decimal("1"))
+        self.assertEqual(
+            result.ruin_probability_upper_bound,
+            clopper_pearson_upper_bound(
+                ruin_count=1,
+                independent_units=2,
+                confidence_level=Decimal("0.95"),
+            ),
+        )
         self.assertFalse(result.proposal_target_risk_qualified)
+
+    def test_large_equity_threshold_cannot_accidentally_qualify_probability(self) -> None:
+        precommit = _precommit(threshold=Decimal("99"))
+        result = derive_product_proposal_risk_execution_evidence(
+            precommit,
+            (
+                _row("member-a", source="source-a"),
+                _row("member-b", source="source-b"),
+            ),
+            evaluated_at="2026-10-04T10:02:00+00:00",
+        )
+        self.assertTrue(result.statistical_bound_computed)
+        self.assertFalse(result.proposal_target_risk_qualified)
+        self.assertFalse(result.grants_risk_approval_authority)
+
+    def test_estimator_dispatch_substitution_is_rejected(self) -> None:
+        precommit = _precommit()
+        original = evidence_authority.clopper_pearson_upper_bound
+        try:
+            evidence_authority.clopper_pearson_upper_bound = lambda **_: Decimal("0")
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "estimator dispatch changed",
+            ):
+                derive_product_proposal_risk_execution_evidence(
+                    precommit,
+                    (
+                        _row("member-a", source="source-a"),
+                        _row("member-b", source="source-b"),
+                    ),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            evidence_authority.clopper_pearson_upper_bound = original
 
     def test_member_order_and_fixed_n_count_are_exact(self) -> None:
         precommit = _precommit()
@@ -307,7 +354,7 @@ class ProductProposalRiskExecutionEvidenceTests(unittest.TestCase):
                 evaluated_at="2026-10-04T10:02:00+00:00",
             )
 
-    def test_evidence_digest_is_stable_for_identical_exact_inputs(self) -> None:
+    def test_evidence_digest_is_stable_and_seals_canonical_evaluator(self) -> None:
         precommit = _precommit()
         rows = (
             _row("member-a", source="source-a"),
@@ -325,6 +372,7 @@ class ProductProposalRiskExecutionEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(first.evidence_sha256, second.evidence_sha256)
         self.assertEqual(len(first.evidence_sha256), 64)
+        self.assertEqual(first.evaluator_source_sha256, evaluator_source_sha256())
 
     def test_unproven_precommit_identity_is_rejected(self) -> None:
         forged = object.__new__(ProductProposalRiskEvaluationPrecommit)

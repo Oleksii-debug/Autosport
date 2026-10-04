@@ -971,11 +971,29 @@ def _require_dispatch(
         raise ProductProposalRiskScenarioPopulationError(
             "scenario population authority dispatch changed"
         )
-    for name, expected_function, code in expected_helper_witnesses:
+    for (
+        name,
+        expected_function,
+        code,
+        defaults,
+        kwdefaults,
+        kwdefault_witnesses,
+    ) in expected_helper_witnesses:
         current_function = globals().get(name)
+        current_kwdefaults = getattr(current_function, "__kwdefaults__", None)
         if (
             current_function is not expected_function
             or getattr(current_function, "__code__", None) is not code
+            or getattr(current_function, "__defaults__", None) is not defaults
+            or current_kwdefaults is not kwdefaults
+            or tuple(sorted((current_kwdefaults or {}).keys()))
+            != tuple(key for key, _value, _code in kwdefault_witnesses)
+            or any(
+                current_kwdefaults[key] is not expected_value
+                or getattr(current_kwdefaults[key], "__code__", None)
+                is not expected_code
+                for key, expected_value, expected_code in kwdefault_witnesses
+            )
         ):
             raise ProductProposalRiskScenarioPopulationError(
                 "scenario population authority dispatch changed"
@@ -983,6 +1001,8 @@ def _require_dispatch(
 
 
 _REQUIRE_DISPATCH_ORIGINAL = _require_dispatch
+_REQUIRE_DISPATCH_CODE = getattr(_REQUIRE_DISPATCH_ORIGINAL, "__code__", None)
+_REQUIRE_DISPATCH_DEFAULTS = getattr(_REQUIRE_DISPATCH_ORIGINAL, "__defaults__", None)
 
 
 def _require_precommit(
@@ -1685,6 +1705,18 @@ _HELPER_WITNESSES = tuple(
         name,
         globals()[name],
         getattr(globals()[name], "__code__", None),
+        getattr(globals()[name], "__defaults__", None),
+        getattr(globals()[name], "__kwdefaults__", None),
+        tuple(
+            (
+                key,
+                value,
+                getattr(value, "__code__", None),
+            )
+            for key, value in sorted(
+                (getattr(globals()[name], "__kwdefaults__", None) or {}).items()
+            )
+        ),
     )
     for name in (
         "_text",
@@ -1721,7 +1753,13 @@ def issue_product_proposal_risk_scenario_population(
 ) -> ProductProposalRiskScenarioPopulation:
     """Durably bind one fixed-N member→scenario vector to verified terminal space."""
 
-    if _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL:
+    if (
+        _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL
+        or getattr(_REQUIRE_DISPATCH_ORIGINAL, "__code__", None)
+        is not _REQUIRE_DISPATCH_CODE
+        or getattr(_REQUIRE_DISPATCH_ORIGINAL, "__defaults__", None)
+        is not _REQUIRE_DISPATCH_DEFAULTS
+    ):
         raise ProductProposalRiskScenarioPopulationError(
             "scenario population dispatch guard root changed"
         )
@@ -1912,7 +1950,13 @@ def resolve_product_proposal_risk_scenario_population(
 ) -> ProductProposalRiskScenarioPopulation:
     """Re-resolve the durable mapping against the same verified terminal population."""
 
-    if _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL:
+    if (
+        _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL
+        or getattr(_REQUIRE_DISPATCH_ORIGINAL, "__code__", None)
+        is not _REQUIRE_DISPATCH_CODE
+        or getattr(_REQUIRE_DISPATCH_ORIGINAL, "__defaults__", None)
+        is not _REQUIRE_DISPATCH_DEFAULTS
+    ):
         raise ProductProposalRiskScenarioPopulationError(
             "scenario population dispatch guard root changed"
         )

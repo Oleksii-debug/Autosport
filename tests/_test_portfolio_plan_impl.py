@@ -1343,6 +1343,37 @@ class PortfolioPlanTests(unittest.TestCase):
         witness = self._terminal_witness(book, intents, graph, groups)
         canonical_analyse = portfolio_plan_module.ScenarioSearchEngine.analyse_authoritative
 
+        def delegated_analysis(engine, tickets, authorities, *, decision_as_of):
+            return canonical_analyse(
+                engine,
+                tickets,
+                authorities,
+                decision_as_of=decision_as_of,
+            )
+
+        with patch.object(
+            portfolio_plan_module.ScenarioSearchEngine,
+            "analyse_authoritative",
+            delegated_analysis,
+        ):
+            rebound_plan = build_portfolio_plan(
+                book,
+                intents,
+                self._policy(goal),
+                self.DECISION_TS,
+                dependency_graph=graph,
+                terminal_state_evidence=witness,
+                market_outcome_authorities=(authority,),
+            )
+
+        self.assertEqual(rebound_plan.action, PortfolioAction.WAIT)
+        self.assertEqual(rebound_plan.stakes, (Decimal("0"),))
+        self.assertIsNone(rebound_plan.terminal_economics)
+        self.assertIn(
+            "canonical authoritative scenario-search authority changed",
+            rebound_plan.reason,
+        )
+
         def settle_during_analysis(engine, tickets, authorities, *, decision_as_of):
             book.settle(
                 existing.ticket_id,

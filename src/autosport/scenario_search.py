@@ -27,6 +27,24 @@ _SCENARIO_DECIMAL_CONTEXT = Context(
 )
 
 
+def _scenario_conservative_bounds(
+    tickets: list[PaperTicket],
+) -> tuple[Decimal, Decimal]:
+    """Derive fail-closed portfolio bounds under one canonical Decimal context."""
+    with localcontext(_SCENARIO_DECIMAL_CONTEXT):
+        floor = -sum((ticket.stake for ticket in tickets), Decimal("0"))
+        ceiling = sum(
+            (
+                ticket.stake * ticket.combined_odds - ticket.stake
+                for ticket in tickets
+            ),
+            Decimal("0"),
+        )
+    if not floor.is_finite() or not ceiling.is_finite():
+        raise ValueError("scenario conservative bounds must be finite")
+    return floor, ceiling
+
+
 def _canonical_scenario_text(value: object, *, field: str) -> str:
     if type(value) is not str or not value or value != value.strip() or "\x00" in value:
         raise ValueError(f"{field} must be a non-empty canonical string")
@@ -218,8 +236,7 @@ class ScenarioSearchEngine:
             return ScenarioSearchReport("exact", 1, 1, zero, zero, zero, zero, True, True, zero, "exact")
         mapping = self._validate_and_map(open_tickets, canonical_groups)
         total_states = math.prod(len(group.outcomes) for group in canonical_groups)
-        floor = -sum((ticket.stake for ticket in open_tickets), Decimal("0"))
-        ceiling = sum((ticket.stake * ticket.combined_odds - ticket.stake for ticket in open_tickets), Decimal("0"))
+        floor, ceiling = _scenario_conservative_bounds(open_tickets)
         if total_states <= self.exact_state_limit:
             profits, weighted = self._enumerate(open_tickets, canonical_groups)
             expected = weighted if weighted is not None else None
@@ -428,17 +445,7 @@ class ScenarioSearchEngine:
                 )
             )
 
-        floor = -sum(
-            (ticket.stake for ticket in open_tickets),
-            Decimal("0"),
-        )
-        ceiling = sum(
-            (
-                ticket.stake * ticket.combined_odds - ticket.stake
-                for ticket in open_tickets
-            ),
-            Decimal("0"),
-        )
+        floor, ceiling = _scenario_conservative_bounds(open_tickets)
         outcome_space_exact = all(
             authority.terminal_space_exact for authority in state_authorities
         )

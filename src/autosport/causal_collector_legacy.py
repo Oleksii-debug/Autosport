@@ -491,6 +491,8 @@ class _CanonicalDesktopApplicationStore(_JsonAtomicStore):
         return item
 
     def _mark(self, delta: CollectorDelta, field: str) -> None:
+        if self.progress(delta) is None:
+            raise ApplicationReceiptError("canonical application was not prepared")
         raw = self._read()
         item = raw["applications"].get(delta.delta_id)
         if item is None:
@@ -509,6 +511,8 @@ class _CanonicalDesktopApplicationStore(_JsonAtomicStore):
         self._mark(delta, "health_applied")
 
     def mark_complete(self, delta: CollectorDelta, *, completed_at: str) -> str:
+        if self.progress(delta) is None:
+            raise ApplicationReceiptError("canonical application was not prepared")
         raw = self._read()
         item = raw["applications"].get(delta.delta_id)
         if item is None:

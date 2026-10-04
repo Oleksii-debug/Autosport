@@ -1310,11 +1310,9 @@ def test_monotonic_recovery_code_mutation_is_rejected_before_execution(
     _attempt(ledger, plan)
     ledger_globals = RealExecutionLedger.verified_execution_view.__globals__
     recover = ledger_globals["_MONOTONIC_RECOVER"]
-    calls = []
 
     def forged_recover(*_args, **_kwargs):
-        calls.append("recover")
-        return None
+        raise AssertionError("mutated monotonic recover must not execute")
 
     assert recover.__closure__ is None
     assert forged_recover.__closure__ is None
@@ -1325,6 +1323,4 @@ def test_monotonic_recovery_code_mutation_is_rejected_before_execution(
         match="canonical execution-ledger read authority changed",
     ):
         resolve_execution_capital_at_risk(ledger, plan.plan_id)
-
-    assert calls == []
 

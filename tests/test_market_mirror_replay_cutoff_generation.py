@@ -3135,6 +3135,57 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             self.assertTrue(state["rebuild"])
             self.assertFalse(state["held"])
 
+    def test_direct_positive_generation_with_noncanonical_machine_binding_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            try:
+                forged = self.event(
+                    sequence=1,
+                    odds="9.99",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.direct_insert_positive_generation(
+                    store,
+                    forged,
+                    generation=1,
+                )
+
+                authority = store._market_append_authority()
+                baseline_state = store._generation_zero_baseline_state_sha256()
+                entries = store._validated_positive_append_entries()
+                intended_state = store._append_state_from_entries(
+                    entries,
+                    baseline_state_sha256=baseline_state,
+                )
+                tx_id = "append-1-1-" + ("0" * 32)
+                forged_binding = "0" * 64
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=baseline_state,
+                    intended_state_sha256=intended_state,
+                    semantic_binding_sha256=forged_binding,
+                )
+                authority.recover(
+                    observed_state_sha256=intended_state,
+                    tx_id=tx_id,
+                    semantic_binding_sha256=forged_binding,
+                )
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "semantic binding is invalid",
+                ):
+                    store.events()
+            finally:
+                store.close()
+
+            with self.assertRaisesRegex(
+                MonotonicAuthorityRollbackError,
+                "semantic binding is invalid",
+            ):
+                SQLiteMarketStore(path)
+
 
 if __name__ == "__main__":
     unittest.main()

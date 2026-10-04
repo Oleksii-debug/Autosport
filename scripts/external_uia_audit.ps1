@@ -353,6 +353,8 @@ $report = [ordered]@{
     duplicate_launch_status = 'NOT_RUN'
     duplicate_launch_exit_code = $null
     duplicate_launch_dialog_title = $null
+    normal_close_status = 'NOT_RUN'
+    normal_close_exit_code = $null
     controls = @()
     failures = @()
     real_money_execution = $false
@@ -626,6 +628,56 @@ try {
     if ($report.controls.Count -ne $expected.Count) {
         $report.failures += "external UIA found $($report.controls.Count) of $($expected.Count) critical controls"
     }
+
+    # A semantic/accessibility PASS must also prove that the exact packaged main
+    # window can complete its ordinary product-owned close lifecycle. The cleanup
+    # block below is recovery only; a later force-kill must never convert a hung
+    # STOP/worker teardown into a release qualification PASS.
+    if ($report.failures.Count -eq 0) {
+        $closePatternObject = $null
+        if ($uiaRoot.TryGetCurrentPattern(
+            [System.Windows.Automation.WindowPattern]::Pattern,
+            [ref]$closePatternObject
+        ) -and $null -ne $closePatternObject) {
+            ([System.Windows.Automation.WindowPattern]$closePatternObject).Close()
+        } else {
+            $uiaRoot.SetFocus()
+            [System.Windows.Forms.SendKeys]::SendWait('%{F4}')
+        }
+
+        $closeDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(10, $TimeoutSeconds))
+        $aliveAfterClose = @()
+        while ([DateTime]::UtcNow -lt $closeDeadline) {
+            $aliveAfterClose = @()
+            foreach ($candidateId in @(Get-ProcessFamilyIds -RootProcessId $process.Id)) {
+                try {
+                    $candidate = Get-Process -Id $candidateId -ErrorAction Stop
+                    if (-not $candidate.HasExited) { $aliveAfterClose += [int]$candidateId }
+                } catch {}
+            }
+            if ($aliveAfterClose.Count -eq 0) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($aliveAfterClose.Count -ne 0) {
+            $report.failures += (
+                "main packaged launch did not terminate through ordinary close lifecycle; " +
+                "alive_process_ids=" + (($aliveAfterClose | Sort-Object -Unique) -join ',')
+            )
+        } else {
+            try {
+                $process.WaitForExit()
+                $report.normal_close_exit_code = [int]$process.ExitCode
+            } catch {
+                $report.failures += "main packaged launch exit code could not be observed after ordinary close"
+            }
+            if ($report.normal_close_exit_code -ne 0) {
+                $report.failures += "main packaged launch returned unexpected normal-close exit code $($report.normal_close_exit_code)"
+            } else {
+                $report.normal_close_status = 'PASS'
+            }
+        }
+    }
+
     if ($report.failures.Count -eq 0) {
         $report.status = 'PASS'
     }

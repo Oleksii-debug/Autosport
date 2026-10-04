@@ -2075,6 +2075,141 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
             self.assertEqual([item[0] for item in factory.calls], ["input-a"])
 
+    def test_pending_frontier_allows_prior_same_time_live_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace,
+                [
+                    (self._event(sequence=1, observed=self.START),),
+                    (
+                        self._event(
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START,
+                        ),
+                    ),
+                ],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            def fail_after_pending(_input_id, _snapshot):
+                raise RuntimeError("simulated loss after second pending publication")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            loop.intent_factory = fail_after_pending
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "loss after second pending publication",
+            ):
+                loop.run_cycle()
+            pending = json.loads(loop.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(pending["phase"], "pending")
+            self.assertIsInstance(pending["ledger_offset"], int)
+            self.assertGreater(pending["ledger_offset"], 0)
+            loop.close()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            recovered = resumed.run_cycle()
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(resumed_observer.calls, 0)
+            records = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()
+            self.assertEqual(len(records), 2)
+            self.assertEqual(records[0].observed_ts, records[1].observed_ts)
+            self.assertNotEqual(records[0].decision_id, records[1].decision_id)
+            resumed.close()
+
+    def test_pending_frontier_rejects_rolled_back_same_time_provider_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [ProviderUnavailableError("provider unavailable")],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with patch.object(
+                first,
+                "_persist_plan",
+                side_effect=RuntimeError("simulated loss after gap pending"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "loss after gap pending",
+                ):
+                    first.run_cycle()
+
+            pending_path = (
+                workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+            )
+            rolled_pending = pending_path.read_bytes()
+            pending = json.loads(rolled_pending)
+            self.assertEqual(pending["phase"], "pending")
+            self.assertEqual(pending["gate"], "provider_gap")
+            self.assertEqual(pending["ledger_offset"], 0)
+            first.close()
+
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(sequence=1, observed=self.START),)],
+            )
+            active = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            self.assertEqual(active.run_cycle().status, LiveCycleStatus.PROVIDER_GAP)
+            self.assertEqual(active.run_cycle().status, LiveCycleStatus.DECIDED)
+            records = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()
+            self.assertEqual(len(records), 2)
+            self.assertEqual(records[0].observed_ts, records[1].observed_ts)
+            self.assertNotEqual(records[0].decision_id, records[1].decision_id)
+            active.close()
+
+            pending_path.write_bytes(rolled_pending)
+            stale_observer = _DurableObserver(workspace, [()])
+            stale = self._loop(
+                workspace,
+                observer=stale_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "superseded after publication",
+            ):
+                stale.run_cycle()
+            self.assertEqual(stale_observer.calls, 0)
+            self.assertEqual(
+                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
+                2,
+            )
+            stale.close()
+
     def test_distinct_same_time_market_states_append_distinct_live_decisions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

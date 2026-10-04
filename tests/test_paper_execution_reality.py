@@ -547,6 +547,50 @@ class PaperExecutionRealityTests(unittest.TestCase):
                     started_at=STARTED_AT,
                 )
 
+    def test_rehashed_observed_attempt_must_reproduce_registered_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = plan(action("a1"))
+            observation, registry = registered_observation(
+                ledger,
+                current.actions[0],
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.40",
+                stake="10.00",
+            )
+            execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-observed-rehash",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                observations={"a1": observation},
+                evidence_registry=registry,
+            )
+            events = list(ledger.events())
+            attempt = next(
+                item
+                for item in events
+                if item["event_type"] == "ATTEMPT_RECORDED"
+            )
+            attempt["payload"]["reason"] = "forged observed execution reason"
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "observed attempt is not reproducible",
+            ):
+                execute_paper_plan(
+                    plan=current,
+                    trigger_id="trigger-observed-rehash",
+                    config=config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                    observations={"a1": observation},
+                    evidence_registry=registry,
+                )
+
     def test_writer_lock_fails_closed_instead_of_creating_parallel_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-execution.jsonl"

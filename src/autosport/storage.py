@@ -47,9 +47,13 @@ class _LiveReceiptBatch:
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("live receipt batch is immutable")
 
-    def __iter__(self):
+    def __iter__(
+        self,
+        *,
+        _market_event_type: type[MarketEvent] = MarketEvent,
+    ):
         generation = tuple(
-            MarketEvent.from_dict(json.loads(payload))
+            _market_event_type.from_dict(json.loads(payload))
             for payload in self._payloads
         )
         self._issued_generations.append(generation)
@@ -230,7 +234,11 @@ def _validate_persistable_sequence(value: object) -> int:
     return value
 
 
-def _validate_incoming_event(event: MarketEvent) -> str:
+def _validate_incoming_event(
+    event: MarketEvent,
+    *,
+    _market_event_type: type[MarketEvent] = MarketEvent,
+) -> str:
     """Prove an event survives the exact durable JSON/SQLite representation without type drift."""
     _validate_persistable_sequence(event.sequence)
     _observed_instant(event.observed_ts)
@@ -241,7 +249,7 @@ def _validate_incoming_event(event: MarketEvent) -> str:
         persisted_raw = _load_history_payload(payload)
         if not _typed_payload_equal(raw, persisted_raw):
             raise ValueError("market event JSON representation changes payload types")
-        round_tripped = MarketEvent.from_dict(persisted_raw).to_dict()
+        round_tripped = _market_event_type.from_dict(persisted_raw).to_dict()
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("market event payload is not canonical") from exc
     if not _typed_payload_equal(persisted_raw, round_tripped):
@@ -249,7 +257,11 @@ def _validate_incoming_event(event: MarketEvent) -> str:
     return payload
 
 
-def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
+def _event_from_history_row(
+    row: tuple[object, ...],
+    *,
+    _market_event_type: type[MarketEvent] = MarketEvent,
+) -> MarketEvent:
     """Decode one persisted history row while proving redundant identity columns agree."""
     if len(row) != len(_HISTORY_COLUMNS):
         raise ValueError("market event history row has unexpected shape")
@@ -274,7 +286,7 @@ def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
     if payload_json != canonical_raw:
         raise ValueError("stored market event payload is not canonical JSON text")
 
-    event = MarketEvent.from_dict(raw)
+    event = _market_event_type.from_dict(raw)
     if canonical_raw != _canonical_payload(event):
         raise ValueError("stored market event payload is not canonical")
 
@@ -296,13 +308,17 @@ def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
     return event
 
 
-def _event_from_current_payload(payload_json: object) -> MarketEvent:
+def _event_from_current_payload(
+    payload_json: object,
+    *,
+    _market_event_type: type[MarketEvent] = MarketEvent,
+) -> MarketEvent:
     """Decode canonical projection payload independently of repairable redundant columns."""
     if not isinstance(payload_json, str):
         raise ValueError("current quote projection payload must be JSON text")
     raw = _load_history_payload(payload_json)
     try:
-        event = MarketEvent.from_dict(raw)
+        event = _market_event_type.from_dict(raw)
     except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("current quote projection payload is not canonical") from exc
     if _canonical_json(raw) != _canonical_payload(event):
@@ -858,6 +874,8 @@ class SQLiteMarketStore:
     def _append_live_batch_accepted(
         self,
         events: Iterable[MarketEvent],
+        *,
+        _market_event_type: type[MarketEvent] = MarketEvent,
     ) -> list[MarketEvent]:
         """Route one exact live-ingestion batch through the canonical write choke point.
 
@@ -866,12 +884,12 @@ class SQLiteMarketStore:
         than caller-mutable store state. append_batch_accepted remains the canonical
         retry/fault-injection choke point.
         """
-        if type(self) is not SQLiteMarketStore:
+        if type(self) is not __class__:
             raise TypeError(
                 "live receipt authority requires an exact SQLiteMarketStore"
             )
         materialized = tuple(events)
-        if any(type(event) is not MarketEvent for event in materialized):
+        if any(type(event) is not _market_event_type for event in materialized):
             raise TypeError("live receipt authority requires exact MarketEvent values")
         capability = _LiveReceiptBatch(materialized)
         with self._connection_lock:
@@ -922,9 +940,14 @@ class SQLiteMarketStore:
             events = [_event_from_history_row(row) for row in rows]
         return sorted(events, key=_event_order_key)
 
-    def has_trusted_live_receipt(self, event: MarketEvent) -> bool:
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event must be a MarketEvent")
+    def has_trusted_live_receipt(
+        self,
+        event: MarketEvent,
+        *,
+        _market_event_type: type[MarketEvent] = MarketEvent,
+    ) -> bool:
+        if type(event) is not _market_event_type:
+            raise TypeError("event must be an exact MarketEvent")
         with self._connection_lock:
             row = self.connection.execute(
                 f"""SELECT {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)},r.ingest_ts,r.authority
@@ -969,7 +992,7 @@ class SQLiteMarketStore:
     def trusted_live_current_by_source(self) -> dict[tuple[str, str], MarketEvent]:
         """Project latest source-local live state without retroactively trusting imports."""
         current: dict[tuple[str, str], MarketEvent] = {}
-        for event in SQLiteMarketStore.trusted_live_events(self):
+        for event in __class__.trusted_live_events(self):
             key = (event.source_id, event.quote_key)
             previous = current.get(key)
             if previous is None or _projection_order_key(event) > _projection_order_key(

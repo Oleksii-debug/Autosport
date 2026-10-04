@@ -25,17 +25,14 @@ class LiveReceiptRetryHookIsolationTests(unittest.TestCase):
                 ingest_ts="2026-10-04T03:00:02+00:00",
                 metadata={"origin": "canonical"},
             )
-            canonical_append = store.append_batch_accepted
-
             def mutate_retry_view(events):
                 retry_view = list(events)
                 self.assertEqual(len(retry_view), 1)
                 retry_view[0].metadata["retry_hook_edit"] = True
-                return canonical_append(events)
 
             with patch.object(
                 store,
-                "append_batch_accepted",
+                "_before_live_append_attempt",
                 side_effect=mutate_retry_view,
             ):
                 accepted = store._append_live_batch_accepted([event])

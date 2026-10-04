@@ -4830,6 +4830,94 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_committed_prefix_ignores_later_market_row_without_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                tail = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:00.500000+00:00",
+                )
+                self.assertTrue(store.append(first))
+                payload = storage_module._canonical_payload(tail)
+                store.connection.execute(
+                    """INSERT INTO market_events
+                       (dedupe_key,quote_key,event_id,market_id,selection_id,
+                        decimal_odds,observed_ts,source_id,sequence,payload_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        tail.dedupe_key,
+                        tail.quote_key,
+                        tail.event_id,
+                        tail.market_id,
+                        tail.selection_id,
+                        str(tail.decimal_odds),
+                        tail.observed_ts,
+                        tail.source_id,
+                        tail.sequence,
+                        payload,
+                    ),
+                )
+                store.connection.commit()
+
+                store.require_committed_append_generation(1)
+                self.assertEqual(
+                    [
+                        (event.sequence, generation)
+                        for event, generation
+                        in store.events_at_committed_append_boundary(1)
+                    ],
+                    [(1, 1)],
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "append-generation authority does not exactly cover history",
+                ):
+                    store.require_current_append_authority_with_boundary(1)
+            finally:
+                store.close()
+
+    def test_committed_prefix_ignores_later_generation_without_market_row(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(first))
+                store.connection.execute(
+                    """INSERT INTO market_event_commit_order
+                       (dedupe_key, append_generation)
+                       VALUES (?, ?)""",
+                    ("orphan-tail-dedupe", 3),
+                )
+                store.connection.commit()
+
+                store.require_committed_append_generation(1)
+                self.assertEqual(
+                    [
+                        (event.sequence, generation)
+                        for event, generation
+                        in store.events_at_committed_append_boundary(1)
+                    ],
+                    [(1, 1)],
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "append-generation authority does not exactly cover history",
+                ):
+                    store.require_current_append_authority_with_boundary(1)
+            finally:
+                store.close()
+
     def test_committed_append_prefix_ignores_negative_unissued_tail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

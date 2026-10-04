@@ -29,6 +29,20 @@ _CURRENT_COLUMNS_SQL = ",".join(_CURRENT_COLUMNS)
 _LIVE_RECEIPT_COLUMNS = ("dedupe_key", "ingest_ts", "authority")
 _LIVE_RECEIPT_COLUMNS_SQL = ",".join(_LIVE_RECEIPT_COLUMNS)
 _LIVE_RECEIPT_AUTHORITY = "autosport.live_ingestion_receipt.v1"
+
+
+class _LiveReceiptBatch:
+    """Internal capability wrapper for the one authority-bearing storage path."""
+
+    __slots__ = ("events",)
+
+    def __init__(self, events: tuple[MarketEvent, ...]) -> None:
+        self.events = events
+
+    def __iter__(self):
+        return iter(self.events)
+
+
 _LEGACY_CURRENT_COLUMNS = ("quote_key", "observed_ts", "sequence", "payload_json")
 _LEGACY_CURRENT_COLUMNS_SQL = ",".join(_LEGACY_CURRENT_COLUMNS)
 
@@ -577,7 +591,8 @@ class SQLiteMarketStore:
     def __init__(self, path: str | Path = "autosport.db") -> None:
         self.path = Path(path)
         self._connection_lock = RLock()
-        self._pending_live_receipt_batch: tuple[MarketEvent, ...] | None = None
+        # Mutable state may block nested authority, but never grants receipt authority.
+        self._live_receipt_write_depth = 0
         self.connection = sqlite3.connect(self.path, check_same_thread=False)
         try:
             self.connection.execute("PRAGMA journal_mode=WAL")
@@ -818,21 +833,24 @@ class SQLiteMarketStore:
     ) -> list[MarketEvent]:
         """Route one exact live-ingestion batch through the canonical write choke point.
 
-        Materialize before arming receipt authority so lazy iterable code cannot run
-        while authority is pending. The canonical public batch writer consumes the
-        one exact tuple identity before iterating it, preventing a reentrant generic
-        append from inheriting live-receipt authority while preserving the existing
-        storage retry/fault-injection seam.
+        Materialize before arming authority so lazy iterable code runs while no live
+        capability exists. Receipt authority is carried by an internal wrapper rather
+        than caller-mutable store state. append_batch_accepted remains the canonical
+        retry/fault-injection choke point.
         """
+        if type(self) is not SQLiteMarketStore:
+            raise TypeError(
+                "live receipt authority requires an exact SQLiteMarketStore"
+            )
         materialized = tuple(events)
         with self._connection_lock:
-            if self._pending_live_receipt_batch is not None:
+            if self._live_receipt_write_depth != 0:
                 raise RuntimeError("nested live receipt authority write is not allowed")
-            self._pending_live_receipt_batch = materialized
+            self._live_receipt_write_depth = 1
             try:
-                return self.append_batch_accepted(materialized)
+                return self.append_batch_accepted(_LiveReceiptBatch(materialized))
             finally:
-                self._pending_live_receipt_batch = None
+                self._live_receipt_write_depth = 0
 
     def append(self, event: MarketEvent) -> bool:
         with self._connection_lock:
@@ -843,11 +861,13 @@ class SQLiteMarketStore:
         """Insert one normalized batch in one transaction and return newly accepted events."""
         accepted: list[MarketEvent] = []
         with self._connection_lock:
-            live_receipt_authority = events is self._pending_live_receipt_batch
-            if live_receipt_authority:
-                self._pending_live_receipt_batch = None
+            live_receipt_authority = (
+                type(events) is _LiveReceiptBatch
+                and self._live_receipt_write_depth == 1
+            )
+            batch_events = events.events if live_receipt_authority else events
             with self.connection:
-                for event in events:
+                for event in batch_events:
                     if self._insert_one(event):
                         if live_receipt_authority:
                             self._insert_live_receipt_authority(event)

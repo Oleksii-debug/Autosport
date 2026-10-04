@@ -867,16 +867,6 @@ def test_product_fixed_n_risk_observations_match_evaluator_manifest(
         observations=cohort.observations,
     )
     assert request.observation_manifest_sha256 == cohort.observation_manifest_sha256
-    qualification = resolve_product_fixed_n_iid_qualification(
-        membership,
-        registry_path=registry_path,
-        workspace=workspace,
-        sampling_manifest_json=manifest,
-        sampling_frame_json=SAMPLING_FRAME_JSON,
-        horizon_json=HORIZON_JSON,
-        settlement_bridges=(bridge,),
-        authority_root=authority_root,
-    )
     assert tuple(
         item.source_evidence_sha256 for item in cohort.observations
     ) == qualification.member_path_evidence_sha256
@@ -983,6 +973,52 @@ def test_product_fixed_n_risk_observation_verifier_rejects_object_new_forgery(
     for field_name in ProductFixedNRiskObservationSet.__dataclass_fields__:
         object.__setattr__(forged, field_name, getattr(canonical, field_name))
     object.__setattr__(forged, "source_evidence_sha256", "0" * 64)
+
+    with pytest.raises(
+        ProductFixedNRiskObservationSetError,
+        match="differs from canonical durable evidence",
+    ):
+        verify_product_fixed_n_risk_observations(
+            forged,
+            membership=membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridges=(bridge,),
+            authority_root=authority_root,
+        )
+
+
+def test_product_fixed_n_risk_observation_verifier_rejects_provenance_forgery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        bridge,
+        _initial_capital_sha256,
+        _stake_policy_sha256,
+    ) = _qualified_fixed_n_fixture(tmp_path, monkeypatch)
+    canonical = resolve_product_fixed_n_risk_observations(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+    forged = object.__new__(ProductFixedNRiskObservationSet)
+    for field_name in ProductFixedNRiskObservationSet.__dataclass_fields__:
+        object.__setattr__(forged, field_name, getattr(canonical, field_name))
+    object.__setattr__(forged, "dataset_manifest_sha256", "0" * 64)
 
     with pytest.raises(
         ProductFixedNRiskObservationSetError,

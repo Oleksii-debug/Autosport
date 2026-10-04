@@ -1881,3 +1881,86 @@ def test_market_book_authority_alias_rebind_revokes_feasibility_authority(
                 action_id=ACTION_ID,
                 max_snapshot_age=timedelta(seconds=2),
             )
+
+
+def test_provider_limit_type_alias_rebind_revokes_feasibility_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, _ = _synthetic_authoritative_receipt(MarketBookTransport())
+    bound = _bound(datetime.now(timezone.utc))
+
+    class ForgedLimitAuthority:
+        def __init__(self, **kwargs) -> None:
+            self.__dict__.update(kwargs)
+            self.permitted = True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        monkeypatch.setattr(
+            feasibility_module,
+            "ProviderLimitAuthority",
+            ForgedLimitAuthority,
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="canonical execution feasibility semantic types changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+def test_market_book_snapshot_type_alias_rebind_revokes_feasibility_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, _ = _synthetic_authoritative_receipt(MarketBookTransport())
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        monkeypatch.setattr(
+            feasibility_module,
+            "MarketBookSnapshot",
+            object,
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="canonical execution feasibility semantic types changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+def test_result_type_alias_rebind_revokes_feasibility_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, _ = _synthetic_authoritative_receipt(MarketBookTransport())
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        monkeypatch.setattr(
+            feasibility_module,
+            "ExecutionFeasibilitySnapshot",
+            object,
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="canonical execution feasibility semantic types changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )

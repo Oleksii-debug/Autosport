@@ -483,6 +483,209 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             active.close()
             stale.close()
 
+    def test_durable_stop_preempts_stale_cycle_before_pending_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            bootstrap = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            bootstrap.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(bootstrap.run_cycle().status, LiveCycleStatus.DECIDED)
+            bootstrap.close()
+
+            controller = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            stale_observer = _DurableObserver(
+                workspace,
+                [
+                    (
+                        self._event(
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START + timedelta(seconds=2),
+                        ),
+                    )
+                ],
+            )
+            stale = self._loop(
+                workspace,
+                observer=stale_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            stale_progress = stale._progress
+            controller.stop()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "control changed concurrently before pending publication",
+            ):
+                stale.run_cycle()
+
+            self.assertEqual(stale_observer.calls, 1)
+            self.assertEqual(stale._progress, stale_progress)
+            self.assertEqual(
+                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
+                1,
+            )
+
+            stopped_observer = _DurableObserver(workspace, [()])
+            stopped = self._loop(
+                workspace,
+                observer=stopped_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=3)),
+            )
+            self.assertEqual(stopped.run_cycle().status, LiveCycleStatus.STOPPED)
+            self.assertEqual(stopped_observer.calls, 0)
+            controller.close()
+            stale.close()
+            stopped.close()
+
+    def test_unfinished_append_pending_recovers_before_durable_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_append() -> None:
+                raise RuntimeError("simulated process loss after ledger append")
+
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                post_append_hook=fail_after_append,
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "process loss after ledger append"):
+                first.run_cycle()
+
+            progress_path = (
+                workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+            )
+            self.assertEqual(
+                json.loads(progress_path.read_text(encoding="utf-8"))["phase"],
+                "append_pending",
+            )
+            self.assertEqual(
+                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
+                1,
+            )
+            first.stop()
+            first.close()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            recovered = resumed.run_cycle()
+            self.assertEqual(recovered.status, LiveCycleStatus.DUPLICATE_DECISION)
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertEqual(
+                json.loads(progress_path.read_text(encoding="utf-8"))["phase"],
+                "committed",
+            )
+            self.assertEqual(
+                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
+                1,
+            )
+            self.assertEqual(resumed.run_cycle().status, LiveCycleStatus.STOPPED)
+            self.assertEqual(resumed_observer.calls, 0)
+            resumed.close()
+
+    def test_dependency_registry_mutation_rejected_while_pending_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            loop._write_pending(
+                decision_ts=(self.START + timedelta(seconds=1)).isoformat(),
+                market_state_sha256="a" * 64,
+                affected_input_ids=("input-a",),
+                gate="normal",
+            )
+            inputs_before = loop.inputs_path.read_bytes()
+            progress_before = loop.progress_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "cannot mutate live dependency registry while a decision is unfinished",
+            ):
+                loop.register_input("input-b", selection_ids="selection-b")
+
+            self.assertEqual(loop.dependencies.input_ids, ("input-a",))
+            self.assertEqual(loop.inputs_path.read_bytes(), inputs_before)
+            self.assertEqual(loop.progress_path.read_bytes(), progress_before)
+            loop.close()
+
+    def test_stale_dependency_mutation_cannot_publish_after_newer_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            bootstrap = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            bootstrap.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(bootstrap.run_cycle().status, LiveCycleStatus.DECIDED)
+            bootstrap.close()
+
+            active = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            stale = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            active._write_pending(
+                decision_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                market_state_sha256="b" * 64,
+                affected_input_ids=("input-a",),
+                gate="normal",
+            )
+            inputs_before = active.inputs_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "progress changed concurrently before dependency publication",
+            ):
+                stale.register_input("input-b", selection_ids="selection-b")
+
+            self.assertEqual(stale.dependencies.input_ids, ("input-a",))
+            self.assertEqual(active.inputs_path.read_bytes(), inputs_before)
+            active.close()
+            stale.close()
+
     def test_constructor_requires_durable_registered_intent_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

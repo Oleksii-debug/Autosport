@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import copy, deepcopy
 from dataclasses import replace
+import hashlib
 import json
 
 import pytest
@@ -25,6 +26,28 @@ from autosport.nvda_manual_acceptance import (
 
 ARTIFACT_SHA = "a" * 64
 SOURCE_SHA = "b" * 40
+WEBVIEW2_RUNTIME_WITNESS = {
+    "schema_version": 1,
+    "renderer": "edgechromium",
+    "browser_version_string": "154.0.2847.51",
+    "observation_source": "native_core_webview2_environment",
+    "real_money_execution": False,
+    "human_tested": False,
+    "nvda_verified": False,
+    "whole_product_complete": False,
+}
+RUNTIME_WITNESS_SHA = hashlib.sha256(
+    (
+        json.dumps(
+            WEBVIEW2_RUNTIME_WITNESS,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+).hexdigest()
 T0 = "2026-09-23T01:20:00.000000+00:00"
 T1 = "2026-09-23T01:21:00.000000+00:00"
 T2 = "2026-09-23T01:22:00.000000+00:00"
@@ -32,11 +55,12 @@ T2 = "2026-09-23T01:22:00.000000+00:00"
 
 def _transcript() -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "artifact_sha256": ARTIFACT_SHA,
         "source_sha": SOURCE_SHA,
         "windows_version": "Windows 11 25H2 build 26200",
         "nvda_version": "NVDA 2026.2",
+        "webview2_runtime_witness": dict(WEBVIEW2_RUNTIME_WITNESS),
         "keyboard_only": True,
         "mouse_used": False,
         "evidence_origin": HUMAN_NVDA_ORIGIN,
@@ -89,6 +113,7 @@ def _record(
         transcript=transcript,
         expected_artifact_sha256=ARTIFACT_SHA,
         expected_source_sha=SOURCE_SHA,
+        expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
         reviewer_ref=reviewer_ref,
         reviewer_attestation=reviewer_attestation,
         reviewed_at=reviewed_at,
@@ -101,6 +126,7 @@ def _resolve(ledger: ManualNvdaAcceptanceLedger, transcript: object):
         transcript=transcript,
         expected_artifact_sha256=ARTIFACT_SHA,
         expected_source_sha=SOURCE_SHA,
+        expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
     )
 
 
@@ -148,6 +174,7 @@ def test_resolution_verifier_rejects_copy_and_tamper(tmp_path):
             resolution,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=resolution.record.transcript_sha256,
         )
         is resolution
@@ -164,6 +191,7 @@ def test_resolution_verifier_rejects_copy_and_tamper(tmp_path):
             cloned,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=resolution.record.transcript_sha256,
         )
 
@@ -178,6 +206,7 @@ def test_resolution_verifier_rejects_copy_and_tamper(tmp_path):
             tampered,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=tampered.record.transcript_sha256,
         )
 
@@ -197,6 +226,7 @@ def test_resolution_verifier_rejects_wrong_candidate_identity(tmp_path):
             resolution,
             expected_artifact_sha256="c" * 64,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=resolution.record.transcript_sha256,
         )
 
@@ -271,6 +301,7 @@ def test_verified_accept_becomes_stale_after_later_reject_from_restarted_ledger(
             accepted_resolution,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=accepted_resolution.record.transcript_sha256,
         )
         is accepted_resolution
@@ -292,6 +323,7 @@ def test_verified_accept_becomes_stale_after_later_reject_from_restarted_ledger(
             accepted_resolution,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=accepted_resolution.record.transcript_sha256,
         )
 
@@ -303,6 +335,7 @@ def test_verified_accept_becomes_stale_after_later_reject_from_restarted_ledger(
             rejected_resolution,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=rejected_resolution.record.transcript_sha256,
         )
         is rejected_resolution
@@ -332,6 +365,7 @@ def test_verified_reject_becomes_stale_after_later_accept(tmp_path):
             rejected_resolution,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=rejected_resolution.record.transcript_sha256,
         )
 
@@ -343,6 +377,7 @@ def test_verified_reject_becomes_stale_after_later_accept(tmp_path):
             accepted_resolution,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=accepted_resolution.record.transcript_sha256,
         )
         is accepted_resolution
@@ -372,6 +407,7 @@ def test_unrelated_candidate_successor_does_not_stale_current_resolution(tmp_pat
             resolution,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=resolution.record.transcript_sha256,
         )
         is resolution
@@ -395,6 +431,7 @@ def test_resolution_verifier_rejects_issued_ledger_path_rebinding(tmp_path):
             resolution,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=resolution.record.transcript_sha256,
         )
 
@@ -422,6 +459,7 @@ def test_resolution_verifier_rejects_instance_events_override(tmp_path):
             resolution,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=resolution.record.transcript_sha256,
         )
 
@@ -462,6 +500,7 @@ def test_fake_lookup_global_cannot_override_private_resolution_registry(
             resolution,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=resolution.record.transcript_sha256,
         )
         is resolution
@@ -498,6 +537,7 @@ def test_fake_register_global_cannot_override_private_resolution_issuance(
             resolution,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=resolution.record.transcript_sha256,
         )
         is resolution
@@ -530,6 +570,7 @@ def test_fake_registry_global_cannot_mint_a_copied_resolution(
             cloned,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=resolution.record.transcript_sha256,
         )
 
@@ -559,6 +600,7 @@ def test_resolution_verifier_rejects_instance_events_locked_override(
             resolution,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=resolution.record.transcript_sha256,
         )
 
@@ -596,6 +638,7 @@ def test_resolution_verifier_rejects_class_read_anchor_rebinding(
             resolution,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=resolution.record.transcript_sha256,
         )
 
@@ -629,6 +672,7 @@ def test_resolution_verifier_rejects_writer_lock_dispatch_rebinding(
             resolution,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=resolution.record.transcript_sha256,
         )
 
@@ -680,6 +724,7 @@ def test_resolution_verifier_rechecks_reader_graph_after_inflight_mutation(
             resolution,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             expected_transcript_sha256=resolution.record.transcript_sha256,
         )
 
@@ -735,6 +780,7 @@ def test_wrong_artifact_or_source_cannot_reuse_decision(tmp_path):
             transcript=transcript,
             expected_artifact_sha256="c" * 64,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
         )
     with pytest.raises(
         NvdaManualAcceptanceStateError,
@@ -744,6 +790,73 @@ def test_wrong_artifact_or_source_cannot_reuse_decision(tmp_path):
             transcript=transcript,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha="d" * 40,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
+        )
+
+
+def test_runtime_witness_drift_cannot_reuse_manual_decision(tmp_path):
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript)
+
+    changed = deepcopy(transcript)
+    witness = changed["webview2_runtime_witness"]
+    assert isinstance(witness, dict)
+    witness["browser_version_string"] = "155.0.3000.1"
+    changed_sha = hashlib.sha256(
+        (
+            json.dumps(
+                witness,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+    ).hexdigest()
+
+    assert (
+        ledger.resolve_current(
+            transcript=changed,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=changed_sha,
+        )
+        is None
+    )
+
+
+def test_wrong_runtime_witness_anchor_cannot_record_or_resolve(tmp_path):
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    wrong = "c" * 64
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="did not pass canonical structural validation",
+    ):
+        ledger.record_decision(
+            transcript=transcript,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=wrong,
+            reviewer_ref="reviewer-opaque-01",
+            reviewer_attestation="Manual review performed.",
+            reviewed_at=T0,
+            decision=ManualNvdaDecision.ACCEPT_PHYSICAL_NVDA,
+        )
+
+    _record(ledger, transcript)
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="did not pass canonical structural validation",
+    ):
+        ledger.resolve_current(
+            transcript=transcript,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=wrong,
         )
 
 
@@ -795,6 +908,7 @@ def test_unknown_protocol_cannot_mint_or_resolve_decision(tmp_path):
             transcript=transcript,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             reviewer_ref="reviewer-opaque-01",
             reviewer_attestation="Manual review performed.",
             reviewed_at=T0,
@@ -808,6 +922,7 @@ def test_unknown_protocol_cannot_mint_or_resolve_decision(tmp_path):
             transcript=transcript,
             expected_artifact_sha256=ARTIFACT_SHA,
             expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
             protocol_version="future-unowned-protocol",
         )
 
@@ -921,6 +1036,7 @@ def test_ledger_keeps_reviewer_attestation_private_by_hash(tmp_path):
         transcript=_transcript(),
         expected_artifact_sha256=ARTIFACT_SHA,
         expected_source_sha=SOURCE_SHA,
+        expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
         reviewer_ref="reviewer-opaque-01",
         reviewer_attestation=secret_phrase,
         reviewed_at=T0,

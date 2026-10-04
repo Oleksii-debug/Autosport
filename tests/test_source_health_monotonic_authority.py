@@ -396,7 +396,12 @@ def test_same_transition_can_retry_after_pre_publish_abort(
 
     authority = store._monotonic_authority()
     binding = store._authority_binding(observed, intended, kind="PUBLISH")
-    first_tx_id = store._next_authority_tx_id(authority, observed, intended)
+    first_tx_id = store._next_authority_tx_id(
+        authority,
+        observed,
+        intended,
+        binding,
+    )
     authority.prepare(
         tx_id=first_tx_id,
         observed_state_sha256=observed,

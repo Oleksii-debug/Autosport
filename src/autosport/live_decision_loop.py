@@ -1517,6 +1517,9 @@ class PersistentLiveDecisionLoop:
         self._freshness_deadlines.clear()
         self._freshness_generations.clear()
         self._freshness_heap.clear()
+        self._availability_deadlines.clear()
+        self._availability_generations.clear()
+        self._availability_heap.clear()
         return result
 
     def _refresh_intents_from_replay(

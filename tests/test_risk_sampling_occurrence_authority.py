@@ -36,14 +36,19 @@ def _sha_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _frame(*, duplicate: bool = False) -> str:
+def _frame(
+    *,
+    duplicate: bool = False,
+    duplicate_payload: bool = False,
+) -> str:
     second_id = "unit-a" if duplicate else "unit-b"
+    second_payload = "a" * 64 if duplicate_payload else "b" * 64
     return _canonical(
         {
             "schema": "AUTOSPORT_RISK_IID_SAMPLING_FRAME_V1",
             "units": [
                 {"payload_sha256": "a" * 64, "unit_id": "unit-a"},
-                {"payload_sha256": "b" * 64, "unit_id": second_id},
+                {"payload_sha256": second_payload, "unit_id": second_id},
             ],
         }
     )
@@ -368,15 +373,18 @@ def test_forged_plan_cannot_pass_canonical_verifier(
 ) -> None:
     values = _product_precommit(tmp_path, monkeypatch)
     plan = _resolve(values)
-    forged = ProductIidExpectedDrawPlan(
-        experiment_id=plan.experiment_id,
-        sampling_manifest_sha256=plan.sampling_manifest_sha256,
-        sampling_frame_sha256=plan.sampling_frame_sha256,
-        horizon_sha256=plan.horizon_sha256,
-        frame_units=plan.frame_units,
-        member_draws=plan.member_draws,
-        plan_sha256="0" * 64,
-    )
+    forged = object.__new__(ProductIidExpectedDrawPlan)
+    for field_name in (
+        "experiment_id",
+        "sampling_manifest_sha256",
+        "sampling_frame_sha256",
+        "horizon_sha256",
+        "frame_units",
+        "member_draws",
+        "plan_sha256",
+    ):
+        object.__setattr__(forged, field_name, getattr(plan, field_name))
+    object.__setattr__(forged, "plan_sha256", "0" * 64)
     (
         membership,
         workspace,
@@ -398,6 +406,56 @@ def test_forged_plan_cannot_pass_canonical_verifier(
             horizon_json=horizon_json,
             authority_root=authority_root,
         )
+
+
+def test_duplicate_frame_payloads_are_rejected_even_with_distinct_ids(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=_frame(duplicate_payload=True),
+    )
+
+    with pytest.raises(ProductIidDrawPlanError, match="payloads must be unique"):
+        _resolve(values)
+
+
+def test_positive_draw_truth_cannot_be_caller_constructed() -> None:
+    with pytest.raises(TypeError, match="product-issued"):
+        ProductIidExpectedDrawPlan(
+            experiment_id="forged",
+            sampling_manifest_sha256="1" * 64,
+            sampling_frame_sha256="2" * 64,
+            horizon_sha256="3" * 64,
+            frame_units=(),
+            member_draws=(),
+            plan_sha256="4" * 64,
+        )
+
+    with pytest.raises(TypeError, match="product-issued"):
+        ProductIidExpectedMemberDraw(
+            member_id="forged",
+            member_index=0,
+            stream_sha256="1" * 64,
+            draw_count=1,
+            draw_indices=(0,),
+            draw_unit_ids=("unit",),
+            draw_payload_sha256=("2" * 64,),
+            draw_transcript_sha256="3" * 64,
+        )
+
+
+def test_horizon_serialized_resource_bound_fails_before_json_work(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values = list(_product_precommit(tmp_path, monkeypatch))
+    values[6] = "{" + (" " * 5000) + "}"
+
+    with pytest.raises(ProductIidDrawPlanError, match="serialized size"):
+        _resolve(tuple(values))
 
 
 def test_precommit_resolver_rebinding_fails_before_attacker_executes(
@@ -441,6 +499,74 @@ def test_structure_resolver_rebinding_fails_before_attacker_executes(
         forged_structure,
     )
 
+    with pytest.raises(ProductIidDrawPlanError, match="authority dispatch changed"):
+        _resolve(values)
+    assert attacker_called is False
+
+
+def test_verifier_rejects_public_resolver_rebinding_before_attacker_executes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values = _product_precommit(tmp_path, monkeypatch)
+    candidate = _resolve(values)
+    attacker_called = False
+
+    def forged_resolver(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        return candidate
+
+    monkeypatch.setattr(
+        draw_authority,
+        "resolve_product_iid_expected_draw_plan",
+        forged_resolver,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="verifier authority dispatch changed",
+    ):
+        verify_product_iid_expected_draw_plan(
+            candidate,
+            membership=membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=frame_json,
+            horizon_json=horizon_json,
+            authority_root=authority_root,
+        )
+    assert attacker_called is False
+
+
+def test_result_type_rebinding_fails_before_attacker_executes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values = _product_precommit(tmp_path, monkeypatch)
+    attacker_called = False
+
+    class ForgedPlan:
+        def __new__(cls, *_args, **_kwargs):
+            nonlocal attacker_called
+            attacker_called = True
+            return super().__new__(cls)
+
+    monkeypatch.setattr(
+        draw_authority,
+        "ProductIidExpectedDrawPlan",
+        ForgedPlan,
+    )
     with pytest.raises(ProductIidDrawPlanError, match="authority dispatch changed"):
         _resolve(values)
     assert attacker_called is False

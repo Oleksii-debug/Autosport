@@ -998,6 +998,65 @@ def test_retryable_renewal_failure_retries_refresh_not_login(tmp_path):
     assert renewal_admission.action is ProphetXLoginAdmissionAction.RETRY_LATER
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ProphetXRenewalFailureClass.RETRYABLE,
+        ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE,
+    ],
+)
+def test_pre_expiry_renewal_failure_cannot_launder_backoff_at_token_expiry(
+    tmp_path,
+    failure,
+):
+    lifecycle = _lifecycle(tmp_path)
+    admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+    active = lifecycle.complete_login_success(
+        attempt_id=admission.attempt_id,
+        now=NOW,
+        access_expires_at=NOW + timedelta(minutes=30),
+    )
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
+    started = lifecycle.begin_renewal(
+        now=due_at,
+        refresh_token_lineage_id=active.session_lineage_id,
+    )
+
+    failed_at = active.access_expires_at - timedelta(seconds=1)
+    failed = lifecycle.complete_renewal_failure(
+        attempt_id=started.attempt_id,
+        now=failed_at,
+        failure=failure,
+    )
+
+    assert failed.state is ProphetXSessionState.RENEWAL_DUE
+    assert failed.retry_not_before is not None
+    assert failed.retry_not_before > active.access_expires_at
+    assert failed.slot_hold_until == failed.retry_not_before
+
+    blocked = lifecycle.begin_login(
+        now=active.access_expires_at,
+        access_token_available=False,
+    )
+    assert (
+        blocked.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    )
+    assert blocked.retry_at == failed.retry_not_before
+    assert blocked.login_authorized is False
+
+    admitted = lifecycle.begin_login(
+        now=failed.retry_not_before,
+        access_token_available=False,
+    )
+    assert admitted.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+
+
 def test_ambiguous_renewal_result_blocks_replacement_login_for_conservative_hold(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)

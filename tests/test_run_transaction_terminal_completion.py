@@ -186,6 +186,50 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
                 (root / RunTransaction.ROOT_NAME / run_id).exists()
             )
 
+    def test_transaction_start_rejects_omitted_bound_draw_admission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
+            book_path = root / "paper_book.json"
+            PaperBook("10000").save(book_path)
+            ledger = JsonlDecisionLedger(root / "decisions.jsonl")
+            ledger.path.touch()
+
+            market_sha256 = "a" * 64
+            results_sha256 = "b" * 64
+            strategy_id = "baseline-v1"
+            run_id = "draw-admission-omitted"
+            base_book_hash = sha256_file(book_path)
+            base_ledger_hash = sha256_file(ledger.path)
+            key = registry.begin(
+                market_sha256,
+                results_sha256,
+                strategy_id,
+                run_id,
+                base_paper_book_sha256=base_book_hash,
+                base_decision_ledger_sha256=base_ledger_hash,
+                sampling_draw_admission_receipt_sha256="d" * 64,
+            )
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "sampling draw-admission binding mismatch",
+            ):
+                RunTransaction.start(
+                    root,
+                    run_id=run_id,
+                    experiment_key=key,
+                    market_sha256=market_sha256,
+                    results_sha256=results_sha256,
+                    strategy_id=strategy_id,
+                    base_paper_book_sha256=base_book_hash,
+                    base_decision_ledger_sha256=base_ledger_hash,
+                )
+
+            self.assertFalse(
+                (root / RunTransaction.ROOT_NAME / run_id).exists()
+            )
+
     def test_detached_completion_rejects_in_progress_registry_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

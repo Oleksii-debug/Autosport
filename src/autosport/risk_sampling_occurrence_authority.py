@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +24,7 @@ from .risk_sampling_dependence import (
     resolve_fixed_n_iid_precommit_authority,
 )
 from .risk_sampling_membership import ResolvedFixedNRiskMembership
+from .workspace_lock import _open_read_only_descriptor
 
 
 _FRAME_SCHEMA = "AUTOSPORT_RISK_IID_SAMPLING_FRAME_V1"
@@ -34,6 +37,7 @@ _MAX_DRAW_COUNT = 1000000
 _MAX_TOTAL_DRAWS = 1000000
 _MAX_FRAME_JSON_BYTES = 16 * 1024 * 1024
 _MAX_HORIZON_JSON_BYTES = 4096
+_MAX_RUN_ADMISSION_STATE_BYTES = 64 * 1024
 _HEX = frozenset("0123456789abcdef")
 
 _PRECOMMIT = resolve_fixed_n_iid_precommit_authority
@@ -838,6 +842,117 @@ def _run_admission_semantic_binding_sha256(
     )
 
 
+def _run_admission_file_identity(
+    value: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+        value.st_nlink,
+    )
+
+
+def _read_stable_run_admission_state(path: Path) -> dict[str, object]:
+    try:
+        before = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        raise ProductIidDrawPlanError(
+            "IID run-admission state cannot be inspected"
+        ) from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_size > _MAX_RUN_ADMISSION_STATE_BYTES
+    ):
+        raise ProductIidDrawPlanError(
+            "IID run-admission state must be one bounded regular non-aliased file"
+        )
+
+    descriptor: int | None = None
+    primary_error: BaseException | None = None
+    try:
+        descriptor = _open_read_only_descriptor(path)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or _run_admission_file_identity(opened)
+            != _run_admission_file_identity(before)
+        ):
+            raise ProductIidDrawPlanError(
+                "IID run-admission state changed during open"
+            )
+
+        chunks: list[bytes] = []
+        remaining = _MAX_RUN_ADMISSION_STATE_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after_open = os.fstat(descriptor)
+        after = os.stat(path, follow_symlinks=False)
+    except ProductIidDrawPlanError as exc:
+        primary_error = exc
+        raise
+    except OSError as exc:
+        primary_error = exc
+        raise ProductIidDrawPlanError(
+            "IID run-admission state changed or became unreadable"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as close_error:
+                if primary_error is None:
+                    raise ProductIidDrawPlanError(
+                        "IID run-admission descriptor cleanup failed"
+                    ) from close_error
+                try:
+                    primary_error.add_note(
+                        "IID run-admission descriptor cleanup also failed"
+                    )
+                except BaseException:
+                    pass
+
+    if len(payload) > _MAX_RUN_ADMISSION_STATE_BYTES:
+        raise ProductIidDrawPlanError(
+            "IID run-admission state exceeds supported size"
+        )
+    if (
+        _run_admission_file_identity(before)
+        != _run_admission_file_identity(after)
+        or _run_admission_file_identity(opened)
+        != _run_admission_file_identity(after_open)
+    ):
+        raise ProductIidDrawPlanError(
+            "IID run-admission state changed during stable read"
+        )
+    try:
+        decoded = payload.decode("utf-8")
+        state = json.loads(
+            decoded,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite,
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ProductIidDrawPlanError(
+            "IID run-admission state is invalid UTF-8 JSON"
+        ) from exc
+    if type(state) is not dict:
+        raise ProductIidDrawPlanError(
+            "IID run-admission state must be a JSON object"
+        )
+    return state
+
+
 def _run_admission_registry_item(
     workspace: Path,
     member_id: str,
@@ -1004,13 +1119,8 @@ def _resolve_run_admission_state(
         member_index=member_index,
     )
     try:
-        raw = path.read_text(encoding="utf-8")
-        state = json.loads(
-            raw,
-            object_pairs_hook=_reject_duplicate_keys,
-            parse_constant=_reject_nonfinite,
-        )
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        state = _read_stable_run_admission_state(path)
+    except ProductIidDrawPlanError as exc:
         raise ProductIidDrawPlanError(
             "IID run-admission state cannot be re-resolved"
         ) from exc
@@ -1177,17 +1287,8 @@ def issue_product_iid_run_admission(
             )
             atomic_write_json(path, state)
             try:
-                readback = json.loads(
-                    path.read_text(encoding="utf-8"),
-                    object_pairs_hook=_reject_duplicate_keys,
-                    parse_constant=_reject_nonfinite,
-                )
-            except (
-                OSError,
-                UnicodeError,
-                json.JSONDecodeError,
-                ValueError,
-            ) as exc:
+                readback = _read_stable_run_admission_state(path)
+            except ProductIidDrawPlanError as exc:
                 raise ProductIidDrawPlanError(
                     "IID run-admission state cannot be read back after prepare"
                 ) from exc

@@ -126,24 +126,41 @@ class MarketMirror:
                 self._publication_revision_guard = None
 
     @staticmethod
-    def _key(event: MarketEvent) -> tuple[str, str]:
+    def _key(
+        event: MarketEvent,
+        *,
+        _quote_key=MarketEvent.quote_key.fget,
+    ) -> tuple[str, str]:
         # Include source identity so two providers using the same local IDs cannot
-        # overwrite one another's state.
-        return (event.source_id, event.quote_key)
+        # overwrite one another's state. Seal the canonical quote-key descriptor so
+        # an in-process rebind cannot redirect trusted state after persistence.
+        if _quote_key is None:
+            raise RuntimeError("canonical quote_key descriptor is unavailable")
+        return (event.source_id, _quote_key(event))
 
     @staticmethod
     def _snapshot_event(
         event: MarketEvent,
         *,
         _event_type: type[MarketEvent] = MarketEvent,
+        _to_dict=MarketEvent.to_dict,
+        _from_dict=MarketEvent.from_dict,
     ) -> MarketEvent:
         """Own an independent canonical value snapshot, including nested metadata."""
         if type(event) is not _event_type:
             raise TypeError("event must be an exact MarketEvent")
-        return _event_type.from_dict(event.to_dict())
+        snapshot = _from_dict(_to_dict(event))
+        if type(snapshot) is not _event_type:
+            raise TypeError("market mirror snapshot lost canonical MarketEvent authority")
+        return snapshot
 
     @staticmethod
-    def _same_sequence_payload(left: MarketEvent, right: MarketEvent) -> bool:
+    def _same_sequence_payload(
+        left: MarketEvent,
+        right: MarketEvent,
+        *,
+        _to_dict=MarketEvent.to_dict,
+    ) -> bool:
         """Compare provider payload truth while ignoring local receipt clocks.
 
         ``observed_ts`` and ``ingest_ts`` are local process timestamps. A retry or
@@ -152,8 +169,8 @@ class MarketMirror:
         (``source_ts``) and every economic/provider/provenance field remain part of the
         conflict check.
         """
-        left_payload = left.to_dict()
-        right_payload = right.to_dict()
+        left_payload = _to_dict(left)
+        right_payload = _to_dict(right)
         for local_clock in ("observed_ts", "ingest_ts"):
             left_payload.pop(local_clock, None)
             right_payload.pop(local_clock, None)
@@ -252,7 +269,7 @@ class MarketMirror:
                 return MirrorApplyResult(
                     MirrorUpdate.APPLIED,
                     event.source_id,
-                    event.quote_key,
+                    key[1],
                     None,
                     event.sequence,
                 )
@@ -261,7 +278,7 @@ class MarketMirror:
                 return MirrorApplyResult(
                     MirrorUpdate.STALE,
                     event.source_id,
-                    event.quote_key,
+                    key[1],
                     previous.sequence,
                     previous.sequence,
                 )
@@ -271,7 +288,7 @@ class MarketMirror:
                     return MirrorApplyResult(
                         MirrorUpdate.DUPLICATE,
                         event.source_id,
-                        event.quote_key,
+                        key[1],
                         previous.sequence,
                         previous.sequence,
                     )
@@ -284,7 +301,7 @@ class MarketMirror:
             return MirrorApplyResult(
                 MirrorUpdate.APPLIED,
                 event.source_id,
-                event.quote_key,
+                key[1],
                 previous.sequence,
                 event.sequence,
             )
@@ -519,6 +536,8 @@ class MarketMirror:
         event_ids: str | Iterable[str] | None = None,
         market_ids: str | Iterable[str] | None = None,
         selection_ids: str | Iterable[str] | None = None,
+        _require_store=_require_market_store,
+        _trusted_reader=_trusted_live_events,
     ) -> MirrorSnapshot:
         """Reconstruct exactly the decision-visible mirror state at as_of.
 
@@ -533,7 +552,9 @@ class MarketMirror:
         """
         if type(require_live_receipt_authority) is not bool:
             raise TypeError("require_live_receipt_authority must be bool")
-        canonical_store = _require_market_store(
+        if require_live_receipt_authority and cls is not __class__:
+            raise TypeError("trusted live replay requires an exact MarketMirror")
+        canonical_store = _require_store(
             store,
             exact=require_live_receipt_authority,
             error_message=(
@@ -545,7 +566,7 @@ class MarketMirror:
         boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
         mirror = cls()
         history = (
-            _trusted_live_events(canonical_store)
+            _trusted_reader(canonical_store)
             if require_live_receipt_authority
             else canonical_store.events()
         )
@@ -588,7 +609,13 @@ class MarketMirror:
         return mirror
 
     @classmethod
-    def from_live_store(cls, store: SQLiteMarketStore) -> "MarketMirror":
+    def from_live_store(
+        cls,
+        store: SQLiteMarketStore,
+        *,
+        _require_store=_require_market_store,
+        _trusted_current=_trusted_live_current_by_source,
+    ) -> "MarketMirror":
         """Restore only rows with durable product-owned live receipt authority.
 
         Legacy, replay and imported rows remain canonical market history but cannot
@@ -596,13 +623,15 @@ class MarketMirror:
         restart. The receipt side table is intentionally prospective: rows written
         before that authority existed stay absent from this live projection.
         """
-        canonical_store = _require_market_store(
+        if cls is not __class__:
+            raise TypeError("live store bootstrap requires an exact MarketMirror")
+        canonical_store = _require_store(
             store,
             exact=True,
             error_message="live store must be an exact SQLiteMarketStore",
         )
         mirror = cls()
-        current = _trusted_live_current_by_source(canonical_store)
+        current = _trusted_current(canonical_store)
         for key in sorted(current):
             mirror.apply(current[key])
         return mirror

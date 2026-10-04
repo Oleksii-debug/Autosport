@@ -1744,6 +1744,31 @@ class SQLiteMarketStore:
         append_authority: MonotonicWorkspaceAuthority,
         cutoff_rows: tuple[tuple[str, str, int], ...],
     ) -> None:
+        history = authority.read_history()
+        pending = (
+            history[-1]
+            if history and history[-1].phase is AuthorityPhase.PREPARE
+            else None
+        )
+
+        # Generic authority recovery automatically records ABORT when durable state
+        # still equals a PREPARE's previous COMMIT. That terminal record is itself an
+        # irreversible machine-authority mutation, so do not let it extend an already
+        # noncanonical committed cutoff chain. Prove the unchanged durable row-set
+        # first; only then may recovery append the ABORT.
+        if (
+            pending is not None
+            and observed_state_sha256
+            == pending.previous_committed_state_sha256
+        ):
+            self._require_canonical_cutoff_authority_bindings(
+                authority,
+                append_authority,
+                cutoff_rows,
+            )
+            authority.recover(observed_state_sha256=observed_state_sha256)
+            return
+
         try:
             authority.recover(observed_state_sha256=observed_state_sha256)
             return

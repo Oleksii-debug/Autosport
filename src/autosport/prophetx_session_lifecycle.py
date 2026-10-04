@@ -827,17 +827,41 @@ class ProphetXSessionLifecycle:
             raise ProphetXSessionLifecycleError(
                 "scope must be an exact ProphetXSessionScope"
             )
+        # Detach the authority-bearing scope from the caller-owned frozen dataclass.
+        # ``object.__setattr__`` can mutate a frozen dataclass in-process, so retaining
+        # the caller object would allow credential/role/environment identity to drift
+        # while _scope_dir/_state_path remain pinned to the original provider pool.
+        self._scope_environment = scope.environment
+        self._scope_access_key_identity_sha256 = scope.access_key_identity_sha256
+        self._scope_credential_revision = scope.credential_revision
+        self._scope_integration_role = scope.integration_role
+        scope_snapshot = ProphetXSessionScope(
+            environment=self._scope_environment,
+            access_key_identity_sha256=self._scope_access_key_identity_sha256,
+            credential_revision=self._scope_credential_revision,
+            integration_role=self._scope_integration_role,
+        )
         self.workspace = Path(workspace)
-        self.scope = scope
         self._scope_dir = (
             self.workspace
             / ".provider-session-lifecycle"
-            / self.scope.pool_id
+            / scope_snapshot.pool_id
         )
         self._state_path = self._scope_dir / self._STATE_NAME
         self._thread_lock = RLock()
         self._owned_attempts: set[str] = set()
         self._issued_effect_admissions: dict[str, ProphetXLoginAdmission] = {}
+
+    @property
+    def scope(self) -> ProphetXSessionScope:
+        """Return a detached diagnostic view; it is not retained as authority."""
+
+        return ProphetXSessionScope(
+            environment=self._scope_environment,
+            access_key_identity_sha256=self._scope_access_key_identity_sha256,
+            credential_revision=self._scope_credential_revision,
+            integration_role=self._scope_integration_role,
+        )
 
     @property
     def state_path(self) -> Path:

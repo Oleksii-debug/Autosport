@@ -2342,6 +2342,7 @@ def launch_windows_shell(
     trusted_document_violation = False
     runtime_browser_version: str | None = None
     runtime_identity_violation = False
+    runtime_witness_published = False
     runtime_witness_path: Path | None = None
     if canonical_bridge:
         try:
@@ -2370,6 +2371,7 @@ def launch_windows_shell(
 
     def bind_trusted_document() -> bool | None:
         nonlocal runtime_browser_version, runtime_identity_violation
+        nonlocal runtime_witness_published
         nonlocal trusted_document_observed, trusted_document_violation
         if not canonical_bridge:
             return None
@@ -2398,6 +2400,27 @@ def launch_windows_shell(
             api._revoke_trust()
             trusted_document_violation = True
             return False
+
+        # before_load is the last synchronous host boundary before pywebview
+        # injects the privileged Python API into this exact document. Publish the
+        # actual native runtime identity here, while the qualified window is live,
+        # rather than after webview.start() returns (which normally means the
+        # native window has already closed). A crash/kill during a physical NVDA
+        # session must not erase the only exact-runtime binding evidence.
+        if runtime_witness_path is not None and not runtime_witness_published:
+            assert runtime_browser_version is not None
+            try:
+                _write_webview2_runtime_witness(
+                    runtime_witness_path,
+                    runtime_browser_version,
+                )
+            except OSError:
+                api._revoke_trust()
+                runtime_identity_violation = True
+                trusted_document_violation = True
+                return False
+            runtime_witness_published = True
+
         trusted_document_observed = True
         return None
 
@@ -2510,20 +2533,14 @@ def launch_windows_shell(
             raise WindowsWebViewUnavailable(
                 "The Autosport semantic shell lost its trusted WebView document binding"
             )
-        if runtime_witness_path is not None:
-            if runtime_browser_version is None or runtime_identity_violation:
-                raise WindowsWebViewUnavailable(
-                    "The Autosport semantic shell has no actual WebView2 runtime witness"
-                )
-            try:
-                _write_webview2_runtime_witness(
-                    runtime_witness_path,
-                    runtime_browser_version,
-                )
-            except OSError as exc:
-                raise WindowsWebViewUnavailable(
-                    "Autosport could not persist the actual WebView2 runtime witness"
-                ) from exc
+        if runtime_witness_path is not None and (
+            runtime_browser_version is None
+            or runtime_identity_violation
+            or not runtime_witness_published
+        ):
+            raise WindowsWebViewUnavailable(
+                "The Autosport semantic shell has no actual WebView2 runtime witness"
+            )
     except WindowsWebViewUnavailable:
         raise
     except Exception as exc:

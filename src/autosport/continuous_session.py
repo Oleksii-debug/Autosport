@@ -359,6 +359,12 @@ class _ContinuousSessionState:
         with durable_path_lock(self.path):
             if self.path.exists():
                 raw = self._read_file()
+                if session_id is not None and raw["session_id"] != _text(
+                    session_id, "session_id"
+                ):
+                    raise ContinuousSessionError(
+                        "durable session_id does not match configured session"
+                    )
                 if raw["schema_version"] == self._V2_VERSION:
                     raw = self._migrate_v2_locked(raw)
                 else:
@@ -368,12 +374,6 @@ class _ContinuousSessionState:
                 if existing_source != self.source_id:
                     raise ContinuousSessionError(
                         "durable session source_id does not match configured source"
-                    )
-                if session_id is not None and raw["session_id"] != _text(
-                    session_id, "session_id"
-                ):
-                    raise ContinuousSessionError(
-                        "durable session_id does not match configured session"
                     )
             else:
                 resolved_id = _text(

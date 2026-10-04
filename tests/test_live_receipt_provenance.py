@@ -4,6 +4,7 @@ import unittest
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.ingestion import IngestionEngine
 from autosport.market_bus import MarketEventBus
@@ -141,6 +142,52 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(live_event.sequence, 1)
             self.assertEqual(live_event, trusted)
             store.close()
+
+    def test_receipt_persistence_failure_rolls_back_market_insert_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            with patch.object(
+                store,
+                "_insert_live_receipt_authority",
+                side_effect=sqlite3.OperationalError("receipt write failed"),
+            ):
+                with self.assertRaisesRegex(sqlite3.OperationalError, "receipt write failed"):
+                    self._ingest(store)
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.current_by_source(), {})
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertEqual(
+                store.connection.execute(
+                    "SELECT COUNT(*) FROM market_event_live_receipts"
+                ).fetchone()[0],
+                0,
+            )
+            store.close()
+
+    def test_pre_receipt_schema_reopens_without_retroactive_trust(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            event = self._direct_event()
+            store = SQLiteMarketStore(path)
+            self.assertTrue(store.append(event))
+            store.connection.execute("DROP TABLE market_event_live_receipts")
+            store.connection.commit()
+            store.close()
+
+            reopened = SQLiteMarketStore(path)
+            try:
+                self.assertEqual(reopened.events(), [event])
+                self.assertEqual(reopened.trusted_live_events(), [])
+                self.assertFalse(reopened.has_trusted_live_receipt(event))
+                receipt_table = reopened.connection.execute(
+                    """SELECT name FROM sqlite_master
+                       WHERE type='table' AND name='market_event_live_receipts'"""
+                ).fetchone()
+                self.assertEqual(receipt_table, ("market_event_live_receipts",))
+            finally:
+                reopened.close()
 
     def test_tampered_live_receipt_authority_fails_closed_on_reopen(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

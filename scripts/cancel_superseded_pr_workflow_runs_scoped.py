@@ -202,6 +202,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
         self._recovered_runs.clear()
         try:
             associated_pr_number = self.associated_pr_number(event_head_sha)
+        except RequestBudgetExhausted:
+            raise
         except CancellationError:
             return
         if associated_pr_number != pr_number:
@@ -400,6 +402,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 historical_pr_number = self._historical_associated_pr_number(
                     run.head_sha
                 )
+            except RequestBudgetExhausted:
+                raise
             except CancellationError:
                 return run
             if historical_pr_number != self._historical_recovery_pr_number:
@@ -1396,6 +1400,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     ):
                         continue
                     branch_head_sha = self._canonical_branch_head(head_branch)
+                except RequestBudgetExhausted:
+                    raise
                 except CancellationError:
                     continue
                 if branch_head_sha == candidate_head_sha:
@@ -1418,6 +1424,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 continue
             except _HistoricalAssociationAmbiguous:
                 continue
+            except RequestBudgetExhausted:
+                raise
             except CancellationError:
                 continue
 
@@ -1437,6 +1445,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     raise CancellationError(
                         "canonical qualification reader authority changed"
                     )
+            except RequestBudgetExhausted:
+                raise
             except CancellationError:
                 continue
             qualification_head, integration_capable = (
@@ -1609,6 +1619,8 @@ def _build_explicit_run_identity_checker(
                 # self._request dispatch from the authority-producing GET itself; a
                 # concurrent class/instance rebound therefore cannot shape the response.
                 payload = request_impl(api, f"/actions/runs/{run_id}")
+            except RequestBudgetExhausted:
+                raise
             except CancellationError:
                 return False
             if not production_dispatch_current():
@@ -1660,6 +1672,8 @@ def _build_explicit_run_identity_checker(
                 )
                 is True
             )
+        except RequestBudgetExhausted:
+            raise
         except CancellationError:
             return False
 
@@ -2008,6 +2022,8 @@ def cancel_superseded_explicit_pr_runs(
             require_decision_authorities()
             qualification = _qualification_reader(api, pr_number)
             require_decision_authorities()
+        except RequestBudgetExhausted:
+            raise
         except CancellationError:
             # Qualification authority is scoped to one PR group. Failure to resolve
             # one group must fail that group closed without starving independent PRs
@@ -2079,6 +2095,8 @@ def cancel_superseded_explicit_pr_runs(
                 require_decision_authorities()
                 current_qualification = _qualification_reader(api, pr_number)
                 require_decision_authorities()
+            except RequestBudgetExhausted:
+                raise
             except CancellationError:
                 break
             if (
@@ -2194,6 +2212,8 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
     try:
         current_qualification = _qualification_reader(api, pr_number)
         require_decision_authorities()
+    except RequestBudgetExhausted:
+        raise
     except CancellationError:
         require_decision_authorities()
         # A failed authority reread grants no trigger cancellation authority, but it
@@ -2534,6 +2554,8 @@ def _build_main(
                         api, trigger_pr_number
                     )
                     require_main_dispatch()
+                except RequestBudgetExhausted:
+                    raise
                 except CancellationError:
                     # Trigger qualification is authority for this one source run only.
                     # Failure proves no cancellation authority and must not turn already
@@ -2556,6 +2578,8 @@ def _build_main(
                 file=sys.stderr,
             )
             return 0
+        except RequestBudgetExhausted:
+            raise
         except CancellationError as exc:
             print(f"superseded-run cancellation failed: {exc}", file=sys.stderr)
             return 2

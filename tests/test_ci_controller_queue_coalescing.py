@@ -4404,3 +4404,54 @@ def test_main_request_budget_exhaustion_defers_incomplete_snapshot(
     assert "request budget exhausted" in captured.err
     assert len(requested) == 12
     assert all("/cancel" not in url for url in requested)
+
+
+def test_request_budget_exhaustion_is_not_downgraded_to_group_failure() -> None:
+    api = SweepApi(
+        (_run(50, STALE_HEAD, (501,)),),
+        {},
+    )
+
+    def exhausted_qualification(_api, _pr_number: int):
+        raise scoped_controller.RequestBudgetExhausted("fixture request budget exhausted")
+
+    with pytest.raises(
+        scoped_controller.RequestBudgetExhausted,
+        match="request budget exhausted",
+    ):
+        cancel_superseded_explicit_pr_runs(
+            api,  # type: ignore[arg-type]
+            workflow_name="CI",
+            current_run_id=99,
+            _qualification_reader=exhausted_qualification,
+            _qualification_reader_code=exhausted_qualification.__code__,
+        )
+
+    assert api.cancelled == []
+
+
+def test_request_budget_exhaustion_propagates_from_orphan_association(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    api._unbound_active_runs[7016] = (STALE_HEAD, None)
+
+    def exhausted_association(_head_sha: str) -> int:
+        raise scoped_controller.RequestBudgetExhausted("fixture request budget exhausted")
+
+    monkeypatch.setattr(
+        api,
+        "_historical_associated_pr_number",
+        exhausted_association,
+    )
+
+    with pytest.raises(
+        scoped_controller.RequestBudgetExhausted,
+        match="request budget exhausted",
+    ):
+        api.cancel_historical_unbound_runs()

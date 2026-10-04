@@ -26,10 +26,12 @@ from autosport.execution_empirical_evidence import (
 from autosport.real_execution_ledger import (
     AcknowledgementStatus,
     ExecutionAction,
+    ExecutionLedgerBusyError,
     ExecutionLedgerIntegrityError,
     ExecutionPlan,
     ExecutionStateError,
     ExternalAcknowledgement,
+    ExternalEffectReconciliation,
     RealExecutionLedger,
     ReconciliationSnapshot,
 )
@@ -111,6 +113,23 @@ def _bind_provider(
     )
 
 
+def _acknowledgement(
+    *,
+    status: AcknowledgementStatus = AcknowledgementStatus.ACCEPTED,
+    accepted_odds: Decimal | None = Decimal("2.08"),
+    accepted_stake: Decimal | None = Decimal("5.00"),
+    acknowledged_at: str = ACKED,
+) -> ExternalAcknowledgement:
+    return ExternalAcknowledgement(
+        attempt_id="attempt-1",
+        external_receipt_id="receipt-1",
+        status=status,
+        acknowledged_at=acknowledged_at,
+        accepted_odds=accepted_odds,
+        accepted_stake=accepted_stake,
+    )
+
+
 def _ack(
     ledger: RealExecutionLedger,
     *,
@@ -119,16 +138,20 @@ def _ack(
     accepted_stake: Decimal | None = Decimal("5.00"),
     acknowledged_at: str = ACKED,
 ) -> None:
-    ledger.acknowledge(
-        ExternalAcknowledgement(
-            attempt_id="attempt-1",
-            external_receipt_id="receipt-1",
-            status=status,
-            acknowledged_at=acknowledged_at,
-            accepted_odds=accepted_odds,
-            accepted_stake=accepted_stake,
-        )
+    acknowledgement = _acknowledgement(
+        status=status,
+        accepted_odds=accepted_odds,
+        accepted_stake=accepted_stake,
+        acknowledged_at=acknowledged_at,
     )
+    ledger._bind_provider_acknowledgement_evidence(
+        attempt_id="attempt-1",
+        evidence_id=EVIDENCE_ID,
+        observed_at=acknowledged_at,
+        source="provider-response",
+        acknowledgement=acknowledgement,
+    )
+    ledger.acknowledge(acknowledgement)
 
 
 def _reconciled_not_found_ledger(tmp_path) -> RealExecutionLedger:
@@ -152,7 +175,6 @@ def _reconciled_not_found_ledger(tmp_path) -> RealExecutionLedger:
 
 def _accepted_evidence(tmp_path):
     ledger = _ledger(tmp_path)
-    _bind_provider(ledger)
     _ack(ledger)
     return build_empirical_execution_evidence(
         ledger,
@@ -176,7 +198,7 @@ def test_terminal_accepted_record_keeps_provider_correlation_but_slippage_unknow
     assert evidence.censor_reason is None
     assert evidence.censor_cutoff_recorded_at is None
     assert evidence.provider_evidence_id == EVIDENCE_ID
-    assert evidence.provider_evidence_observed_at == PROVIDER
+    assert evidence.provider_evidence_observed_at == ACKED
 
     assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
     assert evidence.accepted_odds is None
@@ -252,6 +274,15 @@ def test_unknown_attempt_is_retained_with_explicit_censor_reason(tmp_path):
         attempt_id="attempt-1",
     )
 
+    assert evidence.bookmaker_profile_version == "profile-1"
+    assert evidence.decision_id == "decision-1"
+    assert evidence.plan_created_at == DECISION
+    assert evidence.decision_at is None
+    assert evidence.quote_observed_at == QUOTE
+    assert evidence.quote_available_to_product_at is None
+    assert evidence.quote_expires_at == "2026-09-21T10:01:00+00:00"
+    assert evidence.approval_id == "approval-1"
+    assert len(evidence.attempt_effect_fingerprint) == 64
     assert evidence.attempt_state == "UNKNOWN"
     assert evidence.provider_outcome_verified is False
     assert (
@@ -262,6 +293,121 @@ def test_unknown_attempt_is_retained_with_explicit_censor_reason(tmp_path):
     assert evidence.censor_reason == "UNKNOWN_EXTERNAL_EFFECT"
     assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
     assert evidence.acknowledged_at is None
+
+
+def test_unknown_positive_reconciliation_is_retained_pending_terminal_ack(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.mark_unknown(
+        "attempt-1",
+        reason="provider timeout after submission",
+        observed_at="2026-09-21T10:00:02+00:00",
+    )
+    ledger.reconcile_found(
+        ExternalEffectReconciliation(
+            attempt_id="attempt-1",
+            evidence_id=RECONCILIATION_ID,
+            external_receipt_id="receipt-pending-1",
+            observed_at=RECONCILIATION_AT,
+            source=RECONCILIATION_SOURCE,
+        )
+    )
+
+    evidence = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    assert evidence.attempt_state == "UNKNOWN"
+    assert evidence.right_censored is True
+    assert evidence.censor_reason == "UNKNOWN_RECONCILED_FOUND_AWAITING_ACK"
+    assert evidence.reconciliation_evidence_id == RECONCILIATION_ID
+    assert evidence.reconciliation_evidence_source == RECONCILIATION_SOURCE
+    assert evidence.reconciliation_evidence_observed_at == RECONCILIATION_AT
+    assert evidence.reconciliation_external_effect_found is True
+    assert evidence.reconciliation_external_receipt_id == "receipt-pending-1"
+    assert evidence.external_receipt_id is None
+    assert evidence.acknowledgement_status is None
+    assert evidence.provider_outcome_verified is False
+    assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
+
+
+def test_direct_construction_cannot_forge_reconciliation_receipt_without_evidence(
+    tmp_path,
+):
+    evidence = build_empirical_execution_evidence(
+        _ledger(tmp_path),
+        attempt_id="attempt-1",
+    )
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="receipt requires durable reconciliation evidence",
+    ):
+        replace(
+            evidence,
+            reconciliation_external_receipt_id="forged-receipt",
+        )
+
+
+def test_positive_reconciliation_direct_construction_requires_receipt_identity(
+    tmp_path,
+):
+    ledger = _ledger(tmp_path)
+    ledger.mark_unknown(
+        "attempt-1",
+        reason="provider timeout after submission",
+        observed_at="2026-09-21T10:00:02+00:00",
+    )
+    ledger.reconcile_found(
+        ExternalEffectReconciliation(
+            attempt_id="attempt-1",
+            evidence_id=RECONCILIATION_ID,
+            external_receipt_id="receipt-pending-1",
+            observed_at=RECONCILIATION_AT,
+            source=RECONCILIATION_SOURCE,
+        )
+    )
+    evidence = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="positive reconciliation requires receipt identity",
+    ):
+        replace(
+            evidence,
+            reconciliation_external_receipt_id=None,
+        )
+
+
+def test_direct_construction_cannot_launder_plan_time_into_decision_time(tmp_path):
+    evidence = build_empirical_execution_evidence(
+        _ledger(tmp_path),
+        attempt_id="attempt-1",
+    )
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="does not prove exact decision timestamp",
+    ):
+        replace(evidence, decision_at=DECISION)
+
+
+def test_direct_construction_cannot_launder_quote_observation_into_availability(
+    tmp_path,
+):
+    evidence = build_empirical_execution_evidence(
+        _ledger(tmp_path),
+        attempt_id="attempt-1",
+    )
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="does not prove quote product-availability time",
+    ):
+        replace(evidence, quote_available_to_product_at=QUOTE)
 
 
 def test_provider_evidence_does_not_turn_nonterminal_attempt_into_slippage_sample(
@@ -282,28 +428,33 @@ def test_provider_evidence_does_not_turn_nonterminal_attempt_into_slippage_sampl
     assert evidence.accepted_odds is None
 
 
-def test_terminal_ack_without_separate_provider_evidence_still_has_attempt_record(
+def test_terminal_ack_without_exact_provider_evidence_is_rejected_before_projection(
     tmp_path,
 ):
     ledger = _ledger(tmp_path)
-    _ack(ledger)
+    acknowledgement = _acknowledgement()
+
+    with pytest.raises(
+        ExecutionStateError,
+        match="requires exact provider-bound acknowledgement evidence",
+    ):
+        ledger.acknowledge(acknowledgement)
 
     evidence = build_empirical_execution_evidence(
         ledger,
         attempt_id="attempt-1",
     )
 
-    assert evidence.attempt_state == "ACCEPTED"
-    assert evidence.ledger_terminal is True
+    assert evidence.attempt_state == "SUBMITTED"
+    assert evidence.ledger_terminal is False
     assert evidence.provider_evidence_id is None
     assert evidence.provider_outcome_verified is False
     assert (
         evidence.provider_outcome_verification_reason
-        == PROVIDER_OUTCOME_UNVERIFIED_ACK
+        == PROVIDER_OUTCOME_NOT_APPLICABLE
     )
+    assert evidence.right_censored is True
     assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
-    assert evidence.accepted_odds is None
-    assert evidence.adverse_odds_delta is None
 
 
 def test_reconciled_not_found_is_unverified_right_censored_evidence(tmp_path):
@@ -335,6 +486,7 @@ def test_reconciled_not_found_is_unverified_right_censored_evidence(tmp_path):
     assert evidence.reconciliation_evidence_source == RECONCILIATION_SOURCE
     assert evidence.reconciliation_evidence_observed_at == RECONCILIATION_AT
     assert evidence.reconciliation_external_effect_found is False
+    assert evidence.reconciliation_external_receipt_id is None
     assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
     assert evidence.accepted_odds is None
 
@@ -367,7 +519,7 @@ def test_reconciled_not_found_direct_construction_requires_reconciliation_identi
         replace(evidence, reconciliation_evidence_id=None)
 
 
-def test_generic_provider_evidence_cannot_mint_known_slippage_by_direct_construction(
+def test_exact_provider_provenance_cannot_mint_known_slippage_without_root_authority(
     tmp_path,
 ):
     evidence = _accepted_evidence(tmp_path)
@@ -390,7 +542,6 @@ def test_generic_provider_evidence_cannot_mint_known_slippage_by_direct_construc
 
 def test_partial_acceptance_keeps_unproven_slippage_unknown(tmp_path):
     ledger = _ledger(tmp_path)
-    _bind_provider(ledger)
     _ack(
         ledger,
         status=AcknowledgementStatus.PARTIAL,
@@ -421,7 +572,6 @@ def test_partial_acceptance_keeps_unproven_slippage_unknown(tmp_path):
 
 def test_rejected_attempt_is_not_a_fake_zero_slippage_sample(tmp_path):
     ledger = _ledger(tmp_path)
-    _bind_provider(ledger)
     _ack(
         ledger,
         status=AcknowledgementStatus.REJECTED,
@@ -447,12 +597,106 @@ def test_rejected_attempt_is_not_a_fake_zero_slippage_sample(tmp_path):
     assert evidence.unaccepted_stake is None
 
 
-def test_generic_provider_evidence_cannot_mint_lay_slippage(tmp_path):
+def test_terminal_ack_projects_exact_positive_reconciliation_lineage(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.mark_unknown(
+        "attempt-1",
+        reason="provider timeout after submission",
+        observed_at="2026-09-21T10:00:02+00:00",
+    )
+    reconciliation = ExternalEffectReconciliation(
+        attempt_id="attempt-1",
+        evidence_id=RECONCILIATION_ID,
+        external_receipt_id="receipt-1",
+        observed_at=RECONCILIATION_AT,
+        source=RECONCILIATION_SOURCE,
+    )
+    ledger.reconcile_found(reconciliation)
+    acknowledgement = ExternalAcknowledgement(
+        attempt_id="attempt-1",
+        external_receipt_id="receipt-1",
+        status=AcknowledgementStatus.ACCEPTED,
+        acknowledged_at="2026-09-21T10:00:04+00:00",
+        accepted_odds=Decimal("2.08"),
+        accepted_stake=Decimal("5.00"),
+        reconciliation_evidence_id=RECONCILIATION_ID,
+    )
+    ledger.acknowledge(acknowledgement)
+
+    evidence = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    assert evidence.attempt_state == "ACCEPTED"
+    assert evidence.reconciliation_evidence_id == RECONCILIATION_ID
+    assert evidence.reconciliation_evidence_source == RECONCILIATION_SOURCE
+    assert evidence.reconciliation_evidence_observed_at == RECONCILIATION_AT
+    assert evidence.reconciliation_external_effect_found is True
+    assert evidence.reconciliation_external_receipt_id == "receipt-1"
+    assert evidence.external_receipt_id == "receipt-1"
+    assert evidence.provider_outcome_verified is False
+    assert (
+        evidence.provider_outcome_verification_reason
+        == PROVIDER_OUTCOME_UNVERIFIED_ACK
+    )
+    assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
+
+    population = build_empirical_execution_population_evidence(
+        ledger,
+        evaluation_protocol_sha256="7" * 64,
+    )
+    population_payload = population.to_dict()
+    assert population.reconciliation_evidence_count == 1
+    assert population.positive_reconciliation_count == 1
+    assert population.negative_reconciliation_count == 0
+    assert population_payload["positive_reconciliation_rate"] == {
+        "numerator": 1,
+        "denominator": 1,
+    }
+
+
+def test_receiptless_rejected_attempt_projects_canonical_terminal_evidence(tmp_path):
+    ledger = _ledger(tmp_path)
+    acknowledgement = ExternalAcknowledgement(
+        attempt_id="attempt-1",
+        external_receipt_id=None,
+        status=AcknowledgementStatus.REJECTED,
+        acknowledged_at=ACKED,
+    )
+    ledger._bind_provider_acknowledgement_evidence(
+        attempt_id="attempt-1",
+        evidence_id=EVIDENCE_ID,
+        observed_at=ACKED,
+        source="provider-response",
+        acknowledgement=acknowledgement,
+    )
+    ledger.acknowledge(acknowledgement)
+
+    evidence = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    assert evidence.attempt_state == "REJECTED"
+    assert evidence.ledger_terminal is True
+    assert evidence.external_receipt_id is None
+    assert evidence.acknowledgement_status == "REJECTED"
+    assert evidence.acknowledgement_payload_sha256 is not None
+    assert (
+        evidence.provider_evidence_acknowledgement_sha256
+        == evidence.acknowledgement_payload_sha256
+    )
+    assert evidence.slippage_status == SLIPPAGE_STATUS_NOT_APPLICABLE
+
+
+def test_exact_provider_provenance_cannot_mint_lay_slippage_without_root_authority(
+    tmp_path,
+):
     ledger = _ledger(
         tmp_path,
         action=_action(side="LAY", requested_odds=Decimal("3.00")),
     )
-    _bind_provider(ledger)
     _ack(ledger, accepted_odds=Decimal("3.05"))
 
     evidence = build_empirical_execution_evidence(
@@ -465,9 +709,8 @@ def test_generic_provider_evidence_cannot_mint_lay_slippage(tmp_path):
     assert evidence.adverse_odds_delta is None
 
 
-def test_generic_provider_evidence_does_not_require_price_side_semantics(tmp_path):
+def test_exact_provider_provenance_does_not_require_price_side_semantics(tmp_path):
     ledger = _ledger(tmp_path, action=_action(side="CUSTOM"))
-    _bind_provider(ledger)
     _ack(ledger)
 
     evidence = build_empirical_execution_evidence(
@@ -500,20 +743,22 @@ def test_caller_ack_cannot_upgrade_provider_outcome_authority(tmp_path):
         )
 
 
-def test_wall_clock_cross_stage_inversion_is_rejected_before_projection(tmp_path):
+def test_provider_ack_binding_rejects_cross_stage_wall_clock_inversion(tmp_path):
     ledger = _ledger(tmp_path)
-    _bind_provider(
-        ledger,
-        observed_at="2026-09-21T10:00:01.900000+00:00",
+    acknowledgement = _acknowledgement(
+        acknowledged_at="2026-09-21T10:00:01.800000+00:00",
     )
 
     with pytest.raises(
         ExecutionStateError,
-        match="acknowledgement precedes attempt causal boundary",
+        match="provider evidence time must equal acknowledgement time",
     ):
-        _ack(
-            ledger,
-            acknowledged_at="2026-09-21T10:00:01.800000+00:00",
+        ledger._bind_provider_acknowledgement_evidence(
+            attempt_id="attempt-1",
+            evidence_id=EVIDENCE_ID,
+            observed_at="2026-09-21T10:00:01.900000+00:00",
+            source="provider-response",
+            acknowledgement=acknowledgement,
         )
 
 
@@ -577,7 +822,6 @@ def test_direct_construction_rejects_slippage_forgery(tmp_path):
 
 def test_restart_rebuild_is_byte_identical_for_terminal_record(tmp_path):
     ledger = _ledger(tmp_path)
-    _bind_provider(ledger)
     _ack(ledger)
     first = build_empirical_execution_evidence(
         ledger,
@@ -650,7 +894,6 @@ def test_missing_attempt_is_unavailable_not_synthetic_censor_record(tmp_path):
 
 def test_tampered_ledger_fails_before_empirical_projection(tmp_path):
     ledger = _ledger(tmp_path)
-    _bind_provider(ledger)
     _ack(ledger)
     raw = ledger.path.read_text(encoding="utf-8")
     assert "receipt-1" in raw
@@ -673,13 +916,11 @@ def test_attempt_projection_ignores_rebound_ledger_snapshot_seams(tmp_path):
         tmp_path / "canonical-attempt",
         action=_action(selection_id="canonical-selection"),
     )
-    _bind_provider(canonical)
     _ack(canonical)
     decoy = _ledger(
         tmp_path / "decoy-attempt",
         action=_action(selection_id="decoy-selection"),
     )
-    _bind_provider(decoy)
     _ack(decoy)
 
     canonical_snapshot = RealExecutionLedger.verified_snapshot(canonical)
@@ -763,38 +1004,76 @@ def _population_ledger(tmp_path) -> RealExecutionLedger:
             )
             continue
 
-        ledger.bind_provider_evidence(
-            attempt_id=attempt_id,
-            evidence_id=format(index, "064x"),
-            observed_at=PROVIDER,
-            source="provider-response",
-        )
         status = {
             "ACCEPTED": AcknowledgementStatus.ACCEPTED,
             "PARTIAL": AcknowledgementStatus.PARTIAL,
             "REJECTED": AcknowledgementStatus.REJECTED,
         }[state]
-        ledger.acknowledge(
-            ExternalAcknowledgement(
-                attempt_id=attempt_id,
-                external_receipt_id=f"receipt-{suffix}",
-                status=status,
-                acknowledged_at=ACKED,
-                accepted_odds=(
-                    None if status is AcknowledgementStatus.REJECTED else Decimal("2.08")
-                ),
-                accepted_stake=(
-                    None
-                    if status is AcknowledgementStatus.REJECTED
-                    else (
-                        Decimal("2.00")
-                        if status is AcknowledgementStatus.PARTIAL
-                        else Decimal("5.00")
-                    )
-                ),
-            )
+        acknowledgement = ExternalAcknowledgement(
+            attempt_id=attempt_id,
+            external_receipt_id=(
+                None
+                if status is AcknowledgementStatus.REJECTED
+                else f"receipt-{suffix}"
+            ),
+            status=status,
+            acknowledged_at=ACKED,
+            accepted_odds=(
+                None if status is AcknowledgementStatus.REJECTED else Decimal("2.08")
+            ),
+            accepted_stake=(
+                None
+                if status is AcknowledgementStatus.REJECTED
+                else (
+                    Decimal("2.00")
+                    if status is AcknowledgementStatus.PARTIAL
+                    else Decimal("5.00")
+                )
+            ),
         )
+        ledger._bind_provider_acknowledgement_evidence(
+            attempt_id=attempt_id,
+            evidence_id=format(index, "064x"),
+            observed_at=ACKED,
+            source="provider-response",
+            acknowledgement=acknowledgement,
+        )
+        ledger.acknowledge(acknowledgement)
     return ledger
+
+
+def test_projection_rejects_same_path_rollback_against_parent_monotonic_authority(
+    tmp_path,
+):
+    ledger = _ledger(tmp_path)
+    prior_bytes = ledger.path.read_bytes()
+    _ack(ledger)
+    assert ledger.path.read_bytes() != prior_bytes
+
+    ledger.path.write_bytes(prior_bytes)
+
+    with pytest.raises(
+        ExecutionLedgerIntegrityError,
+        match="rollback/monotonic authority check failed",
+    ):
+        build_empirical_execution_evidence(
+            ledger,
+            attempt_id="attempt-1",
+        )
+
+
+def test_projection_fails_closed_while_canonical_writer_lock_exists(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger._lock_path.write_text("writer-held", encoding="utf-8")
+
+    with pytest.raises(
+        ExecutionLedgerBusyError,
+        match="writer lock exists",
+    ):
+        build_empirical_execution_evidence(
+            ledger,
+            attempt_id="attempt-1",
+        )
 
 
 def test_population_projection_ignores_rebound_ledger_snapshot_seams(tmp_path):
@@ -830,6 +1109,14 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
 
     assert isinstance(aggregate, EmpiricalExecutionPopulationEvidence)
     assert aggregate.total_attempts == 7
+    assert aggregate.decision_count == 7
+    assert aggregate.plan_count == 7
+    assert aggregate.planned_action_count == 7
+    assert aggregate.attempted_action_count == 7
+    assert aggregate.unattempted_action_count == 0
+    assert aggregate.retry_attempt_count == 0
+    assert aggregate.submitted_attempt_count == 6
+    assert aggregate.unsubmitted_attempt_count == 1
     assert aggregate.source_product_authority_verified is False
     assert (
         aggregate.source_root_authority_status
@@ -862,6 +1149,14 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
     assert aggregate.unverified_ledger_terminal_count == 3
     assert aggregate.right_censored_count == 4
     assert aggregate.provider_evidence_count == 3
+    assert aggregate.submitted_request_identity_count == 0
+    assert aggregate.provider_request_binding_count == 0
+    assert aggregate.provider_acknowledgement_binding_count == 3
+    assert aggregate.durable_acknowledgement_identity_count == 3
+    assert aggregate.provider_bound_durable_ack_count == 3
+    assert aggregate.reconciliation_evidence_count == 1
+    assert aggregate.positive_reconciliation_count == 0
+    assert aggregate.negative_reconciliation_count == 1
     assert aggregate.provider_outcome_unverified_ack_count == 3
     assert aggregate.provider_outcome_unverified_absence_count == 1
     assert aggregate.provider_outcome_not_applicable_count == 3
@@ -910,6 +1205,143 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
     assert payload["provider_evidence_rate"] == {
         "numerator": 3,
         "denominator": 7,
+    }
+    assert payload["submitted_request_identity_rate"] == {
+        "numerator": 0,
+        "denominator": 7,
+    }
+    assert payload["provider_request_binding_rate"] == {
+        "numerator": 0,
+        "denominator": 7,
+    }
+    assert payload["provider_acknowledgement_binding_rate"] == {
+        "numerator": 3,
+        "denominator": 7,
+    }
+    assert payload["durable_acknowledgement_identity_rate"] == {
+        "numerator": 3,
+        "denominator": 7,
+    }
+    assert payload["provider_bound_durable_ack_rate"] == {
+        "numerator": 3,
+        "denominator": 7,
+    }
+    assert payload["planned_action_attempt_rate"] == {
+        "numerator": 7,
+        "denominator": 7,
+    }
+    assert payload["unattempted_action_rate"] == {
+        "numerator": 0,
+        "denominator": 7,
+    }
+    assert payload["submitted_attempt_rate"] == {
+        "numerator": 6,
+        "denominator": 7,
+    }
+    assert payload["unsubmitted_attempt_rate"] == {
+        "numerator": 1,
+        "denominator": 7,
+    }
+    assert payload["reconciliation_evidence_rate"] == {
+        "numerator": 1,
+        "denominator": 7,
+    }
+    assert payload["positive_reconciliation_rate"] == {
+        "numerator": 0,
+        "denominator": 7,
+    }
+    assert payload["negative_reconciliation_rate"] == {
+        "numerator": 1,
+        "denominator": 7,
+    }
+
+
+def test_population_funnel_retains_plan_only_zero_attempt_denominator(tmp_path):
+    ledger = RealExecutionLedger(tmp_path / "plan-only-execution.jsonl")
+    action = _action(
+        action_id="leg-plan-only",
+        selection_id="selection-plan-only",
+        quote_id="quote-plan-only",
+    )
+    ledger.reserve_plan(
+        ExecutionPlan(
+            plan_id="plan-only",
+            bookmaker_profile_version="profile-1",
+            decision_id="decision-plan-only",
+            approval_id="approval-plan-only",
+            created_at=DECISION,
+            actions=(action,),
+        )
+    )
+
+    aggregate = build_empirical_execution_population_evidence(
+        ledger,
+        evaluation_protocol_sha256="9" * 64,
+    )
+    payload = aggregate.to_dict()
+
+    assert aggregate.decision_count == 1
+    assert aggregate.plan_count == 1
+    assert aggregate.planned_action_count == 1
+    assert aggregate.attempted_action_count == 0
+    assert aggregate.unattempted_action_count == 1
+    assert aggregate.total_attempts == 0
+    assert aggregate.submitted_attempt_count == 0
+    assert aggregate.unsubmitted_attempt_count == 0
+    assert aggregate.samples == ()
+    assert payload["planned_action_attempt_rate"] == {
+        "numerator": 0,
+        "denominator": 1,
+    }
+    assert payload["unattempted_action_rate"] == {
+        "numerator": 1,
+        "denominator": 1,
+    }
+    assert payload["submitted_attempt_rate"] == {
+        "numerator": 0,
+        "denominator": 0,
+    }
+    assert all(value == 0 for value in payload["state_counts"].values())
+
+
+def test_population_funnel_retains_planned_action_without_attempt(tmp_path):
+    ledger = _population_ledger(tmp_path)
+    unattempted_action = replace(
+        _action(),
+        action_id="leg-unattempted",
+        selection_id="selection-unattempted",
+        quote_id="quote-unattempted",
+    )
+    ledger.reserve_plan(
+        ExecutionPlan(
+            plan_id="plan-unattempted",
+            bookmaker_profile_version="profile-1",
+            decision_id="decision-unattempted",
+            approval_id="approval-unattempted",
+            created_at=DECISION,
+            actions=(unattempted_action,),
+        )
+    )
+
+    aggregate = build_empirical_execution_population_evidence(
+        ledger,
+        evaluation_protocol_sha256="8" * 64,
+    )
+    payload = aggregate.to_dict()
+
+    assert aggregate.total_attempts == 7
+    assert aggregate.decision_count == 8
+    assert aggregate.plan_count == 8
+    assert aggregate.planned_action_count == 8
+    assert aggregate.attempted_action_count == 7
+    assert aggregate.unattempted_action_count == 1
+    assert payload["planned_action_attempt_rate"] == {
+        "numerator": 7,
+        "denominator": 8,
+    }
+    assert payload["unattempted_action_rate"] == {
+        "numerator": 1,
+        "denominator": 8,
     }
 
 

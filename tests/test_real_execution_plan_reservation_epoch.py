@@ -60,14 +60,18 @@ def test_verified_plan_reservation_provenance_is_restart_stable(
     assert reserved_at.utcoffset() is not None
 
 
-def test_module_clock_and_uuid_rebinding_cannot_choose_reservation_provenance(
+def test_module_clock_and_randomness_rebinding_cannot_choose_reservation_provenance(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     forged_time = "2000-01-01T00:00:00+00:00"
-    forged_uuid = UUID("00000000-0000-4000-8000-000000000001")
+    forged_event_id = "00000000-0000-4000-8000-000000000000"
     monkeypatch.setattr(ledger_module, "_now", lambda: forged_time)
-    monkeypatch.setattr(ledger_module.uuid, "uuid4", lambda: forged_uuid)
+    monkeypatch.setattr(
+        ledger_module.os,
+        "urandom",
+        lambda size: b"\\x00" * size,
+    )
 
     ledger = RealExecutionLedger(tmp_path / "real.jsonl")
     plan = _plan()
@@ -75,7 +79,7 @@ def test_module_clock_and_uuid_rebinding_cannot_choose_reservation_provenance(
     view = ledger.verified_execution_view(plan.plan_id)
 
     assert view.plan_reserved_at != forged_time
-    assert view.plan_reserved_event_id != str(forged_uuid)
+    assert view.plan_reserved_event_id != forged_event_id
     assert UUID(view.plan_reserved_event_id).version == 4
 
 

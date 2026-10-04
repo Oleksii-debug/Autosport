@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import json
 import pytest
@@ -18,6 +18,45 @@ from autosport.prophetx_transactions_transport import (
 )
 
 NOW = datetime(2026, 9, 23, 1, 40, tzinfo=timezone.utc)
+
+
+class _ChangingOffsetTz(tzinfo):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def utcoffset(self, _dt: datetime | None) -> timedelta:
+        self.calls += 1
+        if self.calls == 1:
+            return timedelta(0)
+        return timedelta(hours=-12)
+
+    def dst(self, _dt: datetime | None) -> timedelta:
+        return timedelta(0)
+
+    def tzname(self, _dt: datetime | None) -> str:
+        return "CHANGING"
+
+
+class _InvalidOffsetTz(tzinfo):
+    def utcoffset(self, _dt: datetime | None):
+        return "invalid"
+
+    def dst(self, _dt: datetime | None) -> timedelta:
+        return timedelta(0)
+
+    def tzname(self, _dt: datetime | None) -> str:
+        return "INVALID"
+
+
+class _ExtremeOffsetTz(tzinfo):
+    def utcoffset(self, _dt: datetime | None) -> timedelta:
+        return timedelta(hours=23)
+
+    def dst(self, _dt: datetime | None) -> timedelta:
+        return timedelta(0)
+
+    def tzname(self, _dt: datetime | None) -> str:
+        return "EXTREME"
 
 
 def row(**kw):
@@ -58,6 +97,45 @@ def client(*bodies, clock=lambda: NOW):
         ),
         transport,
     )
+
+
+def test_observation_time_uses_one_offset_observation_and_canonical_utc():
+    zone = _ChangingOffsetTz()
+    c, _ = client(
+        payload(row()),
+        clock=lambda: datetime(2026, 9, 23, 1, 40, tzinfo=zone),
+    )
+
+    page = c.read_page()
+
+    assert zone.calls == 1
+    assert page.observed_at == NOW.isoformat()
+
+
+def test_observation_time_invalid_offset_is_bounded_error():
+    c, _ = client(
+        payload(row()),
+        clock=lambda: datetime(2026, 9, 23, 1, 40, tzinfo=_InvalidOffsetTz()),
+    )
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="invalid timezone offset",
+    ):
+        c.read_page()
+
+
+def test_observation_time_utc_normalization_overflow_is_bounded_error():
+    c, _ = client(
+        payload(row()),
+        clock=lambda: datetime(1, 1, 1, 0, 0, tzinfo=_ExtremeOffsetTz()),
+    )
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="cannot be normalized to UTC",
+    ):
+        c.read_page()
 
 
 def test_exact_query_secret_safe_get_and_exact_money():

@@ -6,7 +6,7 @@ execution, settlement, P&L, bankroll, or retry authority.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
@@ -352,9 +352,30 @@ class ProphetXTransactionsClient:
 
     def _observed_at(self) -> str:
         value = self._clock()
-        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-            raise ProphetXReadOnlyError("clock must return timezone-aware datetime")
-        return value.isoformat()
+        if type(value) is not datetime or value.tzinfo is None:
+            raise ProphetXReadOnlyError(
+                "clock must return an exact timezone-aware datetime"
+            )
+        try:
+            offset = value.utcoffset()
+        except Exception as exc:
+            raise ProphetXReadOnlyError(
+                "clock returned datetime with invalid timezone offset"
+            ) from exc
+        if (
+            type(offset) is not timedelta
+            or not (-timedelta(days=1) < offset < timedelta(days=1))
+        ):
+            raise ProphetXReadOnlyError(
+                "clock returned datetime without a bounded concrete UTC offset"
+            )
+        try:
+            naive_utc = value.replace(tzinfo=None) - offset
+        except (OverflowError, ValueError) as exc:
+            raise ProphetXReadOnlyError(
+                "clock datetime cannot be normalized to UTC"
+            ) from exc
+        return naive_utc.replace(tzinfo=timezone.utc).isoformat()
 
 
 def _parse_row(value: object, index: int) -> ProphetXWalletTransaction:

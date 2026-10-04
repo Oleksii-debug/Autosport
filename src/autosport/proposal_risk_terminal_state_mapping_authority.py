@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 from collections.abc import Mapping
@@ -38,7 +37,7 @@ _RESULT_SCHEMA = "autosport.proposal-risk-terminal-state-mapping-result.v1"
 _SCENARIO_ID_PREFIX = "terminal-vector-v1:"
 _HEX = frozenset("0123456789abcdef")
 _PATH_TYPE = type(Path("."))
-_MAX_SCENARIO_ID_LENGTH = 512
+_MAX_SCENARIO_ID_LENGTH = 96
 
 _PRECOMMIT_TYPE = ProductProposalRiskEvaluationPrecommit
 _TARGET_TYPE = ProductProposalRiskTarget
@@ -70,10 +69,6 @@ _JSON_LOADS_EXPECTED = _JSON_LOADS
 _JSON_DECODE_ERROR = json.JSONDecodeError
 _HASHLIB_SHA256 = hashlib.sha256
 _HASHLIB_SHA256_EXPECTED = _HASHLIB_SHA256
-_B64_ENCODE = base64.urlsafe_b64encode
-_B64_ENCODE_EXPECTED = _B64_ENCODE
-_B64_DECODE = base64.urlsafe_b64decode
-_B64_DECODE_EXPECTED = _B64_DECODE
 
 
 class ProductProposalRiskTerminalStateMappingError(RuntimeError):
@@ -738,98 +733,28 @@ def _state_vector_payload(
 
 
 def _scenario_id(payload: dict[str, object]) -> str:
-    if (
-        _B64_ENCODE is not _B64_ENCODE_EXPECTED
-        or base64.urlsafe_b64encode is not _B64_ENCODE_EXPECTED
-    ):
-        raise ProductProposalRiskTerminalStateMappingError(
-            "terminal mapping base64 dispatch changed"
-        )
-    encoded = _B64_ENCODE(_canonical_bytes(payload)).decode("ascii").rstrip("=")
-    scenario_id = _SCENARIO_ID_PREFIX + encoded
     return _text(
-        scenario_id,
+        _SCENARIO_ID_PREFIX + _digest(payload),
         "scenario_id",
         max_length=_MAX_SCENARIO_ID_LENGTH,
     )
 
 
-def _decode_scenario_id(
+def _require_scenario_id(
     value: object,
-    terminal_population: ProductProposalTargetTerminalPopulation,
-    groups: tuple[_TerminalGroupModel, ...],
-) -> tuple[str, ...]:
+    state_vector_payload: dict[str, object],
+) -> str:
     scenario_id = _text(
         value,
         "scenario_id",
         max_length=_MAX_SCENARIO_ID_LENGTH,
     )
-    if not scenario_id.startswith(_SCENARIO_ID_PREFIX):
+    expected = _scenario_id(state_vector_payload)
+    if scenario_id != expected:
         raise ProductProposalRiskTerminalStateMappingError(
-            "scenario_id is not a canonical terminal-vector identifier"
+            "scenario_id does not match the verified terminal-state vector"
         )
-    encoded = scenario_id[len(_SCENARIO_ID_PREFIX) :]
-    if not encoded:
-        raise ProductProposalRiskTerminalStateMappingError(
-            "scenario_id terminal-vector payload is empty"
-        )
-    if (
-        _B64_DECODE is not _B64_DECODE_EXPECTED
-        or base64.urlsafe_b64decode is not _B64_DECODE_EXPECTED
-        or _B64_ENCODE is not _B64_ENCODE_EXPECTED
-        or base64.urlsafe_b64encode is not _B64_ENCODE_EXPECTED
-    ):
-        raise ProductProposalRiskTerminalStateMappingError(
-            "terminal mapping base64 dispatch changed"
-        )
-    try:
-        raw = _B64_DECODE(encoded + "=" * (-len(encoded) % 4))
-        raw_text = raw.decode("utf-8", errors="strict")
-        parsed = _JSON_LOADS(
-            raw_text,
-            object_pairs_hook=_reject_duplicate_keys,
-            parse_constant=_reject_nonfinite,
-        )
-    except (ValueError, UnicodeError, _JSON_DECODE_ERROR) as exc:
-        raise ProductProposalRiskTerminalStateMappingError(
-            "scenario_id terminal-vector payload is invalid"
-        ) from exc
-    if (
-        _B64_ENCODE(raw).decode("ascii").rstrip("=") != encoded
-        or type(parsed) is not dict
-        or _canonical_bytes(parsed) != raw
-        or set(parsed) != {"schema", "terminal_population_sha256", "states"}
-        or parsed.get("schema") != _SCENARIO_ID_SCHEMA
-        or parsed.get("terminal_population_sha256")
-        != terminal_population.population_sha256
-    ):
-        raise ProductProposalRiskTerminalStateMappingError(
-            "scenario_id terminal-vector payload is non-canonical or stale"
-        )
-    states = parsed.get("states")
-    if type(states) is not list or len(states) != len(groups):
-        raise ProductProposalRiskTerminalStateMappingError(
-            "scenario_id terminal state vector cardinality changed"
-        )
-    state_ids: list[str] = []
-    for index, (raw_state, group) in enumerate(zip(states, groups)):
-        if (
-            type(raw_state) is not dict
-            or set(raw_state) != {"market_group_sha256", "state_id"}
-            or raw_state.get("market_group_sha256")
-            != group.market_group_sha256
-        ):
-            raise ProductProposalRiskTerminalStateMappingError(
-                "scenario_id terminal market-group binding changed"
-            )
-        state_id = _text(raw_state.get("state_id"), f"scenario state[{index}]")
-        if state_id not in group.state_by_id:
-            raise ProductProposalRiskTerminalStateMappingError(
-                "scenario_id names an unverified terminal state"
-            )
-        state_ids.append(state_id)
-    return tuple(state_ids)
-
+    return scenario_id
 
 def _candidate_mapping_material(
     target: ProductProposalRiskTarget,
@@ -1122,6 +1047,7 @@ def resolve_product_proposal_risk_terminal_state_mapping(
     *,
     precommit: ProductProposalRiskEvaluationPrecommit,
     authorities: tuple[MarketSettlementOutcomeAuthority, ...],
+    member_market_state_ids: tuple[tuple[str, ...], ...],
 ) -> ProductProposalRiskTerminalStateMapping:
     """Prove only that the durable fixed-N scenario strings map to terminal states."""
 
@@ -1164,18 +1090,32 @@ def resolve_product_proposal_risk_terminal_state_mapping(
             "durable scenario population member vectors lost fixed-N cardinality"
         )
 
+    if (
+        type(member_market_state_ids) is not tuple
+        or len(member_market_state_ids) != len(precommit.planned_member_ids)
+    ):
+        raise ProductProposalRiskTerminalStateMappingError(
+            "member_market_state_ids must contain the exact fixed-N cohort"
+        )
+
     member_state_vector_sha256s: list[str] = []
-    for index, (scenario_id, mapping_sha256) in enumerate(
+    for index, (scenario_id, mapping_sha256, state_ids) in enumerate(
         zip(
             scenario_population.member_scenario_ids,
             scenario_population.member_mapping_sha256s,
+            member_market_state_ids,
         )
     ):
-        state_ids = _decode_scenario_id(
-            scenario_id,
+        if type(state_ids) is not tuple:
+            raise ProductProposalRiskTerminalStateMappingError(
+                f"member_market_state_ids[{index}] must be an exact tuple"
+            )
+        state_vector = _state_vector_payload(
             terminal_population,
             groups,
+            state_ids,
         )
+        _require_scenario_id(scenario_id, state_vector)
         derived = _derive_binding_from_parents(
             precommit=precommit,
             target=target,
@@ -1311,10 +1251,6 @@ def _require_dispatch() -> None:
         or json.loads is not _JSON_LOADS_EXPECTED
         or _HASHLIB_SHA256 is not _HASHLIB_SHA256_EXPECTED
         or hashlib.sha256 is not _HASHLIB_SHA256_EXPECTED
-        or _B64_ENCODE is not _B64_ENCODE_EXPECTED
-        or base64.urlsafe_b64encode is not _B64_ENCODE_EXPECTED
-        or _B64_DECODE is not _B64_DECODE_EXPECTED
-        or base64.urlsafe_b64decode is not _B64_DECODE_EXPECTED
     ):
         raise ProductProposalRiskTerminalStateMappingError(
             "terminal mapping dispatch root changed"
@@ -1348,7 +1284,7 @@ _HELPER_WITNESSES_EXPECTED = tuple(
         "_leg_key",
         "_state_vector_payload",
         "_scenario_id",
-        "_decode_scenario_id",
+        "_require_scenario_id",
         "_candidate_mapping_material",
         "_derive_binding_from_parents",
         "_resolve_terminal_parents",

@@ -1421,7 +1421,6 @@ class SQLiteMarketStore:
     ) -> None:
         """Repair current projection from history proven in the same write snapshot."""
         latest: dict[tuple[str, str], tuple[tuple[int, str], MarketEvent]] = {}
-        history_by_dedupe: dict[str, MarketEvent] = {}
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             # Startup repair is itself a trust-boundary write. Re-prove both mutable
@@ -1438,35 +1437,16 @@ class SQLiteMarketStore:
             ).fetchall()
             for row in rows:
                 event = _event_from_history_row(row)
-                history_by_dedupe[event.dedupe_key] = event
                 order_key = _projection_order_key(event)
                 projection_key = (event.source_id, event.quote_key)
                 previous = latest.get(projection_key)
                 if previous is None or order_key > previous[0]:
                     latest[projection_key] = (order_key, event)
 
-            projection_rows = self.connection.execute(
-                f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes"
-            ).fetchall()
-            for projection_row in projection_rows:
-                try:
-                    projection_event = _event_from_current_payload(projection_row[4])
-                except (KeyError, TypeError, ValueError):
-                    continue
-                history_event = history_by_dedupe.get(projection_event.dedupe_key)
-                if history_event is None:
-                    # current_quotes is a derived cache, not an authority. Once the
-                    # complete history has been independently proven above, a
-                    # projection-only row is corruption that can be discarded and
-                    # rebuilt; it must not brick restart.
-                    continue
-                if _canonical_payload(history_event) != _canonical_payload(projection_event):
-                    continue
-                try:
-                    _event_from_current_row(projection_row)
-                except (KeyError, TypeError, ValueError):
-                    continue
-
+            # current_quotes is a derived cache, not an authority. Its old
+            # payload bytes are deliberately not parsed: once canonical history and
+            # append authority are proven in this write snapshot, every projection
+            # row can be discarded and reconstructed from history alone.
             self.connection.execute("DELETE FROM current_quotes")
             for projection_key in sorted(latest):
                 event = latest[projection_key][1]

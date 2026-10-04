@@ -728,6 +728,34 @@ def _trusted_live_events_from_connection(
     return sorted(events, key=_order_key)
 
 
+def _has_trusted_live_receipt_from_connection(
+    connection: sqlite3.Connection,
+    event: MarketEvent,
+    *,
+    _dedupe_key=_market_event_dedupe_key,
+    _canonical_payload_fn=_canonical_payload,
+    _authority: str = _LIVE_RECEIPT_AUTHORITY,
+    _decode_history=_event_from_history_row,
+) -> bool:
+    row = connection.execute(
+        f"""SELECT {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)},r.ingest_ts,r.authority
+            FROM market_events AS m
+            INNER JOIN market_event_live_receipts AS r
+            ON r.dedupe_key=m.dedupe_key
+            WHERE m.dedupe_key=?""",
+        (_dedupe_key(event),),
+    ).fetchone()
+    if row is None:
+        return False
+    stored = _decode_history(row[: len(_HISTORY_COLUMNS)])
+    receipt_ingest_ts, authority = row[-2:]
+    if _canonical_payload_fn(stored) != _canonical_payload_fn(event):
+        raise ValueError("live receipt authority does not bind the supplied market event")
+    if receipt_ingest_ts != stored.ingest_ts or authority != _authority:
+        raise ValueError("live receipt authority conflicts with market event")
+    return True
+
+
 class SQLiteMarketStore:
     """Crash-safe append-only normalized market history plus current quote projection.
 
@@ -989,6 +1017,9 @@ class SQLiteMarketStore:
         _capability_type: type[_LiveReceiptBatch] = _LiveReceiptBatch,
         _capability_init=_LiveReceiptBatch.__init__,
         _object_new=object.__new__,
+        _dedupe_key=_market_event_dedupe_key,
+        _canonical_payload_fn=_canonical_payload,
+        _has_trusted=_has_trusted_live_receipt_from_connection,
     ) -> list[MarketEvent]:
         """Route one exact live-ingestion batch through the canonical write choke point.
 
@@ -1006,14 +1037,47 @@ class SQLiteMarketStore:
             raise TypeError("live receipt authority requires exact MarketEvent values")
         capability = _object_new(_capability_type)
         _capability_init(capability, materialized)
+        requested_counts: dict[tuple[str, str], int] = {}
+        for event in materialized:
+            identity = (_dedupe_key(event), _canonical_payload_fn(event))
+            requested_counts[identity] = requested_counts.get(identity, 0) + 1
+
         with self._connection_lock:
             if self._active_live_receipt_batch is not None:
                 raise RuntimeError("nested live receipt authority write is not allowed")
+            receipt_keys_before = {
+                _dedupe_key(event)
+                for event in materialized
+                if self.connection.execute(
+                    "SELECT 1 FROM market_event_live_receipts WHERE dedupe_key=?",
+                    (_dedupe_key(event),),
+                ).fetchone()
+                is not None
+            }
             self._active_live_receipt_batch = capability
             try:
-                return self.append_batch_accepted(capability)
+                accepted = self.append_batch_accepted(capability)
             finally:
                 self._active_live_receipt_batch = None
+
+            if type(accepted) is not list:
+                raise TypeError("live append must return a list of accepted MarketEvent values")
+            remaining = dict(requested_counts)
+            for event in accepted:
+                if type(event) is not _market_event_type:
+                    raise TypeError("live append returned a non-canonical MarketEvent")
+                identity = (_dedupe_key(event), _canonical_payload_fn(event))
+                available = remaining.get(identity, 0)
+                if available <= 0:
+                    raise RuntimeError("live append returned an event outside the requested batch")
+                remaining[identity] = available - 1
+                if identity[0] in receipt_keys_before:
+                    raise RuntimeError("live append reported a pre-existing receipt as newly accepted")
+                if not _has_trusted(self.connection, event):
+                    raise RuntimeError(
+                        "live append returned an event without durable receipt authority"
+                    )
+            return accepted
 
     def append(self, event: MarketEvent) -> bool:
         with self._connection_lock:
@@ -1073,31 +1137,12 @@ class SQLiteMarketStore:
         event: MarketEvent,
         *,
         _market_event_type: type[MarketEvent] = MarketEvent,
-        _dedupe_key=_market_event_dedupe_key,
-        _canonical_payload_fn=_canonical_payload,
-        _authority: str = _LIVE_RECEIPT_AUTHORITY,
-        _decode_history=_event_from_history_row,
+        _read=_has_trusted_live_receipt_from_connection,
     ) -> bool:
         if type(event) is not _market_event_type:
             raise TypeError("event must be an exact MarketEvent")
         with self._connection_lock:
-            row = self.connection.execute(
-                f"""SELECT {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)},r.ingest_ts,r.authority
-                    FROM market_events AS m
-                    INNER JOIN market_event_live_receipts AS r
-                    ON r.dedupe_key=m.dedupe_key
-                    WHERE m.dedupe_key=?""",
-                (_dedupe_key(event),),
-            ).fetchone()
-        if row is None:
-            return False
-        stored = _decode_history(row[: len(_HISTORY_COLUMNS)])
-        receipt_ingest_ts, authority = row[-2:]
-        if _canonical_payload_fn(stored) != _canonical_payload_fn(event):
-            raise ValueError("live receipt authority does not bind the supplied market event")
-        if receipt_ingest_ts != stored.ingest_ts or authority != _authority:
-            raise ValueError("live receipt authority conflicts with market event")
-        return True
+            return _read(self.connection, event)
 
     def trusted_live_events(
         self,

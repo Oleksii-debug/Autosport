@@ -3356,6 +3356,41 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_constructor_rejects_path_replacement_during_sqlite_open(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            moved_path = Path(directory) / "market-opened.db"
+            original_connect = storage_module.sqlite3.connect
+            replaced = False
+
+            def connect_then_replace(database, *args, **kwargs):
+                nonlocal replaced
+                connection = original_connect(database, *args, **kwargs)
+                try:
+                    os.replace(path, moved_path)
+                    path.touch()
+                    replaced = True
+                except OSError as exc:
+                    connection.close()
+                    self.skipTest(
+                        f"SQLite open-time pathname replacement unavailable: {exc}"
+                    )
+                return connection
+
+            with patch.object(
+                storage_module.sqlite3,
+                "connect",
+                new=connect_then_replace,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "pathname changed while opening database",
+                ):
+                    SQLiteMarketStore(path)
+
+            self.assertTrue(replaced)
+            self.assertTrue(moved_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

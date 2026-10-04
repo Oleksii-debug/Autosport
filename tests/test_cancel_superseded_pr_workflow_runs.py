@@ -604,6 +604,39 @@ def test_parse_run_rejects_inplace_workflow_run_constructor_mutation(
         )
 
 
+def test_commit_association_rejects_urlencode_default_rebase(monkeypatch) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    encoder = controller_module.urlencode
+    defaults = encoder.__defaults__
+    assert defaults is not None and defaults
+    requested: list[str] = []
+
+    def forged_quote_via(string, safe, encoding=None, errors=None):
+        del string, safe, encoding, errors
+        return "forged"
+
+    def forbidden_request(path: str, **_kwargs):
+        requested.append(path)
+        raise AssertionError("rebased encoder must not reach commit association transport")
+
+    monkeypatch.setattr(
+        encoder,
+        "__defaults__",
+        defaults[:-1] + (forged_quote_via,),
+    )
+    monkeypatch.setattr(api, "_request", forbidden_request)
+
+    with pytest.raises(
+        CancellationError,
+        match="commit association authority is unavailable",
+    ):
+        api.associated_pr_number(HEAD_A)
+    assert requested == []
+
+
 def test_commit_association_page_bound_cannot_hide_second_pr(monkeypatch) -> None:
     api = controller_module.GitHubApi(
         repository="owner/repo",

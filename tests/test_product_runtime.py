@@ -187,6 +187,8 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     "_acknowledgement_clock": lambda: clock.value,
                     "_on_application_receipt": lambda *_args: None,
                     "drain": lambda **_kwargs: (),
+                    "_PROTECTED_AUTHORITY_FIELDS": frozenset(),
+                    "_product_authority_snapshot": (),
                     "_product_authority_sealed": False,
                 }
                 for name, replacement in replacements.items():
@@ -204,10 +206,23 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                         else:
                             self.assertIs(current, original)
 
+                original_apply = desktop.apply_event
+                desktop.__dict__["apply_event"] = lambda _delta, _event: None
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "changed after composition",
+                ):
+                    desktop.drain(as_of=clock.value)
+                self.assertFalse(
+                    DesktopDeltaCheckpointStore(root / "desktop_acks.json").has_ack(
+                        delta.delta_id
+                    )
+                )
+                desktop.__dict__["apply_event"] = original_apply
+
                 self.assertTrue(runtime.collector.delta_store.append(delta))
                 self.assertEqual(
-                    desktop.drain(as_of=clock.value),
-                    (delta.delta_id,),
+                    desktop.drain(as_of=clock.value),                    (delta.delta_id,),
                 )
                 self.assertEqual(runtime.mirror.snapshot(), (event,))
                 receipt = DesktopDeltaCheckpointStore(

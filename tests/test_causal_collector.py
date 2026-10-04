@@ -934,6 +934,49 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertFalse(checkpoint.has_ack("d1"))
 
 
+    def test_consumer_digest_roots_ignore_kwdefault_metadata_rebind(self):
+        expected_payload = event_payload()
+        wrong_event = MarketEvent.from_dict(
+            {
+                **expected_payload,
+                "decimal_odds": "9.99",
+            }
+        )
+        forged_payload = dict(expected_payload)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = CollectorDeltaStore(Path(tmp) / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(Path(tmp) / "desktop.json")
+            delta = self.make_delta(payload=expected_payload)
+            collector.append(delta)
+            apply_calls = []
+
+            def resolve_event(_delta):
+                forged_defaults = dict(canonical_event_digest.__kwdefaults__ or {})
+                forged_defaults["_market_event_to_dict"] = lambda _event: dict(
+                    forged_payload
+                )
+                canonical_event_digest.__kwdefaults__ = forged_defaults
+                return wrong_event
+
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=resolve_event,
+                apply_event=lambda *_: apply_calls.append(True),
+                lookup_application_receipt=lambda _delta: None,
+            )
+            original_kwdefaults = canonical_event_digest.__kwdefaults__
+            try:
+                with self.assertRaises(DeltaConflictError):
+                    consumer.drain(as_of="2026-01-01T00:00:05+00:00")
+            finally:
+                canonical_event_digest.__kwdefaults__ = original_kwdefaults
+
+            self.assertEqual(apply_calls, [])
+            self.assertFalse(checkpoint.has_ack(delta.delta_id))
+
+
     def test_consumer_rejects_market_event_subclass_before_application_or_ack(self):
         expected_payload = event_payload()
 

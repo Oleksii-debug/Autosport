@@ -75,16 +75,14 @@ def _text(value: Any, field: str) -> str:
     return value
 
 
-def canonical_event_digest(
+def _canonical_event_digest_impl(
     event_or_payload: Any,
     *,
-    _market_event_type: type[MarketEvent] = MarketEvent,
-    _market_event_to_dict=MarketEvent.to_dict,
-    _dumps=json.dumps,
-    _sha256=hashlib.sha256,
+    _market_event_type,
+    _market_event_to_dict,
+    _dumps,
+    _sha256,
 ) -> str:
-    """Hash canonical event evidence without mutable MarketEvent codec dispatch."""
-
     if type(event_or_payload) is _market_event_type:
         payload = _market_event_to_dict(event_or_payload)
     else:
@@ -104,6 +102,33 @@ def canonical_event_digest(
     except (TypeError, ValueError) as exc:
         raise ValueError("canonical event payload is not JSON-safe") from exc
     return _sha256(raw).hexdigest()
+
+
+def _bind_canonical_event_digest(implementation):
+    """Keep canonical digest roots outside caller-writable function defaults."""
+
+    market_event_type = MarketEvent
+    market_event_to_dict = MarketEvent.to_dict
+    dumps = json.dumps
+    sha256 = hashlib.sha256
+
+    def canonical_event_digest(event_or_payload: Any) -> str:
+        """Hash canonical event evidence through composition-time authority roots."""
+
+        return implementation(
+            event_or_payload,
+            _market_event_type=market_event_type,
+            _market_event_to_dict=market_event_to_dict,
+            _dumps=dumps,
+            _sha256=sha256,
+        )
+
+    return canonical_event_digest
+
+
+canonical_event_digest = _bind_canonical_event_digest(_canonical_event_digest_impl)
+del _canonical_event_digest_impl
+del _bind_canonical_event_digest
 
 
 def digest_source_payload(raw_payload: bytes | bytearray | memoryview | str) -> str:

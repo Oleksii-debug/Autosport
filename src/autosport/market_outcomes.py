@@ -182,7 +182,7 @@ def _canonical_sha256(name: str, value: object) -> str:
 
 
 def _canonical_json(payload: object) -> str:
-    return json.dumps(
+    return _CANONICAL_JSON_DUMPS(
         payload,
         ensure_ascii=False,
         sort_keys=True,
@@ -192,7 +192,27 @@ def _canonical_json(payload: object) -> str:
 
 
 def _sha256_payload(payload: object) -> str:
-    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+    return _CANONICAL_SHA256_CONSTRUCTOR(
+        _canonical_json(payload).encode("utf-8")
+    ).hexdigest()
+
+
+_CANONICAL_JSON_DUMPS = json.dumps
+_CANONICAL_JSON_DUMPS_CODE = getattr(_CANONICAL_JSON_DUMPS, "__code__", None)
+_CANONICAL_SHA256_CONSTRUCTOR = hashlib.sha256
+_CANONICAL_SHA256_CONSTRUCTOR_CODE = getattr(
+    _CANONICAL_SHA256_CONSTRUCTOR,
+    "__code__",
+    None,
+)
+_CANONICAL_JSON_ENCODER = _canonical_json
+_CANONICAL_JSON_ENCODER_CODE = getattr(_CANONICAL_JSON_ENCODER, "__code__", None)
+_CANONICAL_SHA256_PAYLOAD = _sha256_payload
+_CANONICAL_SHA256_PAYLOAD_CODE = getattr(
+    _CANONICAL_SHA256_PAYLOAD,
+    "__code__",
+    None,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -385,6 +405,19 @@ _CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD_CODE = getattr(
 
 _CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS = (
     ("datetime", _CANONICAL_DATETIME_TYPE),
+    ("_canonical_json", _CANONICAL_JSON_ENCODER),
+    ("_sha256_payload", _CANONICAL_SHA256_PAYLOAD),
+    ("_CANONICAL_JSON_DUMPS", _CANONICAL_JSON_DUMPS),
+    ("_CANONICAL_JSON_DUMPS_CODE", _CANONICAL_JSON_DUMPS_CODE),
+    ("_CANONICAL_JSON_ENCODER", _CANONICAL_JSON_ENCODER),
+    ("_CANONICAL_JSON_ENCODER_CODE", _CANONICAL_JSON_ENCODER_CODE),
+    ("_CANONICAL_SHA256_CONSTRUCTOR", _CANONICAL_SHA256_CONSTRUCTOR),
+    (
+        "_CANONICAL_SHA256_CONSTRUCTOR_CODE",
+        _CANONICAL_SHA256_CONSTRUCTOR_CODE,
+    ),
+    ("_CANONICAL_SHA256_PAYLOAD", _CANONICAL_SHA256_PAYLOAD),
+    ("_CANONICAL_SHA256_PAYLOAD_CODE", _CANONICAL_SHA256_PAYLOAD_CODE),
     ("MarketOutcomeIdentity", _CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE),
     ("timezone", _CANONICAL_TIMEZONE_TYPE),
     ("MarketTerminalState", _CANONICAL_MARKET_TERMINAL_STATE_TYPE),
@@ -919,6 +952,20 @@ def _assert_canonical_market_outcome_authority_dispatch() -> None:
         if globals().get(name) is not expected:
             raise ValueError(
                 "canonical market outcome authority module root was replaced"
+            )
+    helper_code_checks = (
+        (_CANONICAL_JSON_DUMPS, _CANONICAL_JSON_DUMPS_CODE),
+        (_CANONICAL_JSON_ENCODER, _CANONICAL_JSON_ENCODER_CODE),
+        (
+            _CANONICAL_SHA256_CONSTRUCTOR,
+            _CANONICAL_SHA256_CONSTRUCTOR_CODE,
+        ),
+        (_CANONICAL_SHA256_PAYLOAD, _CANONICAL_SHA256_PAYLOAD_CODE),
+    )
+    for helper, expected_code in helper_code_checks:
+        if getattr(helper, "__code__", None) is not expected_code:
+            raise ValueError(
+                "canonical market outcome authority digest helper was replaced"
             )
     if (
         getattr(

@@ -836,5 +836,103 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
         authority.assert_issued_integrity()
 
 
+    def test_mutated_authority_rejects_sha256_payload_rebinding_mask(self) -> None:
+        authority = self._authority()
+        issued_digest = authority.authority_sha256
+        object.__setattr__(
+            authority,
+            "selection_ids",
+            ("away", "forged", "home"),
+        )
+        original = market_outcomes_module._sha256_payload
+        hostile_calls: list[object] = []
+
+        def forged_digest(payload):
+            hostile_calls.append(payload)
+            return issued_digest
+
+        market_outcomes_module._sha256_payload = forged_digest
+        try:
+            with self.assertRaisesRegex(ValueError, "module root was replaced"):
+                authority.assert_issued_integrity()
+        finally:
+            market_outcomes_module._sha256_payload = original
+
+        self.assertEqual(hostile_calls, [])
+        with self.assertRaisesRegex(ValueError, "mutated after verified issuance"):
+            authority.assert_issued_integrity()
+
+    def test_mutated_authority_rejects_sha256_payload_code_mutation_mask(
+        self,
+    ) -> None:
+        authority = self._authority()
+        issued_digest = authority.authority_sha256
+        object.__setattr__(
+            authority,
+            "selection_ids",
+            ("away", "forged", "home"),
+        )
+        helper = market_outcomes_module._sha256_payload
+        original_code = helper.__code__
+        hostile_calls: list[object] = []
+
+        def forged_digest(payload):
+            hostile_calls.append(payload)
+            return issued_digest
+
+        self.assertEqual(original_code.co_freevars, ())
+        self.assertEqual(forged_digest.__code__.co_freevars, ())
+        helper.__code__ = forged_digest.__code__
+        try:
+            with self.assertRaisesRegex(ValueError, "digest helper was replaced"):
+                authority.assert_issued_integrity()
+        finally:
+            helper.__code__ = original_code
+
+        self.assertEqual(hostile_calls, [])
+        with self.assertRaisesRegex(ValueError, "mutated after verified issuance"):
+            authority.assert_issued_integrity()
+
+    def test_digest_rejects_json_dumps_alias_rebinding_before_execution(self) -> None:
+        authority = self._authority()
+        original = market_outcomes_module._CANONICAL_JSON_DUMPS
+        hostile_calls: list[object] = []
+
+        def hostile_dumps(*args, **kwargs):
+            hostile_calls.append((args, kwargs))
+            return "{}"
+
+        market_outcomes_module._CANONICAL_JSON_DUMPS = hostile_dumps
+        try:
+            with self.assertRaisesRegex(ValueError, "module root was replaced"):
+                authority.assert_issued_integrity()
+        finally:
+            market_outcomes_module._CANONICAL_JSON_DUMPS = original
+
+        self.assertEqual(hostile_calls, [])
+        authority.assert_issued_integrity()
+
+    def test_digest_rejects_sha256_constructor_alias_rebinding_before_execution(
+        self,
+    ) -> None:
+        authority = self._authority()
+        original = market_outcomes_module._CANONICAL_SHA256_CONSTRUCTOR
+        hostile_calls: list[object] = []
+
+        def hostile_constructor(payload):
+            hostile_calls.append(payload)
+            raise AssertionError("hostile sha256 constructor executed")
+
+        market_outcomes_module._CANONICAL_SHA256_CONSTRUCTOR = hostile_constructor
+        try:
+            with self.assertRaisesRegex(ValueError, "module root was replaced"):
+                authority.assert_issued_integrity()
+        finally:
+            market_outcomes_module._CANONICAL_SHA256_CONSTRUCTOR = original
+
+        self.assertEqual(hostile_calls, [])
+        authority.assert_issued_integrity()
+
+
 if __name__ == "__main__":
     unittest.main()

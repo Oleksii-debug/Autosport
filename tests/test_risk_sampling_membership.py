@@ -192,7 +192,15 @@ class RiskSamplingMembershipTests(unittest.TestCase):
             (self._design_v2(confidence_level="1"), "strictly between"),
             (self._design_v2(confidence_level="0"), "strictly between"),
             (self._design_v2(confidence_level="0.950"), "canonical decimal text"),
+            (
+                self._design_v2(confidence_level="1e100000000"),
+                "exceeds supported canonical size",
+            ),
             (self._design_v2(ruin_threshold="-0"), "canonical decimal text"),
+            (
+                self._design_v2(ruin_threshold="1e100000000"),
+                "exceeds supported canonical size",
+            ),
             (
                 self._design_v2(risk_target_scope="CALLER_CANDIDATE"),
                 "FROZEN_STAKE_POLICY",

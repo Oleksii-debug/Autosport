@@ -2257,6 +2257,22 @@ class PersistentLiveDecisionLoop:
                     raise _ConcurrentDecisionSnapshot(
                         "provider gap lost canonical provider source identity"
                     ) from source_error
+            else:
+                # An injected observation runner can report only a generic provider
+                # failure, with no product-owned causal source identity. In that
+                # ambiguous case one unrelated failed dependency must not authorize
+                # a ZERO/provider-gap decision for healthy peers. Requiring every
+                # source already bound into this exact decision cut to be FAILED is
+                # conservative and preserves liveness once the complete ambiguous
+                # source set is durably failed.
+                required_failed_source_ids = tuple(
+                    sorted(
+                        {
+                            boundary.source_id
+                            for boundary in provider_health_boundaries
+                        }
+                    )
+                )
             try:
                 self._verify_provider_health_boundaries(
                     provider_health_boundaries,

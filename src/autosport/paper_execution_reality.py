@@ -779,7 +779,39 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 raise PaperExecutionIntegrityError(
                     "durable reservation action_ids are invalid"
                 )
-            _, attempts = self._attempts_in_event_order(run_events)
+            attempt_events, attempts = self._attempts_in_event_order(
+                run_events
+            )
+            reservation_event = reservations[0]
+            if any(
+                event["sequence"] <= reservation_event["sequence"]
+                for event in attempt_events
+            ):
+                raise PaperExecutionIntegrityError(
+                    "durable attempt appears before RUN_RESERVED"
+                )
+            completions = [
+                event
+                for event in run_events
+                if event["event_type"] == "RUN_COMPLETED"
+            ]
+            if len(completions) > 1:
+                raise PaperExecutionIntegrityError(
+                    "run has multiple completion events"
+                )
+            if completions:
+                completion = completions[0]
+                if (
+                    completion["sequence"]
+                    <= reservation_event["sequence"]
+                    or any(
+                        event["sequence"] > completion["sequence"]
+                        for event in attempt_events
+                    )
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "durable completion chronology is invalid"
+                    )
             derived = _derive_run_economics(tuple(action_ids_raw), attempts)
             if not derived.can_complete:
                 raise PaperExecutionStateError(

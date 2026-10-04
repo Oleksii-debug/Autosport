@@ -733,7 +733,7 @@ class SQLiteMarketStore:
                     projection_event = _event_from_current_payload(projection_row[3])
                 except (KeyError, TypeError, ValueError):
                     continue
-                history_event = history_by_dedupe.get(projection__market_event_dedupe_key(event))
+                history_event = history_by_dedupe.get(_market_event_dedupe_key(projection_event))
                 if history_event is None:
                     raise ValueError(
                         "legacy current_quotes projection event is missing from authoritative history"
@@ -817,7 +817,7 @@ class SQLiteMarketStore:
                     projection_event = _event_from_current_payload(projection_row[4])
                 except (KeyError, TypeError, ValueError):
                     continue
-                history_event = history_by_dedupe.get(projection__market_event_dedupe_key(event))
+                history_event = history_by_dedupe.get(_market_event_dedupe_key(projection_event))
                 if history_event is None:
                     raise ValueError(
                         "current_quotes projection event is missing from authoritative history"

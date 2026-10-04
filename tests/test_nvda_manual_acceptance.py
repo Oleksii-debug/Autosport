@@ -1358,6 +1358,63 @@ def test_unterminated_pending_file_fails_closed_before_recovery(tmp_path):
         ledger.events()
 
 
+def test_crlf_rewritten_ledger_event_is_not_canonical(tmp_path):
+    ledger = _ledger(tmp_path)
+    _record(ledger, _transcript())
+    raw = ledger.path.read_bytes()
+    assert b"\r" not in raw
+    ledger.path.write_bytes(raw.replace(b"\n", b"\r\n"))
+
+    with pytest.raises(
+        NvdaManualAcceptanceIntegrityError,
+        match="ledger event bytes are not canonical",
+    ):
+        ledger.events()
+
+
+def test_crlf_rewritten_anchor_is_not_canonical(tmp_path):
+    ledger = _ledger(tmp_path)
+    _record(ledger, _transcript())
+    raw = ledger._anchor_path.read_bytes()
+    assert b"\r" not in raw
+    ledger._anchor_path.write_bytes(raw.replace(b"\n", b"\r\n"))
+
+    with pytest.raises(
+        NvdaManualAcceptanceIntegrityError,
+        match="anchor bytes are not canonical",
+    ):
+        ledger.events()
+
+
+def test_crlf_rewritten_pending_is_not_canonical(tmp_path):
+    ledger = _ledger(tmp_path)
+    _record(ledger, _transcript())
+    event = json.loads(ledger.path.read_text(encoding="utf-8"))
+    pending = ledger._pending_record(
+        prior_event_count=0,
+        prior_root=None,
+        event=event,
+    )
+    ledger._pending_path.write_text(
+        json.dumps(
+            pending,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    raw = ledger._pending_path.read_bytes()
+    ledger._pending_path.write_bytes(raw.replace(b"\n", b"\r\n"))
+
+    with pytest.raises(
+        NvdaManualAcceptanceIntegrityError,
+        match="pending manual NVDA decision bytes are not canonical",
+    ):
+        ledger.events()
+
+
 def test_tail_deletion_is_detected_by_anchor(tmp_path):
     transcript = _transcript()
     ledger = _ledger(tmp_path)

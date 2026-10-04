@@ -140,13 +140,16 @@ class _SourceHealthSnapshot:
         )
 
     def after_success(
-        self, outcome: "CommittedIngestionOutcome"
+        self,
+        outcome: "CommittedIngestionOutcome",
+        *,
+        _parse_timestamp=parse_source_timestamp,
     ) -> "_SourceHealthSnapshot":
         latest_source_ts = self.latest_source_ts
         if outcome.latest_source_ts is not None:
             if latest_source_ts is None or (
-                parse_source_timestamp(outcome.latest_source_ts)
-                >= parse_source_timestamp(latest_source_ts)
+                _parse_timestamp(outcome.latest_source_ts)
+                >= _parse_timestamp(latest_source_ts)
             ):
                 latest_source_ts = outcome.latest_source_ts
         quality_flags = tuple(sorted(outcome.quality_flags))
@@ -265,7 +268,15 @@ class IngestionEngine:
         self.health_store = health_store
         self.clock = clock or _utc_now_iso
 
-    def poll_once(self, provider: MarketProvider, max_items: int = 1000) -> IngestionStats:
+    def poll_once(
+        self,
+        provider: MarketProvider,
+        max_items: int = 1000,
+        *,
+        _stamp=_stamp_live_event,
+        _publish=_publish_normalized_live_batch,
+        _parse_timestamp=parse_source_timestamp,
+    ) -> IngestionStats:
         if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0:
             raise ValueError("max_items must be a positive integer")
         if max_items > self.policy.max_batch_size:
@@ -325,12 +336,11 @@ class IngestionEngine:
         normalized = []
         rejected = 0
         latest_source: datetime | None = None
-        now_point = parse_source_timestamp(now)
+        now_point = _parse_timestamp(now)
         for quote in batch.quotes:
-            source_point: datetime | None = None
             if quote.source_ts is not None:
                 try:
-                    source_point = parse_source_timestamp(quote.source_ts)
+                    _parse_timestamp(quote.source_ts)
                 except (AttributeError, TypeError, ValueError):
                     flags.add("INVALID_SOURCE_TIMESTAMP")
                     rejected += 1
@@ -340,19 +350,25 @@ class IngestionEngine:
                 # Provider/adaptor observation clocks remain evidence fields.
                 # Durable ingestion time is owned by this post-acquisition
                 # product clock, never by provider-controlled quote payloads.
-                event = _stamp_live_event(event, now)
+                event = _stamp(event, now)
+                if event.source_id != batch.source_id:
+                    raise ValueError("normalizer returned mismatched source_id")
+                source_point = (
+                    _parse_timestamp(event.source_ts)
+                    if event.source_ts is not None
+                    else None
+                )
+                observed_point = _parse_timestamp(event.observed_ts)
             except (TypeError, ValueError):
                 flags.add("INVALID_QUOTE")
                 rejected += 1
                 continue
 
-            # Decision freshness uses provider source time when available and the
-            # canonical observation time otherwise. Health must classify the same
-            # temporal truth that MarketMirror.active_view will later enforce.
+            # Health must classify the exact temporal truth persisted in MarketEvent,
+            # because MarketMirror.active_view later makes decisions from these same
+            # normalized source/observation clocks.
             freshness_point = (
-                source_point
-                if source_point is not None
-                else parse_source_timestamp(event.observed_ts)
+                source_point if source_point is not None else observed_point
             )
             age_seconds = (now_point - freshness_point).total_seconds()
             if age_seconds > self.policy.stale_after_seconds:
@@ -368,7 +384,7 @@ class IngestionEngine:
 
         latest_source_ts = latest_source.isoformat() if latest_source is not None else None
         if previous_source_ts is not None and latest_source is not None:
-            if latest_source < parse_source_timestamp(previous_source_ts):
+            if latest_source < _parse_timestamp(previous_source_ts):
                 flags.add("SOURCE_TIME_REGRESSION")
 
         # Persistence and subscriber delivery are local pipeline stages. A failure here
@@ -376,7 +392,7 @@ class IngestionEngine:
         # acquisition/validation/normalization already succeeded.
         ordered_flags = tuple(sorted(flags))
         try:
-            accepted = _publish_normalized_live_batch(self.bus, normalized)
+            accepted = _publish(self.bus, normalized)
         except MarketEventDeliveryError as delivery_error:
             # MarketEventDeliveryError can only be raised after transactional
             # persistence succeeds. Preserve the exact storage-derived outcome in

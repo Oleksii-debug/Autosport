@@ -651,7 +651,7 @@ def _build_trusted_private_place_action(private_place_action, private_place_acti
                     approval=confirmation_context.approval,
                     action=action,
                     attempt_id=confirmation_context.attempt_id,
-                    submitted_at=final_send_at,
+                    submitted_at=submitted_at,
                 )
             except (_CONFIRMATION_INNER_ERROR, _CONFIRMATION_ERROR) as exc:
                 raise _impl.BetfairSupervisedExecutionError(

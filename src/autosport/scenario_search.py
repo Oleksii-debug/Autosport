@@ -5,7 +5,7 @@ import math
 import random
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
 from fractions import Fraction
 
 from .domain import PaperTicket, TicketStatus
@@ -15,6 +15,14 @@ from .portfolio import PortfolioEngine, _snapshot_open_tickets_for_analysis
 
 _MAX_SCENARIO_PROBABILITY_COEFFICIENT_DIGITS = 4096
 _MAX_SCENARIO_PROBABILITY_ABS_EXPONENT = 4096
+_SCENARIO_DECIMAL_CONTEXT = Context(
+    prec=28,
+    rounding=ROUND_HALF_EVEN,
+    Emin=-999999,
+    Emax=999999,
+    capitals=1,
+    clamp=0,
+)
 
 
 def _canonical_scenario_text(value: object, *, field: str) -> str:
@@ -469,16 +477,23 @@ class ScenarioSearchEngine:
     def _enumerate(self, tickets: list[PaperTicket], groups: list[ScenarioGroup]) -> tuple[list[Decimal], Decimal | None]:
         profits: list[Decimal] = []
         can_weight = all(all(outcome.probability is not None for outcome in group.outcomes) for group in groups)
-        expected = Decimal("0") if can_weight else None
+        expected_fraction = Fraction(0, 1) if can_weight else None
         for combination in itertools.product(*(group.outcomes for group in groups)):
             winners = {outcome.quote_key for outcome in combination}
             profit = PortfolioEngine.scenario_profit(tickets, winners)
             profits.append(profit)
-            if expected is not None:
-                probability = Decimal("1")
+            if expected_fraction is not None:
+                probability = Fraction(1, 1)
                 for outcome in combination:
-                    probability *= outcome.probability or Decimal("0")
-                expected += probability * profit
+                    if outcome.probability is None:
+                        raise RuntimeError("weighted enumeration lost canonical probability")
+                    probability *= Fraction(outcome.probability)
+                expected_fraction += probability * Fraction(profit)
+        expected = (
+            _fraction_to_exact_decimal(expected_fraction)
+            if expected_fraction is not None
+            else None
+        )
         return profits, expected
 
     def _partial_bounds(
@@ -576,7 +591,7 @@ class ScenarioSearchEngine:
             if can_weight
             else ()
         )
-        total = Decimal("0")
+        total = Fraction(0, 1)
         for _ in range(self.sample_count):
             winners: set[str] = set()
             for index, group in enumerate(groups):
@@ -592,8 +607,12 @@ class ScenarioSearchEngine:
             value = PortfolioEngine.scenario_profit(tickets, winners)
             worst = min(worst, value)
             best = max(best, value)
-            total += value
-        expected = total / Decimal(self.sample_count) if can_weight else None
+            total += Fraction(value)
+        expected = (
+            _fraction_to_sampled_decimal(total / self.sample_count)
+            if can_weight
+            else None
+        )
         return worst, best, expected
 
     def _sample_expected(self, tickets, groups) -> tuple[Decimal | None, str | None]:
@@ -601,6 +620,38 @@ class ScenarioSearchEngine:
             return None, None
         _worst, _best, expected = self._sample(tickets, groups)
         return expected, "sampled-independent-groups"
+
+
+def _fraction_to_exact_decimal(value: Fraction) -> Decimal:
+    denominator = value.denominator
+    twos = 0
+    fives = 0
+    while denominator % 2 == 0:
+        denominator //= 2
+        twos += 1
+    while denominator % 5 == 0:
+        denominator //= 5
+        fives += 1
+    if denominator != 1:
+        raise ValueError("exact scenario expectation is not Decimal-representable")
+    scale = max(twos, fives)
+    coefficient = value.numerator
+    if twos < scale:
+        coefficient *= 2 ** (scale - twos)
+    if fives < scale:
+        coefficient *= 5 ** (scale - fives)
+    if coefficient == 0:
+        return Decimal("0")
+    digits = tuple(int(item) for item in str(abs(coefficient)))
+    return Decimal((int(coefficient < 0), digits, -scale))
+
+
+def _fraction_to_sampled_decimal(value: Fraction) -> Decimal:
+    with localcontext(_SCENARIO_DECIMAL_CONTEXT):
+        result = Decimal(value.numerator) / Decimal(value.denominator)
+    if not result.is_finite():
+        raise ValueError("sampled scenario expectation must be finite")
+    return result
 
 
 def _decimal_probability_coefficient(value: Decimal) -> tuple[int, int]:

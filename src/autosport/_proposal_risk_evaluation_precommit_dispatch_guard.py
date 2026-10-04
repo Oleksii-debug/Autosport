@@ -193,6 +193,24 @@ def _install_execution_evidence_guard() -> None:
         "grants_ticket_authority",
         "grants_real_money_authority",
     )
+    row_descriptor_names = (
+        "__init__",
+        "__post_init__",
+        "member_id",
+        "binding_sha256",
+        "target_sha256",
+        "candidate_vector_sha256",
+        "executed_stakes",
+        "execution_engine_sha256",
+        "source_sha256",
+        "observed_at",
+        "starting_equity",
+        "minimum_equity",
+        "terminal_equity",
+        "gross_pnl",
+        "costs",
+        "net_pnl",
+    )
     result_descriptor_names = (
         "__new__",
         "execution_evidence_identity_proven",
@@ -212,6 +230,10 @@ def _install_execution_evidence_guard() -> None:
         (name, precommit_type.__dict__.get(name))
         for name in precommit_descriptor_names
     )
+    row_descriptor_witnesses = tuple(
+        (name, row_type.__dict__.get(name))
+        for name in row_descriptor_names
+    )
     result_descriptor_witnesses = tuple(
         (name, result_type.__dict__.get(name))
         for name in result_descriptor_names
@@ -219,6 +241,10 @@ def _install_execution_evidence_guard() -> None:
     if any(value is None for _, value in precommit_descriptor_witnesses):
         raise RuntimeError(
             "proposal risk execution evidence precommit truth descriptors are unavailable"
+        )
+    if any(value is None for _, value in row_descriptor_witnesses):
+        raise RuntimeError(
+            "proposal risk execution evidence row validation descriptors are unavailable"
         )
     if any(value is None for _, value in result_descriptor_witnesses):
         raise RuntimeError(
@@ -290,6 +316,11 @@ def _install_execution_evidence_guard() -> None:
             if precommit_type.__dict__.get(name) is not expected:
                 raise error_type(
                     f"proposal risk execution evidence precommit descriptor {name} changed"
+                )
+        for name, expected in row_descriptor_witnesses:
+            if row_type.__dict__.get(name) is not expected:
+                raise error_type(
+                    f"proposal risk execution evidence row descriptor {name} changed"
                 )
         for name, expected in result_descriptor_witnesses:
             if result_type.__dict__.get(name) is not expected:

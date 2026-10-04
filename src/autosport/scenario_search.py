@@ -6,16 +6,51 @@ import random
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from fractions import Fraction
 
 from .domain import PaperTicket, TicketStatus
 from .market_outcomes import MarketSettlementOutcomeAuthority
 from .portfolio import PortfolioEngine, _snapshot_open_tickets_for_analysis
 
 
+_MAX_SCENARIO_PROBABILITY_COEFFICIENT_DIGITS = 4096
+_MAX_SCENARIO_PROBABILITY_ABS_EXPONENT = 4096
+
+
+def _canonical_scenario_text(value: object, *, field: str) -> str:
+    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
+        raise ValueError(f"{field} must be a non-empty canonical string")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field} must be valid UTF-8 text") from exc
+    return value
+
+
+def _validate_scenario_probability(value: object) -> Decimal:
+    if type(value) is not Decimal or not value.is_finite():
+        raise ValueError("scenario outcome probability must be an exact finite Decimal")
+    if value < 0 or value > 1:
+        raise ValueError("scenario outcome probability must be between 0 and 1")
+    parts = value.as_tuple()
+    if not isinstance(parts.exponent, int):
+        raise ValueError("scenario outcome probability exponent must be an integer")
+    if len(parts.digits) > _MAX_SCENARIO_PROBABILITY_COEFFICIENT_DIGITS:
+        raise ValueError("scenario outcome probability coefficient exceeds resource limit")
+    if abs(parts.exponent) > _MAX_SCENARIO_PROBABILITY_ABS_EXPONENT:
+        raise ValueError("scenario outcome probability exponent exceeds resource limit")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ScenarioOutcome:
     quote_key: str
     probability: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        _canonical_scenario_text(self.quote_key, field="scenario outcome quote_key")
+        if self.probability is not None:
+            _validate_scenario_probability(self.probability)
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,8 +59,13 @@ class ScenarioGroup:
     outcomes: tuple[ScenarioOutcome, ...]
 
     def __post_init__(self) -> None:
-        if len(self.outcomes) < 2:
-            raise ValueError("scenario group requires at least two outcomes")
+        _canonical_scenario_text(self.group_id, field="scenario group_id")
+        if type(self.outcomes) is not tuple or len(self.outcomes) < 2:
+            raise ValueError("scenario group outcomes must be a tuple with at least two outcomes")
+        if any(type(item) is not ScenarioOutcome for item in self.outcomes):
+            raise ValueError("scenario group outcomes must contain exact ScenarioOutcome values")
+        for item in self.outcomes:
+            item.__post_init__()
         keys = [item.quote_key for item in self.outcomes]
         if len(keys) != len(set(keys)):
             raise ValueError("duplicate outcome quote_key")
@@ -33,11 +73,64 @@ class ScenarioGroup:
         if any(value is not None for value in probabilities):
             if any(value is None for value in probabilities):
                 raise ValueError("either all or no outcome probabilities must be supplied")
-            total = sum((value for value in probabilities if value is not None), Decimal("0"))
-            if abs(total - Decimal("1")) > Decimal("0.000000001"):
-                raise ValueError("scenario group probabilities must sum to 1")
-            if any(value is not None and (value < 0 or value > 1) for value in probabilities):
-                raise ValueError("invalid outcome probability")
+            typed = tuple(_validate_scenario_probability(value) for value in probabilities)
+            if sum((Fraction(value) for value in typed), Fraction(0, 1)) != Fraction(1, 1):
+                raise ValueError("scenario group probabilities must sum exactly to 1")
+
+
+def _scenario_group_fingerprint(
+    group: ScenarioGroup,
+) -> tuple[str, tuple[tuple[str, Decimal | None], ...]]:
+    if type(group) is not ScenarioGroup:
+        raise ValueError("scenario groups must contain exact ScenarioGroup values")
+    group.__post_init__()
+    return (
+        group.group_id,
+        tuple((outcome.quote_key, outcome.probability) for outcome in group.outcomes),
+    )
+
+
+def _scenario_group_sort_key(group: ScenarioGroup) -> tuple[str, tuple[str, ...]]:
+    return group.group_id, tuple(outcome.quote_key for outcome in group.outcomes)
+
+
+def _snapshot_scenario_groups(
+    groups: list[ScenarioGroup] | tuple[ScenarioGroup, ...],
+) -> tuple[ScenarioGroup, ...]:
+    if type(groups) not in (list, tuple):
+        raise ValueError("scenario groups must be a list or tuple")
+    source_groups = tuple(groups)
+    captured: list[tuple[str, tuple[tuple[str, Decimal | None], ...]]] = []
+    snapshots: list[ScenarioGroup] = []
+    for group in source_groups:
+        fingerprint = _scenario_group_fingerprint(group)
+        captured.append(fingerprint)
+        group_id, outcome_values = fingerprint
+        snapshots.append(
+            ScenarioGroup(
+                group_id,
+                tuple(
+                    ScenarioOutcome(quote_key, probability)
+                    for quote_key, probability in sorted(outcome_values, key=lambda item: item[0])
+                ),
+            )
+        )
+
+    current_groups = tuple(groups)
+    if (
+        len(current_groups) != len(source_groups)
+        or any(current is not source for current, source in zip(current_groups, source_groups))
+    ):
+        raise ValueError("scenario group set changed during snapshot")
+    for group, fingerprint in zip(source_groups, captured):
+        if _scenario_group_fingerprint(group) != fingerprint:
+            raise ValueError("scenario group changed during snapshot")
+
+    ordered = tuple(sorted(snapshots, key=_scenario_group_sort_key))
+    group_ids = tuple(group.group_id for group in ordered)
+    if len(group_ids) != len(set(group_ids)):
+        raise ValueError("scenario group_id values must be unique")
+    return ordered
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,31 +198,32 @@ class ScenarioSearchEngine:
 
     def analyse(self, tickets: list[PaperTicket], groups: list[ScenarioGroup]) -> ScenarioSearchReport:
         open_tickets = _snapshot_open_tickets_for_analysis(tickets)
+        canonical_groups = _snapshot_scenario_groups(groups)
         if not open_tickets:
             zero = Decimal("0")
             return ScenarioSearchReport("exact", 1, 1, zero, zero, zero, zero, True, True, zero, "exact")
-        mapping = self._validate_and_map(open_tickets, groups)
-        total_states = math.prod(len(group.outcomes) for group in groups)
+        mapping = self._validate_and_map(open_tickets, canonical_groups)
+        total_states = math.prod(len(group.outcomes) for group in canonical_groups)
         floor = -sum((ticket.stake for ticket in open_tickets), Decimal("0"))
         ceiling = sum((ticket.stake * ticket.combined_odds - ticket.stake for ticket in open_tickets), Decimal("0"))
         if total_states <= self.exact_state_limit:
-            profits, weighted = self._enumerate(open_tickets, groups)
+            profits, weighted = self._enumerate(open_tickets, canonical_groups)
             expected = weighted if weighted is not None else None
             return ScenarioSearchReport(
                 "exact-enumeration", total_states, total_states, min(profits), max(profits), floor, ceiling, True, True,
                 expected, "exact-independent-groups" if expected is not None else None,
             )
 
-        min_result = self._branch_bound(open_tickets, groups, mapping, minimize=True)
-        max_result = self._branch_bound(open_tickets, groups, mapping, minimize=False)
+        min_result = self._branch_bound(open_tickets, canonical_groups, mapping, minimize=True)
+        max_result = self._branch_bound(open_tickets, canonical_groups, mapping, minimize=False)
         if min_result[2] and max_result[2]:
-            expected, expected_mode = self._sample_expected(open_tickets, groups)
+            expected, expected_mode = self._sample_expected(open_tickets, canonical_groups)
             return ScenarioSearchReport(
                 "branch-and-bound-exact-extrema", total_states, min_result[1] + max_result[1], min_result[0], max_result[0],
                 floor, ceiling, True, True, expected, expected_mode,
             )
 
-        sample_worst, sample_best, expected = self._sample(open_tickets, groups)
+        sample_worst, sample_best, expected = self._sample(open_tickets, canonical_groups)
         observed_worst = min(sample_worst, min_result[0])
         observed_best = max(sample_best, max_result[0])
         return ScenarioSearchReport(
@@ -477,12 +571,21 @@ class ScenarioSearchEngine:
         worst = Decimal("Infinity")
         best = Decimal("-Infinity")
         can_weight = all(all(outcome.probability is not None for outcome in group.outcomes) for group in groups)
+        weighted_tables = (
+            tuple(_integer_probability_weights(group.outcomes) for group in groups)
+            if can_weight
+            else ()
+        )
         total = Decimal("0")
         for _ in range(self.sample_count):
             winners: set[str] = set()
-            for group in groups:
+            for index, group in enumerate(groups):
                 if can_weight:
-                    selected = _weighted_choice(rng, group.outcomes)
+                    selected = _weighted_choice(
+                        rng,
+                        group.outcomes,
+                        weighted_tables[index],
+                    )
                 else:
                     selected = rng.choice(group.outcomes)
                 winners.add(selected.quote_key)
@@ -500,11 +603,53 @@ class ScenarioSearchEngine:
         return expected, "sampled-independent-groups"
 
 
-def _weighted_choice(rng: random.Random, outcomes: tuple[ScenarioOutcome, ...]) -> ScenarioOutcome:
-    threshold = rng.random()
-    cumulative = 0.0
+def _decimal_probability_coefficient(value: Decimal) -> tuple[int, int]:
+    validated = _validate_scenario_probability(value)
+    parts = validated.as_tuple()
+    coefficient = 0
+    for digit in parts.digits:
+        coefficient = coefficient * 10 + digit
+    if parts.sign:
+        coefficient = -coefficient
+    return coefficient, parts.exponent
+
+
+def _integer_probability_weights(
+    outcomes: tuple[ScenarioOutcome, ...],
+) -> tuple[int, ...]:
+    if type(outcomes) is not tuple or not outcomes:
+        raise ValueError("weighted scenario outcomes must be a non-empty tuple")
+    probability_parts: list[tuple[int, int]] = []
     for outcome in outcomes:
-        cumulative += float(outcome.probability or Decimal("0"))
-        if threshold <= cumulative:
+        if type(outcome) is not ScenarioOutcome or outcome.probability is None:
+            raise ValueError("weighted scenario outcomes require exact probabilities")
+        probability_parts.append(_decimal_probability_coefficient(outcome.probability))
+    minimum_exponent = min(exponent for _coefficient, exponent in probability_parts)
+    weights = tuple(
+        coefficient * (10 ** (exponent - minimum_exponent))
+        for coefficient, exponent in probability_parts
+    )
+    if any(weight < 0 for weight in weights) or sum(weights) <= 0:
+        raise ValueError("weighted scenario probabilities are invalid")
+    return weights
+
+
+def _weighted_choice(
+    rng: random.Random,
+    outcomes: tuple[ScenarioOutcome, ...],
+    weights: tuple[int, ...] | None = None,
+) -> ScenarioOutcome:
+    if weights is None:
+        weights = _integer_probability_weights(outcomes)
+    if len(weights) != len(outcomes):
+        raise ValueError("weighted scenario table does not match outcomes")
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        raise ValueError("weighted scenario probability mass must be positive")
+    target = rng.randrange(total_weight)
+    cumulative = 0
+    for outcome, weight in zip(outcomes, weights):
+        cumulative += weight
+        if target < cumulative:
             return outcome
-    return outcomes[-1]
+    raise RuntimeError("weighted scenario selection failed despite exact probability mass")

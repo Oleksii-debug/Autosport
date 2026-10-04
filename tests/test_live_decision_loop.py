@@ -428,6 +428,61 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             active.close()
             stale.close()
 
+    def test_stale_instance_cannot_publish_after_dependency_registry_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            bootstrap = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            bootstrap.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(bootstrap.run_cycle().status, LiveCycleStatus.DECIDED)
+            bootstrap.close()
+
+            active = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            stale = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            stale_progress = stale._progress
+            active.register_input("input-b", selection_ids="selection-b")
+            self.assertEqual(
+                active.dependencies.input_ids,
+                ("input-a", "input-b"),
+            )
+            self.assertEqual(stale.dependencies.input_ids, ("input-a",))
+            progress_bytes = active.progress_path.read_bytes()
+            pre_action_bytes = active.pre_action_book_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "dependency registry changed concurrently before pending publication",
+            ):
+                stale._write_pending(
+                    decision_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                    market_state_sha256="d" * 64,
+                    affected_input_ids=("input-a",),
+                    gate="normal",
+                )
+
+            self.assertEqual(active.progress_path.read_bytes(), progress_bytes)
+            self.assertEqual(active.pre_action_book_path.read_bytes(), pre_action_bytes)
+            self.assertEqual(stale._progress, stale_progress)
+            active.close()
+            stale.close()
+
     def test_constructor_requires_durable_registered_intent_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

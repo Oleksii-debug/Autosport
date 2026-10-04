@@ -280,6 +280,47 @@ def test_cancel_rejects_class_mutated_request_dispatch(monkeypatch) -> None:
         api.cancel(123)
 
 
+def test_cancel_rejects_request_kwdefault_rebase_before_post(monkeypatch) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    defaults = GitHubApi._request.__kwdefaults__
+    assert defaults is not None
+    invoked = {"value": False}
+
+    def forbidden_urlopen(*_args, **_kwargs):
+        invoked["value"] = True
+        raise AssertionError("rebased request defaults must revoke cancel authority")
+
+    monkeypatch.setitem(defaults, "_json_parse_int", str)
+    monkeypatch.setattr(controller_module, "urlopen", forbidden_urlopen)
+
+    with pytest.raises(
+        CancellationError,
+        match="cancellation request dispatch changed",
+    ):
+        api.cancel(123)
+    assert not invoked["value"]
+
+
+def test_cancel_rejects_request_kwdefault_rebase_during_post(monkeypatch) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    defaults = GitHubApi._request.__kwdefaults__
+    assert defaults is not None
+
+    def mutating_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        assert request.get_method() == "POST"
+        monkeypatch.setitem(defaults, "_json_parse_int", str)
+        return _FakeSuccessResponse(202, b"accepted")
+
+    monkeypatch.setattr(controller_module, "urlopen", mutating_urlopen)
+
+    with pytest.raises(
+        CancellationError,
+        match="cancellation request dispatch changed",
+    ):
+        api.cancel(123)
+
+
 def test_cancel_rejects_in_place_request_code_rebind() -> None:
     api = GitHubApi(repository="owner/repo", token="token")
     original_code = GitHubApi._request.__code__

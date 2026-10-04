@@ -10,6 +10,7 @@ import urllib.request as urllib_request
 
 import pytest
 
+import autosport.betfair_account_readonly as readonly
 import autosport.betfair_price_ladder_admission as subject
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
@@ -599,6 +600,74 @@ def test_injected_transport_receipt_cannot_mint_provider_authority():
         match="lacks canonical direct Betfair provider IO origin",
     ):
         _assess(receipt, Decimal("2.00"))
+
+
+def test_provider_parser_rebinding_during_io_cannot_mint_ladder_authority(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    original_provider_text = readonly._provider_text
+
+    class RebindingTransport(PriceLadderTransport):
+        def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            body: bytes,
+            timeout_seconds: float,
+        ) -> bytes:
+            payload = super().post(
+                url,
+                headers=headers,
+                body=body,
+                timeout_seconds=timeout_seconds,
+            )
+
+            def forged_provider_text(value, key, field):
+                result = original_provider_text(value, key, field)
+                if field == "price_ladder_type":
+                    return "FINEST"
+                return result
+
+            monkeypatch.setattr(
+                readonly,
+                "_provider_text",
+                forged_provider_text,
+            )
+            return payload
+
+    receipt, _client = _canonical_receipt(
+        RebindingTransport("CLASSIC")
+    )
+    assert receipt.ladder_type == "FINEST"
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="lacks canonical direct Betfair provider IO origin",
+    ):
+        _assess(receipt, Decimal("2.01"))
+
+
+def test_post_issue_hash_helper_rebinding_cannot_preserve_forged_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    receipt, _client = _canonical_receipt(
+        PriceLadderTransport("CLASSIC")
+    )
+    original_fingerprint = readonly._market_price_ladder_fingerprint(receipt)
+
+    object.__setattr__(receipt, "ladder_type", "FINEST")
+    monkeypatch.setattr(
+        readonly,
+        "_canonical_sha256",
+        lambda _value: original_fingerprint,
+    )
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="lacks canonical direct Betfair provider IO origin",
+    ):
+        _assess(receipt, Decimal("2.01"))
 
 
 def test_structurally_copied_receipt_cannot_mint_provider_authority():

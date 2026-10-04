@@ -300,6 +300,47 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(str(ticket.legs[0].locked_odds), "2.40")
             self.assertEqual(book.balance, __import__("decimal").Decimal("96.00"))
 
+    def test_observed_materialized_book_state_is_recoverable_from_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            pre_action_book = PaperBook("100.00")
+            current_action = action("a1", odds="2.50", stake="10.00")
+            current_prepared = prepared(runtime, current_action)
+            registered = evidence(
+                current_action,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.25",
+                stake="10.00",
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-observed-recovery",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={"a1": registered.as_observation()},
+                evidence_registry=registry,
+            )
+            self.assertEqual(len(book.tickets), 1)
+
+            restarted_book = PaperBook.load(Path(tmp) / "paper-book.json")
+            restarted = PaperExecutionAdoptionRuntime(
+                book=restarted_book,
+                ledger=ledger,
+                config=runtime.config,
+                max_quote_age=runtime.max_quote_age,
+                paper_book_path=Path(tmp) / "paper-book.json",
+            )
+            restarted_prepared = prepared(restarted, current_action)
+            restarted.assert_recoverable_book_state(
+                pre_action_book=pre_action_book,
+                prepared=restarted_prepared,
+                trigger_id="trigger-observed-recovery",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
     def test_attempt_before_ticket_restart_materializes_same_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

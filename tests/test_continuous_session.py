@@ -5134,6 +5134,54 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 )
                 store.close()
 
+    def test_settlement_state_read_rejects_sha_validator_module_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-state-sha-rebind",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:state-sha-rebind",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="state-sha-rebind-evidence",
+                evidence_sha256="e" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            original_sha_validator = continuous_session_module._sha256
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                state_path = root / "continuous_session.json"
+                raw = json.loads(state_path.read_text(encoding="utf-8"))
+                raw["settlement_evidence"][0]["evidence_sha256"] = "forged"
+                raw["pending_settlement_resolutions"][0]["evidence_sha256"] = "forged"
+                state_path.write_text(
+                    json.dumps(raw, sort_keys=True, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+                continuous_session_module._sha256 = lambda value, _field: value
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "continuous session state read authority changed",
+                ):
+                    coordinator.status()
+            finally:
+                continuous_session_module._sha256 = original_sha_validator
+                store.close()
+
     def test_settlement_state_read_rejects_validator_code_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

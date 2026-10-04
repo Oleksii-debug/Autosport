@@ -509,6 +509,14 @@ def _target_market_requirements(
                 raise ProductProposalRiskOutcomeInputMappingError(
                     f"candidate leg {context_index}:{leg_index} is invalid"
                 )
+            # MarketSettlementOutcomeAuthority currently has no exchange-side
+            # identity. A BACK/LAY proposal therefore cannot be represented by the
+            # side-agnostic terminal market without losing exact target identity.
+            if leg.get("exchange_side") is not None:
+                raise ProductProposalRiskOutcomeInputMappingError(
+                    "proposal risk outcome mapping does not yet support exchange-side "
+                    "target identities"
+                )
             matching = [
                 quote
                 for quote in quotes
@@ -517,6 +525,7 @@ def _target_market_requirements(
                 and quote.get("market_id") == leg.get("market_id")
                 and quote.get("selection_id") == leg.get("selection_id")
                 and quote.get("sport") == leg.get("sport")
+                and quote.get("exchange_side") is None
             ]
             if not matching:
                 raise ProductProposalRiskOutcomeInputMappingError(

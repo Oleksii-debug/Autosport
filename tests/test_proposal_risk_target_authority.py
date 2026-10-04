@@ -1683,5 +1683,68 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
                 getter.__code__ = original_code
 
 
+    def test_outcome_input_mapping_rejects_exchange_side_identity_collapse(
+        self,
+    ) -> None:
+        decision_ts = "2026-09-18T15:05:00Z"
+        quote_ts = "2026-09-18T15:04:00Z"
+        leg = TicketLeg(
+            event_id="event-sided",
+            market_id="match_odds",
+            selection_id="home",
+            locked_odds=Decimal("2"),
+            sport="table_tennis",
+            exchange_side="back",
+        )
+        quote = MarketEvent(
+            event_id=leg.event_id,
+            market_id=leg.market_id,
+            selection_id=leg.selection_id,
+            decimal_odds=Decimal("2"),
+            observed_ts=quote_ts,
+            source_id="betfair_exchange_historical",
+            sequence=1,
+            market_type=MarketType.WINNER,
+            source_ts=quote_ts,
+            ingest_ts=quote_ts,
+            metadata={},
+            sport="table_tennis",
+            exchange_side="back",
+        )
+        target = issue_product_proposal_risk_target(
+            self.workspace,
+            signal_strengths=(Decimal("1"),),
+            contexts=(
+                ProposedTicketRiskContext(
+                    legs=(leg,),
+                    quotes=(quote,),
+                    bankroll_id=self.goal.bankroll_id,
+                    currency=self.goal.currency,
+                    proposal_ts=decision_ts,
+                ),
+            ),
+        )
+        store = SQLiteMarketStore(self.workspace / "sided_outcome_inputs.db")
+        self.addCleanup(store.close)
+        forged_exact_type = object.__new__(
+            outcome_input_authority.MarketSettlementOutcomeAuthority
+        )
+        market_input = ProposalRiskMarketInput(
+            store=store,
+            outcome_authority=forged_exact_type,
+            max_age=timedelta(minutes=10),
+        )
+
+        with self.assertRaisesRegex(
+            ProductProposalRiskOutcomeInputMappingError,
+            "does not yet support exchange-side target identities",
+        ):
+            issue_product_proposal_risk_outcome_input_mapping(
+                self.workspace,
+                target_sha256=target.target_sha256,
+                market_inputs=(market_input,),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

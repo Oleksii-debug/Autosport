@@ -1,8 +1,10 @@
 import copy
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import autosport.market_outcomes as market_outcomes
 from autosport.domain import MarketType, TicketLeg
 from autosport.market_outcomes import (
     MarketOutcomeIdentity,
@@ -155,6 +157,35 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
             assessment.refusal_reason,
             "market_type_has_no_supported_terminal_settlement_semantics",
         )
+
+    def test_betfair_adapter_fails_closed_if_market_definition_changes_during_snapshot(self):
+        definition = self._market_definition()
+        canonical_json = market_outcomes._canonical_json
+        definition_reads = 0
+
+        def mutating_canonical_json(payload):
+            nonlocal definition_reads
+            encoded = canonical_json(payload)
+            if payload is definition:
+                definition_reads += 1
+                if definition_reads == 1:
+                    definition["runners"][0]["id"] = "tampered-away"
+            return encoded
+
+        with patch(
+            "autosport.market_outcomes._canonical_json",
+            side_effect=mutating_canonical_json,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "market_definition changed during canonical snapshot",
+            ):
+                assess_betfair_historical_market_definition_authority(
+                    market_id="match_odds",
+                    market_definition=definition,
+                    provider_publish_at="2026-09-18T15:00:00Z",
+                    observed_at="2026-09-18T15:00:01Z",
+                )
 
     def test_betfair_adapter_refuses_non_open_or_unsupported_definition(self):
         closed = assess_betfair_historical_market_definition_authority(
@@ -460,6 +491,30 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
             ScenarioSearchEngine().analyse_authoritative(
                 [ticket],
                 [authority],
+                decision_as_of=self.DECISION_AS_OF,
+            )
+
+        class ForgedIdentity(MarketOutcomeIdentity):
+            @property
+            def market_key(self):
+                return ("table_tennis", "event-1", "forged-market", "winner")
+
+        nested = self._authority(("away", "home"))
+        forged_identity = ForgedIdentity(
+            sport=nested.identity.sport,
+            event_id=nested.identity.event_id,
+            market_id=nested.identity.market_id,
+            source_id=nested.identity.source_id,
+            market_type=nested.identity.market_type,
+        )
+        object.__setattr__(nested, "identity", forged_identity)
+        with self.assertRaisesRegex(
+            ValueError,
+            "invalid after issuance",
+        ):
+            ScenarioSearchEngine().analyse_authoritative(
+                [ticket],
+                [nested],
                 decision_as_of=self.DECISION_AS_OF,
             )
 

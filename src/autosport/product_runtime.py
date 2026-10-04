@@ -2275,9 +2275,11 @@ def _build_autonomous_product_runtime_impl(
     _desktop_delivery_resolver,
     _desktop_consumer_type,
     _canonical_application_type,
+    _canonical_application_init,
     _canonical_application_apply,
     _canonical_application_lookup,
     _paper_book_type,
+    _paper_book_init,
     _runtime_type,
     _runtime_lease_type,
     _runtime_lease_init,
@@ -2297,13 +2299,22 @@ def _build_autonomous_product_runtime_impl(
     _manifest_text_validator,
     _manifest_type,
     _lifecycle_type,
+    _lifecycle_init,
     _market_store_type,
+    _market_store_init,
+    _market_store_close,
     _mirror_type,
+    _mirror_init,
     _invalidation_buffer_type,
+    _invalidation_buffer_init,
     _market_bus_type,
+    _market_bus_init,
     _source_health_type,
+    _source_health_init,
     _dependency_index_type,
+    _dependency_index_init,
     _collector_store_type,
+    _collector_store_init,
     _collector_service_type,
     _collector_service_init,
     _collector_service_status,
@@ -2312,8 +2323,10 @@ def _build_autonomous_product_runtime_impl(
     _collector_service_run_cycle,
     _collector_service_bounded_provider_call,
     _checkpoint_type,
+    _checkpoint_init,
     _coordinator_type,
     _start_transition_store_type,
+    _start_transition_store_init,
     _start_transition_read,
     _start_transition_write,
 ) -> AutonomousProductRuntime:
@@ -2335,7 +2348,8 @@ def _build_autonomous_product_runtime_impl(
 
     try:
         normalized_bankroll = str(initial_bankroll)
-        _paper_book_type(normalized_bankroll)
+        validation_book = object.__new__(_paper_book_type)
+        _paper_book_init(validation_book, normalized_bankroll)
     except Exception as exc:
         raise ValueError("initial_bankroll must construct a valid PaperBook") from exc
 
@@ -2741,15 +2755,23 @@ def _build_autonomous_product_runtime_impl(
         )
         collector_source = ProductCollectorSourceProxy()
 
-        lifecycle = _lifecycle_type(root / "catalog.json")
-        market_store = _market_store_type(root / "market.db")
-        lease_stack.callback(market_store.close)
-        mirror = _mirror_type()
-        invalidations = _invalidation_buffer_type(mirror)
+        lifecycle = object.__new__(_lifecycle_type)
+        _lifecycle_init(lifecycle, root / "catalog.json")
+        market_store = object.__new__(_market_store_type)
+        _market_store_init(market_store, root / "market.db")
+        lease_stack.callback(_market_store_close, market_store)
+        mirror = object.__new__(_mirror_type)
+        _mirror_init(mirror)
+        invalidations = object.__new__(_invalidation_buffer_type)
+        _invalidation_buffer_init(invalidations, mirror)
 
-        market_bus = _market_bus_type(market_store)
-        source_health = _source_health_type(root / "source_health.json")
-        canonical_application = _canonical_application_type(
+        market_bus = object.__new__(_market_bus_type)
+        _market_bus_init(market_bus, market_store)
+        source_health = object.__new__(_source_health_type)
+        _source_health_init(source_health, root / "source_health.json")
+        canonical_application = object.__new__(_canonical_application_type)
+        _canonical_application_init(
+            canonical_application,
             market_bus,
             source_health,
             root / "desktop_application.json",
@@ -2768,8 +2790,10 @@ def _build_autonomous_product_runtime_impl(
         ):
             invalidations.accept_persisted(event)
 
-        dependencies = _dependency_index_type(mirror)
-        collector_store = _collector_store_type(root / "collector_deltas.json")
+        dependencies = object.__new__(_dependency_index_type)
+        _dependency_index_init(dependencies, mirror)
+        collector_store = object.__new__(_collector_store_type)
+        _collector_store_init(collector_store, root / "collector_deltas.json")
 
         from weakref import WeakKeyDictionary
 
@@ -3022,7 +3046,10 @@ def _build_autonomous_product_runtime_impl(
 
         desktop = _desktop_consumer_type(
             collector_store,
-            _checkpoint_type(root / "desktop_acks.json"),
+            (lambda checkpoint: (
+                _checkpoint_init(checkpoint, root / "desktop_acks.json"),
+                checkpoint,
+            )[1])(object.__new__(_checkpoint_type)),
             resolve_event=resolve_product_event,
             apply_event=apply_completed_desktop_application,
             lookup_application_receipt=lookup_completed_desktop_application,
@@ -3042,8 +3069,12 @@ def _build_autonomous_product_runtime_impl(
             clock=resolved_clock,
             initial_bankroll=manifest.initial_bankroll,
         )
-        raw_start_transition_store = _start_transition_store_type(
-            root / "product_start_transition.json"
+        raw_start_transition_store = object.__new__(
+            _start_transition_store_type
+        )
+        _start_transition_store_init(
+            raw_start_transition_store,
+            root / "product_start_transition.json",
         )
         start_transition_path = object.__getattribute__(
             raw_start_transition_store,
@@ -3223,9 +3254,11 @@ def _bind_autonomous_product_runtime_builder(
     desktop_delivery_resolver,
     desktop_consumer_type,
     canonical_application_type,
+    canonical_application_init,
     canonical_application_apply,
     canonical_application_lookup,
     paper_book_type,
+    paper_book_init,
     runtime_type,
     runtime_lease_type,
     runtime_lease_init,
@@ -3245,13 +3278,22 @@ def _bind_autonomous_product_runtime_builder(
     manifest_text_validator,
     manifest_type,
     lifecycle_type,
+    lifecycle_init,
     market_store_type,
+    market_store_init,
+    market_store_close,
     mirror_type,
+    mirror_init,
     invalidation_buffer_type,
+    invalidation_buffer_init,
     market_bus_type,
+    market_bus_init,
     source_health_type,
+    source_health_init,
     dependency_index_type,
+    dependency_index_init,
     collector_store_type,
+    collector_store_init,
     collector_service_type,
     collector_service_init,
     collector_service_status,
@@ -3260,8 +3302,10 @@ def _bind_autonomous_product_runtime_builder(
     collector_service_run_cycle,
     collector_service_bounded_provider_call,
     checkpoint_type,
+    checkpoint_init,
     coordinator_type,
     start_transition_store_type,
+    start_transition_store_init,
     start_transition_read,
     start_transition_write,
 ):
@@ -3289,9 +3333,11 @@ def _bind_autonomous_product_runtime_builder(
             _desktop_delivery_resolver=desktop_delivery_resolver,
             _desktop_consumer_type=desktop_consumer_type,
             _canonical_application_type=canonical_application_type,
+            _canonical_application_init=canonical_application_init,
             _canonical_application_apply=canonical_application_apply,
             _canonical_application_lookup=canonical_application_lookup,
             _paper_book_type=paper_book_type,
+            _paper_book_init=paper_book_init,
             _runtime_type=runtime_type,
             _runtime_lease_type=runtime_lease_type,
             _runtime_lease_init=runtime_lease_init,
@@ -3311,13 +3357,22 @@ def _bind_autonomous_product_runtime_builder(
             _manifest_text_validator=manifest_text_validator,
             _manifest_type=manifest_type,
             _lifecycle_type=lifecycle_type,
+            _lifecycle_init=lifecycle_init,
             _market_store_type=market_store_type,
+            _market_store_init=market_store_init,
+            _market_store_close=market_store_close,
             _mirror_type=mirror_type,
+            _mirror_init=mirror_init,
             _invalidation_buffer_type=invalidation_buffer_type,
+            _invalidation_buffer_init=invalidation_buffer_init,
             _market_bus_type=market_bus_type,
+            _market_bus_init=market_bus_init,
             _source_health_type=source_health_type,
+            _source_health_init=source_health_init,
             _dependency_index_type=dependency_index_type,
+            _dependency_index_init=dependency_index_init,
             _collector_store_type=collector_store_type,
+            _collector_store_init=collector_store_init,
             _collector_service_type=collector_service_type,
             _collector_service_init=collector_service_init,
             _collector_service_status=collector_service_status,
@@ -3326,8 +3381,10 @@ def _bind_autonomous_product_runtime_builder(
             _collector_service_run_cycle=collector_service_run_cycle,
             _collector_service_bounded_provider_call=collector_service_bounded_provider_call,
             _checkpoint_type=checkpoint_type,
+            _checkpoint_init=checkpoint_init,
             _coordinator_type=coordinator_type,
             _start_transition_store_type=start_transition_store_type,
+            _start_transition_store_init=start_transition_store_init,
             _start_transition_read=start_transition_read,
             _start_transition_write=start_transition_write,
         )
@@ -3342,9 +3399,11 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     _desktop_applied_event_for_receipt,
     _ProductDesktopDeltaConsumer,
     CanonicalDesktopApplication,
+    CanonicalDesktopApplication.__init__,
     CanonicalDesktopApplication.apply,
     CanonicalDesktopApplication.lookup_receipt,
     PaperBook,
+    PaperBook.__init__,
     _ProductAutonomousProductRuntime,
     _ProductRuntimeLease,
     _product_runtime_lease_init,
@@ -3364,13 +3423,22 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     _ManifestStore._text,
     ProductCompositionManifest,
     ContinuousEventLifecycle,
+    ContinuousEventLifecycle.__init__,
     SQLiteMarketStore,
+    SQLiteMarketStore.__init__,
+    SQLiteMarketStore.close,
     MarketMirror,
+    MarketMirror.__init__,
     BoundedMirrorInvalidationBuffer,
+    BoundedMirrorInvalidationBuffer.__init__,
     MarketEventBus,
+    MarketEventBus.__init__,
     SourceHealthStore,
+    SourceHealthStore.__init__,
     FocusedMirrorDependencyIndex,
+    FocusedMirrorDependencyIndex.__init__,
     CollectorDeltaStore,
+    CollectorDeltaStore.__init__,
     HeadlessCollectorService,
     HeadlessCollectorService.__init__,
     HeadlessCollectorService.status,
@@ -3379,8 +3447,10 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     HeadlessCollectorService.run_cycle,
     HeadlessCollectorService._bounded_provider_call,
     DesktopDeltaCheckpointStore,
+    DesktopDeltaCheckpointStore.__init__,
     _ProductContinuousSessionCoordinator,
     _ProductStartTransitionStore,
+    _ProductStartTransitionStore.__init__,
     _read_product_start_transition,
     atomic_write_json,
 )

@@ -536,6 +536,8 @@ class MarketMirror:
         event_ids: str | Iterable[str] | None = None,
         market_ids: str | Iterable[str] | None = None,
         selection_ids: str | Iterable[str] | None = None,
+        _require_store=_require_market_store,
+        _trusted_reader=_trusted_live_events,
     ) -> MirrorSnapshot:
         """Reconstruct exactly the decision-visible mirror state at as_of.
 
@@ -552,7 +554,7 @@ class MarketMirror:
             raise TypeError("require_live_receipt_authority must be bool")
         if require_live_receipt_authority and cls is not __class__:
             raise TypeError("trusted live replay requires an exact MarketMirror")
-        canonical_store = _require_market_store(
+        canonical_store = _require_store(
             store,
             exact=require_live_receipt_authority,
             error_message=(
@@ -564,7 +566,7 @@ class MarketMirror:
         boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
         mirror = cls()
         history = (
-            _trusted_live_events(canonical_store)
+            _trusted_reader(canonical_store)
             if require_live_receipt_authority
             else canonical_store.events()
         )
@@ -607,7 +609,13 @@ class MarketMirror:
         return mirror
 
     @classmethod
-    def from_live_store(cls, store: SQLiteMarketStore) -> "MarketMirror":
+    def from_live_store(
+        cls,
+        store: SQLiteMarketStore,
+        *,
+        _require_store=_require_market_store,
+        _trusted_current=_trusted_live_current_by_source,
+    ) -> "MarketMirror":
         """Restore only rows with durable product-owned live receipt authority.
 
         Legacy, replay and imported rows remain canonical market history but cannot
@@ -617,13 +625,13 @@ class MarketMirror:
         """
         if cls is not __class__:
             raise TypeError("live store bootstrap requires an exact MarketMirror")
-        canonical_store = _require_market_store(
+        canonical_store = _require_store(
             store,
             exact=True,
             error_message="live store must be an exact SQLiteMarketStore",
         )
         mirror = cls()
-        current = _trusted_live_current_by_source(canonical_store)
+        current = _trusted_current(canonical_store)
         for key in sorted(current):
             mirror.apply(current[key])
         return mirror

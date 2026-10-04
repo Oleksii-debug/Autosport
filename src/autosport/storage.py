@@ -743,7 +743,11 @@ class SQLiteMarketStore:
     """
 
     def __init__(self, path: str | Path = "autosport.db") -> None:
-        self.path = Path(path).absolute()
+        # Freeze one filesystem-canonical database pathname before SQLite or any
+        # independent authority derives identity from it.  In particular, a file
+        # symlink alias must not create a second WAL/authority namespace for the
+        # same durable database.
+        self.path = Path(path).resolve(strict=False)
         self._connection_lock = RLock()
         self.connection = sqlite3.connect(self.path, check_same_thread=False)
         try:
@@ -1583,8 +1587,12 @@ class SQLiteMarketStore:
         """Insert one normalized batch and independently issue its positive chronology."""
 
         authority = self._market_append_authority()
-        with self._connection_lock:
-            with self._market_append_issuance_lock(authority):
+        # Keep the global lock order identical to trusted readers: cross-process
+        # append issuance first, then this instance's SQLite connection lock.
+        # Reversing these two locks creates an AB-BA deadlock when one thread is
+        # appending while another calls events()/current_by_source().
+        with self._market_append_issuance_lock(authority):
+            with self._connection_lock:
                 self.connection.execute("BEGIN IMMEDIATE")
                 prepared: tuple[str, str, str | None] | None = None
                 accepted: list[MarketEvent] = []

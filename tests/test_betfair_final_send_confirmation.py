@@ -1392,3 +1392,83 @@ def test_confirmation_expiry_after_consumption_denies_provider_transport(
         assert restarted.attempt_state is AttemptState.UNKNOWN
         assert transport.calls == []
 
+def test_quote_expiry_at_last_provider_seam_after_final_durable_reads_denies_transport(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-last-provider-seam-quote-expiry"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        authority, review, receipt = _confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+            ttl_seconds=120,
+        )
+        transport = _accepted_transport(action)
+        client = _enabled_client(profile, transport, store=goal_store)
+        observed_times = []
+        trusted_times = iter(
+            (
+                provider_tests.RESERVED_AT,
+                provider_tests.SUBMITTED_AT,
+                provider_tests.READBACK_AT,
+                provider_tests.QUOTE_EXPIRES_AT,
+            )
+        )
+
+        def trusted_now():
+            value = next(trusted_times, provider_tests.QUOTE_EXPIRES_AT)
+            observed_times.append(value)
+            return value
+
+        monkeypatch.setattr(
+            provider_tests.betfair_supervised_execution._supervised_execution_runtime,
+            "_trusted_now",
+            trusted_now,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="quote expired after durable confirmation",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                clock=lambda: provider_tests.RESERVED_AT,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert observed_times == [
+            provider_tests.RESERVED_AT,
+            provider_tests.SUBMITTED_AT,
+            provider_tests.READBACK_AT,
+            provider_tests.QUOTE_EXPIRES_AT,
+        ]
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.SUBMITTED
+        assert _audit_receipt(authority, review, receipt).receipt.consumed_at is not None
+
+        restarted = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            clock=lambda: provider_tests.RESERVED_AT,
+            confirmation_receipt_id=receipt.receipt_id,
+            confirmation_review_sha256=review.review_sha256,
+        )
+        assert restarted.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert restarted.attempt_state is AttemptState.UNKNOWN
+        assert transport.calls == []
+

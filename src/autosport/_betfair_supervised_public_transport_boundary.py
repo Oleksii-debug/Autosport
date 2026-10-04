@@ -707,6 +707,44 @@ def _build_trusted_private_place_action(private_place_action, private_place_acti
                     "durable Betfair submission time changed after confirmation"
                 )
 
+            # All durable/currentness I/O is complete under the ledger writer
+            # fence. Take the last authority timestamp at the irreversible
+            # provider seam, then perform only pure in-memory expiry checks
+            # before POST. This closes the wall-time window created by the
+            # confirmation, approval and SUBMITTED rereads above.
+            provider_send_at = _impl._supervised_execution_runtime._trusted_now()
+            if not _confirmation_graph_unchanged():
+                raise _impl.BetfairSupervisedExecutionError(
+                    "Betfair confirmation authority changed at provider send seam"
+                )
+            provider_send_instant = _CONFIRMATION_INSTANT(
+                provider_send_at,
+                "provider_send_at",
+            )
+            if provider_send_instant < final_send_instant:
+                raise _impl.BetfairSupervisedExecutionError(
+                    "trusted Betfair final-send clock moved backwards at provider seam"
+                )
+            if provider_send_instant >= _CONFIRMATION_INSTANT(
+                final_confirmation.review.expires_at,
+                "review.expires_at",
+            ):
+                raise _impl.BetfairSupervisedExecutionError(
+                    "durable Betfair operator confirmation expired before provider send"
+                )
+            _FINAL_REQUIRE_APPROVAL(
+                bound,
+                confirmation_context.approval,
+                provider_send_at,
+            )
+            if provider_send_instant >= _CONFIRMATION_INSTANT(
+                action.expires_at,
+                "action.expires_at",
+            ):
+                raise _impl.BetfairSupervisedExecutionError(
+                    "Betfair action quote expired after durable confirmation"
+                )
+
         with _TRUSTED_PROFILE_LOCK:
             _require_current_workspace_profile_locked(workspace)
             if (

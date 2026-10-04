@@ -12,6 +12,176 @@ from autosport.storage import SQLiteMarketStore
 
 
 class LiveReceiptRetryHookIsolationTests(unittest.TestCase):
+    def test_lazy_batch_materialization_cannot_redirect_live_store_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            foreign = SQLiteMarketStore(Path(directory) / "foreign.db")
+            event = MarketEvent(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.00"),
+                observed_ts="2026-10-04T03:00:01+00:00",
+                source_id="provider-a",
+                sequence=1,
+                market_type=MarketType.WINNER,
+                ingest_ts="2026-10-04T03:00:02+00:00",
+                metadata={"origin": "canonical"},
+            )
+            original_connection = store.connection
+            original_path = store.path
+
+            def redirect_while_materializing():
+                store.connection = foreign.connection
+                store.path = foreign.path
+                yield event
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "materialization changed canonical store authority",
+                ):
+                    store._append_live_batch_accepted(redirect_while_materializing())
+            finally:
+                store.connection = original_connection
+                store.path = original_path
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertEqual(store.trusted_live_current_by_source(), {})
+            self.assertEqual(foreign.events(), [])
+            self.assertEqual(foreign.trusted_live_events(), [])
+            self.assertEqual(foreign.trusted_live_current_by_source(), {})
+            store.close()
+            foreign.close()
+
+    def test_retry_hook_cannot_redirect_live_authority_to_foreign_store(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            foreign = SQLiteMarketStore(Path(directory) / "foreign.db")
+            event = MarketEvent(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.00"),
+                observed_ts="2026-10-04T03:00:01+00:00",
+                source_id="provider-a",
+                sequence=1,
+                market_type=MarketType.WINNER,
+                ingest_ts="2026-10-04T03:00:02+00:00",
+                metadata={"origin": "canonical"},
+            )
+            original_connection = store.connection
+            original_path = store.path
+
+            def redirect_store_authority(_events):
+                store.connection = foreign.connection
+                store.path = foreign.path
+
+            try:
+                with patch.object(
+                    store,
+                    "_before_live_append_attempt",
+                    side_effect=redirect_store_authority,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "changed canonical store authority",
+                    ):
+                        store._append_live_batch_accepted([event])
+            finally:
+                store.connection = original_connection
+                store.path = original_path
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertEqual(store.trusted_live_current_by_source(), {})
+            self.assertEqual(foreign.events(), [])
+            self.assertEqual(foreign.trusted_live_events(), [])
+            self.assertEqual(foreign.trusted_live_current_by_source(), {})
+            store.close()
+            foreign.close()
+
+    def test_retry_hook_cannot_relabel_live_store_workspace_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = MarketEvent(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.00"),
+                observed_ts="2026-10-04T03:00:01+00:00",
+                source_id="provider-a",
+                sequence=1,
+                market_type=MarketType.WINNER,
+                ingest_ts="2026-10-04T03:00:02+00:00",
+                metadata={"origin": "canonical"},
+            )
+            original_path = store.path
+
+            def relabel_workspace(_events):
+                store.path = Path(directory) / "other.db"
+
+            try:
+                with patch.object(
+                    store,
+                    "_before_live_append_attempt",
+                    side_effect=relabel_workspace,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "changed canonical store authority",
+                    ):
+                        store._append_live_batch_accepted([event])
+            finally:
+                store.path = original_path
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertEqual(store.trusted_live_current_by_source(), {})
+            store.close()
+
+    def test_retry_hook_cannot_replace_live_connection_serialization_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            foreign = SQLiteMarketStore(Path(directory) / "foreign.db")
+            event = MarketEvent(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.00"),
+                observed_ts="2026-10-04T03:00:01+00:00",
+                source_id="provider-a",
+                sequence=1,
+                market_type=MarketType.WINNER,
+                ingest_ts="2026-10-04T03:00:02+00:00",
+                metadata={"origin": "canonical"},
+            )
+            original_lock = store._connection_lock
+
+            def replace_lock(_events):
+                store._connection_lock = foreign._connection_lock
+
+            try:
+                with patch.object(
+                    store,
+                    "_before_live_append_attempt",
+                    side_effect=replace_lock,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "changed canonical store authority",
+                    ):
+                        store._append_live_batch_accepted([event])
+            finally:
+                store._connection_lock = original_lock
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertEqual(store.trusted_live_current_by_source(), {})
+            store.close()
+            foreign.close()
+
     def test_post_snapshot_batch_iterator_rebind_cannot_redirect_canonical_persistence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

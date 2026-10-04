@@ -16,6 +16,7 @@ from .decision_ledger import (
 )
 from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
+from .replay import ReplayExecutionReceipt, verify_replay_execution_receipt
 from . import _paperbook_preload_authority_guard as _paperbook_authority
 from .workspace_lock import _open_read_only_descriptor
 
@@ -41,6 +42,20 @@ _WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
 # Match the repository's existing durable-replay file ceiling. Transaction manifests
 # are fixed-schema control records and must never force unbounded restart materialization.
 _MAX_TRANSACTION_MANIFEST_BYTES = 64 * 1024 * 1024
+_REPLAY_EXECUTION_RECEIPT_TYPE = ReplayExecutionReceipt
+_REPLAY_EXECUTION_VERIFIER = verify_replay_execution_receipt
+_REPLAY_EXECUTION_VERIFIER_CODE = getattr(
+    _REPLAY_EXECUTION_VERIFIER,
+    "__code__",
+    None,
+)
+_REPLAY_SUMMARY_HASH_FIELDS = (
+    "replay_input_event_payload_sequence_sha256",
+    "replay_consumed_event_payload_sequence_sha256",
+    "replay_applied_event_payload_sequence_sha256",
+    "replay_consumed_event_payload_multiset_sha256",
+    "replay_execution_receipt_sha256",
+)
 
 
 class RunTransactionError(RuntimeError):
@@ -588,8 +603,94 @@ class RunTransaction:
         atomic_write_json(self.manifest_path, manifest)
         return book_snapshot.sha256, staged_snapshot.sha256
 
-    def precommit(self, summary_payload: dict[str, Any]) -> dict[str, Any]:
+    def precommit(
+        self,
+        summary_payload: dict[str, Any],
+        *,
+        replay_execution_receipt: ReplayExecutionReceipt | None = None,
+    ) -> dict[str, Any]:
         self._require_complete_identity_anchor()
+        if type(summary_payload) is not dict:
+            raise RunTransactionError("summary_payload must be an exact dict")
+
+        replay_evidence: dict[str, object] | None = None
+        caller_replay_hash_fields = tuple(
+            field_name
+            for field_name in _REPLAY_SUMMARY_HASH_FIELDS
+            if field_name in summary_payload
+        )
+        if replay_execution_receipt is None:
+            if caller_replay_hash_fields:
+                raise RunTransactionError(
+                    "replay payload evidence requires product-issued "
+                    "ReplayExecutionReceipt"
+                )
+        else:
+            if (
+                ReplayExecutionReceipt is not _REPLAY_EXECUTION_RECEIPT_TYPE
+                or verify_replay_execution_receipt
+                is not _REPLAY_EXECUTION_VERIFIER
+                or getattr(_REPLAY_EXECUTION_VERIFIER, "__code__", None)
+                is not _REPLAY_EXECUTION_VERIFIER_CODE
+            ):
+                raise RunTransactionError(
+                    "replay execution receipt authority dispatch changed"
+                )
+            try:
+                verified_receipt = _REPLAY_EXECUTION_VERIFIER(
+                    replay_execution_receipt
+                )
+            except (TypeError, ValueError) as exc:
+                raise RunTransactionError(
+                    "replay execution receipt is not product-authoritative"
+                ) from exc
+            if (
+                ReplayExecutionReceipt is not _REPLAY_EXECUTION_RECEIPT_TYPE
+                or verify_replay_execution_receipt
+                is not _REPLAY_EXECUTION_VERIFIER
+                or getattr(_REPLAY_EXECUTION_VERIFIER, "__code__", None)
+                is not _REPLAY_EXECUTION_VERIFIER_CODE
+            ):
+                raise RunTransactionError(
+                    "replay execution receipt authority dispatch changed"
+                )
+            if (
+                verified_receipt is not replay_execution_receipt
+                or type(verified_receipt) is not _REPLAY_EXECUTION_RECEIPT_TYPE
+                or verified_receipt.run_id != self.run_id
+            ):
+                raise RunTransactionError(
+                    "replay execution receipt run identity mismatch"
+                )
+            replay_evidence = {
+                "replay_dataset_hash": verified_receipt.dataset_hash,
+                "event_count": verified_receipt.event_count,
+                "replay_input_event_payload_sequence_sha256": (
+                    verified_receipt.input_event_payload_sequence_sha256
+                ),
+                "replay_consumed_event_payload_sequence_sha256": (
+                    verified_receipt.consumed_event_payload_sequence_sha256
+                ),
+                "replay_applied_event_payload_sequence_sha256": (
+                    verified_receipt.applied_event_payload_sequence_sha256
+                ),
+                "replay_consumed_event_payload_multiset_sha256": (
+                    verified_receipt.consumed_event_payload_multiset_sha256
+                ),
+                "replay_execution_receipt_sha256": (
+                    verified_receipt.receipt_sha256
+                ),
+            }
+            for field_name, authoritative_value in replay_evidence.items():
+                if (
+                    field_name in summary_payload
+                    and summary_payload[field_name] != authoritative_value
+                ):
+                    raise RunTransactionError(
+                        "caller replay evidence differs from product-issued "
+                        f"receipt: {field_name}"
+                    )
+
         manifest = self._read_manifest()
         if manifest["phase"] != "staging":
             raise RunTransactionError("transaction is not in staging phase")
@@ -705,6 +806,8 @@ class RunTransaction:
         book_hash = book_snapshot.sha256
         ledger_hash = staged_snapshot.sha256
         summary = dict(summary_payload)
+        if replay_evidence is not None:
+            summary.update(replay_evidence)
         summary["paper_book_sha256"] = book_hash
         summary["decision_ledger_sha256"] = ledger_hash
         summary["transaction_schema_version"] = self.SCHEMA_VERSION
@@ -1535,12 +1638,7 @@ class RunTransaction:
         ]
         if summary.get("real_money_execution") is not False:
             mismatches.append("real_money_execution")
-        replay_evidence_fields = (
-            "replay_input_event_payload_sequence_sha256",
-            "replay_consumed_event_payload_sequence_sha256",
-            "replay_applied_event_payload_sequence_sha256",
-            "replay_consumed_event_payload_multiset_sha256",
-        )
+        replay_evidence_fields = _REPLAY_SUMMARY_HASH_FIELDS
         present_replay_evidence = tuple(
             field_name
             for field_name in replay_evidence_fields
@@ -1559,11 +1657,15 @@ class RunTransaction:
                     except RunTransactionError:
                         mismatches.append(field_name)
                 event_count = summary.get("event_count")
-                if (
-                    type(event_count) is not int
-                    or event_count < 0
-                ):
+                if type(event_count) is not int or event_count < 0:
                     mismatches.append("event_count")
+                try:
+                    self._require_identity_hash(
+                        summary.get("replay_dataset_hash"),
+                        "replay_dataset_hash",
+                    )
+                except RunTransactionError:
+                    mismatches.append("replay_dataset_hash")
         if mismatches:
             raise RunTransactionError(
                 f"{label} transaction identity mismatch: " + ",".join(sorted(mismatches))

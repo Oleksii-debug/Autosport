@@ -37,6 +37,35 @@ class ScenarioSearchProbabilityTruthTests(unittest.TestCase):
                 ),
             )
 
+    def test_probability_shape_resource_bounds_fail_closed(self) -> None:
+        oversized_exponent = Decimal((0, (1,), -4097))
+        oversized_coefficient = Decimal((0, (1,) * 4097, -4097))
+        for value, reason in (
+            (oversized_exponent, "exponent exceeds resource limit"),
+            (oversized_coefficient, "coefficient exceeds resource limit"),
+        ):
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(ValueError, reason):
+                    ScenarioOutcome("event|winner|a", value)
+
+    def test_duplicate_group_id_fails_closed_before_analysis(self) -> None:
+        first = ScenarioGroup(
+            "duplicate-id",
+            (
+                ScenarioOutcome("event-1|winner|a"),
+                ScenarioOutcome("event-1|winner|b"),
+            ),
+        )
+        second = ScenarioGroup(
+            "duplicate-id",
+            (
+                ScenarioOutcome("event-2|winner|a"),
+                ScenarioOutcome("event-2|winner|b"),
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "scenario group_id values must be unique"):
+            ScenarioSearchEngine().analyse([], [first, second])
+
     def test_probability_mass_exact_decimal_equivalence_is_accepted(self) -> None:
         group = ScenarioGroup(
             "event-winner",

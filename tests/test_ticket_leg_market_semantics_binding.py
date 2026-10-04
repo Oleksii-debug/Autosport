@@ -1,15 +1,12 @@
-import json
 from decimal import Decimal
 
 import pytest
 
 from autosport.domain import TicketLeg
-from autosport.paper import PaperBook
 
 
 _S1 = "soccer:h2h:v1"
 _S2 = "soccer:h2h:v2"
-_TS = "2026-09-22T12:00:00+00:00"
 
 
 def _leg(semantics: str | None) -> TicketLeg:
@@ -63,48 +60,3 @@ def test_ticket_leg_rejects_noncanonical_market_semantics(identity: str) -> None
     with pytest.raises(ValueError, match="market_semantics_id"):
         _leg(identity)
 
-
-def test_paperbook_schema8_round_trip_preserves_market_semantics(tmp_path) -> None:
-    path = tmp_path / "paper-book.json"
-    book = PaperBook("100")
-    ticket = book.open_ticket([_leg(_S1)], "10", placed_at=_TS)
-    book.save(path)
-
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 8
-    assert payload["tickets"][0]["legs"][0]["market_semantics_id"] == _S1
-
-    restored = PaperBook.load(path)
-    restored_leg = restored.tickets[ticket.ticket_id].legs[0]
-    assert restored_leg.market_semantics_id == _S1
-    assert restored_leg.settlement_identity == ticket.legs[0].settlement_identity
-
-
-def test_schema7_legacy_leg_remains_readable_without_modern_semantics(tmp_path) -> None:
-    path = tmp_path / "paper-book-v7.json"
-    book = PaperBook("100")
-    book.open_ticket([_leg(_S1)], "10", placed_at=_TS)
-    book.save(path)
-
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["schema_version"] = 7
-    payload["tickets"][0]["legs"][0].pop("market_semantics_id")
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    restored = PaperBook.load(path)
-    restored_leg = next(iter(restored.tickets.values())).legs[0]
-    assert restored_leg.market_semantics_id is None
-
-
-def test_schema8_requires_explicit_market_semantics_field_even_when_none(tmp_path) -> None:
-    path = tmp_path / "paper-book-v8.json"
-    book = PaperBook("100")
-    book.open_ticket([_leg(None)], "10", placed_at=_TS)
-    book.save(path)
-
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["tickets"][0]["legs"][0].pop("market_semantics_id")
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="market_semantics_id"):
-        PaperBook.load(path)

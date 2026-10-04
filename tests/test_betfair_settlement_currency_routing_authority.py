@@ -6,6 +6,7 @@ import urllib.request as _urllib_request
 import pytest
 
 from autosport import _betfair_settlement_credential_origin_guard as origin_guard
+from autosport import _betfair_settlement_provider_row_semantics as settlement_semantics
 from autosport.betfair_account_identity import build_betfair_authenticated_client
 from autosport.betfair_account_readonly import BetfairReadOnlyClient, BetfairSessionCredentials
 from autosport.betfair_settlement_revisions import (
@@ -355,3 +356,14 @@ def test_nested_k07_authority_closure_drift_is_rejected_before_execution(
         assert calls == []
     finally:
         cell.cell_contents = original
+
+
+@pytest.mark.parametrize("currency", ["US", "USDD", "US1", "123"])
+def test_persisted_money_currency_cannot_exceed_k07_currency_shape(currency) -> None:
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="three-letter uppercase ASCII letters",
+    ):
+        settlement_semantics._currency_code(currency)
+
+    assert settlement_semantics._currency_code("USD") == "USD"

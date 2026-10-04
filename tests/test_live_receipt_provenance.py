@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.ingestion as ingestion_module
 import autosport.market_bus as market_bus_module
 import autosport.storage as storage_module
 from autosport.domain import MarketEvent
@@ -213,6 +214,89 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(stats.rejected, 1)
             self.assertEqual(stats.quality_flags, ("INVALID_QUOTE",))
             self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
+    def test_live_ingestion_stamping_survives_dependency_rebind(self) -> None:
+        class PoisonMarketEvent(MarketEvent):
+            pass
+
+        class PoisonBus(MarketEventBus):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            bus = MarketEventBus(store)
+            engine = IngestionEngine(
+                bus,
+                clock=lambda: self.RECEIVE_TIME,
+            )
+
+            with (
+                patch.object(ingestion_module, "MarketEvent", PoisonMarketEvent),
+                patch.object(ingestion_module, "MarketEventBus", PoisonBus),
+                patch.object(
+                    ingestion_module,
+                    "replace",
+                    side_effect=AssertionError("mutable replace global must not be consulted"),
+                ),
+            ):
+                stats = engine.poll_once(
+                    InMemoryProvider("provider-a", [self._quote(sequence=1)]),
+                    max_items=10,
+                )
+
+            self.assertEqual(stats.accepted, 1)
+            trusted = store.trusted_live_events()
+            self.assertEqual(len(trusted), 1)
+            self.assertEqual(trusted[0].ingest_ts, self.RECEIVE_TIME)
+            store.close()
+
+    def test_live_ingestion_uses_sealed_live_publish_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            engine = IngestionEngine(
+                MarketEventBus(store),
+                clock=lambda: self.RECEIVE_TIME,
+            )
+
+            with patch.object(
+                MarketEventBus,
+                "_publish_many_live_ingestion",
+                side_effect=AssertionError("mutable live publish descriptor must not be consulted"),
+            ):
+                stats = engine.poll_once(
+                    InMemoryProvider("provider-a", [self._quote(sequence=1)]),
+                    max_items=10,
+                )
+
+            self.assertEqual(stats.accepted, 1)
+            self.assertEqual(len(store.trusted_live_events()), 1)
+            store.close()
+
+    def test_subclass_bus_neutral_path_uses_sealed_generic_descriptor(self) -> None:
+        class NeutralBus(MarketEventBus):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            engine = IngestionEngine(
+                NeutralBus(store),
+                clock=lambda: self.RECEIVE_TIME,
+            )
+
+            with patch.object(
+                MarketEventBus,
+                "publish_many",
+                side_effect=AssertionError("mutable generic publish descriptor must not be consulted"),
+            ):
+                stats = engine.poll_once(
+                    InMemoryProvider("provider-a", [self._quote(sequence=1)]),
+                    max_items=10,
+                )
+
+            self.assertEqual(stats.accepted, 1)
+            self.assertEqual(len(store.events()), 1)
             self.assertEqual(store.trusted_live_events(), [])
             store.close()
 

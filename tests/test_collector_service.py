@@ -3,6 +3,7 @@ import signal
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from autosport.causal_collector import (
@@ -166,6 +167,19 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
         stop_reason=None,
     ):
         from autosport.event_lifecycle import ContinuousEventLifecycle
+
+        if clock is None and sleep is None:
+            fake_now = datetime.fromisoformat("2026-01-01T00:00:10+00:00")
+
+            def default_clock() -> str:
+                return fake_now.isoformat()
+
+            def default_sleep(seconds: float) -> None:
+                nonlocal fake_now
+                fake_now += timedelta(seconds=seconds)
+
+            clock = default_clock
+            sleep = default_sleep
 
         return HeadlessCollectorService(
             delta_store=CollectorDeltaStore(Path(root) / "collector.json"),

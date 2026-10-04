@@ -888,6 +888,113 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             original,
         )
 
+    def test_outcome_authority_method_retargeting_cannot_change_truth_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="result:resolver-bind",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a",),
+            )
+            book.save(root / "paper_book.json")
+            authority = _OutcomeAuthority(
+                SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="result:resolver-bind",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="resolver-bind-evidence",
+                    evidence_sha256="d" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            authority.resolve = lambda *_args, **_kwargs: None
+            try:
+                result = coordinator.tick()
+                self.assertEqual(result.settled_ticket_ids, (ticket.ticket_id,))
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("110"))
+                self.assertEqual(
+                    durable.tickets[ticket.ticket_id].status.value,
+                    "won",
+                )
+            finally:
+                store.close()
+
+    def test_settlement_handoff_method_retargeting_cannot_change_dispatch(self) -> None:
+        class Handoff:
+            def __init__(self) -> None:
+                self.prepare_calls = 0
+                self.reconcile_calls = 0
+
+            def prepare_settlement(self, **_kwargs):
+                self.prepare_calls += 1
+                return ()
+
+            def reconcile_after_settlement(self, **_kwargs):
+                self.reconcile_calls += 1
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            handoff = Handoff()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                settlement_learning_handoff=handoff,
+            )
+            handoff.prepare_settlement = (
+                lambda **_kwargs: self.fail("retargeted prepare called")
+            )
+            handoff.reconcile_after_settlement = (
+                lambda **_kwargs: self.fail("retargeted reconcile called")
+            )
+            try:
+                coordinator.tick()
+                self.assertEqual(handoff.prepare_calls, 1)
+                self.assertEqual(handoff.reconcile_calls, 1)
+            finally:
+                store.close()
+
     def test_direct_settle_rejects_conflicting_duplicate_evidence_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

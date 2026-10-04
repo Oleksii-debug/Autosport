@@ -139,11 +139,13 @@ def _canonical_receipt(
 def _canonical_read(
     client: BetfairReadOnlyClient,
     transport: PriceLadderTransport,
+    *,
+    market_id: str = "1.234",
 ):
     original_opener = urllib_request._opener
     try:
         urllib_request._opener = _CanonicalUrlOpenerHarness(transport)
-        return client.read_market_price_ladder("1.234")
+        return client.read_market_price_ladder(market_id)
     finally:
         urllib_request._opener = original_opener
 
@@ -668,6 +670,69 @@ def test_post_issue_hash_helper_rebinding_cannot_preserve_forged_receipt(
         match="lacks canonical direct Betfair provider IO origin",
     ):
         _assess(receipt, Decimal("2.01"))
+
+
+def test_failed_same_market_refresh_revokes_prior_positive_authority():
+    class FailingTransport(PriceLadderTransport):
+        def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            body: bytes,
+            timeout_seconds: float,
+        ) -> bytes:
+            raise OSError("provider unavailable")
+
+    receipt, client = _canonical_receipt(
+        PriceLadderTransport("CLASSIC")
+    )
+    result = _assess(receipt, Decimal("2.00"))
+    assert result.admissible is True
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="network request failed",
+    ):
+        _canonical_read(client, FailingTransport("CLASSIC"))
+
+    assert result.admissible is False
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="lacks canonical direct Betfair provider IO origin",
+    ):
+        _assess(receipt, Decimal("2.00"))
+
+
+def test_failed_other_market_refresh_does_not_revoke_unrelated_market():
+    class FailingTransport(PriceLadderTransport):
+        def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            body: bytes,
+            timeout_seconds: float,
+        ) -> bytes:
+            raise OSError("provider unavailable")
+
+    receipt, client = _canonical_receipt(
+        PriceLadderTransport("CLASSIC")
+    )
+    result = _assess(receipt, Decimal("2.00"))
+    assert result.admissible is True
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="network request failed",
+    ):
+        _canonical_read(
+            client,
+            FailingTransport("CLASSIC"),
+            market_id="1.999",
+        )
+
+    assert result.admissible is True
 
 
 def test_structurally_copied_receipt_cannot_mint_provider_authority():

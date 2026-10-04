@@ -63,27 +63,6 @@ class SourceRightsAuthorization:
     approved_by: str
     approval_reference: str
 
-    def __init__(
-        self,
-        *,
-        source_identity: str,
-        required_scope: str,
-        checked_at: datetime,
-        manifest_sha256: str,
-        approved_by: str,
-        approval_reference: str,
-        _issuer: object | None = None,
-    ) -> None:
-        if _issuer is not _AUTHORIZATION_ISSUER:
-            raise SourceRightsManifestError(
-                "SourceRightsAuthorization can only be issued by authorize_source_use"
-            )
-        object.__setattr__(self, "source_identity", source_identity)
-        object.__setattr__(self, "required_scope", required_scope)
-        object.__setattr__(self, "checked_at", checked_at)
-        object.__setattr__(self, "manifest_sha256", manifest_sha256)
-        object.__setattr__(self, "approved_by", approved_by)
-        object.__setattr__(self, "approval_reference", approval_reference)
 
 
 def _build_source_rights_authorization_init(

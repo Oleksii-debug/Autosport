@@ -2295,6 +2295,8 @@ class PersistentLiveDecisionLoop:
                 or durable_progress.loop_id != self.loop_id
                 or durable_progress.decision_ts != plan.decision_ts
                 or durable_progress.market_state_sha256 != market_state_sha256
+                or durable_progress.market_append_generation
+                != progress_market_append_generation
                 or durable_progress.decision_context_sha256
                 != decision_context_sha256
                 or durable_progress.affected_input_ids != affected_input_ids
@@ -2851,6 +2853,8 @@ class PersistentLiveDecisionLoop:
             or existing.payload.get("gate") != progress.gate
             or existing.payload.get("market_state_sha256")
             != progress.market_state_sha256
+            or existing.payload.get("market_append_generation")
+            != progress.market_append_generation
             or existing.payload.get("decision_context_sha256")
             != progress.decision_context_sha256
             or existing.payload.get("affected_input_ids")

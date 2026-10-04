@@ -61,9 +61,9 @@ class PortfolioAwareCandidateOptimizer:
     Generate bounded candidates, then rerank them by their change to the whole paper portfolio.
 
     The beam generator's independent-probability EV is only a screening/tie-break signal.
-    Terminal risk proof is available only when ScenarioSearchEngine reports an exhaustive exact
-    terminal space; exact extrema inside caller-supplied scenario models remain secondary ranking
-    evidence and never upgrade the conservative primary risk value.
+    This generic API accepts caller-supplied scenario models, so their exact extrema remain
+    secondary ranking evidence and never become terminal-space proof. Positive terminal-risk
+    authority requires a separate product-owned authoritative outcome composition.
     """
 
     def __init__(
@@ -132,9 +132,6 @@ class PortfolioAwareCandidateOptimizer:
             touched_groups = {quote_to_group[leg.quote_key] for leg in synthetic.legs}
             dependent = _dependent_existing_ticket_ids(open_existing, touched_groups, quote_to_group)
             with_report = self.scenario_engine.analyse(open_existing + [synthetic], scenario_groups)
-
-            scenario_worst_proven = base_report.worst_proven and with_report.worst_proven
-            scenario_best_proven = base_report.best_proven and with_report.best_proven
 
             # This API accepts caller-supplied ScenarioGroup models, not product-owned
             # MarketSettlementOutcomeAuthority evidence. Report flags returned by an

@@ -105,17 +105,20 @@ class PortfolioAwareCandidateOptimizer:
             raise ValueError("stake must be finite")
         if amount <= 0:
             raise ValueError("stake must be positive")
-        if not groups:
+
+        candidate_snapshot = tuple(candidates)
+        scenario_groups = list(groups)
+        if not scenario_groups:
             raise ValueError("scenario groups required for portfolio-aware candidate evaluation")
 
-        quote_to_group = _quote_group_map(groups)
+        quote_to_group = _quote_group_map(scenario_groups)
         open_existing = _snapshot_open_tickets_for_analysis(existing_tickets)
-        base_report = self.scenario_engine.analyse(open_existing, groups)
+        base_report = self.scenario_engine.analyse(open_existing, scenario_groups)
         ranked: list[CandidatePortfolioImpact] = []
         seen_candidate_identities: set[
             tuple[tuple[str, str, str, str, str, str], ...]
         ] = set()
-        for candidate in candidates:
+        for candidate in candidate_snapshot:
             canonical_candidate = _canonical_candidate(candidate)
             candidate_identity = _candidate_identity_key(canonical_candidate)
             if candidate_identity in seen_candidate_identities:
@@ -125,7 +128,7 @@ class PortfolioAwareCandidateOptimizer:
             synthetic = _candidate_ticket(canonical_candidate, amount, quote_to_group)
             touched_groups = {quote_to_group[leg.quote_key] for leg in synthetic.legs}
             dependent = _dependent_existing_ticket_ids(open_existing, touched_groups, quote_to_group)
-            with_report = self.scenario_engine.analyse(open_existing + [synthetic], groups)
+            with_report = self.scenario_engine.analyse(open_existing + [synthetic], scenario_groups)
 
             scenario_worst_proven = base_report.worst_proven and with_report.worst_proven
             scenario_best_proven = base_report.best_proven and with_report.best_proven

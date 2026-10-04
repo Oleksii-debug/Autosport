@@ -5156,6 +5156,47 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_frozen_prefix_reader_bypasses_malformed_later_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                tail = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:00.500000+00:00",
+                )
+                self.assertTrue(store.append(first))
+                self.direct_insert_positive_generation(
+                    store,
+                    tail,
+                    generation=3,
+                )
+            finally:
+                store.close()
+
+            with self.assertRaises(ValueError):
+                SQLiteMarketStore(path)
+
+            reader = SQLiteMarketStore.open_frozen_prefix_reader(path)
+            try:
+                prefix = reader.events_at_committed_append_boundary(1)
+                self.assertEqual(
+                    [(event.sequence, generation) for event, generation in prefix],
+                    [(1, 1)],
+                )
+                with self.assertRaises(sqlite3.OperationalError):
+                    reader.connection.execute(
+                        "DELETE FROM market_event_commit_order"
+                    )
+            finally:
+                reader.close()
+
     def test_committed_append_prefix_ignores_noncontiguous_unissued_tail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

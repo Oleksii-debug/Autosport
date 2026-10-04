@@ -826,6 +826,56 @@ class SQLiteMarketStore:
             self.connection.close()
             raise
 
+    @classmethod
+    def open_frozen_prefix_reader(
+        cls,
+        path: str | Path,
+    ) -> "SQLiteMarketStore":
+        """Open one existing database for independently proven prefix reads only.
+
+        This deliberately bypasses schema initialization, current-projection rebuild,
+        and current-tail append recovery. It is valid only when the caller already
+        owns a durable append-generation frontier and will read through
+        events_at_committed_append_boundary(), which independently proves that exact
+        prefix against machine authority.
+        """
+
+        reader = cls.__new__(cls)
+        reader.path = Path(path).resolve(strict=False)
+        reader._connection_lock = RLock()
+        pre_open_identity = reader._current_database_path_identity()
+        database_uri = reader.path.as_uri() + "?mode=ro"
+        try:
+            connection = sqlite3.connect(
+                database_uri,
+                uri=True,
+                check_same_thread=False,
+            )
+        except sqlite3.Error as exc:
+            raise ValueError(
+                "cannot open existing market database for frozen-prefix recovery"
+            ) from exc
+        reader.connection = connection
+        try:
+            opened_identity = reader._current_database_path_identity()
+            if not os.path.samestat(pre_open_identity, opened_identity):
+                raise ValueError(
+                    "market database pathname changed while opening frozen-prefix reader"
+                )
+            reader._database_identity = opened_identity
+            connection.execute("PRAGMA query_only=ON")
+            for table_name in (
+                "market_events",
+                "market_event_commit_order",
+                "market_replay_cutoffs",
+            ):
+                _validate_canonical_table(connection, table_name)
+            reader._require_database_path_identity()
+        except BaseException:
+            connection.close()
+            raise
+        return reader
+
     def _current_database_path_identity(self) -> os.stat_result:
         try:
             metadata = self.path.lstat()

@@ -675,6 +675,32 @@ class MarketMirror:
         )
 
     @classmethod
+    def from_proven_history(
+        cls,
+        events_with_generation: Iterable[tuple[MarketEvent, int]],
+    ) -> "MarketMirror":
+        """Restore one mirror from caller-owned, independently proven history."""
+
+        mirror = cls()
+        for item in events_with_generation:
+            if type(item) is not tuple or len(item) != 2:
+                raise TypeError(
+                    "proven market history must contain (MarketEvent, generation) tuples"
+                )
+            event, append_generation = item
+            if not isinstance(event, MarketEvent):
+                raise TypeError("proven market history must contain MarketEvent values")
+            if type(append_generation) is not int or append_generation < 0:
+                raise ValueError(
+                    "proven market history append generation must be non-negative"
+                )
+            mirror._apply_with_causal_authority(
+                event,
+                decision_causal=append_generation > 0,
+            )
+        return mirror
+
+    @classmethod
     def from_store(cls, store: SQLiteMarketStore) -> "MarketMirror":
         """Restore audit/order state without laundering legacy baseline into decisions.
 
@@ -685,13 +711,9 @@ class MarketMirror:
         """
         if not isinstance(store, SQLiteMarketStore):
             raise TypeError("store must be a SQLiteMarketStore")
-        mirror = cls()
-        for event, append_generation in store.events_with_append_generation():
-            mirror._apply_with_causal_authority(
-                event,
-                decision_causal=append_generation > 0,
-            )
-        return mirror
+        return cls.from_proven_history(
+            store.events_with_append_generation()
+        )
 
     def __len__(self) -> int:
         with self._lock:

@@ -96,6 +96,16 @@ def _replacement_source_resolve_event(self, delta):
     return self.resolved_event
 
 
+def _replacement_fetch_catalog_page(self, checkpoint):
+    return CatalogPage(
+        source_id=self.source_id,
+        stream_epoch=self.stream_epoch,
+        cursor="replacement-catalog",
+        position=99,
+        events=(),
+    )
+
+
 def _event() -> MarketEvent:
     return MarketEvent.from_dict(
         {
@@ -936,6 +946,30 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 )
             self.assertFalse((root / "product_composition.json").exists())
 
+    def test_source_identity_rejects_instance_acquisition_shadow(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = _Source()
+            source.fetch_catalog_page = lambda _checkpoint: CatalogPage(
+                source_id=source.source_id,
+                stream_epoch=source.stream_epoch,
+                cursor="forged",
+                position=0,
+                events=(),
+            )
+            with self.assertRaisesRegex(
+                ProductCompositionError,
+                "per-instance fetch_catalog_page shadowing",
+            ):
+                build_autonomous_product_runtime(
+                    workspace=root,
+                    source=source,
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+            self.assertFalse((root / "product_composition.json").exists())
+
     def test_source_resolver_identity_rejects_instance_resolver_shadow(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -953,6 +987,31 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     initial_bankroll="100",
                 )
             self.assertFalse((root / "product_composition.json").exists())
+
+    def test_tick_rejects_post_build_acquisition_rebind_before_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = _Source()
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            original = _Source.fetch_catalog_page
+            before = runtime.collector.status()
+            try:
+                _Source.fetch_catalog_page = _replacement_fetch_catalog_page
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "source resolver authority changed after product composition",
+                ):
+                    runtime.tick()
+                self.assertEqual(runtime.collector.status(), before)
+            finally:
+                _Source.fetch_catalog_page = original
+                runtime.close()
 
     def test_desktop_resolution_rejects_post_build_resolver_rebind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

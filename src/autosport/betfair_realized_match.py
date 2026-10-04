@@ -452,8 +452,12 @@ def _check_common_row_identity(
         raise RealizedMatchEvidenceError(
             "provider order row has a different side"
         )
+    # Canonical adapter composition may return a private cleared-order
+    # subtype carrying provider-native settlement correction fields. The enclosing
+    # readback is still origin-sealed by BetfairReadOnlyClient, so cleared-row
+    # identity must follow the canonical base type rather than exact-type equality.
     if (
-        type(row) is BetfairClearedOrderObservation
+        isinstance(row, BetfairClearedOrderObservation)
         and row.event_id is not None
         and row.event_id != action.event_id
     ):

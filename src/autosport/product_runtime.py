@@ -1812,8 +1812,19 @@ def _build_product_runtime_type(
     entry_methods = ("start", "pause", "resume", "stop", "status", "tick", "close")
     base_methods = {name: getattr(base_type, name) for name in entry_methods}
 
+    def require_snapshot(self) -> tuple[tuple[str, object], ...]:
+        snapshot = snapshots.get(self)
+        if snapshot is None:
+            raise error_type("product runtime authority snapshot is unavailable")
+        raw = object.__getattribute__(self, "__dict__")
+        for name, expected in snapshot:
+            if raw.get(name) is not expected:
+                raise error_type(
+                    f"product runtime authority field {name!r} changed after composition"
+                )
+        return snapshot
+
     class ProductAutonomousProductRuntime(base_type):
-        __slots__ = ("__weakref__",)
         __eq__ = object.__eq__
         __hash__ = object.__hash__
 
@@ -1828,6 +1839,7 @@ def _build_product_runtime_type(
             snapshot = snapshots.get(self)
             if snapshot is not None:
                 if name in entry_methods:
+                    require_snapshot(self)
                     return base_methods[name].__get__(self, type(self))
                 if name in snapshot_fields:
                     for field_name, expected in snapshot:

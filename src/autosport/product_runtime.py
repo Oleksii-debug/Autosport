@@ -349,6 +349,74 @@ class _ProductRuntimeLease(WorkspaceEconomicLock):
             super().release()
 
 
+def _build_product_runtime_lease_authority(
+    *,
+    base_init,
+    base_acquire,
+    base_release,
+    error_type,
+):
+    def initialize(lease, workspace: str | Path) -> None:
+        object.__setattr__(lease, "_product_authority_fields_sealed", False)
+        base_init(lease, workspace)
+        object.__setattr__(lease, "_authority_active", False)
+        object.__setattr__(lease, "_acquired_once", False)
+        object.__setattr__(lease, "_operation_fence", None)
+        object.__setattr__(lease, "_product_authority_fields_sealed", True)
+
+    def acquire(lease) -> None:
+        if object.__getattribute__(lease, "_acquired_once"):
+            raise error_type(
+                "product runtime workspace authority cannot be reacquired"
+            )
+        base_acquire(lease)
+        object.__setattr__(lease, "_acquired_once", True)
+        object.__setattr__(lease, "_authority_active", True)
+
+    def release(lease) -> None:
+        operation_fence = object.__getattribute__(lease, "_operation_fence")
+        if operation_fence is None:
+            object.__setattr__(lease, "_authority_active", False)
+            base_release(lease)
+            return
+        with operation_fence:
+            object.__setattr__(lease, "_authority_active", False)
+            base_release(lease)
+
+    def bind_operation_fence(lease, operation_fence: RLock) -> None:
+        if object.__getattribute__(lease, "_operation_fence") is not None:
+            raise error_type(
+                "product runtime operation fence is already bound"
+            )
+        object.__setattr__(lease, "_operation_fence", operation_fence)
+
+    def authority_active(lease) -> bool:
+        return bool(object.__getattribute__(lease, "_authority_active"))
+
+    return (
+        initialize,
+        acquire,
+        release,
+        bind_operation_fence,
+        authority_active,
+    )
+
+
+(
+    _product_runtime_lease_init,
+    _product_runtime_lease_acquire,
+    _product_runtime_lease_release,
+    _product_runtime_lease_bind_operation_fence,
+    _product_runtime_lease_authority_active,
+) = _build_product_runtime_lease_authority(
+    base_init=WorkspaceEconomicLock.__init__,
+    base_acquire=WorkspaceEconomicLock.acquire,
+    base_release=WorkspaceEconomicLock.release,
+    error_type=WorkspaceEconomicLockError,
+)
+del _build_product_runtime_lease_authority
+
+
 class _ProductStartTransitionStore:
     """Durable START transaction journal under the runtime-wide workspace lease."""
 
@@ -3258,11 +3326,11 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     PaperBook,
     _ProductAutonomousProductRuntime,
     _ProductRuntimeLease,
-    _ProductRuntimeLease.__init__,
-    _ProductRuntimeLease.acquire,
-    _ProductRuntimeLease.release,
-    _ProductRuntimeLease.bind_operation_fence,
-    _ProductRuntimeLease.authority_active.fget,
+    _product_runtime_lease_init,
+    _product_runtime_lease_acquire,
+    _product_runtime_lease_release,
+    _product_runtime_lease_bind_operation_fence,
+    _product_runtime_lease_authority_active,
     _source_resolver_identity,
     _settlement_authority_identity,
     _settlement_learning_handoff_identity,

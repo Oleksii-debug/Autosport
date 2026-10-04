@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -23,6 +24,7 @@ from autosport.opportunity import (
     StrategyClass,
 )
 from autosport.paper import PaperBook
+import autosport.portfolio_plan as portfolio_plan_module
 from autosport.portfolio_plan import (
     EvidenceTruth,
     OpportunityEvidence,
@@ -1268,6 +1270,87 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertIsNone(plan.terminal_economics)
         self.assertFalse(authority.terminal_space_exact)
         self.assertIn("exhaustive but not exact", plan.reason)
+
+    def test_terminal_economics_fails_closed_if_paperbook_changes_during_proof(self) -> None:
+        goal = self._goal()
+        authority = self._betfair_authority()
+        book = PaperBook("1000")
+        existing_leg = TicketLeg(
+            "event-betfair-1",
+            "1.23456789",
+            "101",
+            Decimal("3"),
+            sport="table_tennis",
+        )
+        existing = book.open_ticket(
+            [existing_leg],
+            "10",
+            placed_at="2026-09-18T13:10:00+00:00",
+            provider_source_ids=("betfair_exchange_historical",),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+        )
+        intent = self._intent(
+            goal,
+            suffix="betfair-race-202",
+            strategy_class=StrategyClass.PREDICTIVE_EDGE,
+            signal=Decimal("0.03"),
+            odds=Decimal("3"),
+            sport="table_tennis",
+            event_id="event-betfair-1",
+            market_id="1.23456789",
+            selection_id="202",
+            source_id="betfair_exchange_historical",
+        )
+        groups = (
+            ScenarioGroup(
+                "betfair-race-control",
+                (
+                    ScenarioOutcome(existing_leg.quote_key),
+                    ScenarioOutcome(intent.risk_context.legs[0].quote_key),
+                ),
+            ),
+        )
+        intents = self._bind_terminal_state((intent,), groups)
+        graph = self._graph(book, intents)
+        witness = self._terminal_witness(book, intents, graph, groups)
+        canonical_analyse = portfolio_plan_module.ScenarioSearchEngine.analyse_authoritative
+
+        def settle_during_analysis(engine, tickets, authorities, *, decision_as_of):
+            book.settle(
+                existing.ticket_id,
+                {existing_leg.quote_key},
+                settled_at="2026-09-18T13:19:59+00:00",
+            )
+            return canonical_analyse(
+                engine,
+                tickets,
+                authorities,
+                decision_as_of=decision_as_of,
+            )
+
+        with patch.object(
+            portfolio_plan_module.ScenarioSearchEngine,
+            "analyse_authoritative",
+            settle_during_analysis,
+        ):
+            plan = build_portfolio_plan(
+                book,
+                intents,
+                self._policy(goal),
+                self.DECISION_TS,
+                dependency_graph=graph,
+                terminal_state_evidence=witness,
+                market_outcome_authorities=(authority,),
+            )
+
+        self.assertEqual(plan.action, PortfolioAction.WAIT)
+        self.assertEqual(plan.stakes, (Decimal("0"),))
+        self.assertIsNone(plan.terminal_economics)
+        self.assertIn(
+            "current portfolio changed during terminal economics evaluation",
+            plan.reason,
+        )
 
     def test_authoritative_terminal_proof_requires_reverified_authority_on_readback(self) -> None:
         goal = self._goal()

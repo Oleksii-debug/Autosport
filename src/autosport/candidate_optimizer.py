@@ -128,16 +128,13 @@ class PortfolioAwareCandidateOptimizer:
 
             scenario_worst_proven = base_report.worst_proven and with_report.worst_proven
             scenario_best_proven = base_report.best_proven and with_report.best_proven
-            worst_proven = (
-                scenario_worst_proven
-                and _report_has_exact_terminal_space(base_report)
-                and _report_has_exact_terminal_space(with_report)
-            )
-            best_proven = (
-                scenario_best_proven
-                and _report_has_exact_terminal_space(base_report)
-                and _report_has_exact_terminal_space(with_report)
-            )
+
+            # This API accepts caller-supplied ScenarioGroup models, not product-owned
+            # MarketSettlementOutcomeAuthority evidence. Report flags returned by an
+            # injected/subclassed scenario engine therefore cannot mint terminal-space
+            # authority. Generic scenario extrema remain useful secondary evidence only.
+            worst_proven = False
+            best_proven = False
             observed_worst_change = with_report.observed_worst - base_report.observed_worst
             conservative_floor_change = with_report.conservative_floor - base_report.conservative_floor
             observed_best_change = with_report.observed_best - base_report.observed_best
@@ -182,10 +179,6 @@ class PortfolioAwareCandidateOptimizer:
 
         ranked.sort(key=_ranking_key, reverse=True)
         return ranked[: self.result_limit]
-
-
-def _report_has_exact_terminal_space(report: ScenarioSearchReport) -> bool:
-    return report.outcome_space_exhaustive and report.outcome_space_exact
 
 
 def _scale_standalone_expected_profit(

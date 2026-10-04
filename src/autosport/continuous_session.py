@@ -1041,18 +1041,23 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         return settled, tuple(unique)
 
-    @staticmethod
     def _open_quote_keys_for_book(
+        self,
         book: PaperBook,
         event_identity: str,
     ) -> set[str]:
         parts = {event_identity}
         if ":" in event_identity:
             parts.add(event_identity.split(":", 1)[1])
+        source_id = self.collector.source_id
         return {
             leg.quote_key
             for ticket in book.tickets.values()
             if ticket.status.value == "open"
+            # Legacy/unscoped PAPER tickets remain readable, but once explicit
+            # provider provenance exists a different provider's settlement
+            # authority must never mutate this ticket's economics.
+            if not ticket.provider_source_ids or source_id in ticket.provider_source_ids
             for leg in ticket.legs
             if leg.event_id in parts
         }

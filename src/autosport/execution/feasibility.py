@@ -516,6 +516,10 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
         ) from exc
     if plan_view.plan_fingerprint != bound.execution_plan.fingerprint:
         raise ValueError("durable execution-plan fingerprint mismatch")
+    if plan_view.stale:
+        raise ValueError(
+            "durable execution plan is stale; recompute before feasibility decision"
+        )
     decision_at = _provider_timestamp(plan_view.plan_reserved_at)
     _require_aware(decision_at, "decision_at")
 

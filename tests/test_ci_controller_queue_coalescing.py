@@ -442,6 +442,57 @@ def test_main_rejects_preentry_orphan_effect_rebind(
     assert forged_calls == []
 
 
+def test_main_rejects_preentry_inherited_request_shadow(monkeypatch) -> None:
+    forged_calls: list[str] = []
+
+    def forged_request(_self, path: str, **_kwargs) -> object:
+        forged_calls.append(path)
+        return {}
+
+    monkeypatch.setattr(
+        WorkflowScopedGitHubApi,
+        "_request",
+        forged_request,
+    )
+
+    assert scoped_controller.main(_scoped_main_args()) == 2
+    assert forged_calls == []
+
+
+def test_main_rejects_preentry_inherited_cancel_shadow(monkeypatch) -> None:
+    forged_calls: list[int] = []
+
+    def forged_cancel(_self, run_id: int) -> None:
+        forged_calls.append(run_id)
+
+    monkeypatch.setattr(
+        WorkflowScopedGitHubApi,
+        "cancel",
+        forged_cancel,
+    )
+
+    assert scoped_controller.main(_scoped_main_args()) == 2
+    assert forged_calls == []
+
+
+def test_main_rejects_preentry_base_urlopen_rebind(monkeypatch) -> None:
+    forged_calls: list[object] = []
+    base_request_globals = scoped_controller.GitHubApi._request.__globals__
+
+    def forged_urlopen(request: object, *, timeout: int) -> object:
+        forged_calls.extend((request, timeout))
+        raise AssertionError("forged transport must not execute")
+
+    monkeypatch.setitem(
+        base_request_globals,
+        "urlopen",
+        forged_urlopen,
+    )
+
+    assert scoped_controller.main(_scoped_main_args()) == 2
+    assert forged_calls == []
+
+
 def test_scoped_main_closure_owns_canonical_orphan_effect() -> None:
     closure = {
         name: cell.cell_contents

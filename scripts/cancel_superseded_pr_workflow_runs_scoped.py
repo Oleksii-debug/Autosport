@@ -1827,6 +1827,7 @@ def _build_main(
     *,
     module_globals,
     api_type,
+    base_api_type,
     sweep_impl,
     trigger_impl,
     snapshot_identity_impl,
@@ -1860,6 +1861,16 @@ def _build_main(
 
     api_init = api_type.__dict__.get("__init__")
     api_init_code = getattr(api_init, "__code__", None)
+    base_request_impl = base_api_type.__dict__.get("_request")
+    base_request_code = getattr(base_request_impl, "__code__", None)
+    base_cancel_impl = base_api_type.__dict__.get("cancel")
+    base_cancel_code = getattr(base_cancel_impl, "__code__", None)
+    base_request_globals = getattr(base_request_impl, "__globals__", {})
+    request_type = base_request_globals.get("Request")
+    request_init = request_type.__dict__.get("__init__")
+    request_init_code = getattr(request_init, "__code__", None)
+    urlopen_impl = base_request_globals.get("urlopen")
+    urlopen_code = getattr(urlopen_impl, "__code__", None)
     active_runs_impl = api_type.__dict__.get("active_runs")
     active_runs_code = getattr(active_runs_impl, "__code__", None)
     orphan_impl = api_type.__dict__.get("cancel_historical_unbound_runs")
@@ -1872,6 +1883,8 @@ def _build_main(
     orphan_effect_code = getattr(orphan_effect_impl, "__code__", None)
 
     api_init_defaults = freeze_default_metadata(api_init)
+    base_request_defaults = freeze_default_metadata(base_request_impl)
+    base_cancel_defaults = freeze_default_metadata(base_cancel_impl)
     active_runs_defaults = freeze_default_metadata(active_runs_impl)
     orphan_defaults = freeze_default_metadata(orphan_impl)
     sweep_defaults = freeze_default_metadata(sweep_impl)
@@ -1890,6 +1903,24 @@ def _build_main(
                 and api_type.__dict__.get("__init__") is api_init
                 and getattr(api_init, "__code__", None) is api_init_code
                 and default_metadata_current(api_init, api_init_defaults)
+                and module_globals.get("GitHubApi") is base_api_type
+                and base_api_type.__dict__.get("_request") is base_request_impl
+                and getattr(base_request_impl, "__code__", None) is base_request_code
+                and default_metadata_current(
+                    base_request_impl, base_request_defaults
+                )
+                and base_api_type.__dict__.get("cancel") is base_cancel_impl
+                and getattr(base_cancel_impl, "__code__", None) is base_cancel_code
+                and default_metadata_current(
+                    base_cancel_impl, base_cancel_defaults
+                )
+                and getattr(api_type, "_request", None) is base_request_impl
+                and getattr(api_type, "cancel", None) is base_cancel_impl
+                and base_request_globals.get("Request") is request_type
+                and request_type.__dict__.get("__init__") is request_init
+                and getattr(request_init, "__code__", None) is request_init_code
+                and base_request_globals.get("urlopen") is urlopen_impl
+                and getattr(urlopen_impl, "__code__", None) is urlopen_code
                 and api_type.__dict__.get("active_runs") is active_runs_impl
                 and getattr(active_runs_impl, "__code__", None) is active_runs_code
                 and default_metadata_current(active_runs_impl, active_runs_defaults)
@@ -2099,6 +2130,7 @@ def _build_main(
 main = _build_main(
     module_globals=globals(),
     api_type=WorkflowScopedGitHubApi,
+    base_api_type=GitHubApi,
     sweep_impl=cancel_superseded_explicit_pr_runs,
     trigger_impl=_cancel_triggering_run_if_stale_or_nonqualifying,
     snapshot_identity_impl=_explicit_singleton_pr_for_current_run,

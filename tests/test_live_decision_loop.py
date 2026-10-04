@@ -2155,6 +2155,115 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     clock=_ManualClock(self.START + timedelta(seconds=4)),
                 )
 
+    def test_rolled_back_pending_progress_cannot_remint_existing_live_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [
+                        (self._event(sequence=1),),
+                        (
+                            self._event(
+                                sequence=2,
+                                odds="2.10",
+                                observed=self.START + timedelta(seconds=2),
+                            ),
+                        ),
+                    ],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            progress_path = (
+                workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+            )
+            rolled = json.loads(progress_path.read_text(encoding="utf-8"))
+            rolled["phase"] = "pending"
+            rolled["decision_id"] = None
+            rolled["plan_sha256"] = None
+            rolled["ledger_offset"] = None
+
+            clock.value = self.START + timedelta(seconds=3)
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            loop.close()
+            progress_path.write_text(
+                json.dumps(rolled, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "predates an already durable live decision",
+            ):
+                self._loop(
+                    workspace,
+                    observer=resumed_observer,
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=4)),
+                )
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertEqual(
+                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
+                2,
+            )
+
+    def test_rolled_back_append_pending_progress_cannot_hide_newer_live_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [
+                        (self._event(sequence=1),),
+                        (
+                            self._event(
+                                sequence=2,
+                                odds="2.10",
+                                observed=self.START + timedelta(seconds=2),
+                            ),
+                        ),
+                    ],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            progress_path = (
+                workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+            )
+            rolled = json.loads(progress_path.read_text(encoding="utf-8"))
+            rolled["phase"] = "append_pending"
+
+            clock.value = self.START + timedelta(seconds=3)
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            loop.close()
+            progress_path.write_text(
+                json.dumps(rolled, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "not the latest durable live decision",
+            ):
+                self._loop(
+                    workspace,
+                    observer=resumed_observer,
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=4)),
+                )
+            self.assertEqual(resumed_observer.calls, 0)
+
     def test_rolled_back_committed_progress_fails_closed_against_newer_live_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

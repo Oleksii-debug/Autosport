@@ -619,6 +619,115 @@ def test_active_state_rejects_expiry_at_or_before_transition(tmp_path):
         lifecycle.read_snapshot()
 
 
+@pytest.mark.parametrize(
+    "state,kwargs,match",
+    [
+        (
+            ProphetXSessionState.LOGIN_IN_FLIGHT,
+            {
+                "attempt_id": "a" * 64,
+                "attempt_started_at": NOW,
+                "slot_hold_until": NOW + timedelta(seconds=1),
+            },
+            "login_in_flight slot hold is below the conservative floor",
+        ),
+        (
+            ProphetXSessionState.ACTIVE,
+            {
+                "session_lineage_id": "b" * 64,
+                "access_expires_at": NOW + timedelta(seconds=1),
+                "slot_hold_until": NOW + timedelta(seconds=1),
+            },
+            "active slot hold is below the conservative floor",
+        ),
+        (
+            ProphetXSessionState.SESSION_POOL_EXHAUSTED,
+            {
+                "slot_hold_until": NOW + timedelta(seconds=1),
+                "last_failure_class": (
+                    ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED
+                ),
+            },
+            "session-pool hold is below the conservative floor",
+        ),
+    ],
+)
+def test_persisted_floor_states_reject_shortened_slot_horizons(
+    state,
+    kwargs,
+    match,
+):
+    with pytest.raises(ProphetXSessionLifecycleError, match=match):
+        ProphetXSessionSnapshot(
+            state=state,
+            generation=14,
+            credential_revision="rev-1",
+            integration_role="market-maker-primary",
+            last_transition_at=NOW,
+            **kwargs,
+        )
+
+
+@pytest.mark.parametrize(
+    "login_failure,renewal_failure",
+    [
+        (ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT, None),
+        (None, ProphetXRenewalFailureClass.AMBIGUOUS_PROVIDER_RESULT),
+    ],
+)
+def test_ambiguous_wait_rejects_shortened_conservative_hold(
+    login_failure,
+    renewal_failure,
+):
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="ambiguous provider result hold is below the conservative floor",
+    ):
+        ProphetXSessionSnapshot(
+            state=ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+            generation=15,
+            credential_revision="rev-1",
+            integration_role="market-maker-primary",
+            last_transition_at=NOW,
+            slot_hold_until=NOW + timedelta(seconds=1),
+            last_failure_class=login_failure,
+            last_renewal_failure_class=renewal_failure,
+        )
+
+
+def test_refresh_success_wait_rejects_shortened_conservative_hold():
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="wait hold is below the conservative refresh floor",
+    ):
+        ProphetXSessionSnapshot(
+            state=ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+            generation=16,
+            credential_revision="rev-1",
+            integration_role="market-maker-primary",
+            last_transition_at=NOW,
+            access_expires_at=NOW + timedelta(minutes=5),
+            slot_hold_until=NOW + timedelta(minutes=5),
+        )
+
+
+def test_restart_rejects_shortened_inflight_hold_before_new_login(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    lifecycle.begin_login(now=NOW, access_token_available=False)
+    payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
+    payload["slot_hold_until"] = (NOW + timedelta(seconds=1)).isoformat()
+    lifecycle.state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="login_in_flight slot hold is below the conservative floor",
+    ):
+        _lifecycle(tmp_path).begin_login(
+            now=NOW + timedelta(seconds=2),
+            access_token_available=False,
+        )
+
+
 def test_provider_slot_wait_requires_explicit_hold_horizon(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)

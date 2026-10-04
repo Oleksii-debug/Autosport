@@ -1963,15 +1963,53 @@ class SQLiteMarketStore:
         return sorted(events, key=_event_order_key)
 
     def current_by_source(self) -> dict[tuple[str, str], MarketEvent]:
-        with self._connection_lock:
-            rows = self.connection.execute(
-                f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes"
-            ).fetchall()
-            current: dict[tuple[str, str], MarketEvent] = {}
-            for row in rows:
-                event = _event_from_current_row(row)
-                current[(event.source_id, event.quote_key)] = event
-            return current
+        """Return only a projection proven to equal independently trusted history."""
+
+        authority = self._market_append_authority()
+        with self._market_append_issuance_lock(authority):
+            with self._connection_lock:
+                _validate_canonical_table(self.connection, "market_events")
+                _validate_canonical_table(self.connection, "current_quotes")
+                self._validate_causal_replay_state()
+                self._require_product_issued_positive_history(authority)
+
+                history_rows = self.connection.execute(
+                    f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
+                ).fetchall()
+                expected: dict[tuple[str, str], MarketEvent] = {}
+                for history_row in history_rows:
+                    event = _event_from_history_row(history_row)
+                    key = (event.source_id, event.quote_key)
+                    previous = expected.get(key)
+                    if (
+                        previous is None
+                        or _projection_order_key(event)
+                        > _projection_order_key(previous)
+                    ):
+                        expected[key] = event
+
+                rows = self.connection.execute(
+                    f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes"
+                ).fetchall()
+                current: dict[tuple[str, str], MarketEvent] = {}
+                for row in rows:
+                    event = _event_from_current_row(row)
+                    key = (event.source_id, event.quote_key)
+                    if key in current:
+                        raise ValueError(
+                            "current quote projection contains duplicate provider key"
+                        )
+                    current[key] = event
+
+                if current.keys() != expected.keys() or any(
+                    _canonical_payload(current[key])
+                    != _canonical_payload(expected[key])
+                    for key in expected
+                ):
+                    raise ValueError(
+                        "current quote projection diverges from canonical market history"
+                    )
+                return current
 
     def current(self) -> dict[str, MarketEvent]:
         current: dict[str, MarketEvent] = {}

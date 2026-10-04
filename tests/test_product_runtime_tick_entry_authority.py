@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from autosport.continuous_session import ContinuousSessionError
 from autosport.event_lifecycle import CatalogPage
 from autosport.product_entrypoint import ProductRuntimeError, run_product
 from autosport.product_runtime import (
@@ -64,6 +65,84 @@ def test_product_runtime_entry_tick_does_not_materialize_settlement_history(
         result = tick_autonomous_product_runtime(runtime)
         assert result.session_id == runtime.coordinator.session_id
     finally:
+        runtime.close()
+
+
+def test_product_runtime_entry_rejects_coherent_status_slot_replacement(
+    tmp_path: Path,
+) -> None:
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=_Source(),
+        clock=lambda: "2026-09-27T05:45:00+00:00",
+        sleep=lambda _: None,
+        initial_bankroll="100",
+    )
+    runtime_type = AutonomousProductRuntime
+    runtime_dict = type.__getattribute__(runtime_type, "__dict__")
+    original_status = runtime_dict["_coherent_status"]
+    hostile_calls = 0
+
+    def hostile_status(self, **_kwargs):
+        nonlocal hostile_calls
+        del self
+        hostile_calls += 1
+        return object()
+
+    try:
+        type.__setattr__(
+            runtime_type,
+            "_coherent_status",
+            hostile_status,
+        )
+        with pytest.raises(
+            ContinuousSessionError,
+            match="status authority changed",
+        ):
+            tick_autonomous_product_runtime(runtime)
+        assert hostile_calls == 0
+    finally:
+        type.__setattr__(
+            runtime_type,
+            "_coherent_status",
+            original_status,
+        )
+        runtime.close()
+
+
+def test_product_runtime_entry_rejects_coherent_status_code_mutation(
+    tmp_path: Path,
+) -> None:
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=_Source(),
+        clock=lambda: "2026-09-27T05:45:00+00:00",
+        sleep=lambda _: None,
+        initial_bankroll="100",
+    )
+    canonical_status = type.__getattribute__(
+        AutonomousProductRuntime,
+        "__dict__",
+    )["_coherent_status"]
+    original_code = canonical_status.__code__
+    hostile_calls = 0
+
+    def hostile_status(self, **_kwargs):
+        nonlocal hostile_calls
+        del self
+        hostile_calls += 1
+        return object()
+
+    try:
+        canonical_status.__code__ = hostile_status.__code__
+        with pytest.raises(
+            ContinuousSessionError,
+            match="status authority changed",
+        ):
+            tick_autonomous_product_runtime(runtime)
+        assert hostile_calls == 0
+    finally:
+        canonical_status.__code__ = original_code
         runtime.close()
 
 

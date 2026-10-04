@@ -26,6 +26,7 @@ from .supervised_execution import (
 CONFIRMATION_FILENAME = "supervised-confirmation.jsonl"
 _REVIEW_PAYLOAD_DOMAIN = "autosport.supervised-review-payload.v1"
 _DECISION_DOMAIN = "autosport.betfair-final-send-decision.v1"
+_DECISION_ID_DOMAIN = "autosport.betfair-final-send-decision-id.v1"
 _CONSUMER_DOMAIN = "autosport.betfair-final-send-consumer.v1"
 _WITNESS_DOMAIN = "autosport.betfair-final-send-confirmation-witness.v1"
 
@@ -220,7 +221,19 @@ def betfair_execution_confirmation_spec(
         risk_evidence_sha256=risk_evidence_sha256,
     )
     decision_sha256 = _domain_digest(_DECISION_DOMAIN, material)
-    decision_id = f"betfair-final-send-v1-{decision_sha256}"
+    decision_identity = {
+        "schema": "autosport.betfair_final_send_identity",
+        "schema_version": 1,
+        **{
+            key: value
+            for key, value in material.items()
+            if key not in {"schema", "schema_version", "risk_evidence_sha256"}
+        },
+    }
+    decision_id = (
+        "betfair-final-send-v1-"
+        + _domain_digest(_DECISION_ID_DOMAIN, decision_identity)
+    )
     review_payload = {
         "schema": "autosport.betfair_final_send_review",
         "schema_version": 1,

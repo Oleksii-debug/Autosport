@@ -17,6 +17,9 @@ _RUNTIME_EXECUTE_SENTINEL = "_autosport_decision_origin_pristine_runtime_execute
 _CALLSITE_IDENTITY_SENTINEL = "_autosport_decision_origin_frozen_callsites"
 _LIVE_INIT_SENTINEL = "_autosport_decision_origin_pristine_live_init"
 _LIVE_INIT_GUARD_SENTINEL = "_autosport_decision_origin_live_init_guard"
+_CLOCK_EXECUTE_CODE_SENTINEL = (
+    "_autosport_decision_origin_pristine_clock_execute_code"
+)
 
 # The true execution implementation must be preserved once, before any origin
 # wrapper can be recaptured by importlib.reload(_paper_execution_decision_origin).
@@ -29,6 +32,21 @@ if not hasattr(PaperExecutionAdoptionRuntime, _RUNTIME_EXECUTE_SENTINEL):
 _STABLE_RUNTIME_EXECUTE = getattr(
     PaperExecutionAdoptionRuntime,
     _RUNTIME_EXECUTE_SENTINEL,
+)
+
+# execute_with_clock is a narrow canonical trampoline: it samples the fresh product
+# clock under the execution RLock, then re-enters the fully composed execute surface.
+# Freeze its exact code identity once so arbitrary intermediate helpers cannot turn
+# product ancestry into ambient execution authority.
+if not hasattr(PaperExecutionAdoptionRuntime, _CLOCK_EXECUTE_CODE_SENTINEL):
+    setattr(
+        PaperExecutionAdoptionRuntime,
+        _CLOCK_EXECUTE_CODE_SENTINEL,
+        PaperExecutionAdoptionRuntime.execute_with_clock.__code__,
+    )
+_CLOCK_EXECUTE_CODE = getattr(
+    PaperExecutionAdoptionRuntime,
+    _CLOCK_EXECUTE_CODE_SENTINEL,
 )
 
 # Freeze producer ownership at installation time. Reading mutable class attributes
@@ -308,6 +326,7 @@ def _make_execute_guard(
     execute_stable_fn,
     product_origin_runtime,
     product_origin_callsite_code,
+    clock_execute_code,
     paper_value_fresh_code,
     paper_value_recovery_code,
 ):
@@ -352,18 +371,35 @@ def _make_execute_guard(
 
         current = inspect.currentframe()
         caller = None
+        authority_caller = None
         try:
             caller = current.f_back if current is not None else None
+            authority_caller = caller
+            if (
+                caller is not None
+                and caller.f_code is clock_execute_code
+                and caller.f_locals.get("self") is self
+                and caller.f_locals.get("prepared") is prepared
+                and caller.f_locals.get("trigger_id") == trigger_id
+            ):
+                # The exact clock entrypoint is a transparent product trampoline,
+                # not an authority source. Its immediate caller must independently
+                # satisfy the canonical producer identity checks below.
+                authority_caller = caller.f_back
             origin = (
                 None
-                if caller is None
-                else origin_from_direct_caller_fn(self, decision_id, caller)
+                if authority_caller is None
+                else origin_from_direct_caller_fn(
+                    self,
+                    decision_id,
+                    authority_caller,
+                )
             )
 
             if ambient_origin is not None:
                 if (
-                    caller is None
-                    or caller.f_code
+                    authority_caller is None
+                    or authority_caller.f_code
                     not in {paper_value_fresh_code, paper_value_recovery_code}
                     or origin is None
                     or origin != ambient_origin
@@ -373,7 +409,11 @@ def _make_execute_guard(
                     )
 
             if origin is None:
-                ancestor = None if caller is None else caller.f_back
+                ancestor = (
+                    None
+                    if authority_caller is None
+                    else authority_caller.f_back
+                )
                 if matching_product_ancestor_fn(self, decision_id, ancestor):
                     raise PaperExecutionAdoptionError(
                         "nested PAPER execution cannot inherit product decision-origin authority"
@@ -425,6 +465,7 @@ def _make_execute_guard(
         finally:
             del current
             del caller
+            del authority_caller
 
     return execute_with_exact_product_callsite
 
@@ -435,6 +476,7 @@ _execute_with_exact_product_callsite = _make_execute_guard(
     _execute_stable,
     _instance_guard._PRODUCT_ORIGIN_RUNTIME,
     _instance_guard._PRODUCT_ORIGIN_CALLSITE_CODE,
+    _CLOCK_EXECUTE_CODE,
     _PAPER_VALUE_FRESH_CODE,
     _PAPER_VALUE_RECOVERY_CODE,
 )

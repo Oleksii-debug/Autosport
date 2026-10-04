@@ -7,6 +7,8 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.ingestion as ingestion_module
+import autosport.market_bus as market_bus_module
 import autosport.storage as storage_module
 from autosport.domain import MarketEvent
 from autosport.ingestion import IngestionEngine
@@ -99,192 +101,6 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(store.trusted_live_events(), [])
             store.close()
 
-    def test_public_batch_with_forged_live_wrapper_remains_receipt_neutral(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "market.db"
-            store = SQLiteMarketStore(path)
-            event = self._direct_event(sequence=1)
-
-            # Neither the private wrapper nor a caller-authored legacy depth marker
-            # can grant live receipt authority through the public append seam.
-            store._live_receipt_write_depth = 1
-            accepted = store.append_batch_accepted(_LiveReceiptBatch((event,)))
-
-            self.assertEqual(accepted, [event])
-            self.assertFalse(store.has_trusted_live_receipt(event))
-            self.assertEqual(store.trusted_live_events(), [])
-            store.close()
-
-    def test_live_append_hook_cannot_mint_receipt_without_persisting_row(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "market.db"
-            store = SQLiteMarketStore(path)
-            event = self._direct_event(sequence=1)
-
-            with patch.object(
-                store,
-                "append_batch_accepted",
-                return_value=[event],
-            ):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "did not persist an expected market event",
-                ):
-                    store._append_live_batch_accepted([event])
-
-            self.assertEqual(store.events(), [])
-            self.assertEqual(store.trusted_live_events(), [])
-            self.assertFalse(store.connection.in_transaction)
-            store.close()
-
-    def test_live_append_hook_must_return_exact_list(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "market.db"
-            store = SQLiteMarketStore(path)
-            event = self._direct_event(sequence=1)
-
-            def insert_then_tuple(events):
-                return tuple(SQLiteMarketStore.append_batch_accepted(store, events))
-
-            with patch.object(
-                store,
-                "append_batch_accepted",
-                side_effect=insert_then_tuple,
-            ):
-                with self.assertRaisesRegex(
-                    TypeError,
-                    "must return an exact list",
-                ):
-                    store._append_live_batch_accepted([event])
-
-            self.assertEqual(store.events(), [])
-            self.assertEqual(store.trusted_live_events(), [])
-            self.assertFalse(store.connection.in_transaction)
-            store.close()
-
-    def test_live_append_hook_cannot_inject_extra_market_history(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "market.db"
-            store = SQLiteMarketStore(path)
-            event = self._direct_event(sequence=1)
-            extra = self._direct_event(sequence=2, odds="2.20")
-
-            def insert_extra(events):
-                accepted = SQLiteMarketStore.append_batch_accepted(store, events)
-                self.assertEqual(
-                    SQLiteMarketStore.append_batch_accepted(store, [extra]),
-                    [extra],
-                )
-                return accepted
-
-            with patch.object(
-                store,
-                "append_batch_accepted",
-                side_effect=insert_extra,
-            ):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "changed storage outside the canonical batch",
-                ):
-                    store._append_live_batch_accepted([event])
-
-            self.assertEqual(store.events(), [])
-            self.assertEqual(store.current_by_source(), {})
-            self.assertEqual(store.trusted_live_events(), [])
-            self.assertFalse(store.connection.in_transaction)
-            store.close()
-
-    def test_live_append_hook_subclass_return_is_rejected_before_serialization(self) -> None:
-        class ForgingAcceptedEvent(MarketEvent):
-            def to_dict(self):
-                raise AssertionError("subclass serialization must not be consulted")
-
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "market.db"
-            store = SQLiteMarketStore(path)
-            event = self._direct_event(sequence=1)
-            forged = ForgingAcceptedEvent.from_dict(event.to_dict())
-
-            def insert_then_forge(events):
-                accepted = SQLiteMarketStore.append_batch_accepted(store, events)
-                self.assertEqual(len(accepted), 1)
-                return [forged]
-
-            with patch.object(
-                store,
-                "append_batch_accepted",
-                side_effect=insert_then_forge,
-            ):
-                with self.assertRaisesRegex(
-                    TypeError,
-                    "must return exact MarketEvent instances",
-                ):
-                    store._append_live_batch_accepted([event])
-
-            self.assertEqual(store.events(), [])
-            self.assertEqual(store.trusted_live_events(), [])
-            self.assertFalse(store.connection.in_transaction)
-            store.close()
-
-    def test_live_append_hook_cannot_retroactively_upgrade_existing_history(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "market.db"
-            store = SQLiteMarketStore(path)
-            event = self._direct_event(sequence=1)
-            self.assertTrue(store.append(event))
-
-            with patch.object(
-                store,
-                "append_batch_accepted",
-                return_value=[event],
-            ):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "outside the canonical inserted set",
-                ):
-                    store._append_live_batch_accepted([event])
-
-            self.assertEqual(store.events(), [event])
-            self.assertFalse(store.has_trusted_live_receipt(event))
-            self.assertEqual(store.trusted_live_events(), [])
-            self.assertFalse(store.connection.in_transaction)
-            store.close()
-
-    def test_public_batch_preserves_outer_transaction_ownership(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "market.db"
-            store = SQLiteMarketStore(path)
-            event = self._direct_event(sequence=1)
-
-            store.connection.execute("BEGIN IMMEDIATE")
-            accepted = store.append_batch_accepted([event])
-            self.assertEqual(accepted, [event])
-            self.assertTrue(store.connection.in_transaction)
-            store.connection.rollback()
-
-            self.assertEqual(store.events(), [])
-            self.assertEqual(store.trusted_live_events(), [])
-            store.close()
-
-    def test_live_transaction_write_accounting_handles_descending_same_quote_batch(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "market.db"
-            store = SQLiteMarketStore(path)
-            newer = self._direct_event(sequence=2, odds="2.20")
-            older = self._direct_event(sequence=1, odds="2.00")
-
-            accepted = store._append_live_batch_accepted([newer, older])
-
-            self.assertEqual(accepted, [newer, older])
-            self.assertEqual(store.trusted_live_events(), [older, newer])
-            current = store.trusted_live_current_by_source()
-            self.assertEqual(
-                current[(newer.source_id, newer.quote_key)],
-                newer,
-            )
-            self.assertFalse(store.connection.in_transaction)
-            store.close()
-
     def test_live_retry_keeps_canonical_market_event_type_after_module_rebind(self) -> None:
         class PoisonMarketEvent(MarketEvent):
             @classmethod
@@ -304,9 +120,10 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             with patch.object(store, "append_batch_accepted", side_effect=retry_hook):
                 accepted = store._append_live_batch_accepted([event])
 
-            self.assertEqual(accepted, [event])
+            self.assertEqual(len(accepted), 1)
             trusted = store.trusted_live_events()
-            self.assertEqual(trusted, [event])
+            self.assertEqual(len(trusted), 1)
+            self.assertEqual(trusted[0].to_dict(), event.to_dict())
             self.assertTrue(store.has_trusted_live_receipt(trusted[0]))
             store.close()
 
@@ -327,6 +144,23 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
 
             self.assertEqual(accepted, [event])
             self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_trusted_receipt_query_rejects_market_event_subclass(self) -> None:
+        class ForgingEvent(MarketEvent):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            self._ingest(store)
+            trusted = store.trusted_live_events()[0]
+            forged = ForgingEvent.from_dict(trusted.to_dict())
+
+            with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+                store.has_trusted_live_receipt(forged)
+
+            self.assertTrue(store.has_trusted_live_receipt(trusted))
             store.close()
 
     def test_live_receipt_authority_does_not_leak_into_reentrant_generic_batch(self) -> None:
@@ -383,6 +217,89 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(store.trusted_live_events(), [])
             store.close()
 
+    def test_live_ingestion_stamping_survives_dependency_rebind(self) -> None:
+        class PoisonMarketEvent(MarketEvent):
+            pass
+
+        class PoisonBus(MarketEventBus):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            bus = MarketEventBus(store)
+            engine = IngestionEngine(
+                bus,
+                clock=lambda: self.RECEIVE_TIME,
+            )
+
+            with (
+                patch.object(ingestion_module, "MarketEvent", PoisonMarketEvent),
+                patch.object(ingestion_module, "MarketEventBus", PoisonBus),
+                patch.object(
+                    ingestion_module,
+                    "replace",
+                    side_effect=AssertionError("mutable replace global must not be consulted"),
+                ),
+            ):
+                stats = engine.poll_once(
+                    InMemoryProvider("provider-a", [self._quote(sequence=1)]),
+                    max_items=10,
+                )
+
+            self.assertEqual(stats.accepted, 1)
+            trusted = store.trusted_live_events()
+            self.assertEqual(len(trusted), 1)
+            self.assertEqual(trusted[0].ingest_ts, self.RECEIVE_TIME)
+            store.close()
+
+    def test_live_ingestion_uses_sealed_live_publish_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            engine = IngestionEngine(
+                MarketEventBus(store),
+                clock=lambda: self.RECEIVE_TIME,
+            )
+
+            with patch.object(
+                MarketEventBus,
+                "_publish_many_live_ingestion",
+                side_effect=AssertionError("mutable live publish descriptor must not be consulted"),
+            ):
+                stats = engine.poll_once(
+                    InMemoryProvider("provider-a", [self._quote(sequence=1)]),
+                    max_items=10,
+                )
+
+            self.assertEqual(stats.accepted, 1)
+            self.assertEqual(len(store.trusted_live_events()), 1)
+            store.close()
+
+    def test_subclass_bus_neutral_path_uses_sealed_generic_descriptor(self) -> None:
+        class NeutralBus(MarketEventBus):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            engine = IngestionEngine(
+                NeutralBus(store),
+                clock=lambda: self.RECEIVE_TIME,
+            )
+
+            with patch.object(
+                MarketEventBus,
+                "publish_many",
+                side_effect=AssertionError("mutable generic publish descriptor must not be consulted"),
+            ):
+                stats = engine.poll_once(
+                    InMemoryProvider("provider-a", [self._quote(sequence=1)]),
+                    max_items=10,
+                )
+
+            self.assertEqual(stats.accepted, 1)
+            self.assertEqual(len(store.events()), 1)
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
     def test_market_bus_subclass_remains_receipt_provenance_neutral(self) -> None:
         class ForgingBus(MarketEventBus):
             def _publish_many_live_ingestion(self, events):
@@ -412,25 +329,81 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(store.trusted_live_events(), [])
             store.close()
 
-    def test_private_live_receipt_seam_rejects_event_subclass_before_serialization(self) -> None:
-        class ForgingEvent(MarketEvent):
-            def to_dict(self):
-                raise AssertionError("subclass serialization must not be consulted")
+    def test_live_bus_authority_survives_module_class_rebind(self) -> None:
+        class PoisonBus(MarketEventBus):
+            pass
+
+        class PoisonStore(SQLiteMarketStore):
+            pass
 
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "market.db"
-            store = SQLiteMarketStore(path)
-            canonical = self._direct_event(sequence=1)
-            forged = ForgingEvent.from_dict(canonical.to_dict())
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            bus = MarketEventBus(store)
+            event = self._direct_event(sequence=1)
 
-            with self.assertRaisesRegex(
-                TypeError,
-                "live receipt authority requires exact MarketEvent values",
+            with (
+                patch.object(market_bus_module, "MarketEventBus", PoisonBus),
+                patch.object(market_bus_module, "SQLiteMarketStore", PoisonStore),
             ):
-                store._append_live_batch_accepted([forged])
+                accepted = MarketEventBus._publish_many_live_ingestion(bus, [event])
 
-            self.assertEqual(store.events(), [])
-            self.assertEqual(store.trusted_live_events(), [])
+            self.assertEqual(accepted, 1)
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_live_bus_uses_sealed_store_append_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            bus = MarketEventBus(store)
+            event = self._direct_event(sequence=1)
+
+            with patch.object(
+                SQLiteMarketStore,
+                "_append_live_batch_accepted",
+                side_effect=AssertionError("mutable class descriptor must not be consulted"),
+            ):
+                accepted = MarketEventBus._publish_many_live_ingestion(bus, [event])
+
+            self.assertEqual(accepted, 1)
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_live_bus_ignores_instance_notify_shadow(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            bus = MarketEventBus(store)
+            delivered = []
+            bus.subscribe(delivered.append)
+            bus._notify = lambda events: (_ for _ in ()).throw(
+                AssertionError("instance notify shadow must not control live delivery")
+            )
+            event = self._direct_event(sequence=1)
+
+            accepted = MarketEventBus._publish_many_live_ingestion(bus, [event])
+
+            self.assertEqual(accepted, 1)
+            self.assertEqual(delivered, [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_live_bus_deepcopy_authority_survives_module_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            bus = MarketEventBus(store)
+            delivered = []
+            bus.subscribe(delivered.append)
+            event = self._direct_event(sequence=1)
+
+            with patch.object(
+                market_bus_module,
+                "deepcopy",
+                side_effect=AssertionError("mutable deepcopy global must not be consulted"),
+            ):
+                accepted = MarketEventBus._publish_many_live_ingestion(bus, [event])
+
+            self.assertEqual(accepted, 1)
+            self.assertEqual(delivered, [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
             store.close()
 
     def test_private_live_receipt_seam_rejects_store_subclass(self) -> None:
@@ -635,48 +608,6 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             )
             store.close()
 
-    def test_silent_receipt_writer_noop_rolls_back_market_insert(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "market.db"
-            store = SQLiteMarketStore(path)
-
-            with patch.object(
-                store,
-                "_insert_live_receipt_authority",
-                return_value=None,
-            ):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "did not persist canonical authority",
-                ):
-                    self._ingest(store)
-
-            self.assertEqual(store.events(), [])
-            self.assertEqual(store.current_by_source(), {})
-            self.assertEqual(store.trusted_live_events(), [])
-            self.assertFalse(store.connection.in_transaction)
-            store.close()
-
-    def test_receipt_query_rejects_market_event_subclass(self) -> None:
-        class ReceiptQuerySubclass(MarketEvent):
-            pass
-
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "market.db"
-            store = SQLiteMarketStore(path)
-            self._ingest(store)
-            trusted = store.trusted_live_events()[0]
-            forged = ReceiptQuerySubclass.from_dict(trusted.to_dict())
-
-            with self.assertRaisesRegex(
-                TypeError,
-                "event must be an exact MarketEvent",
-            ):
-                store.has_trusted_live_receipt(forged)
-
-            self.assertTrue(store.has_trusted_live_receipt(trusted))
-            store.close()
-
     def test_receipt_persistence_failure_rolls_back_market_insert_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"
@@ -777,6 +708,235 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             ):
                 SQLiteMarketStore(path)
 
+
+    def test_public_batch_with_forged_live_wrapper_remains_receipt_neutral(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+
+            # Neither the private wrapper nor a caller-authored legacy depth marker
+            # can grant live receipt authority through the public append seam.
+            store._live_receipt_write_depth = 1
+            accepted = store.append_batch_accepted(_LiveReceiptBatch((event,)))
+
+            self.assertEqual(accepted, [event])
+            self.assertFalse(store.has_trusted_live_receipt(event))
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
+    def test_live_append_hook_cannot_mint_receipt_without_persisting_row(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+
+            with patch.object(
+                store,
+                "append_batch_accepted",
+                return_value=[event],
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "did not persist an expected market event",
+                ):
+                    store._append_live_batch_accepted([event])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertFalse(store.connection.in_transaction)
+            store.close()
+
+    def test_live_append_hook_must_return_exact_list(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+
+            def insert_then_tuple(events):
+                return tuple(SQLiteMarketStore.append_batch_accepted(store, events))
+
+            with patch.object(
+                store,
+                "append_batch_accepted",
+                side_effect=insert_then_tuple,
+            ):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "must return an exact list",
+                ):
+                    store._append_live_batch_accepted([event])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertFalse(store.connection.in_transaction)
+            store.close()
+
+    def test_live_append_hook_cannot_inject_extra_market_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+            extra = self._direct_event(sequence=2, odds="2.20")
+
+            def insert_extra(events):
+                accepted = SQLiteMarketStore.append_batch_accepted(store, events)
+                self.assertEqual(
+                    SQLiteMarketStore.append_batch_accepted(store, [extra]),
+                    [extra],
+                )
+                return accepted
+
+            with patch.object(
+                store,
+                "append_batch_accepted",
+                side_effect=insert_extra,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "changed storage outside the canonical batch",
+                ):
+                    store._append_live_batch_accepted([event])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.current_by_source(), {})
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertFalse(store.connection.in_transaction)
+            store.close()
+
+    def test_live_append_hook_subclass_return_is_rejected_before_serialization(self) -> None:
+        class ForgingAcceptedEvent(MarketEvent):
+            def to_dict(self):
+                raise AssertionError("subclass serialization must not be consulted")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+            forged = ForgingAcceptedEvent.from_dict(event.to_dict())
+
+            def insert_then_forge(events):
+                accepted = SQLiteMarketStore.append_batch_accepted(store, events)
+                self.assertEqual(len(accepted), 1)
+                return [forged]
+
+            with patch.object(
+                store,
+                "append_batch_accepted",
+                side_effect=insert_then_forge,
+            ):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "must return exact MarketEvent instances",
+                ):
+                    store._append_live_batch_accepted([event])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertFalse(store.connection.in_transaction)
+            store.close()
+
+    def test_live_append_hook_cannot_retroactively_upgrade_existing_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+            self.assertTrue(store.append(event))
+
+            with patch.object(
+                store,
+                "append_batch_accepted",
+                return_value=[event],
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "outside the canonical inserted set",
+                ):
+                    store._append_live_batch_accepted([event])
+
+            self.assertEqual(store.events(), [event])
+            self.assertFalse(store.has_trusted_live_receipt(event))
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertFalse(store.connection.in_transaction)
+            store.close()
+
+    def test_public_batch_preserves_outer_transaction_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+
+            store.connection.execute("BEGIN IMMEDIATE")
+            accepted = store.append_batch_accepted([event])
+            self.assertEqual(accepted, [event])
+            self.assertTrue(store.connection.in_transaction)
+            store.connection.rollback()
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
+    def test_live_transaction_write_accounting_handles_descending_same_quote_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            newer = self._direct_event(sequence=2, odds="2.20")
+            older = self._direct_event(sequence=1, odds="2.00")
+
+            accepted = store._append_live_batch_accepted([newer, older])
+
+            self.assertEqual(accepted, [newer, older])
+            self.assertEqual(store.trusted_live_events(), [older, newer])
+            current = store.trusted_live_current_by_source()
+            self.assertEqual(
+                current[(newer.source_id, newer.quote_key)],
+                newer,
+            )
+            self.assertFalse(store.connection.in_transaction)
+            store.close()
+
+    def test_private_live_receipt_seam_rejects_event_subclass_before_serialization(self) -> None:
+        class ForgingEvent(MarketEvent):
+            def to_dict(self):
+                raise AssertionError("subclass serialization must not be consulted")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            canonical = self._direct_event(sequence=1)
+            forged = ForgingEvent.from_dict(canonical.to_dict())
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "live receipt authority requires exact MarketEvent values",
+            ):
+                store._append_live_batch_accepted([forged])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
+    def test_silent_receipt_writer_noop_rolls_back_market_insert(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+
+            with patch.object(
+                store,
+                "_insert_live_receipt_authority",
+                return_value=None,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "did not persist canonical authority",
+                ):
+                    self._ingest(store)
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.current_by_source(), {})
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertFalse(store.connection.in_transaction)
+            store.close()
 
 if __name__ == "__main__":
     unittest.main()

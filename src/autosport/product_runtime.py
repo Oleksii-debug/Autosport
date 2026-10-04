@@ -575,47 +575,54 @@ class _ManifestStore:
         )
 
 
-def _source_resolver_identity(
+def _source_resolver_identity_impl(
     *,
     source: ProductCollectorSource,
     source_id: str,
+    _text,
+    _semantic_sha256,
+    _semantic_error_type,
+    _error_type,
+    _dumps,
+    _sha256,
+    _function_type,
 ) -> str:
     """Fingerprint the durable delta-to-MarketEvent authority used across restart."""
 
-    source_id = _ManifestStore._text(source_id, "source_id")
+    source_id = _text(source_id, "source_id")
     if getattr(source, "source_id", None) != source_id:
-        raise ProductCompositionError(
+        raise _error_type(
             "source resolver identity conflicts with configured source_id"
         )
-    stream_epoch = _ManifestStore._text(
+    stream_epoch = _text(
         getattr(source, "stream_epoch", None),
         "source.stream_epoch",
     )
     instance_dict = getattr(source, "__dict__", None)
     if type(instance_dict) is dict and "resolve_event" in instance_dict:
-        raise ProductCompositionError(
+        raise _error_type(
             "product source forbids per-instance resolve_event shadowing"
         )
     resolver = getattr(type(source), "resolve_event", None)
-    if type(resolver) is not FunctionType:
-        raise ProductCompositionError(
+    if type(resolver) is not _function_type:
+        raise _error_type(
             "product source must use a concrete class resolve_event method"
         )
     if resolver.__defaults__ is not None or resolver.__kwdefaults__ not in (None, {}):
-        raise ProductCompositionError(
+        raise _error_type(
             "product source resolve_event cannot use mutable call defaults"
         )
     if resolver.__closure__ is not None:
-        raise ProductCompositionError(
+        raise _error_type(
             "product source resolve_event cannot close over mutable authority"
         )
     try:
-        resolver_semantic_sha256 = function_semantic_sha256(
+        resolver_semantic_sha256 = _semantic_sha256(
             resolver,
             runtime_owner=type(source),
         )
-    except ResolverSemanticIdentityError as exc:
-        raise ProductCompositionError(
+    except _semantic_error_type as exc:
+        raise _error_type(
             "product source resolve_event semantics cannot be fingerprinted safely"
         ) from exc
 
@@ -632,7 +639,7 @@ def _source_resolver_identity(
                     break
         if value is None:
             return None
-        return _ManifestStore._text(value, name)
+        return _text(value, name)
 
     explicit_configuration = optional_text(
         "product_source_configuration_sha256"
@@ -645,9 +652,12 @@ def _source_resolver_identity(
         if digest is not None and (
             len(digest) != 64
             or digest != digest.lower()
-            or any(character not in "0123456789abcdef" for character in digest)
+            or any(
+                character not in "0123456789abcdef"
+                for character in digest
+            )
         ):
-            raise ProductCompositionError(
+            raise _error_type(
                 f"{field_name} must be lowercase SHA-256 hex"
             )
 
@@ -662,14 +672,50 @@ def _source_resolver_identity(
         "lawful_terms_ref": optional_text("lawful_terms_ref"),
         "retention_ref": optional_text("retention_ref"),
     }
-    encoded = json.dumps(
+    encoded = _dumps(
         payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return _sha256(encoded).hexdigest()
+
+
+def _bind_source_resolver_identity(implementation):
+    text = _ManifestStore._text
+    semantic_sha256 = function_semantic_sha256
+    semantic_error_type = ResolverSemanticIdentityError
+    error_type = ProductCompositionError
+    dumps = json.dumps
+    sha256 = hashlib.sha256
+    function_type = FunctionType
+
+    def bound(
+        *,
+        source: ProductCollectorSource,
+        source_id: str,
+    ) -> str:
+        return implementation(
+            source=source,
+            source_id=source_id,
+            _text=text,
+            _semantic_sha256=semantic_sha256,
+            _semantic_error_type=semantic_error_type,
+            _error_type=error_type,
+            _dumps=dumps,
+            _sha256=sha256,
+            _function_type=function_type,
+        )
+
+    return bound
+
+
+_source_resolver_identity = _bind_source_resolver_identity(
+    _source_resolver_identity_impl
+)
+del _source_resolver_identity_impl
+del _bind_source_resolver_identity
 
 def _settlement_authority_identity(
     *,

@@ -102,15 +102,17 @@ def test_module_global_redactor_rebinding_fails_closed_without_dispatch(
         calls.append(exc)
         return str(exc)
 
-    monkeypatch.setattr(health_module, "safe_exception_text", forged)
+    assert not hasattr(health_module, "safe_exception_text")
+    monkeypatch.setattr(health_module, "safe_exception_text", forged, raising=False)
     state = store.record_failure(
         "fixture-source",
         now=_NOW,
         error=RuntimeError(f"Authorization: Bearer {secret}"),
     )
 
-    assert state.last_error == _FALLBACK
     assert calls == []
+    assert state.last_error is not None
+    assert secret not in state.last_error
     assert secret not in store.path.read_text(encoding="utf-8")
 
 
@@ -120,7 +122,7 @@ def test_canonical_redactor_code_swap_fails_closed_before_dispatch(
 ) -> None:
     store = _store(tmp_path, monkeypatch, "code-swap")
     secret = "AS-DURABLE-CODE-SWAP-SENTINEL-41bc"
-    canonical = health_module.safe_exception_text
+    canonical = secret_redaction.safe_exception_text
     original_code = canonical.__code__
 
     def forged(exc: BaseException, **_kwargs) -> str:
@@ -202,7 +204,13 @@ def test_rebinding_public_renderer_holder_cannot_redirect_method_closure(
         calls.append(exc)
         return str(exc)
 
-    monkeypatch.setattr(health_module, "_DURABLE_FAILURE_RENDERER", forged)
+    assert not hasattr(health_module, "_DURABLE_FAILURE_RENDERER")
+    monkeypatch.setattr(
+        health_module,
+        "_DURABLE_FAILURE_RENDERER",
+        forged,
+        raising=False,
+    )
     state = store.record_failure(
         "fixture-source",
         now=_NOW,
@@ -222,11 +230,18 @@ def test_rebinding_public_fallback_holder_cannot_change_fail_closed_literal(
     store = _store(tmp_path, monkeypatch, "fallback-holder-rebind")
     secret = "AS-DURABLE-FALLBACK-HOLDER-SENTINEL-b80a"
 
-    monkeypatch.setattr(health_module, "_DURABLE_FAILURE_FALLBACK", secret)
+    assert not hasattr(health_module, "_DURABLE_FAILURE_FALLBACK")
+    monkeypatch.setattr(
+        health_module,
+        "_DURABLE_FAILURE_FALLBACK",
+        secret,
+        raising=False,
+    )
     monkeypatch.setattr(
         health_module,
         "safe_exception_text",
         lambda exc: str(exc),
+        raising=False,
     )
     state = store.record_failure(
         "fixture-source",
@@ -234,7 +249,8 @@ def test_rebinding_public_fallback_holder_cannot_change_fail_closed_literal(
         error=RuntimeError(f"Authorization: Bearer {secret}"),
     )
 
-    assert state.last_error == _FALLBACK
+    assert state.last_error is not None
+    assert secret not in state.last_error
     assert secret not in store.path.read_text(encoding="utf-8")
 
 

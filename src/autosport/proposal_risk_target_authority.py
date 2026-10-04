@@ -272,7 +272,7 @@ class ProductProposalRiskTarget:
     economic_goal_contract_sha256: str
     risk_policy_sha256: str
     candidate_sha256s: tuple[str, ...]
-    candidate_contexts: tuple[ProposedTicketRiskContext, ...]
+    candidate_context_json: tuple[str, ...]
     candidate_vector_sha256: str
     signal_strengths: tuple[Decimal, ...]
     evaluated_stakes: tuple[Decimal, ...]
@@ -323,7 +323,7 @@ _TARGET_FIELDS = (
     "economic_goal_contract_sha256",
     "risk_policy_sha256",
     "candidate_sha256s",
-    "candidate_contexts",
+    "candidate_context_json",
     "candidate_vector_sha256",
     "signal_strengths",
     "evaluated_stakes",
@@ -1523,7 +1523,10 @@ def _build_target(
         "economic_goal_contract_sha256": goal_sha,
         "risk_policy_sha256": policy.provenance_sha256,
         "candidate_sha256s": candidate_sha256s,
-        "candidate_contexts": contexts,
+        "candidate_context_json": tuple(
+            _canonical_json(_context_payload(context)).decode("utf-8")
+            for context in contexts
+        ),
         "candidate_vector_sha256": candidate_vector_sha256,
         "signal_strengths": signals,
         "evaluated_stakes": stakes,

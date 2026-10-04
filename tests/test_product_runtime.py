@@ -197,7 +197,12 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                             "product desktop authority field",
                         ):
                             setattr(desktop, name, replacement)
-                        self.assertIs(getattr(desktop, name), original)
+                        current = getattr(desktop, name)
+                        if name == "drain":
+                            self.assertIs(current.__func__, original.__func__)
+                            self.assertNotIn("drain", desktop.__dict__)
+                        else:
+                            self.assertIs(current, original)
 
                 self.assertTrue(runtime.collector.delta_store.append(delta))
                 self.assertEqual(

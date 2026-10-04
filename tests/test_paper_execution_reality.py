@@ -325,6 +325,48 @@ class PaperExecutionRealityTests(unittest.TestCase):
             with self.assertRaisesRegex(PaperExecutionIntegrityError, "digest mismatch"):
                 PaperExecutionLedger(path).events()
 
+    def test_rehashed_unknown_event_type_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            execute_paper_plan(
+                plan=plan(action("a1")),
+                trigger_id="trigger-unknown-event",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            forged = ledger._event(
+                event_type="FORGED_EXECUTION_EVENT",
+                run_id=events[-1]["run_id"],
+                key=f'{events[-1]["run_id"]}:forged',
+                payload={},
+                sequence=len(events),
+                previous_sha256=events[-1]["event_sha256"],
+            )
+            rewritten = [*events, forged]
+            path.write_text(
+                "".join(
+                    json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                    for item in rewritten
+                ),
+                encoding="utf-8",
+            )
+            ledger._write_anchor_unlocked(rewritten)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "unsupported event_type",
+            ):
+                PaperExecutionLedger(path).events()
+
     def test_writer_lock_fails_closed_instead_of_creating_parallel_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-execution.jsonl"

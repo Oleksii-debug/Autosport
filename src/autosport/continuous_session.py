@@ -1121,6 +1121,14 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "retain_pending_evidence_ids contains duplicate identity"
             )
+        processed = {
+            resolution.evidence_id
+            for resolution in settlement_evidence
+        }
+        if not retained.issubset(processed):
+            raise ContinuousSessionError(
+                "retained pending settlement identity was not processed"
+            )
 
         def mutate(raw: dict[str, Any]) -> None:
             evidence, outcome_digests, pending = self._merge_settlement_evidence(
@@ -1132,7 +1140,10 @@ class _ContinuousSessionState:
             raw["pending_settlement_resolutions"] = [
                 item
                 for item in pending
-                if item["evidence_id"] in retained
+                if (
+                    item["evidence_id"] not in processed
+                    or item["evidence_id"] in retained
+                )
             ]
 
         self._update(mutate)
@@ -1205,6 +1216,14 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "retain_pending_evidence_ids contains duplicate identity"
             )
+        processed = {
+            resolution.evidence_id
+            for resolution in settlement_evidence
+        }
+        if not retained.issubset(processed):
+            raise ContinuousSessionError(
+                "retained pending settlement identity was not processed"
+            )
 
         def mutate(raw: dict[str, Any]) -> None:
             raw["cycles_completed"] = int(raw["cycles_completed"]) + 1
@@ -1222,7 +1241,10 @@ class _ContinuousSessionState:
             raw["pending_settlement_resolutions"] = [
                 item
                 for item in pending
-                if item["evidence_id"] in retained
+                if (
+                    item["evidence_id"] not in processed
+                    or item["evidence_id"] in retained
+                )
             ]
 
         self._update(mutate)

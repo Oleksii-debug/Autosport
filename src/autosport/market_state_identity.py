@@ -39,7 +39,7 @@ def _prophetx_rest_state_material(event: MarketEvent) -> dict[str, object]:
             "ProphetX REST market-state contract requires the canonical source_id"
         )
 
-    payload = event.to_dict()
+    payload = MarketEvent.to_dict(event)
     metadata = payload.get("metadata")
     if type(metadata) is not dict:
         raise MarketStateIdentityError("market-state metadata must be a JSON object")
@@ -121,8 +121,8 @@ def semantic_market_state_identity(event: MarketEvent) -> str | None:
     becoming a caller-mintable duplicate-suppression hint.
     """
 
-    if not isinstance(event, MarketEvent):
-        raise TypeError("event must be MarketEvent")
+    if type(event) is not MarketEvent:
+        raise TypeError("event must be exact MarketEvent")
 
     contract = event.metadata.get("semantic_state_contract")
     if contract is None:
@@ -148,8 +148,8 @@ def semantic_market_state_identity(event: MarketEvent) -> str | None:
 def same_semantic_market_state(previous: MarketEvent, incoming: MarketEvent) -> bool:
     """Return True only for two supported, exact same-state durable events."""
 
-    if not isinstance(previous, MarketEvent) or not isinstance(incoming, MarketEvent):
-        raise TypeError("previous and incoming must be MarketEvent")
+    if type(previous) is not MarketEvent or type(incoming) is not MarketEvent:
+        raise TypeError("previous and incoming must be exact MarketEvent")
     previous_identity = semantic_market_state_identity(previous)
     incoming_identity = semantic_market_state_identity(incoming)
     if previous_identity is None or incoming_identity is None:

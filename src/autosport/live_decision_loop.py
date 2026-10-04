@@ -1593,9 +1593,15 @@ class PersistentLiveDecisionLoop:
                 continue
             if timestamp.tzinfo is None or timestamp.utcoffset() is None:
                 continue
-            deadlines.append(
-                timestamp.astimezone(timezone.utc) + self.max_quote_age
-            )
+            source_time = timestamp.astimezone(timezone.utc)
+            try:
+                deadline = source_time + self.max_quote_age
+            except OverflowError:
+                # A saturated/very large economic freshness allowance can extend
+                # beyond datetime.max. There is then no representable decision time
+                # at which this quote expires, so no finite scheduler deadline exists.
+                continue
+            deadlines.append(deadline)
 
         deadline = min(deadlines) if deadlines else None
         generation = self._freshness_generations.get(input_id, 0) + 1

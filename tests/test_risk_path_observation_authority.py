@@ -714,6 +714,76 @@ def test_replay_dispatch_rebinding_fails_before_attacker_executes(
     assert attacker_called is False
 
 
+def test_run_admission_resolver_rebinding_fails_before_attacker_executes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(tmp_path, monkeypatch)
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
+    attacker_called = False
+
+    def forged_admission(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("attacker run admission executed")
+
+    monkeypatch.setattr(
+        authority,
+        "resolve_product_iid_run_admission",
+        forged_admission,
+    )
+
+    with pytest.raises(
+        ProductRunCapitalPathError,
+        match="authority dispatch changed",
+    ):
+        authority.resolve_product_run_capital_path_evidence(
+            workspace=workspace,
+            run_id=RUN_ID,
+            member_index=0,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridge=bridge,
+            authority_root=authority_root,
+        )
+    assert attacker_called is False
+
+
+def test_missing_pre_run_admission_state_fails_completed_path_resolution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(tmp_path, monkeypatch)
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
+    admission_paths = tuple(workspace.glob(".risk-iid-run-admission-*.json"))
+    assert len(admission_paths) == 1
+    admission_paths[0].unlink()
+
+    with pytest.raises(
+        ProductRunCapitalPathError,
+        match="cannot be re-resolved",
+    ):
+        resolve_product_run_capital_path_evidence(
+            workspace=workspace,
+            run_id=RUN_ID,
+            member_index=0,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridge=bridge,
+            authority_root=authority_root,
+        )
+
+
 def test_product_run_capital_path_evidence_cannot_be_caller_minted() -> None:
     with pytest.raises(TypeError, match="product-issued"):
         ProductRunCapitalPathEvidence(

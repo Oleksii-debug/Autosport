@@ -1187,6 +1187,15 @@ if ([StringComparer]::OrdinalIgnoreCase.Equals([string]$freshFirstRunEvidenceA.l
 if ($freshFirstRunEvidenceA.webview_environment_overrides_clear -ne $true -or $freshFirstRunEvidenceB.webview_environment_overrides_clear -ne $true) {
   throw 'Fresh-extracted first-run storage audit did not prove a clean WebView2 release environment'
 }
+if ($freshFirstRunEvidenceA.workspace_canonical_atomic_publication_proven -ne $true -or $freshFirstRunEvidenceB.workspace_canonical_atomic_publication_proven -ne $true) {
+  throw 'Fresh-extracted first-run storage audit did not prove canonical workspace atomic publication'
+}
+if ($freshFirstRunEvidenceA.webview_host_writability_proven -ne $true -or $freshFirstRunEvidenceB.webview_host_writability_proven -ne $true) {
+  throw 'Fresh-extracted first-run storage audit did not prove WebView host-profile writability'
+}
+if ($freshFirstRunEvidenceA.webview_child_profile_access_proven -ne $false -or $freshFirstRunEvidenceB.webview_child_profile_access_proven -ne $false) {
+  throw 'Fresh-extracted first-run storage audit overclaimed WebView child profile access'
+}
 if ($freshFirstRunEvidenceA.real_money_execution -ne $false -or $freshFirstRunEvidenceA.human_tested -ne $false -or $freshFirstRunEvidenceA.nvda_verified -ne $false) {
   throw 'Fresh-extracted first-run storage audit violated release truth labels'
 }
@@ -1258,6 +1267,9 @@ $freshEvidence = [ordered]@{
   extracted_first_run_storage_status = $freshFirstRunEvidenceA.status
   extracted_first_run_storage_known_folder_status = 'PASS'
   extracted_first_run_storage_cwd_consistency_status = 'PASS'
+  extracted_first_run_workspace_atomic_publication_status = 'PASS'
+  extracted_first_run_webview_host_writability_status = 'PASS'
+  extracted_first_run_webview_child_profile_access_proven = $false
   extracted_diagnostic_status = $freshDiagnostic.status
   extracted_accessibility_status = $freshAccessibility.status
   extracted_keyboard_status = $freshKeyboardEvidence.status

@@ -972,6 +972,93 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_legacy_v2_settlement_evidence_is_readable_but_not_reinterpretable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:legacy",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+            )
+            book.save(root / "paper_book.json")
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="provider-result:legacy",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="legacy-outcome",
+                evidence_sha256="0" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            authority = _OutcomeAuthority(resolution)
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                coordinator.tick()
+                self.assertEqual(
+                    PaperBook.load(root / "paper_book.json").balance,
+                    Decimal("110"),
+                )
+            finally:
+                store.close()
+
+            state_path = root / "continuous_session.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["schema_version"] = 2
+            state.pop("settlement_outcome_digests")
+            state_path.write_text(
+                json.dumps(state, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            restarted, restarted_store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                self.assertEqual(restarted.status().cycles_completed, 1)
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "legacy settlement evidence lacks durable outcome interpretation",
+                ):
+                    restarted.tick()
+                self.assertEqual(
+                    PaperBook.load(root / "paper_book.json").balance,
+                    Decimal("110"),
+                )
+                self.assertEqual(restarted.status().cycles_completed, 1)
+            finally:
+                restarted_store.close()
+
     def test_unresolved_gap_is_durable_in_status_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

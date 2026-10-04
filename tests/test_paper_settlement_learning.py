@@ -407,6 +407,143 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 durable["bindings"][ticket.ticket_id]["settlement_intent"]
             )
 
+    def test_prepare_rejects_multiple_evidence_authorities_for_same_quote(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                _runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            resolutions = (
+                SettlementResolution(
+                    event_identity=f"provider-a:{leg.event_id}",
+                    settlement_ref="result:first",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="evidence:first",
+                    evidence_sha256="c" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                ),
+                SettlementResolution(
+                    event_identity=f"provider-a:{leg.event_id}",
+                    settlement_ref="result:second",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="evidence:second",
+                    evidence_sha256="d" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                ),
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "multiple settlement evidence authorities",
+            ):
+                bridge.prepare_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=resolutions,
+                    at="2026-09-19T21:20:00+00:00",
+                )
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            self.assertIsNone(
+                durable["bindings"][ticket.ticket_id]["settlement_intent"]
+            )
+
+    def test_prepare_rejects_split_evidence_ids_for_same_event_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legs = (
+                TicketLeg(
+                    event_id="event-1",
+                    market_id="winner",
+                    selection_id="home",
+                    locked_odds=Decimal("2.00"),
+                    sport="table_tennis",
+                ),
+                TicketLeg(
+                    event_id="event-1",
+                    market_id="total",
+                    selection_id="over",
+                    locked_odds=Decimal("1.80"),
+                    sport="table_tennis",
+                ),
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                _runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=legs)
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            resolutions = (
+                SettlementResolution(
+                    event_identity="provider-a:event-1",
+                    settlement_ref="result:shared",
+                    quote_outcomes={legs[0].quote_key: "win"},
+                    evidence_id="evidence:first",
+                    evidence_sha256="e" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                ),
+                SettlementResolution(
+                    event_identity="provider-a:event-1",
+                    settlement_ref="result:shared",
+                    quote_outcomes={legs[1].quote_key: "win"},
+                    evidence_id="evidence:second",
+                    evidence_sha256="f" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                ),
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "event/reference has multiple evidence authorities",
+            ):
+                bridge.prepare_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=resolutions,
+                    at="2026-09-19T21:20:00+00:00",
+                )
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            self.assertIsNone(
+                durable["bindings"][ticket.ticket_id]["settlement_intent"]
+            )
+
     def test_reconcile_rejects_foreign_provider_evidence_after_paper_pnl(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

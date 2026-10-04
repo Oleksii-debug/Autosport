@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from market_outcome_test_support import issue_synthetic_market_outcome_authority
+
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal

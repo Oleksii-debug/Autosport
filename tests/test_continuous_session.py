@@ -467,6 +467,123 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_explicit_ticket_provider_provenance_fences_foreign_settlement(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:foreign-fence",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-b",),
+            )
+            book.save(root / "paper_book.json")
+            authority = _OutcomeAuthority(
+                SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="provider-result:foreign-fence",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="foreign-provider-outcome",
+                    evidence_sha256="0" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                result = coordinator.tick()
+                self.assertEqual(result.settled_ticket_ids, ())
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("90"))
+                self.assertEqual(durable.tickets[ticket.ticket_id].status.value, "open")
+                self.assertEqual(coordinator.status().cycles_completed, 1)
+            finally:
+                store.close()
+
+    def test_explicit_matching_provider_provenance_allows_settlement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:matching-provider",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a",),
+            )
+            book.save(root / "paper_book.json")
+            authority = _OutcomeAuthority(
+                SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="provider-result:matching-provider",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="matching-provider-outcome",
+                    evidence_sha256="0" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                result = coordinator.tick()
+                self.assertEqual(result.settled_ticket_ids, (ticket.ticket_id,))
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("110"))
+                self.assertEqual(durable.tickets[ticket.ticket_id].status.value, "won")
+            finally:
+                store.close()
+
     def test_settled_bound_ticket_reaches_agent_loop_once_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

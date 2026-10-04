@@ -116,6 +116,7 @@ def _bind_canonical_settlement_engine(method):
         coordinator,
         book: PaperBook,
         event_identity: str,
+        settlement_ref: str,
     ) -> set[str]:
         lifecycle = coordinator.lifecycle
         if type(lifecycle) is not canonical_lifecycle_type:
@@ -135,6 +136,7 @@ def _bind_canonical_settlement_engine(method):
             coordinator,
             book,
             event_identity,
+            settlement_ref,
             _lifecycle_get=canonical_lifecycle_get,
             _lifecycle_record_type=canonical_lifecycle_record_type,
         )
@@ -989,6 +991,7 @@ def _canonical_open_quote_keys_for_book(
     coordinator,
     book: PaperBook,
     event_identity: str,
+    settlement_ref: str,
     *,
     _lifecycle_get: Callable[[ContinuousEventLifecycle, str], EventLifecycleRecord | None],
     _lifecycle_record_type: type[EventLifecycleRecord],
@@ -1003,6 +1006,14 @@ def _canonical_open_quote_keys_for_book(
     if record is None:
         raise ContinuousSessionError(
             "settlement event identity is absent from durable lifecycle"
+        )
+    if record.phase is not EventPhase.COMPLETED:
+        raise ContinuousSessionError(
+            "settlement event is not durably completed"
+        )
+    if record.settlement_ref != settlement_ref:
+        raise ContinuousSessionError(
+            "settlement evidence reference differs from durable lifecycle"
         )
     source_id = coordinator.collector.source_id
     if record.source_id != source_id:
@@ -1464,6 +1475,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     self,
                     book,
                     resolution.event_identity,
+                    resolution.settlement_ref,
                 )
                 scoped = {
                     quote_key: outcome

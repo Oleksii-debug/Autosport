@@ -2135,6 +2135,12 @@ class PersistentLiveDecisionLoop:
         _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
         self.intent_provenance.assert_available_at(decision_time)
         with WorkspaceEconomicLock(self.workspace):
+            durable_progress = self._load_progress()
+            if durable_progress != self._progress:
+                raise LiveDecisionProgressError(
+                    "live decision progress changed concurrently before pending publication"
+                )
+
             # The snapshot is written before the cursor: a crash before cursor
             # publication leaves only ignorable stale snapshot bytes, while every
             # visible PENDING cursor has an exact pre-action portfolio witness.

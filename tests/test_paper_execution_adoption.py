@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -206,6 +207,52 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                     binding=binding,
                     decision_id="decision-lay",
                 )
+
+    def test_execute_with_clock_samples_after_execution_lock_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            clock_value = [
+                datetime.fromisoformat("2026-09-20T06:00:00.100000+00:00")
+            ]
+
+            class _AdvanceClockOnEnter:
+                def __enter__(self):
+                    clock_value[0] = datetime.fromisoformat(
+                        "2026-09-20T06:01:00+00:00"
+                    )
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            runtime._execution_lock = _AdvanceClockOnEnter()
+            result = runtime.execute_with_clock(
+                prepared=current_prepared,
+                trigger_id="trigger-lock-clock",
+                clock=lambda: clock_value[0],
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(
+                result.run.started_at,
+                "2026-09-20T06:01:00+00:00",
+            )
+            self.assertEqual(
+                result.run.attempts[0].outcome,
+                PaperAttemptOutcome.REJECTED,
+            )
+            self.assertIn("expired", result.run.attempts[0].reason)
+            self.assertEqual(book.tickets, {})
+            reservations = [
+                event
+                for event in ledger.events()
+                if event["event_type"] == "RUN_RESERVED"
+            ]
+            self.assertEqual(
+                reservations[0]["payload"]["started_at"],
+                "2026-09-20T06:01:00+00:00",
+            )
 
     def test_moved_accepted_quote_materializes_execution_truth_once(self):
         with tempfile.TemporaryDirectory() as tmp:

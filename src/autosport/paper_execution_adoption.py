@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from threading import RLock
-from typing import Mapping
+from typing import Callable, Mapping
 
 from . import _paper_execution_reality_legacy as _paper_impl
 from .domain import MarketEvent, PaperTicket, TicketLeg
@@ -775,6 +775,44 @@ class PaperExecutionAdoptionRuntime:
                 prepared=prepared,
                 trigger_id=trigger_id,
                 proposed_started_at=started_at,
+            )
+            return self._execute_unlocked(
+                prepared=prepared,
+                trigger_id=trigger_id,
+                started_at=resolved_started_at,
+                materialize_exposure=materialize_exposure,
+                observations=observations,
+                evidence_registry=evidence_registry,
+                suspended_action_ids=suspended_action_ids,
+            )
+
+    def execute_with_clock(
+        self,
+        *,
+        prepared: PreparedPaperExecution,
+        trigger_id: str,
+        clock: Callable[[], datetime],
+        materialize_exposure: bool,
+        observations: Mapping[str, ObservedPaperExecution] | None = None,
+        evidence_registry: PaperExecutionEvidenceRegistry | None = None,
+        suspended_action_ids: frozenset[str] = frozenset(),
+    ) -> PaperExecutionAdoptionResult:
+        """Sample the execution clock only after entering the canonical run lock."""
+        if not callable(clock):
+            raise TypeError("clock must be callable")
+        with self._execution_lock:
+            now = clock()
+            if not isinstance(now, datetime):
+                raise TypeError("PAPER execution clock must return datetime")
+            if now.tzinfo is None or now.utcoffset() is None:
+                raise ValueError(
+                    "PAPER execution clock must return a timezone-aware datetime"
+                )
+            proposed_started_at = now.astimezone(timezone.utc).isoformat()
+            resolved_started_at = self.resolve_execution_started_at(
+                prepared=prepared,
+                trigger_id=trigger_id,
+                proposed_started_at=proposed_started_at,
             )
             return self._execute_unlocked(
                 prepared=prepared,

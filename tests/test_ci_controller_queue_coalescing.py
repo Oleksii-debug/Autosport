@@ -2957,6 +2957,40 @@ def test_canonical_branch_head_ignores_rebound_sha_and_quote_helpers(
         "https://api.github.com/repos/owner/repo/git/ref/heads/feature%2Foriginal"
     ]
 
+def test_active_run_scan_rejects_parse_run_kwdefault_rebase(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    parser = scoped_controller.parse_run
+    defaults = parser.__kwdefaults__
+    assert defaults is not None
+    requested: list[str] = []
+
+    def forged_positive_int(_value, *, field: str) -> int:
+        del field
+        return 999
+
+    def forbidden_request(path: str, **_kwargs):
+        requested.append(path)
+        raise AssertionError("rebased run parser must not reach transport")
+
+    monkeypatch.setitem(defaults, "_positive_int", forged_positive_int)
+    monkeypatch.setitem(defaults, "_positive_int_code", forged_positive_int.__code__)
+    monkeypatch.setattr(api, "_request", forbidden_request)
+
+    with pytest.raises(
+        CancellationError,
+        match="active workflow pagination authority is unavailable",
+    ):
+        api._active_runs_for_status("queued")
+    assert requested == []
+
+
 def test_active_run_pagination_bound_cannot_be_rebound_to_hide_second_page(
     monkeypatch,
 ) -> None:

@@ -1075,6 +1075,11 @@ class WorkflowScopedGitHubApi(GitHubApi):
             raise CancellationError("active workflow snapshot authority changed")
 
         runs: list[WorkflowRun] = []
+        # GitHub's total_count describes runs, not raw page observations. A moving
+        # offset-paginated collection can overlap pages when newer runs arrive ahead of
+        # the current offset. Track unique run ids separately so duplicate observations
+        # cannot make the scan look complete and hide later active runs.
+        seen_run_ids: set[int] = set()
         page = 1
         while True:
             query = _encode_query(
@@ -1111,8 +1116,11 @@ class WorkflowScopedGitHubApi(GitHubApi):
             ):
                 raise CancellationError("invalid workflow-runs response")
             page_runs = payload["workflow_runs"]
+            if len(page_runs) > _runs_per_page:
+                raise CancellationError("invalid workflow-runs page size")
             for item in page_runs:
                 run = _run_parser(item)
+                seen_run_ids.add(run.run_id)
                 if run.workflow_name != workflow_name:
                     run = _workflow_run_type(
                         run_id=run.run_id,
@@ -1174,7 +1182,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
             if (
                 not page_runs
                 or len(page_runs) < _runs_per_page
-                or len(runs) >= total_count
+                or len(seen_run_ids) >= total_count
             ):
                 break
             page += 1

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import asdict, dataclass, field, fields
@@ -7,6 +8,13 @@ from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
 from typing import BinaryIO
+
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicAuthorityRecoveryRequiredError,
+    MonotonicAuthorityRollbackError,
+    MonotonicWorkspaceAuthority,
+)
 
 
 _ALLOWED_HEALTH_STATUSES = frozenset({"unknown", "healthy", "degraded", "failed"})
@@ -33,6 +41,7 @@ _SCHEMA_V3 = 3
 _SCHEMA_V4 = 4
 _HISTORY_ENTRY_V2_FIELDS = frozenset({"recorded_at", "state"})
 _HISTORY_ENTRY_V3_FIELDS = frozenset({"recorded_at", "transition_order", "state"})
+_SOURCE_HEALTH_AUTHORITY_DOMAIN = "autosport.source-health-store.v1"
 
 
 def parse_source_timestamp(value: str) -> datetime:
@@ -320,7 +329,109 @@ class SourceHealthStore:
             if not self.path.exists():
                 self._write({"schema_version": _SCHEMA_V4, "sources": {}, "history": {}})
             else:
-                self._read()
+                self._read(verify_authority=False)
+                self._recover_or_bootstrap_authority(self._current_state_sha256())
+
+    def _monotonic_authority(self) -> MonotonicWorkspaceAuthority:
+        return MonotonicWorkspaceAuthority(
+            workspace=self.path.parent.resolve(strict=False),
+            domain=_SOURCE_HEALTH_AUTHORITY_DOMAIN,
+            key=self.path.name,
+        )
+
+    @staticmethod
+    def _sha256_bytes(value: bytes) -> str:
+        return hashlib.sha256(value).hexdigest()
+
+    def _current_state_sha256(self) -> str | None:
+        if not self.path.exists():
+            return None
+        return self._sha256_bytes(self.path.read_bytes())
+
+    def _authority_binding(
+        self,
+        observed: str | None,
+        intended: str,
+        *,
+        kind: str,
+    ) -> str:
+        material = "\0".join(
+            (
+                _SOURCE_HEALTH_AUTHORITY_DOMAIN,
+                kind,
+                self.path.name,
+                observed or "<PRISTINE>",
+                intended,
+            )
+        ).encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
+
+    def _recover_or_bootstrap_authority(
+        self,
+        observed: str | None,
+    ) -> MonotonicWorkspaceAuthority:
+        authority = self._monotonic_authority()
+        history = authority.read_history()
+        if not history:
+            if observed is None:
+                return authority
+            binding = self._authority_binding(
+                None,
+                observed,
+                kind="BOOTSTRAP",
+            )
+            tx_id = f"source-health-bootstrap-{observed}"
+            authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=None,
+                intended_state_sha256=observed,
+                semantic_binding_sha256=binding,
+            )
+            authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=observed,
+                semantic_binding_sha256=binding,
+            )
+            return authority
+
+        pending = history[-1] if history[-1].phase is AuthorityPhase.PREPARE else None
+        if pending is None:
+            authority.recover(observed_state_sha256=observed)
+            return authority
+
+        authority.recover(
+            observed_state_sha256=observed,
+            tx_id=pending.tx_id,
+            semantic_binding_sha256=pending.semantic_binding_sha256,
+        )
+        return authority
+
+    def _verify_authority_current(self, observed: str) -> None:
+        authority = self._monotonic_authority()
+        history = authority.read_history()
+        if not history:
+            raise MonotonicAuthorityRollbackError(
+                "source health state is missing independent monotonic authority"
+            )
+
+        pending = history[-1] if history[-1].phase is AuthorityPhase.PREPARE else None
+        if pending is not None:
+            if observed == pending.previous_committed_state_sha256:
+                # A writer prepared a successor but has not published it yet.
+                # The previous committed local image remains authoritative.
+                return
+            if observed == pending.intended_state_sha256:
+                # The local replace is visible but the writer has not yet made
+                # the independent COMMIT durable. Readers must fail closed rather
+                # than promote this crash-prefix state themselves.
+                raise MonotonicAuthorityRecoveryRequiredError(
+                    "source health publication requires monotonic commit recovery"
+                )
+            raise MonotonicAuthorityRollbackError(
+                "source health state matches neither committed nor prepared authority"
+            )
+
+        authority.recover(observed_state_sha256=observed)
 
     @staticmethod
     def _state_from_payload(payload: dict, *, normalize_failed_flags: bool = True) -> SourceHealthState:
@@ -663,10 +774,11 @@ class SourceHealthStore:
         value["quality_flags"] = tuple(value["quality_flags"])
         SourceHealthState(**value)
 
-    def _read(self) -> dict:
+    def _read(self, *, verify_authority: bool = True) -> dict:
         try:
+            raw_bytes = self.path.read_bytes()
             raw = json.loads(
-                self.path.read_text(encoding="utf-8"),
+                raw_bytes.decode("utf-8"),
                 object_pairs_hook=_reject_duplicate_json_keys,
                 parse_constant=_reject_nonfinite_json_constant,
             )
@@ -753,13 +865,50 @@ class SourceHealthStore:
                         raise ValueError("source health latest projection/history mismatch")
         except (TypeError, ValueError) as exc:
             raise ValueError("invalid source health state/history") from exc
+        if verify_authority:
+            self._verify_authority_current(self._sha256_bytes(raw_bytes))
         return raw
 
     def _write(self, raw: dict) -> None:
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(raw, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, self.path)
+        try:
+            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+                json.dump(raw, handle, ensure_ascii=False, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            intended = self._sha256_bytes(temporary.read_bytes())
+            observed = self._current_state_sha256()
+            authority = self._recover_or_bootstrap_authority(observed)
+            binding = self._authority_binding(
+                observed,
+                intended,
+                kind="PUBLISH",
+            )
+            tx_material = "\0".join(
+                (self.path.name, observed or "<PRISTINE>", intended)
+            ).encode("utf-8")
+            tx_id = f"source-health-{hashlib.sha256(tx_material).hexdigest()}"
+            authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=observed,
+                intended_state_sha256=intended,
+                semantic_binding_sha256=binding,
+            )
+            os.replace(temporary, self.path)
+            published = self._current_state_sha256()
+            if published != intended:
+                raise RuntimeError(
+                    "published source health bytes do not match prepared authority digest"
+                )
+            authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=intended,
+                semantic_binding_sha256=binding,
+            )
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass

@@ -800,5 +800,41 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
         self.assertEqual(hostile_calls, [])
 
 
+    def test_identity_code_guard_ignores_descriptor_helper_rebinding(
+        self,
+    ) -> None:
+        authority = self._authority()
+        quote_key = MarketOutcomeIdentity.quote_key
+        original_code = quote_key.__code__
+        original_helper = market_outcomes_module._authority_descriptor_code_identity
+        hostile_calls: list[str] = []
+
+        def hostile_quote_key(identity, selection_id):
+            del identity, selection_id
+            hostile_calls.append("quote_key")
+            return "forged:quote:key"
+
+        def forged_helper(member):
+            del member
+            return (hostile_quote_key.__code__,)
+
+        self.assertEqual(original_code.co_freevars, ())
+        self.assertEqual(hostile_quote_key.__code__.co_freevars, ())
+        quote_key.__code__ = hostile_quote_key.__code__
+        market_outcomes_module._authority_descriptor_code_identity = forged_helper
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "canonical market outcome identity class dispatch was replaced",
+            ):
+                authority.assert_issued_integrity()
+        finally:
+            market_outcomes_module._authority_descriptor_code_identity = original_helper
+            quote_key.__code__ = original_code
+
+        self.assertEqual(hostile_calls, [])
+        authority.assert_issued_integrity()
+
+
 if __name__ == "__main__":
     unittest.main()

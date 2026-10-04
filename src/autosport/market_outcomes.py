@@ -942,7 +942,16 @@ def _assert_canonical_market_outcome_authority_dispatch() -> None:
             raise ValueError(
                 "canonical market outcome identity class dispatch was replaced"
             )
-        if _authority_descriptor_code_identity(current) != expected_code:
+        if isinstance(current, property):
+            current_code = tuple(
+                None if accessor is None else getattr(accessor, "__code__", None)
+                for accessor in (current.fget, current.fset, current.fdel)
+            )
+        elif isinstance(current, (classmethod, staticmethod)):
+            current_code = (getattr(current.__func__, "__code__", None),)
+        else:
+            current_code = (getattr(current, "__code__", None),)
+        if current_code != expected_code:
             raise ValueError(
                 "canonical market outcome identity class dispatch was replaced"
             )

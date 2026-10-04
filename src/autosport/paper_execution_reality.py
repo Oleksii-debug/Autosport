@@ -226,6 +226,41 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             payload=payload,
         )
 
+    @staticmethod
+    def _attempts_in_event_order(
+        events: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], tuple[PaperLegAttempt, ...]]:
+        attempt_events = [
+            event
+            for event in events
+            if event["event_type"] == "ATTEMPT_RECORDED"
+        ]
+        attempts = tuple(
+            PaperLegAttempt.from_dict(event["payload"])
+            for event in attempt_events
+        )
+        if tuple(
+            attempt.sequence for attempt in attempts
+        ) != tuple(range(len(attempts))):
+            raise PaperExecutionIntegrityError(
+                "durable attempt events are not in canonical sequence order"
+            )
+        for event, attempt in zip(
+            attempt_events,
+            attempts,
+            strict=True,
+        ):
+            event_run_id = event["run_id"]
+            if (
+                attempt.run_id != event_run_id
+                or event["event_key"]
+                != f"{event_run_id}:attempt:{attempt.sequence}"
+            ):
+                raise PaperExecutionIntegrityError(
+                    "durable attempt event identity is invalid"
+                )
+        return attempt_events, attempts
+
     def _append_completion_unlocked(
         self,
         *,
@@ -314,16 +349,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 raise PaperExecutionIntegrityError(
                     "durable reservation action_ids are invalid"
                 )
-            attempts = tuple(
-                sorted(
-                    (
-                        PaperLegAttempt.from_dict(event["payload"])
-                        for event in run_events
-                        if event["event_type"] == "ATTEMPT_RECORDED"
-                    ),
-                    key=lambda item: item.sequence,
-                )
-            )
+            _, attempts = self._attempts_in_event_order(run_events)
             derived = _derive_run_economics(tuple(action_ids_raw), attempts)
             if not derived.can_complete:
                 raise PaperExecutionStateError(
@@ -381,28 +407,100 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             observation_evidence_ids=observation_evidence_ids,
             suspended_action_ids=suspended_action_ids,
         )
-        if reserve[0]["payload"] != expected_reserve:
-            raise PaperExecutionStateError("run identity conflicts with durable reservation")
-
-        attempt_events = [
-            event for event in events if event["event_type"] == "ATTEMPT_RECORDED"
-        ]
-        attempts = tuple(
-            sorted(
-                (PaperLegAttempt.from_dict(event["payload"]) for event in attempt_events),
-                key=lambda item: item.sequence,
+        reservation_event = reserve[0]
+        if reservation_event["event_key"] != f"{run_id}:reserve":
+            raise PaperExecutionIntegrityError(
+                "durable reservation event identity is invalid"
             )
-        )
+        if reservation_event["payload"] != expected_reserve:
+            raise PaperExecutionStateError(
+                "run identity conflicts with durable reservation"
+            )
+
+        scopes = [
+            event
+            for event in events
+            if event["event_type"] == "PAPER_EXPOSURE_SCOPE_BOUND"
+        ]
+        if len(scopes) > 1:
+            raise PaperExecutionIntegrityError(
+                "run has multiple exposure-scope events"
+            )
+        if scopes and (
+            scopes[0]["event_key"] != f"{run_id}:exposure-scope"
+            or scopes[0]["sequence"] >= reservation_event["sequence"]
+        ):
+            raise PaperExecutionIntegrityError(
+                "durable exposure scope chronology is invalid"
+            )
+
+        attempt_events, attempts = self._attempts_in_event_order(events)
+        if any(
+            event["sequence"] <= reservation_event["sequence"]
+            for event in attempt_events
+        ):
+            raise PaperExecutionIntegrityError(
+                "durable attempt appears before RUN_RESERVED"
+            )
         derived = _derive_run_economics(
             tuple(action.action_id for action in plan.actions),
             attempts,
         )
+        for index, attempt in enumerate(attempts):
+            action = plan.actions[index]
+            if (
+                attempt.plan_id != plan.plan_id
+                or attempt.model_fingerprint != config.fingerprint
+                or attempt.bookmaker_id != action.bookmaker_id
+                or attempt.account_id != action.account_id
+                or attempt.event_id != action.event_id
+                or attempt.market_id != action.market_id
+                or attempt.selection_id != action.selection_id
+                or attempt.side != action.side
+                or attempt.decision_quote_id != action.quote_id
+                or attempt.decision_odds != action.requested_odds
+                or attempt.requested_stake != action.requested_stake
+                or attempt.decision_observed_at != action.quote_observed_at
+            ):
+                raise PaperExecutionIntegrityError(
+                    "durable attempt conflicts with execution plan/model"
+                )
+            evidence_id = observation_evidence_ids.get(action.action_id)
+            if evidence_id is None:
+                expected_attempt = _synthetic_attempt(
+                    run_id=run_id,
+                    plan=plan,
+                    action=action,
+                    sequence=index,
+                    config=config,
+                    started_at=started_at,
+                    suspended=action.action_id in suspended_action_ids,
+                )
+                if attempt != expected_attempt:
+                    raise PaperExecutionIntegrityError(
+                        "durable synthetic attempt is not reproducible"
+                    )
+            elif (
+                attempt.evidence_grade is EvidenceGrade.SYNTHETIC
+                or attempt.evidence_id != evidence_id
+                or attempt.evidence_sha256 is None
+            ):
+                raise PaperExecutionIntegrityError(
+                    "durable observed attempt conflicts with reserved evidence"
+                )
 
         completions = [event for event in events if event["event_type"] == "RUN_COMPLETED"]
         if len(completions) > 1:
             raise PaperExecutionIntegrityError("run has multiple completion events")
         if completions:
             completion = completions[0]
+            if (
+                completion["event_key"] != f"{run_id}:complete"
+                or completion["sequence"] <= reservation_event["sequence"]
+            ):
+                raise PaperExecutionIntegrityError(
+                    "durable completion event identity/chronology is invalid"
+                )
             if any(
                 event["sequence"] > completion["sequence"] for event in attempt_events
             ):

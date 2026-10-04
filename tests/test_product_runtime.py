@@ -1149,6 +1149,51 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     "collector_bounded"
                 ]
 
+    def test_builder_ignores_durable_state_constructor_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            classes = (
+                product_runtime_module.PaperBook,
+                product_runtime_module.ContinuousEventLifecycle,
+                product_runtime_module.SQLiteMarketStore,
+                product_runtime_module.MarketMirror,
+                product_runtime_module.BoundedMirrorInvalidationBuffer,
+                product_runtime_module.MarketEventBus,
+                product_runtime_module.SourceHealthStore,
+                product_runtime_module.FocusedMirrorDependencyIndex,
+                product_runtime_module.CollectorDeltaStore,
+                product_runtime_module.DesktopDeltaCheckpointStore,
+                product_runtime_module.CanonicalDesktopApplication,
+                product_runtime_module._ProductStartTransitionStore,
+            )
+            originals = {cls: cls.__init__ for cls in classes}
+
+            def forged(*_args, **_kwargs):
+                raise AssertionError(
+                    "rebound durable product constructor must not execute"
+                )
+
+            runtime = None
+            try:
+                for cls in classes:
+                    cls.__init__ = forged
+                runtime = build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+                self.assertEqual(runtime.status().source_id, "provider-a")
+                self.assertTrue((root / "market.db").exists())
+                self.assertTrue((root / "collector_deltas.json").exists())
+                self.assertTrue((root / "catalog.json").exists())
+            finally:
+                for cls, original in originals.items():
+                    cls.__init__ = original
+                if runtime is not None:
+                    runtime.close()
+
     def test_builder_closure_binds_canonical_application_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

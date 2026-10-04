@@ -204,6 +204,8 @@ from . import _outcome_availability_clock_dispatch_guard as _outcome_availabilit
 # never its implementation hook that accepts caller-supplied entropy.
 from . import _risk_randomization_precommit_internal_guard as _risk_randomization_precommit_internal_guard  # noqa: F401,E402
 
-# The proposal-specific risk-evaluation precommit is a new economic authority seam.
-# Seal its public issuer/resolver and helper roots before any caller can use them.
+# Proposal-specific risk evaluation now has two guarded stages on one package import:
+# the durable target/science precommit issuer/resolver and the assertion-only
+# execution-evidence derivation. The latter may compute a statistical bound but
+# deliberately cannot mint proposal execution, risk approval, ticket or money truth.
 from . import _proposal_risk_evaluation_precommit_dispatch_guard as _proposal_risk_evaluation_precommit_dispatch_guard  # noqa: F401,E402

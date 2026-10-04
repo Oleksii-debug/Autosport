@@ -133,6 +133,19 @@ def _bind_live_batch_writer(
     return bound
 
 
+def _bind_trusted_receipt_checker(implementation, market_event_type):
+    """Capture the canonical event type outside mutable module aliases."""
+
+    def bound(self, event):
+        return implementation(
+            self,
+            event,
+            _market_event_type=market_event_type,
+        )
+
+    return bound
+
+
 def _timezone_aware_instant(value: str, field_name: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -920,7 +933,7 @@ class SQLiteMarketStore:
                 "live receipt authority requires an exact SQLiteMarketStore"
             )
         materialized = tuple(events)
-        if any(type(event) is not _SEALED_MARKET_EVENT_TYPE for event in materialized):
+        if any(type(event) is not _market_event_type for event in materialized):
             raise TypeError("live receipt authority requires exact MarketEvent values")
         batch = _LiveReceiptBatch(materialized)
         canonical_events = tuple(batch)
@@ -1014,7 +1027,7 @@ class SQLiteMarketStore:
                     )
 
                 if any(
-                    type(event) is not _SEALED_MARKET_EVENT_TYPE
+                    type(event) is not _market_event_type
                     for event in accepted
                 ):
                     raise TypeError(
@@ -1093,15 +1106,13 @@ class SQLiteMarketStore:
             events = [_event_from_history_row(row) for row in rows]
         return sorted(events, key=_event_order_key)
 
-    def has_trusted_live_receipt(
+    def _has_trusted_live_receipt_impl(
         self,
         event: MarketEvent,
         *,
-        _market_event_type: type[MarketEvent] = MarketEvent,
+        _market_event_type: type[MarketEvent],
     ) -> bool:
-        if _market_event_type is not _SEALED_MARKET_EVENT_TYPE:
-            raise TypeError("trusted receipt type override is not allowed")
-        if type(event) is not _SEALED_MARKET_EVENT_TYPE:
+        if type(event) is not _market_event_type:
             raise TypeError("event must be an exact MarketEvent")
         with self._connection_lock:
             row = self.connection.execute(
@@ -1121,6 +1132,12 @@ class SQLiteMarketStore:
         if receipt_ingest_ts != stored.ingest_ts or authority != _LIVE_RECEIPT_AUTHORITY:
             raise ValueError("live receipt authority conflicts with market event")
         return True
+
+    has_trusted_live_receipt = _bind_trusted_receipt_checker(
+        _has_trusted_live_receipt_impl,
+        _SEALED_MARKET_EVENT_TYPE,
+    )
+    del _has_trusted_live_receipt_impl
 
     def trusted_live_events(self) -> list[MarketEvent]:
         """Return only history rows whose local receipt instant has product authority."""

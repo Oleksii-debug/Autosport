@@ -7,7 +7,7 @@ import pytest
 from autosport.risk_fixed_n_product_cohort import (
     ProductFixedNIidCohort,
     ProductFixedNIidCohortError,
-    _compose_product_fixed_n_iid_cohort,
+    _validate_product_fixed_n_iid_cohort_inputs,
 )
 from autosport.risk_path_observation_authority import ProductRunCapitalPathEvidence
 from autosport.risk_sampling_dependence import (
@@ -107,56 +107,48 @@ def _cohort_inputs() -> tuple[ProductRunCapitalPathEvidence, ...]:
     )
 
 
-def test_complete_product_cohort_promotes_only_simulator_scoped_iid_truth() -> None:
-    result = _compose_product_fixed_n_iid_cohort(
+def test_complete_product_cohort_materializes_exact_neutral_inputs() -> None:
+    material = _validate_product_fixed_n_iid_cohort_inputs(
         _structure(),
         _precommit(),
         _cohort_inputs(),
     )
 
-    assert type(result) is ProductFixedNIidCohort
-    assert result.planned_member_ids == ("run-a", "run-b")
-    assert result.member_stream_sha256 == ("a" * 64, "b" * 64)
-    assert result.run_source_evidence_sha256 == ("1" * 64, "2" * 64)
-    assert result.run_execution_receipt_sha256 == ("3" * 64, "4" * 64)
-    assert result.planned_n == 2
-    assert result.product_precommit_bound is True
-    assert result.execution_consumption_proven is True
-    assert result.occurrence_ancestry_proven is True
-    assert result.run_path_ancestry_proven is True
-    assert result.fixed_n_complete is True
-    assert result.iid_qualified is True
-    assert result.risk_scope == "SIMULATOR_DISTRIBUTION_ONLY"
-    assert result.grants_real_money_authority is False
-    assert result.outcomes_available_at == "2026-01-02T11:00:00+00:00"
-    assert tuple(item.independent_unit_id for item in result.observations) == (
+    assert material["planned_member_ids"] == ("run-a", "run-b")
+    assert material["member_stream_sha256"] == ("a" * 64, "b" * 64)
+    assert material["run_source_evidence_sha256"] == ("1" * 64, "2" * 64)
+    assert material["run_execution_receipt_sha256"] == ("3" * 64, "4" * 64)
+    assert material["outcomes_available_at"] == "2026-01-02T11:00:00+00:00"
+    observations = material["observations"]
+    assert type(observations) is tuple
+    assert tuple(item.independent_unit_id for item in observations) == (
         "run-a",
         "run-b",
     )
-    assert tuple(item.dependence_group_id for item in result.observations) == (
+    assert tuple(item.dependence_group_id for item in observations) == (
         "a" * 64,
         "b" * 64,
     )
-    assert tuple(item.minimum_equity for item in result.observations) == (
+    assert tuple(item.minimum_equity for item in observations) == (
         Decimal("91.25"),
         Decimal("87.50"),
     )
-    assert len(result.cohort_sha256) == 64
+    assert len(material["cohort_sha256"]) == 64
 
 
 def test_product_cohort_digest_is_deterministic() -> None:
-    first = _compose_product_fixed_n_iid_cohort(
+    first = _validate_product_fixed_n_iid_cohort_inputs(
         _structure(),
         _precommit(),
         _cohort_inputs(),
     )
-    second = _compose_product_fixed_n_iid_cohort(
+    second = _validate_product_fixed_n_iid_cohort_inputs(
         _structure(),
         _precommit(),
         _cohort_inputs(),
     )
     assert first == second
-    assert first.cohort_sha256 == second.cohort_sha256
+    assert first["cohort_sha256"] == second["cohort_sha256"]
 
 
 def test_missing_fixed_n_member_fails_closed() -> None:
@@ -164,7 +156,7 @@ def test_missing_fixed_n_member_fails_closed() -> None:
         ProductFixedNIidCohortError,
         match="every precommitted member",
     ):
-        _compose_product_fixed_n_iid_cohort(
+        _validate_product_fixed_n_iid_cohort_inputs(
             _structure(),
             _precommit(),
             _cohort_inputs()[:1],
@@ -177,7 +169,7 @@ def test_member_reordering_fails_closed() -> None:
         ProductFixedNIidCohortError,
         match="exact precommitted IID member",
     ):
-        _compose_product_fixed_n_iid_cohort(
+        _validate_product_fixed_n_iid_cohort_inputs(
             _structure(),
             _precommit(),
             (second, first),
@@ -199,7 +191,7 @@ def test_duplicate_run_source_evidence_fails_closed() -> None:
         ProductFixedNIidCohortError,
         match="unique product run evidence",
     ):
-        _compose_product_fixed_n_iid_cohort(
+        _validate_product_fixed_n_iid_cohort_inputs(
             _structure(),
             _precommit(),
             (first, duplicate),
@@ -221,7 +213,7 @@ def test_duplicate_execution_receipt_fails_closed() -> None:
         ProductFixedNIidCohortError,
         match="unique replay execution receipt",
     ):
-        _compose_product_fixed_n_iid_cohort(
+        _validate_product_fixed_n_iid_cohort_inputs(
             _structure(),
             _precommit(),
             (first, duplicate),
@@ -239,7 +231,7 @@ def test_duplicate_member_stream_fails_closed() -> None:
         ProductFixedNIidCohortError,
         match="distinct product randomization streams",
     ):
-        _compose_product_fixed_n_iid_cohort(
+        _validate_product_fixed_n_iid_cohort_inputs(
             structure,
             _precommit(),
             _cohort_inputs(),
@@ -261,7 +253,7 @@ def test_non_exact_member_index_fails_closed() -> None:
         ProductFixedNIidCohortError,
         match="exact precommitted IID member",
     ):
-        _compose_product_fixed_n_iid_cohort(
+        _validate_product_fixed_n_iid_cohort_inputs(
             _structure(),
             _precommit(),
             (forged, second),

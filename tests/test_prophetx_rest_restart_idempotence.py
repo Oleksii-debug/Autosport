@@ -224,6 +224,31 @@ class ProphetXRestSemanticStateContractTests(unittest.TestCase):
             semantic_market_state_identity(second[0]),
         )
 
+    def test_unrelated_selection_change_does_not_dirty_unchanged_selection(self) -> None:
+        changed = _payload()
+        changed["data"]["markets"][0]["selections"][1][0]["price"] = -180
+        provider = self._provider([_payload(), changed])
+        _first_batch, first = self._normalized(provider)
+        _second_batch, second = self._normalized(provider)
+
+        first_by_selection = {event.selection_id: event for event in first}
+        second_by_selection = {event.selection_id: event for event in second}
+        strike_a = "prophetx:sandbox:strike-a"
+        strike_b = "prophetx:sandbox:strike-b"
+
+        self.assertNotEqual(
+            first_by_selection[strike_a].metadata["snapshot_fingerprint_sha256"],
+            second_by_selection[strike_a].metadata["snapshot_fingerprint_sha256"],
+        )
+        self.assertEqual(
+            semantic_market_state_identity(first_by_selection[strike_a]),
+            semantic_market_state_identity(second_by_selection[strike_a]),
+        )
+        self.assertNotEqual(
+            semantic_market_state_identity(first_by_selection[strike_b]),
+            semantic_market_state_identity(second_by_selection[strike_b]),
+        )
+
     def test_best_price_change_is_semantic(self) -> None:
         changed = _payload()
         changed["data"]["markets"][0]["selections"][0][0]["price"] = 160

@@ -68,6 +68,7 @@ class EventType(str, Enum):
     EXTERNAL_ACKNOWLEDGEMENT = "EXTERNAL_ACKNOWLEDGEMENT"
     RECONCILED_FOUND = "RECONCILED_FOUND"
     RECONCILED_NOT_FOUND = "RECONCILED_NOT_FOUND"
+    BETFAIR_PRE_PROVIDER_NO_EFFECT_AUTHORIZED = "BETFAIR_PRE_PROVIDER_NO_EFFECT_AUTHORIZED"
 
 
 def _now() -> str:
@@ -865,6 +866,11 @@ class RealExecutionLedger:
                     raise ExecutionLedgerIntegrityError(
                         "acknowledgement has invalid status"
                     ) from exc
+            elif kind == EventType.BETFAIR_PRE_PROVIDER_NO_EFFECT_AUTHORIZED.value:
+                if state != AttemptState.UNKNOWN:
+                    raise ExecutionLedgerIntegrityError(
+                        "Betfair pre-provider no-effect authority requires UNKNOWN"
+                    )
             elif kind == EventType.RECONCILED_NOT_FOUND.value:
                 if state != AttemptState.UNKNOWN:
                     raise ExecutionLedgerIntegrityError(
@@ -1313,6 +1319,165 @@ class RealExecutionLedger:
                     prior[3],
                     True,
                 )
+
+        for event_index, event in enumerate(events):
+            if (
+                event["event_type"]
+                != EventType.BETFAIR_PRE_PROVIDER_NO_EFFECT_AUTHORIZED.value
+            ):
+                continue
+            if event["action_id"] is None or event["attempt_id"] is None:
+                raise ExecutionLedgerIntegrityError(
+                    "Betfair pre-provider no-effect authority requires action/attempt identity"
+                )
+            payload = event["payload"]
+            if set(payload) != {
+                "evidence_id",
+                "authorized_at",
+                "approval_id",
+                "approval_fingerprint",
+                "write_adapter_id",
+                "write_adapter_version",
+                "pre_authority_snapshot_sha256",
+                "source",
+            }:
+                raise ExecutionLedgerIntegrityError(
+                    "Betfair pre-provider no-effect authority schema is invalid"
+                )
+            try:
+                _sha256_text(payload["evidence_id"], "evidence_id")
+                _sha256_text(
+                    payload["approval_fingerprint"],
+                    "approval_fingerprint",
+                )
+                _sha256_text(
+                    payload["pre_authority_snapshot_sha256"],
+                    "pre_authority_snapshot_sha256",
+                )
+                authorized_at = _timestamp(
+                    payload["authorized_at"],
+                    "authorized_at",
+                )
+                _text(payload["approval_id"], "approval_id")
+                _text(payload["write_adapter_id"], "write_adapter_id")
+                _text(payload["write_adapter_version"], "write_adapter_version")
+                _text(payload["source"], "source")
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ExecutionLedgerIntegrityError(
+                    "Betfair pre-provider no-effect authority values are invalid"
+                ) from exc
+
+            prior_attempt_events = [
+                prior
+                for prior in events[:event_index]
+                if prior["attempt_id"] == event["attempt_id"]
+            ]
+            if [
+                prior["event_type"] for prior in prior_attempt_events
+            ] != [
+                EventType.ATTEMPT_RESERVED.value,
+                EventType.ATTEMPT_UNKNOWN.value,
+            ]:
+                raise ExecutionLedgerIntegrityError(
+                    "Betfair pre-provider no-effect authority crossed provider/effect boundary"
+                )
+            reserved, unknown = prior_attempt_events
+            if (
+                reserved["plan_id"] != event["plan_id"]
+                or reserved["action_id"] != event["action_id"]
+                or unknown["plan_id"] != event["plan_id"]
+                or unknown["action_id"] != event["action_id"]
+                or unknown["payload"].get("reason") != "process_restart"
+            ):
+                raise ExecutionLedgerIntegrityError(
+                    "Betfair pre-provider no-effect authority identity/restart boundary is invalid"
+                )
+            if authorized_at <= _timestamp(
+                unknown["payload"].get("observed_at"),
+                "restart observed_at",
+            ):
+                raise ExecutionLedgerIntegrityError(
+                    "Betfair pre-provider no-effect authority must follow restart uncertainty"
+                )
+            _, action = cls._action_payload(
+                events,
+                event["plan_id"],
+                event["action_id"],
+            )
+            if action["bookmaker_id"] != "betfair":
+                raise ExecutionLedgerIntegrityError(
+                    "Betfair pre-provider no-effect authority requires Betfair action"
+                )
+
+            prior_approval = [
+                prior
+                for prior in events[:event_index]
+                if prior["plan_id"] == event["plan_id"]
+                and prior["event_type"] == EventType.SUPERVISED_APPROVAL_BOUND.value
+            ]
+            prior_revocations = [
+                prior
+                for prior in events[:event_index]
+                if prior["plan_id"] == event["plan_id"]
+                and prior["event_type"] == EventType.SUPERVISED_APPROVAL_REVOKED.value
+            ]
+            if len(prior_approval) != 1 or prior_revocations:
+                raise ExecutionLedgerIntegrityError(
+                    "Betfair pre-provider no-effect authority requires active durable approval"
+                )
+            approval_payload = prior_approval[0]["payload"]
+            if (
+                approval_payload.get("approval_id") != payload["approval_id"]
+                or approval_payload.get("approval_fingerprint")
+                != payload["approval_fingerprint"]
+            ):
+                raise ExecutionLedgerIntegrityError(
+                    "Betfair pre-provider no-effect authority approval mismatch"
+                )
+            approved_at = _timestamp(
+                approval_payload["approved_at"],
+                "approved_at",
+            )
+            expires_at = _timestamp(
+                approval_payload["expires_at"],
+                "expires_at",
+            )
+            if authorized_at < approved_at or authorized_at >= expires_at:
+                raise ExecutionLedgerIntegrityError(
+                    "Betfair pre-provider no-effect authority is outside approval lifetime"
+                )
+
+            complete_attempt_events = [
+                candidate
+                for candidate in events
+                if candidate["attempt_id"] == event["attempt_id"]
+            ]
+            complete_types = [
+                candidate["event_type"] for candidate in complete_attempt_events
+            ]
+            allowed_prefix = [
+                EventType.ATTEMPT_RESERVED.value,
+                EventType.ATTEMPT_UNKNOWN.value,
+                EventType.BETFAIR_PRE_PROVIDER_NO_EFFECT_AUTHORIZED.value,
+            ]
+            if complete_types not in (
+                allowed_prefix,
+                allowed_prefix + [EventType.RECONCILED_NOT_FOUND.value],
+            ):
+                raise ExecutionLedgerIntegrityError(
+                    "Betfair pre-provider no-effect authority history is not closed"
+                )
+            if len(complete_types) == 4:
+                reconciliation = complete_attempt_events[-1]["payload"]
+                if (
+                    reconciliation.get("evidence_id") != payload["evidence_id"]
+                    or reconciliation.get("observed_at") != payload["authorized_at"]
+                    or reconciliation.get("external_effect_found") is not False
+                    or reconciliation.get("source") != payload["source"]
+                ):
+                    raise ExecutionLedgerIntegrityError(
+                        "Betfair pre-provider no-effect reconciliation mismatches authority"
+                    )
 
         attempt_ids = {
             event["attempt_id"]
@@ -2251,6 +2416,209 @@ class RealExecutionLedger:
 
         return self._mutate(operation)
 
+
+    def _bind_betfair_pre_provider_no_effect(
+        self,
+        *,
+        attempt_id: str,
+        evidence_id: str,
+        observed_at: str,
+        source: str,
+        approval_id: str,
+        approval_fingerprint: str,
+        write_adapter_id: str,
+        write_adapter_version: str,
+        expected_snapshot_sha256: str,
+    ) -> str:
+        _text(attempt_id, "attempt_id")
+        _sha256_text(evidence_id, "evidence_id")
+        _timestamp(observed_at, "observed_at")
+        _text(source, "source")
+        _text(approval_id, "approval_id")
+        _sha256_text(approval_fingerprint, "approval_fingerprint")
+        _text(write_adapter_id, "write_adapter_id")
+        _text(write_adapter_version, "write_adapter_version")
+        _sha256_text(
+            expected_snapshot_sha256,
+            "expected_snapshot_sha256",
+        )
+        reconciliation = ReconciliationSnapshot(
+            attempt_id=attempt_id,
+            evidence_id=evidence_id,
+            observed_at=observed_at,
+            external_effect_found=False,
+            source=source,
+        )
+        reconciliation_payload = reconciliation.to_dict()
+        authority_payload = {
+            "evidence_id": evidence_id,
+            "authorized_at": observed_at,
+            "approval_id": approval_id,
+            "approval_fingerprint": approval_fingerprint,
+            "write_adapter_id": write_adapter_id,
+            "write_adapter_version": write_adapter_version,
+            "pre_authority_snapshot_sha256": expected_snapshot_sha256,
+            "source": source,
+        }
+
+        def operation() -> str:
+            events = self._events()
+            attempt_events = self._attempt_events(events, attempt_id)
+            if not attempt_events:
+                raise ExecutionStateError(
+                    "pre-provider no-effect authority requires reserved attempt"
+                )
+            existing_authority = [
+                event
+                for event in attempt_events
+                if event["event_type"]
+                == EventType.BETFAIR_PRE_PROVIDER_NO_EFFECT_AUTHORIZED.value
+            ]
+            if existing_authority:
+                if (
+                    len(existing_authority) != 1
+                    or existing_authority[0]["payload"] != authority_payload
+                ):
+                    raise ExecutionIdentityConflict(
+                        "attempt already has different pre-provider no-effect authority"
+                    )
+                event_types = [
+                    event["event_type"] for event in attempt_events
+                ]
+                prefix = [
+                    EventType.ATTEMPT_RESERVED.value,
+                    EventType.ATTEMPT_UNKNOWN.value,
+                    EventType.BETFAIR_PRE_PROVIDER_NO_EFFECT_AUTHORIZED.value,
+                ]
+                if event_types == prefix:
+                    first = attempt_events[0]
+                    self._append(
+                        EventType.RECONCILED_NOT_FOUND,
+                        first["plan_id"],
+                        first["action_id"],
+                        attempt_id,
+                        reconciliation_payload,
+                    )
+                elif event_types != prefix + [EventType.RECONCILED_NOT_FOUND.value]:
+                    raise ExecutionStateError(
+                        "pre-provider no-effect authority history changed after issuance"
+                    )
+                return evidence_id
+
+            if [
+                event["event_type"] for event in attempt_events
+            ] != [
+                EventType.ATTEMPT_RESERVED.value,
+                EventType.ATTEMPT_UNKNOWN.value,
+            ]:
+                raise ExecutionStateError(
+                    "pre-provider no-effect authority requires exact RESERVED->restart UNKNOWN history"
+                )
+            first, unknown = attempt_events
+            if unknown["payload"].get("reason") != "process_restart":
+                raise ExecutionStateError(
+                    "pre-provider no-effect authority requires canonical restart UNKNOWN"
+                )
+            _, action = self._action_payload(
+                events,
+                first["plan_id"],
+                first["action_id"],
+            )
+            if action["bookmaker_id"] != "betfair":
+                raise ExecutionStateError(
+                    "pre-provider no-effect authority is restricted to Betfair"
+                )
+
+            approvals = [
+                event
+                for event in events
+                if event["plan_id"] == first["plan_id"]
+                and event["event_type"] == EventType.SUPERVISED_APPROVAL_BOUND.value
+            ]
+            revocations = [
+                event
+                for event in events
+                if event["plan_id"] == first["plan_id"]
+                and event["event_type"] == EventType.SUPERVISED_APPROVAL_REVOKED.value
+            ]
+            if len(approvals) != 1 or revocations:
+                raise ExecutionStateError(
+                    "pre-provider no-effect authority requires active durable approval"
+                )
+            approval = approvals[0]["payload"]
+            if (
+                approval.get("approval_id") != approval_id
+                or approval.get("approval_fingerprint") != approval_fingerprint
+            ):
+                raise ExecutionStateError(
+                    "pre-provider no-effect authority approval identity mismatch"
+                )
+            observed_time = _timestamp(observed_at, "observed_at")
+            if observed_time <= _timestamp(
+                unknown["payload"]["observed_at"],
+                "restart observed_at",
+            ):
+                raise ExecutionStateError(
+                    "pre-provider no-effect authority must follow restart uncertainty"
+                )
+            if observed_time < _timestamp(
+                approval["approved_at"],
+                "approved_at",
+            ) or observed_time >= _timestamp(
+                approval["expires_at"],
+                "expires_at",
+            ):
+                raise ExecutionStateError(
+                    "pre-provider no-effect authority is outside approval lifetime"
+                )
+
+            visible = self.path.read_bytes() if self.path.exists() else b""
+            if hashlib.sha256(visible).hexdigest() != expected_snapshot_sha256:
+                raise ExecutionStateError(
+                    "execution ledger changed before pre-provider no-effect issuance"
+                )
+
+            self._append(
+                EventType.BETFAIR_PRE_PROVIDER_NO_EFFECT_AUTHORIZED,
+                first["plan_id"],
+                first["action_id"],
+                attempt_id,
+                authority_payload,
+            )
+            # Authority is durable first. A crash before the diagnostic append
+            # still cannot release retry because begin_attempt also requires
+            # RECONCILED_NOT_FOUND; exact binder replay completes the pair.
+            self._append(
+                EventType.RECONCILED_NOT_FOUND,
+                first["plan_id"],
+                first["action_id"],
+                attempt_id,
+                reconciliation_payload,
+            )
+            return evidence_id
+
+        return self._mutate(operation)
+
+    def betfair_pre_provider_no_effect_authority(
+        self,
+        attempt_id: str,
+    ) -> dict[str, str] | None:
+        _text(attempt_id, "attempt_id")
+        events = self._events()
+        matches = [
+            event["payload"]
+            for event in self._attempt_events(events, attempt_id)
+            if event["event_type"]
+            == EventType.BETFAIR_PRE_PROVIDER_NO_EFFECT_AUTHORIZED.value
+        ]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise ExecutionLedgerIntegrityError(
+                "attempt has multiple Betfair pre-provider no-effect authorities"
+            )
+        return dict(matches[0])
+
     def begin_attempt(
         self,
         *,
@@ -2258,8 +2626,14 @@ class RealExecutionLedger:
         action_id: str,
         attempt_id: str,
         reserved_at: str | None = None,
+        product_no_effect_authority_id: str | None = None,
     ) -> ExecutionAttempt:
         _text(attempt_id, "attempt_id")
+        if product_no_effect_authority_id is not None:
+            _sha256_text(
+                product_no_effect_authority_id,
+                "product_no_effect_authority_id",
+            )
         reserved_at = reserved_at or _now()
         reserved_time = _timestamp(reserved_at, "reserved_at")
 
@@ -2335,21 +2709,62 @@ class RealExecutionLedger:
                     fingerprint,
                     prior["payload"]["reserved_at"],
                 )
-            for event in events:
-                if (
-                    event["plan_id"] == plan_id
-                    and event["action_id"] == action_id
-                    and event["event_type"]
-                    == EventType.ATTEMPT_RESERVED.value
-                ):
+            prior_action_attempts = [
+                event
+                for event in events
+                if event["plan_id"] == plan_id
+                and event["action_id"] == action_id
+                and event["event_type"] == EventType.ATTEMPT_RESERVED.value
+            ]
+            if prior_action_attempts:
+                if product_no_effect_authority_id is None:
                     # RECONCILED_NOT_FOUND is durable diagnostic truth only.
-                    # No currently integrated product issuer proves that this
-                    # legacy/generic fact authorizes repeating an irreversible
-                    # provider effect.
+                    # Only a separately product-issued no-effect authority can
+                    # admit a repeated irreversible provider effect.
                     raise ExecutionStateError(
                         "action already has prior attempt; retry requires "
                         "product-issued no-effect authority"
                     )
+                previous = prior_action_attempts[-1]
+                previous_attempt_id = previous["attempt_id"]
+                previous_events = self._attempt_events(
+                    events,
+                    previous_attempt_id,
+                )
+                if self._state(previous_events) is not AttemptState.RECONCILED_NOT_FOUND:
+                    raise ExecutionStateError(
+                        "product no-effect authority requires terminal prior no-effect attempt"
+                    )
+                authorities = [
+                    event
+                    for event in previous_events
+                    if event["event_type"]
+                    == EventType.BETFAIR_PRE_PROVIDER_NO_EFFECT_AUTHORIZED.value
+                    and event["payload"].get("evidence_id")
+                    == product_no_effect_authority_id
+                ]
+                if len(authorities) != 1:
+                    raise ExecutionStateError(
+                        "product no-effect authority does not match latest prior attempt"
+                    )
+                authority_index = events.index(authorities[0])
+                if any(
+                    event["plan_id"] == plan_id
+                    and event["action_id"] == action_id
+                    and event["event_type"] == EventType.ATTEMPT_RESERVED.value
+                    for event in events[authority_index + 1 :]
+                ):
+                    raise ExecutionStateError(
+                        "product no-effect authority was already consumed"
+                    )
+                if action["bookmaker_id"] != "betfair":
+                    raise ExecutionStateError(
+                        "Betfair pre-provider no-effect authority cannot authorize another provider"
+                    )
+            elif product_no_effect_authority_id is not None:
+                raise ExecutionStateError(
+                    "product no-effect authority cannot authorize a first attempt"
+                )
             if _timestamp(reserved_at, "reserved_at") >= _timestamp(
                 action["expires_at"], "expires_at"
             ):

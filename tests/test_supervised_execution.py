@@ -2078,3 +2078,314 @@ def test_bridge_rejects_caller_asserted_terminal_settlement_exactness() -> None:
                 attempt_id="attempt-1",
                 readback=readback,
             )
+
+
+def _pre_provider_unknown_ledger(path: Path):
+    bound, approval, _, _ = _bound()
+    ledger = RealExecutionLedger(path)
+    reserve_supervised_plan(ledger, bound, approval)
+    action = bound.execution_plan.actions[0]
+    begin_supervised_attempt(
+        ledger,
+        bound,
+        approval,
+        action_id=action.action_id,
+        attempt_id="attempt-pre-provider-1",
+    )
+    ledger.mark_unknown(
+        "attempt-pre-provider-1",
+        reason="process_restart",
+        observed_at=UNKNOWN_AT,
+    )
+    return ledger, bound, approval, action
+
+
+def test_product_pre_provider_authority_releases_only_specialized_retry(tmp_path) -> None:
+    from autosport.betfair_pre_provider_recovery import (
+        begin_betfair_pre_provider_retry_attempt,
+        recover_betfair_pre_provider_attempt,
+    )
+    from autosport.real_execution_ledger import ExecutionStateError
+
+    ledger, bound, approval, action = _pre_provider_unknown_ledger(
+        tmp_path / "pre-provider-specialized.jsonl"
+    )
+    recovered = recover_betfair_pre_provider_attempt(
+        ledger,
+        bound,
+        approval,
+        attempt_id="attempt-pre-provider-1",
+        observed_at=READBACK_AT,
+    )
+
+    assert recovered.state is AttemptState.RECONCILED_NOT_FOUND
+    assert ledger.can_retry_action(
+        plan_id=bound.execution_plan.plan_id,
+        action_id=action.action_id,
+    ) is False
+    with pytest.raises(
+        ExecutionStateError,
+        match="product-issued no-effect authority",
+    ):
+        begin_supervised_attempt(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-generic-retry",
+        )
+
+    retry = begin_betfair_pre_provider_retry_attempt(
+        ledger,
+        bound,
+        approval,
+        previous_attempt_id="attempt-pre-provider-1",
+        retry_attempt_id="attempt-product-retry",
+    )
+    assert retry.action_id == action.action_id
+    assert ledger.attempt_state("attempt-product-retry") is AttemptState.RESERVED
+
+
+def test_generic_not_found_cannot_mint_product_pre_provider_retry(tmp_path) -> None:
+    from autosport.betfair_pre_provider_recovery import (
+        BetfairPreProviderRecoveryError,
+        begin_betfair_pre_provider_retry_attempt,
+        recover_betfair_pre_provider_attempt,
+    )
+    from autosport.real_execution_ledger import ReconciliationSnapshot
+
+    ledger, bound, approval, _ = _pre_provider_unknown_ledger(
+        tmp_path / "generic-not-found.jsonl"
+    )
+    ledger.reconcile_not_found(
+        ReconciliationSnapshot(
+            attempt_id="attempt-pre-provider-1",
+            evidence_id="a" * 64,
+            observed_at=READBACK_AT,
+            external_effect_found=False,
+            source=(
+                "autosport.betfair_pre_provider_no_external_effect:v2:"
+                "betfair-exchange-jsonrpc-write:v1:" + "b" * 64
+            ),
+        )
+    )
+
+    assert (
+        ledger.betfair_pre_provider_no_effect_authority(
+            "attempt-pre-provider-1"
+        )
+        is None
+    )
+    with pytest.raises(
+        BetfairPreProviderRecoveryError,
+        match="new pre-provider no-effect authority requires UNKNOWN",
+    ):
+        recover_betfair_pre_provider_attempt(
+            ledger,
+            bound,
+            approval,
+            attempt_id="attempt-pre-provider-1",
+            observed_at="2026-09-18T13:20:07+00:00",
+        )
+    with pytest.raises(
+        BetfairPreProviderRecoveryError,
+        match="lacks product-issued",
+    ):
+        begin_betfair_pre_provider_retry_attempt(
+            ledger,
+            bound,
+            approval,
+            previous_attempt_id="attempt-pre-provider-1",
+            retry_attempt_id="attempt-forged-retry",
+        )
+
+
+def test_submitted_restart_never_gets_pre_provider_no_effect_authority(tmp_path) -> None:
+    from autosport.betfair_pre_provider_recovery import (
+        BetfairPreProviderRecoveryError,
+        recover_betfair_pre_provider_attempt,
+    )
+
+    bound, approval, _, _ = _bound()
+    ledger = RealExecutionLedger(tmp_path / "submitted-restart.jsonl")
+    reserve_supervised_plan(ledger, bound, approval)
+    action = bound.execution_plan.actions[0]
+    begin_supervised_attempt(
+        ledger,
+        bound,
+        approval,
+        action_id=action.action_id,
+        attempt_id="attempt-submitted-restart",
+    )
+    ledger.mark_submitted(
+        "attempt-submitted-restart",
+        submitted_at=SUBMITTED_AT,
+    )
+    ledger.mark_unknown(
+        "attempt-submitted-restart",
+        reason="process_restart",
+        observed_at=UNKNOWN_AT,
+    )
+
+    with pytest.raises(
+        BetfairPreProviderRecoveryError,
+        match="crossed a provider/submission/evidence boundary",
+    ):
+        recover_betfair_pre_provider_attempt(
+            ledger,
+            bound,
+            approval,
+            attempt_id="attempt-submitted-restart",
+            observed_at=READBACK_AT,
+        )
+    assert (
+        ledger.betfair_pre_provider_no_effect_authority(
+            "attempt-submitted-restart"
+        )
+        is None
+    )
+
+
+def test_pre_provider_no_effect_authority_survives_restart_and_reconstruction(
+    tmp_path,
+) -> None:
+    from autosport.betfair_pre_provider_recovery import (
+        begin_betfair_pre_provider_retry_attempt,
+        recover_betfair_pre_provider_attempt,
+    )
+
+    path = tmp_path / "restart-authority.jsonl"
+    ledger, bound, approval, action = _pre_provider_unknown_ledger(path)
+    recovered = recover_betfair_pre_provider_attempt(
+        ledger,
+        bound,
+        approval,
+        attempt_id="attempt-pre-provider-1",
+        observed_at=READBACK_AT,
+    )
+
+    restarted = RealExecutionLedger(path)
+    reconstructed = replace(bound)
+    authority = restarted.betfair_pre_provider_no_effect_authority(
+        "attempt-pre-provider-1"
+    )
+    assert authority is not None
+    assert authority["evidence_id"] == recovered.evidence_id
+
+    retry = begin_betfair_pre_provider_retry_attempt(
+        restarted,
+        reconstructed,
+        approval,
+        previous_attempt_id="attempt-pre-provider-1",
+        retry_attempt_id="attempt-after-restart",
+    )
+    assert retry.action_id == action.action_id
+    assert restarted.attempt_state("attempt-after-restart") is AttemptState.RESERVED
+
+
+def test_pre_provider_no_effect_authority_is_single_use(tmp_path) -> None:
+    from autosport.betfair_pre_provider_recovery import (
+        BetfairPreProviderRecoveryError,
+        begin_betfair_pre_provider_retry_attempt,
+        recover_betfair_pre_provider_attempt,
+    )
+
+    ledger, bound, approval, _ = _pre_provider_unknown_ledger(
+        tmp_path / "single-use-authority.jsonl"
+    )
+    recover_betfair_pre_provider_attempt(
+        ledger,
+        bound,
+        approval,
+        attempt_id="attempt-pre-provider-1",
+        observed_at=READBACK_AT,
+    )
+    begin_betfair_pre_provider_retry_attempt(
+        ledger,
+        bound,
+        approval,
+        previous_attempt_id="attempt-pre-provider-1",
+        retry_attempt_id="attempt-product-retry",
+    )
+
+    with pytest.raises(
+        BetfairPreProviderRecoveryError,
+        match="cannot admit retry",
+    ):
+        begin_betfair_pre_provider_retry_attempt(
+            ledger,
+            bound,
+            approval,
+            previous_attempt_id="attempt-pre-provider-1",
+            retry_attempt_id="attempt-duplicate-retry",
+        )
+
+
+def test_pre_provider_authority_crash_prefix_completes_without_reissuing(
+    tmp_path,
+) -> None:
+    from autosport.betfair_pre_provider_recovery import (
+        recover_betfair_pre_provider_attempt,
+    )
+
+    path = tmp_path / "authority-crash-prefix.jsonl"
+    ledger, bound, approval, _ = _pre_provider_unknown_ledger(path)
+    first = recover_betfair_pre_provider_attempt(
+        ledger,
+        bound,
+        approval,
+        attempt_id="attempt-pre-provider-1",
+        observed_at=READBACK_AT,
+    )
+    lines = path.read_bytes().splitlines(keepends=True)
+    assert len(lines) >= 2
+    # Deterministically model process death after the authority fsync but before
+    # the terminal NOT_FOUND append becomes durable.
+    path.write_bytes(b"".join(lines[:-1]))
+
+    restarted = RealExecutionLedger(path)
+    assert restarted.attempt_state(
+        "attempt-pre-provider-1"
+    ) is AttemptState.UNKNOWN
+    authority_before = restarted.betfair_pre_provider_no_effect_authority(
+        "attempt-pre-provider-1"
+    )
+    assert authority_before is not None
+    assert authority_before["evidence_id"] == first.evidence_id
+
+    completed = recover_betfair_pre_provider_attempt(
+        restarted,
+        replace(bound),
+        approval,
+        attempt_id="attempt-pre-provider-1",
+    )
+    assert completed.evidence_id == first.evidence_id
+    assert completed.state is AttemptState.RECONCILED_NOT_FOUND
+
+
+def test_pre_provider_authority_hash_valid_reordering_is_rejected(tmp_path) -> None:
+    from autosport.betfair_pre_provider_recovery import (
+        recover_betfair_pre_provider_attempt,
+    )
+    from autosport.real_execution_ledger import ExecutionLedgerIntegrityError
+
+    path = tmp_path / "authority-reorder.jsonl"
+    ledger, bound, approval, _ = _pre_provider_unknown_ledger(path)
+    recover_betfair_pre_provider_attempt(
+        ledger,
+        bound,
+        approval,
+        attempt_id="attempt-pre-provider-1",
+        observed_at=READBACK_AT,
+    )
+    lines = path.read_bytes().splitlines(keepends=True)
+    assert len(lines) >= 2
+    lines[-2], lines[-1] = lines[-1], lines[-2]
+    path.write_bytes(b"".join(lines))
+
+    with pytest.raises(
+        ExecutionLedgerIntegrityError,
+        match="pre-provider no-effect authority requires UNKNOWN",
+    ):
+        RealExecutionLedger(path).verify_integrity()
+

@@ -329,6 +329,65 @@ def test_recovery_does_not_commit_published_prefix_until_reflush_succeeds(
     assert history[-1].intended_state_sha256 == intended
 
 
+def test_bootstrap_digest_is_from_the_exact_validated_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str((tmp_path / "machine-authority").resolve()),
+    )
+
+    initial_fixture = SourceHealthStore(
+        tmp_path / "validated-fixture" / "source-health.json"
+    )
+    initial_bytes = initial_fixture.path.read_bytes()
+
+    replacement_fixture = SourceHealthStore(
+        tmp_path / "replacement-fixture" / "source-health.json"
+    )
+    _record_success(replacement_fixture)
+    replacement_bytes = replacement_fixture.path.read_bytes()
+    assert replacement_bytes != initial_bytes
+
+    path = tmp_path / "snapshot-race" / "source-health.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(initial_bytes)
+
+    canonical_snapshot = SourceHealthStore._read_snapshot
+    swapped = False
+
+    def swap_after_validated_snapshot(
+        self: SourceHealthStore,
+        *,
+        verify_authority: bool = True,
+    ) -> tuple[dict, str]:
+        nonlocal swapped
+        result = canonical_snapshot(self, verify_authority=verify_authority)
+        if self.path == path and not verify_authority and not swapped:
+            swapped = True
+            path.write_bytes(replacement_bytes)
+        return result
+
+    monkeypatch.setattr(
+        SourceHealthStore,
+        "_read_snapshot",
+        swap_after_validated_snapshot,
+    )
+
+    with pytest.raises(
+        MonotonicAuthorityRollbackError,
+        match="changed during authority bootstrap",
+    ):
+        SourceHealthStore(path)
+
+    assert swapped is True
+    probe = object.__new__(SourceHealthStore)
+    probe.path = path
+    probe._lock_path = path.with_name(path.name + ".lock")
+    assert probe._monotonic_authority().read_history() == ()
+
+
 def test_bootstrap_rejects_bytes_changed_during_durability_barrier(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

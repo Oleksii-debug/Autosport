@@ -16,7 +16,10 @@ from .decision_ledger import (
     JsonlDecisionLedger,
 )
 from .domain import PaperTicket, TicketStatus
-from .market_outcomes import MarketSettlementOutcomeAuthority
+from .market_outcomes import (
+    MarketSettlementOutcomeAuthority,
+    assert_market_settlement_outcome_authoritative,
+)
 from .economic_goal_provenance import provenance_for
 from .opportunity import Opportunity, OpportunityDecision, QuoteRef, StrategyClass
 from .paper import PaperBook
@@ -1263,6 +1266,10 @@ class TerminalStateCompletenessEvidence:
 
 
 _VERIFIED_TERMINAL_AUTHORITY_TOKEN = object()
+_OUTCOME_AUTHORITY_TYPE = MarketSettlementOutcomeAuthority
+_OUTCOME_ASSERT_ISSUED = assert_market_settlement_outcome_authoritative
+_OUTCOME_ASSERT_AVAILABLE = _OUTCOME_AUTHORITY_TYPE.assert_available_as_of
+
 
 
 def _canonical_verified_outcome_authorities(
@@ -1272,13 +1279,12 @@ def _canonical_verified_outcome_authorities(
 ) -> tuple[MarketSettlementOutcomeAuthority, ...]:
     if type(authorities) is not tuple:
         raise TypeError("verified_outcome_authorities must be a tuple")
-    if any(
-        not isinstance(authority, MarketSettlementOutcomeAuthority)
-        for authority in authorities
-    ):
+    if any(type(authority) is not _OUTCOME_AUTHORITY_TYPE for authority in authorities):
         raise TypeError(
-            "verified_outcome_authorities must contain MarketSettlementOutcomeAuthority values"
+            "verified_outcome_authorities must contain exact MarketSettlementOutcomeAuthority values"
         )
+    for authority in authorities:
+        _OUTCOME_ASSERT_ISSUED(authority)
     ordered = tuple(
         sorted(
             authorities,
@@ -1295,7 +1301,7 @@ def _canonical_verified_outcome_authorities(
         raise ValueError("verified outcome authorities must be unique")
     if decision_as_of is not None:
         for authority in ordered:
-            authority.assert_available_as_of(decision_as_of)
+            _OUTCOME_ASSERT_AVAILABLE(authority, decision_as_of)
     return ordered
 
 
@@ -2434,13 +2440,12 @@ def build_portfolio_plan(
         raise TypeError("dependency_evidence must be PortfolioDependencyEvidence")
     if type(market_outcome_authorities) is not tuple:
         raise TypeError("market_outcome_authorities must be a tuple")
-    if any(
-        not isinstance(authority, MarketSettlementOutcomeAuthority)
-        for authority in market_outcome_authorities
-    ):
+    if any(type(authority) is not _OUTCOME_AUTHORITY_TYPE for authority in market_outcome_authorities):
         raise TypeError(
-            "market_outcome_authorities must contain MarketSettlementOutcomeAuthority values"
+            "market_outcome_authorities must contain exact MarketSettlementOutcomeAuthority values"
         )
+    for authority in market_outcome_authorities:
+        _OUTCOME_ASSERT_ISSUED(authority)
     decision_ts, decision_time = _canonical_timestamp("decision_ts", decision_ts)
 
     portfolio_sha256 = risk_policy.risk_of_ruin_portfolio_sha256(book)

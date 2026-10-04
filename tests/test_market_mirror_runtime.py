@@ -588,6 +588,60 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_history_transition_deadline_ignores_semantic_liveness_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                mirror = MarketMirror()
+                dependencies = FocusedMirrorDependencyIndex(mirror)
+                dependencies.register(
+                    "decision",
+                    source_ids="prophetx:sandbox",
+                    selection_ids="selection-1",
+                )
+                current = self.semantic_event(
+                    sequence=1,
+                    observed_ts="2026-09-16T19:00:01+00:00",
+                    ingest_ts="2026-09-16T19:00:01+00:00",
+                )
+                refresh = self.semantic_event(
+                    sequence=2,
+                    observed_ts="2026-09-16T19:00:02+00:00",
+                    ingest_ts="2026-09-16T19:00:05+00:00",
+                )
+                changed = self.semantic_event(
+                    sequence=3,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:03+00:00",
+                    ingest_ts="2026-09-16T19:00:06+00:00",
+                )
+                for event in (current, refresh, changed):
+                    self.assertTrue(store.append(event))
+
+                snapshot, deadline = (
+                    dependencies.current_history_decision_state(
+                        "decision",
+                        store,
+                        as_of=datetime(
+                            2026, 9, 16, 19, 0, 3,
+                            tzinfo=timezone.utc,
+                        ),
+                        max_age=timedelta(minutes=1),
+                    )
+                )
+
+                self.assertEqual(len(snapshot.events), 1)
+                self.assertEqual(snapshot.events[0].sequence, 1)
+                self.assertEqual(
+                    deadline,
+                    datetime(
+                        2026, 9, 16, 19, 0, 6,
+                        tzinfo=timezone.utc,
+                    ),
+                )
+            finally:
+                store.close()
+
     def test_history_transition_deadline_ignores_future_stale_lower_sequence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

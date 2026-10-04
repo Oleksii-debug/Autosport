@@ -1530,6 +1530,13 @@ class PersistentLiveDecisionLoop:
             )
 
         if progress.phase == _PHASE_PENDING:
+            if (
+                progress.ledger_offset is not None
+                and self._ledger_end_offset() < progress.ledger_offset
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "pending live decision ledger frontier was truncated"
+                )
             prospective_decision_id = self._decision_identity(
                 plan=plan,
                 market_state_sha256=progress.market_state_sha256,
@@ -2051,6 +2058,14 @@ class PersistentLiveDecisionLoop:
                     )
                 ledger_offset = durable_progress.ledger_offset
             else:
+                current_ledger_end = self._ledger_end_offset()
+                if (
+                    durable_progress.ledger_offset is not None
+                    and current_ledger_end < durable_progress.ledger_offset
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "pending live decision ledger frontier was truncated"
+                    )
                 last_record = self._verified_latest_ledger_record(
                     replay_run_id=f"live:{self.loop_id}",
                 )
@@ -2068,7 +2083,7 @@ class PersistentLiveDecisionLoop:
                 ):
                     ledger_offset = last_record[0]
                 else:
-                    ledger_offset = self._ledger_end_offset()
+                    ledger_offset = current_ledger_end
                 durable_progress = _Progress(
                     loop_id=self.loop_id,
                     phase=_PHASE_APPEND_PENDING,

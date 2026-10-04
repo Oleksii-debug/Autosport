@@ -1355,6 +1355,67 @@ def test_session_rejects_duplicate_iid_occurrence_before_registry_mutation(
     assert RunRegistry(workspace / "run_registry.json")._read()["runs"] == {}
 
 
+def test_session_rejects_non_path_iid_dataset_root_before_authority_dispatch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    dataset, dataset_manifest_sha256 = _iid_replay_dataset(
+        tmp_path / "iid-dataset",
+        event,
+    )
+    poisoned = ReplayDataset(
+        root=str(dataset.root),
+        name=dataset.name,
+        sport=dataset.sport,
+        market_path=dataset.market_path,
+        results_path=dataset.results_path,
+        market_sha256=dataset.market_sha256,
+        results_sha256=dataset.results_sha256,
+        schema_version=dataset.schema_version,
+        governance=dataset.governance,
+        import_identity=dataset.import_identity,
+    )
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+        dataset_manifest_sha256=dataset_manifest_sha256,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    session = AutosportSession(
+        workspace,
+        initial_bankroll="100",
+        strategy_id="observe-only-v1",
+    )
+    try:
+        with pytest.raises(TypeError, match="dataset.root must be an exact"):
+            session.run_iid_member_dataset(
+                poisoned,
+                membership=membership,
+                registry_path=registry_path,
+                sampling_manifest_json=manifest,
+                sampling_frame_json=frame_json,
+                horizon_json=horizon_json,
+                member_index=0,
+                authority_root=authority_root,
+            )
+    finally:
+        session.close()
+
+    assert RunRegistry(workspace / "run_registry.json")._read()["runs"] == {}
+
+
 def test_session_rejects_runtime_dataset_manifest_outside_frozen_snapshot(
     tmp_path,
     monkeypatch,

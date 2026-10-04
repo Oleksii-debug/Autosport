@@ -604,6 +604,49 @@ class CollectorDeltaTests(unittest.TestCase):
                 "2026-01-01T00:00:07+00:00",
             )
 
+    def test_consumer_drain_seals_ack_validator_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = self.make_delta(payload=payload)
+            collector.append(delta)
+            receipt = DesktopApplicationReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                receipt_id="receipt-d1",
+                applied_at="2026-01-01T00:00:05+00:00",
+            )
+            deliveries = []
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda _: event,
+                apply_event=lambda *_: receipt,
+                lookup_application_receipt=lambda _: None,
+                acknowledgement_clock=lambda: "2026-01-01T00:00:06+00:00",
+                on_application_receipt=lambda *_: deliveries.append("delivered"),
+            )
+
+            original = DesktopDeltaConsumer._acknowledged_at
+
+            def forged_ack_validator(*_args, **_kwargs):
+                raise AssertionError("mutable class ACK validator must not be dispatched")
+
+            DesktopDeltaConsumer._acknowledged_at = forged_ack_validator
+            try:
+                self.assertEqual(
+                    consumer.drain(as_of="2026-01-01T00:00:04+00:00"),
+                    ("d1",),
+                )
+            finally:
+                DesktopDeltaConsumer._acknowledged_at = original
+
+            self.assertEqual(deliveries, ["delivered"])
+            self.assertTrue(checkpoint.has_ack(delta.delta_id))
+
     def test_consumer_post_delivery_ack_clock_rollback_leaves_ack_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

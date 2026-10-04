@@ -413,6 +413,45 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             ("selection-a", "selection-b", "unrelated"),
         )
 
+    def test_history_transition_deadline_ignores_future_expired_state_without_predecessor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                mirror = MarketMirror()
+                dependencies = FocusedMirrorDependencyIndex(mirror)
+                dependencies.register(
+                    "decision",
+                    source_ids="provider-a",
+                    selection_ids="selection-1",
+                )
+                expired_future = MarketEvent(
+                    event_id="event-1",
+                    market_id="market-1",
+                    selection_id="selection-1",
+                    decimal_odds=Decimal("2.00"),
+                    observed_ts="2026-09-16T19:00:01+00:00",
+                    source_id="provider-a",
+                    sequence=1,
+                    status="open",
+                    source_ts="2026-09-16T18:59:50+00:00",
+                    ingest_ts="2026-09-16T19:00:05+00:00",
+                )
+                self.assertTrue(store.append(expired_future))
+
+                snapshot, deadline = dependencies.current_history_decision_state(
+                    "decision",
+                    store,
+                    as_of=datetime(
+                        2026, 9, 16, 19, 0, 2, tzinfo=timezone.utc
+                    ),
+                    max_age=timedelta(seconds=5),
+                )
+
+                self.assertEqual(snapshot.events, ())
+                self.assertIsNone(deadline)
+            finally:
+                store.close()
+
     def test_history_transition_deadline_ignores_future_stale_lower_sequence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

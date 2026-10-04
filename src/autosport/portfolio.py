@@ -70,28 +70,61 @@ def _is_open_ticket_status(
     return value is _open_status
 
 
+_AnalysisLegFingerprint = tuple[
+    str,
+    str,
+    str,
+    Decimal,
+    str | None,
+    str | None,
+]
+
+
+def _analysis_leg_fingerprint(
+    leg: TicketLeg,
+    *,
+    _ticket_leg_type: type[TicketLeg] = TicketLeg,
+) -> _AnalysisLegFingerprint:
+    """Detach the exact nested leg fields consumed by portfolio economics."""
+
+    if type(leg) is not _ticket_leg_type:
+        raise ValueError("portfolio ticket leg must be exact TicketLeg")
+    return (
+        leg.event_id,
+        leg.market_id,
+        leg.selection_id,
+        leg.locked_odds,
+        leg.sport,
+        leg.exchange_side,
+    )
+
+
 def _analysis_ticket_fingerprint(
     ticket: PaperTicket,
     *,
     _paper_ticket_type: type[PaperTicket] = PaperTicket,
+    _leg_fingerprint=_analysis_leg_fingerprint,
 ) -> tuple[
     str,
     Decimal,
-    tuple[TicketLeg, ...],
+    tuple[_AnalysisLegFingerprint, ...],
     str,
     TicketStatus,
     Decimal,
     str | None,
     tuple[str, ...],
 ]:
-    """Return exactly the mutable ticket fields consumed by scenario analysis."""
+    """Return detached mutable ticket fields consumed by scenario analysis."""
 
     if type(ticket) is not _paper_ticket_type:
         raise ValueError("portfolio ticket must be exact PaperTicket")
+    legs = ticket.legs
+    if type(legs) is not tuple:
+        raise ValueError("portfolio ticket legs must be an exact tuple")
     return (
         ticket.ticket_id,
         ticket.stake,
-        ticket.legs,
+        tuple(_leg_fingerprint(leg) for leg in legs),
         ticket.placed_at,
         ticket.status,
         ticket.payout,
@@ -130,6 +163,7 @@ def _snapshot_open_tickets_for_analysis(
     tickets: list[PaperTicket],
     *,
     _paper_ticket_type: type[PaperTicket] = PaperTicket,
+    _ticket_leg_type: type[TicketLeg] = TicketLeg,
     _open_status: TicketStatus = TicketStatus.OPEN,
     _validate_placed_at=PaperBook._validate_placed_at,
 ) -> list[PaperTicket]:
@@ -153,7 +187,7 @@ def _snapshot_open_tickets_for_analysis(
         (
             ticket_id,
             stake,
-            legs,
+            leg_fingerprints,
             placed_at,
             status,
             payout,
@@ -180,16 +214,34 @@ def _snapshot_open_tickets_for_analysis(
                 f"portfolio open ticket {ticket_id} cannot have settled_at"
             )
         _validate_placed_at(placed_at, snapshot=True)
+        detached_legs = tuple(
+            _ticket_leg_type(
+                event_id,
+                market_id,
+                selection_id,
+                locked_odds,
+                sport=sport,
+                exchange_side=exchange_side,
+            )
+            for (
+                event_id,
+                market_id,
+                selection_id,
+                locked_odds,
+                sport,
+                exchange_side,
+            ) in leg_fingerprints
+        )
         _validate_open_ticket_economics_for_analysis(
             ticket_id,
             stake,
-            legs,
+            detached_legs,
         )
         snapshots.append(
             _paper_ticket_type(
                 ticket_id=ticket_id,
                 stake=stake,
-                legs=tuple(legs),
+                legs=detached_legs,
                 placed_at=placed_at,
                 status=_open_status,
                 provider_source_ids=tuple(provider_source_ids),

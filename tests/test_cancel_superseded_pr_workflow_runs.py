@@ -1422,3 +1422,67 @@ def test_base_active_run_reader_bounds_continuous_growth_to_initial_horizon(
         "/actions/runs?event=pull_request&status=queued&per_page=100&page=3",
     ]
 
+
+
+def test_request_budget_stops_transport_before_overrun(monkeypatch) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+        request_budget=2,
+    )
+    requested: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return b""
+
+    def fake_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        requested.append(request.full_url)
+        return FakeResponse()
+
+    request_impl = controller_module.GitHubApi._request
+    monkeypatch.setitem(request_impl.__globals__, "urlopen", fake_urlopen)
+
+    assert api._request("/rate_limit") is None
+    assert api._request("/rate_limit") is None
+    with pytest.raises(
+        controller_module.RequestBudgetExhausted,
+        match="request budget exhausted",
+    ):
+        api._request("/rate_limit")
+
+    assert len(requested) == 2
+
+
+def test_request_budget_state_tamper_fails_closed_before_transport(monkeypatch) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+        request_budget=2,
+    )
+    requested: list[str] = []
+
+    def forbidden_urlopen(_request, *, timeout: int):
+        requested.append(str(timeout))
+        raise AssertionError("tampered request budget must not reach transport")
+
+    request_impl = controller_module.GitHubApi._request
+    monkeypatch.setitem(request_impl.__globals__, "urlopen", forbidden_urlopen)
+    object.__setattr__(api, "_GitHubApi__request_budget_remaining", 3)
+
+    with pytest.raises(
+        CancellationError,
+        match="request budget authority changed",
+    ):
+        api._request("/rate_limit")
+
+    assert requested == []

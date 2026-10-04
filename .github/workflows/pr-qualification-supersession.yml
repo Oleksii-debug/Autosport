@@ -29,6 +29,11 @@ permissions:
 # event may be the surviving trigger; that controller still reconciles its source workflow
 # against fresh live PR qualification rather than trusting the trigger head.
 #
+# The scoped controller also carries one shared 12-request transport budget. The
+# canonical transport timeout is 20 seconds, so even worst-case request waits retain
+# margin below this job's five-minute timeout. Exhaustion defers all remaining cleanup;
+# a partial status scan is discarded and never becomes cancellation authority.
+#
 # cancel-in-progress stays false so a newer requested PR event cannot kill a controller
 # that is already making trusted decisions. Pull-request source events share one lane per
 # exact source workflow, so at most one running and one pending trusted sweep are needed.

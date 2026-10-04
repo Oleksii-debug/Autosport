@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
@@ -4346,3 +4347,60 @@ def test_active_run_reader_bounds_continuous_growth_to_initial_horizon(
         "event=pull_request&status=queued&per_page=100&page=3",
     ]
 
+
+
+def test_main_request_budget_exhaustion_defers_incomplete_snapshot(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+    requested: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return self.body
+
+    def fake_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        requested.append(request.full_url)
+        assert "/actions/workflows/356678400/runs?" in request.full_url
+        assert "status=queued" in request.full_url
+        page = len(requested)
+        assert 1 <= page <= 12
+        first_run_id = (page - 1) * 100 + 1
+        payload = {
+            "total_count": 1200,
+            "workflow_runs": [
+                {
+                    "id": first_run_id + offset,
+                    "head_sha": STALE_HEAD,
+                    "name": "CI",
+                    "status": "queued",
+                    "pull_requests": [{"number": 2039}],
+                }
+                for offset in range(100)
+            ],
+        }
+        return FakeResponse(json.dumps(payload).encode("utf-8"))
+
+    request_impl = scoped_controller.GitHubApi._request
+    monkeypatch.setitem(request_impl.__globals__, "urlopen", fake_urlopen)
+
+    assert scoped_controller.main(_scoped_main_args()) == 0
+
+    captured = capsys.readouterr()
+    assert "request budget exhausted" in captured.err
+    assert len(requested) == 12
+    assert all("/cancel" not in url for url in requested)

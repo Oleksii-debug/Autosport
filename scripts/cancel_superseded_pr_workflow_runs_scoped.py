@@ -12,6 +12,7 @@ if __package__:
         _PULLS_PER_PAGE,
         _RUNS_PER_PAGE,
         CancellationError,
+        RequestBudgetExhausted,
         GitHubApi,
         WorkflowRun,
         _pull_request_qualification_state,
@@ -31,6 +32,7 @@ else:
         _PULLS_PER_PAGE,
         _RUNS_PER_PAGE,
         CancellationError,
+        RequestBudgetExhausted,
         GitHubApi,
         WorkflowRun,
         _pull_request_qualification_state,
@@ -134,7 +136,15 @@ class WorkflowScopedGitHubApi(GitHubApi):
         workflow_id: int,
         workflow_name: str,
     ) -> None:
-        super().__init__(repository=repository, token=token)
+        # The canonical transport has a 20-second per-request timeout. Twelve actual
+        # transport attempts bound worst-case network wait to 240 seconds, preserving
+        # margin under this trusted controller's five-minute workflow timeout. Budget
+        # exhaustion defers remaining cleanup; it never makes a partial scan authoritative.
+        super().__init__(
+            repository=repository,
+            token=token,
+            request_budget=12,
+        )
         if type(workflow_id) is not int or workflow_id <= 0:
             raise CancellationError("invalid workflow id")
         canonical_workflow_id = workflow_id
@@ -860,6 +870,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     require_helper_dispatch("_canonical_branch_head")
                     branch_head_sha = canonical_branch_head(self, head_branch)
                     require_helper_dispatch("_request")
+                except RequestBudgetExhausted:
+                    raise
                 except CancellationError as exc:
                     raise CancellationError(
                         "unbound workflow run branch authority could not be revalidated"
@@ -2208,6 +2220,7 @@ def _build_main(
     trusted_qualification_impl,
     event_identity_impl,
     orphan_effect_impl,
+    request_budget_exhausted_type,
 ):
     """Freeze scoped-controller orchestration roots outside caller metadata."""
 
@@ -2536,6 +2549,13 @@ def _build_main(
                         qualification=trigger_qualification,
                     )
                     require_main_dispatch()
+        except request_budget_exhausted_type as exc:
+            print(
+                "superseded-run cancellation request budget exhausted; "
+                f"deferring remaining cleanup: {exc}",
+                file=sys.stderr,
+            )
+            return 0
         except CancellationError as exc:
             print(f"superseded-run cancellation failed: {exc}", file=sys.stderr)
             return 2
@@ -2559,6 +2579,7 @@ main = _build_main(
     trusted_qualification_impl=_trusted_live_pr_qualification,
     event_identity_impl=_validated_event_pr_identity,
     orphan_effect_impl=_cancel_run_or_defer_active_conflict,
+    request_budget_exhausted_type=RequestBudgetExhausted,
 )
 del _build_main
 

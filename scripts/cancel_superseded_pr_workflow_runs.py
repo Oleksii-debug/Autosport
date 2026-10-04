@@ -22,6 +22,10 @@ class CancellationError(RuntimeError):
     pass
 
 
+class RequestBudgetExhausted(CancellationError):
+    """The trusted controller exhausted its bounded GitHub transport budget."""
+
+
 @dataclass(frozen=True)
 class _AllowedHttpError:
     status_code: int
@@ -285,7 +289,13 @@ def select_superseded_runs(
 
 
 class GitHubApi:
-    def __init__(self, *, repository: str, token: str) -> None:
+    def __init__(
+        self,
+        *,
+        repository: str,
+        token: str,
+        request_budget: int | None = None,
+    ) -> None:
         if type(repository) is not str:
             raise CancellationError("GITHUB_REPOSITORY must be owner/repo")
         parts = repository.split("/")
@@ -293,7 +303,13 @@ class GitHubApi:
             raise CancellationError("GITHUB_REPOSITORY must be owner/repo")
         if not token:
             raise CancellationError("GITHUB_TOKEN is required")
+        if request_budget is not None and (
+            type(request_budget) is not int or request_budget <= 0
+        ):
+            raise CancellationError("request budget must be a positive integer")
         self.__repository = repository
+        self.__request_budget_limit = request_budget
+        self.__request_budget_remaining = request_budget
         self._token = token
 
     @property
@@ -331,8 +347,47 @@ class GitHubApi:
         _strict_object_hook_code=_strict_json_object.__code__,
         _reject_constant_hook=_reject_nonstandard_json_constant,
         _reject_constant_hook_code=_reject_nonstandard_json_constant.__code__,
+        _request_budget_exhausted_type=RequestBudgetExhausted,
     ) -> object:
         repository = object.__getattribute__(self, "_GitHubApi__repository")
+        try:
+            request_budget_limit = object.__getattribute__(
+                self,
+                "_GitHubApi__request_budget_limit",
+            )
+            request_budget_remaining = object.__getattribute__(
+                self,
+                "_GitHubApi__request_budget_remaining",
+            )
+        except AttributeError as exc:
+            raise CancellationError(
+                "GitHub API request budget authority changed"
+            ) from exc
+        if request_budget_limit is None:
+            if request_budget_remaining is not None:
+                raise CancellationError(
+                    "GitHub API request budget authority changed"
+                )
+        else:
+            if (
+                type(request_budget_limit) is not int
+                or request_budget_limit <= 0
+                or type(request_budget_remaining) is not int
+                or request_budget_remaining < 0
+                or request_budget_remaining > request_budget_limit
+            ):
+                raise CancellationError(
+                    "GitHub API request budget authority changed"
+                )
+            if request_budget_remaining == 0:
+                raise _request_budget_exhausted_type(
+                    "GitHub API request budget exhausted"
+                )
+            object.__setattr__(
+                self,
+                "_GitHubApi__request_budget_remaining",
+                request_budget_remaining - 1,
+            )
         request_type = Request
         urlopen_impl = urlopen
 

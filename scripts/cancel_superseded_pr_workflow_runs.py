@@ -519,6 +519,13 @@ class GitHubApi:
         request_impl = self._request
         request_func = getattr(request_impl, "__func__", request_impl)
         request_code = getattr(request_func, "__code__", None)
+        request_positional_defaults = getattr(request_func, "__defaults__", None)
+        request_keyword_defaults = getattr(request_func, "__kwdefaults__", None)
+        request_keyword_items = (
+            tuple(request_keyword_defaults.items())
+            if request_keyword_defaults is not None
+            else ()
+        )
 
         def request_dispatch_current() -> bool:
             bound = self._request
@@ -696,8 +703,15 @@ class GitHubApi:
         _runs_per_page: int = _RUNS_PER_PAGE,
         _encode_query=urlencode,
         _encode_query_code=urlencode.__code__,
+        _encode_query_defaults=urlencode.__defaults__,
+        _encode_query_kwdefaults=urlencode.__kwdefaults__,
         _run_parser=parse_run,
         _run_parser_code=parse_run.__code__,
+        _run_parser_defaults=parse_run.__defaults__,
+        _run_parser_kwdefaults=parse_run.__kwdefaults__,
+        _run_parser_kwdefault_items=tuple(parse_run.__kwdefaults__.items())
+        if parse_run.__kwdefaults__ is not None
+        else (),
     ) -> tuple[WorkflowRun, ...]:
         if (
             type(_active_statuses) is not tuple
@@ -711,7 +725,27 @@ class GitHubApi:
             or _runs_per_page > 100
             or not callable(_encode_query)
             or getattr(_encode_query, "__code__", None) is not _encode_query_code
+            or getattr(_encode_query, "__defaults__", None)
+            is not _encode_query_defaults
+            or getattr(_encode_query, "__kwdefaults__", None)
+            is not _encode_query_kwdefaults
             or getattr(_run_parser, "__code__", None) is not _run_parser_code
+            or getattr(_run_parser, "__defaults__", None)
+            is not _run_parser_defaults
+            or getattr(_run_parser, "__kwdefaults__", None)
+            is not _run_parser_kwdefaults
+            or (
+                _run_parser_kwdefaults is not None
+                and (
+                    len(_run_parser_kwdefaults)
+                    != len(_run_parser_kwdefault_items)
+                    or any(
+                        key not in _run_parser_kwdefaults
+                        or _run_parser_kwdefaults[key] is not value
+                        for key, value in _run_parser_kwdefault_items
+                    )
+                )
+            )
         ):
             raise CancellationError("workflow-runs pagination authority is unavailable")
 
@@ -726,8 +760,43 @@ class GitHubApi:
                 request_code is not None
                 and bound_func is request_func
                 and getattr(request_func, "__code__", None) is request_code
+                and getattr(request_func, "__defaults__", None)
+                is request_positional_defaults
+                and getattr(request_func, "__kwdefaults__", None)
+                is request_keyword_defaults
+                and (
+                    request_keyword_defaults is None
+                    or (
+                        len(request_keyword_defaults) == len(request_keyword_items)
+                        and all(
+                            key in request_keyword_defaults
+                            and request_keyword_defaults[key] is value
+                            for key, value in request_keyword_items
+                        )
+                    )
+                )
                 and getattr(_encode_query, "__code__", None) is _encode_query_code
+                and getattr(_encode_query, "__defaults__", None)
+                is _encode_query_defaults
+                and getattr(_encode_query, "__kwdefaults__", None)
+                is _encode_query_kwdefaults
                 and getattr(_run_parser, "__code__", None) is _run_parser_code
+                and getattr(_run_parser, "__defaults__", None)
+                is _run_parser_defaults
+                and getattr(_run_parser, "__kwdefaults__", None)
+                is _run_parser_kwdefaults
+                and (
+                    _run_parser_kwdefaults is None
+                    or (
+                        len(_run_parser_kwdefaults)
+                        == len(_run_parser_kwdefault_items)
+                        and all(
+                            key in _run_parser_kwdefaults
+                            and _run_parser_kwdefaults[key] is value
+                            for key, value in _run_parser_kwdefault_items
+                        )
+                    )
+                )
             )
 
         if not request_dispatch_current():
@@ -770,6 +839,13 @@ class GitHubApi:
         self,
         *,
         _active_statuses: tuple[str, ...] = _ACTIVE_STATUSES,
+        _status_reader=_active_runs_for_status,
+        _status_reader_code=_active_runs_for_status.__code__,
+        _status_reader_defaults=_active_runs_for_status.__defaults__,
+        _status_reader_kwdefaults=_active_runs_for_status.__kwdefaults__,
+        _status_reader_kwdefault_items=tuple(
+            _active_runs_for_status.__kwdefaults__.items()
+        ),
     ) -> tuple[WorkflowRun, ...]:
         if (
             type(_active_statuses) is not tuple
@@ -777,20 +853,34 @@ class GitHubApi:
             or any(type(item) is not str or not item for item in _active_statuses)
         ):
             raise CancellationError("active workflow status authority is unavailable")
-        status_reader = self._active_runs_for_status
-        status_reader_func = getattr(status_reader, "__func__", status_reader)
-        status_reader_code = getattr(status_reader_func, "__code__", None)
-        if status_reader_code is None:
-            raise CancellationError("active workflow reader authority is unavailable")
+
+        def reader_authority_current() -> bool:
+            bound = self._active_runs_for_status
+            current_kwdefaults = getattr(_status_reader, "__kwdefaults__", None)
+            return (
+                getattr(_status_reader, "__code__", None) is _status_reader_code
+                and getattr(_status_reader, "__defaults__", None)
+                is _status_reader_defaults
+                and current_kwdefaults is _status_reader_kwdefaults
+                and current_kwdefaults is not None
+                and len(current_kwdefaults) == len(_status_reader_kwdefault_items)
+                and all(
+                    key in current_kwdefaults and current_kwdefaults[key] is value
+                    for key, value in _status_reader_kwdefault_items
+                )
+                and getattr(bound, "__self__", None) is self
+                and getattr(bound, "__func__", None) is _status_reader
+            )
+
+        if not reader_authority_current():
+            raise CancellationError("active workflow reader authority changed")
         runs: list[WorkflowRun] = []
         for status in _active_statuses:
-            bound = self._active_runs_for_status
-            if (
-                getattr(bound, "__func__", bound) is not status_reader_func
-                or getattr(status_reader_func, "__code__", None) is not status_reader_code
-            ):
+            if not reader_authority_current():
                 raise CancellationError("active workflow reader authority changed")
-            runs.extend(status_reader(status))
+            runs.extend(_status_reader(self, status))
+            if not reader_authority_current():
+                raise CancellationError("active workflow reader authority changed")
         return tuple(runs)
 
     def workflow_run_status(self, run_id: int) -> str:

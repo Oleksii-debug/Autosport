@@ -1116,8 +1116,11 @@ class WorkflowScopedGitHubApi(GitHubApi):
             ):
                 raise CancellationError("invalid workflow-runs response")
             page_runs = payload["workflow_runs"]
+            total_count = payload["total_count"]
             if len(page_runs) > _runs_per_page:
                 raise CancellationError("invalid workflow-runs page size")
+            if total_count < len(page_runs):
+                raise CancellationError("invalid workflow-runs total_count")
             for item in page_runs:
                 run = _run_parser(item)
                 seen_run_ids.add(run.run_id)
@@ -1173,7 +1176,6 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     self._explicit_active_run_ids.add(run.run_id)
                     self._unbound_active_runs.pop(run.run_id, None)
                 runs.append(recovery_reader(run))
-            total_count = payload["total_count"]
             # Active-run collections are inherently moving while a controller scans
             # them. A short page is therefore a safe terminal snapshot even when the
             # earlier total_count was larger. Missing a concurrently transitioned run

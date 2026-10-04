@@ -239,6 +239,8 @@ def _build_product_coordinator_type(
             if snapshot is not None:
                 if name in dispatch_methods:
                     require_snapshot(self)
+                    if name in static_dispatch_methods:
+                        return base_methods[name]
                     return base_methods[name].__get__(self, type(self))
                 if name in snapshot_fields:
                     for field_name, expected in snapshot:
@@ -2042,6 +2044,9 @@ def _build_product_runtime_type(
         "_recover_interrupted_start",
     )
     dispatch_methods = frozenset((*entry_methods, *internal_methods))
+    static_dispatch_methods = frozenset(
+        {"_state_value", "_note_secondary_failure"}
+    )
     base_methods = {name: getattr(base_type, name) for name in dispatch_methods}
 
     def require_snapshot(self) -> tuple[tuple[str, object], ...]:

@@ -15,6 +15,7 @@ from .causal_collector import (
     CanonicalDesktopApplication,
     CollectorDelta,
     CollectorDeltaStore,
+    DesktopApplicationReceipt,
     DesktopDeltaCheckpointStore,
     DesktopDeltaConsumer,
     canonical_event_digest,
@@ -526,6 +527,15 @@ def _desktop_applied_current_for_source(
     market_store: SQLiteMarketStore,
     collector_store: CollectorDeltaStore,
     canonical_application: CanonicalDesktopApplication,
+    _delta_type=CollectorDelta,
+    _receipt_type=DesktopApplicationReceipt,
+    _deltas_after_commit=CollectorDeltaStore.deltas_after_commit,
+    _lookup_receipt=CanonicalDesktopApplication.lookup_receipt,
+    _validate_receipt=DesktopApplicationReceipt.validate,
+    _market_events=SQLiteMarketStore.events,
+    _canonical_digest=canonical_event_digest,
+    _dedupe_getter=MarketEvent.dedupe_key.fget,
+    _quote_getter=MarketEvent.quote_key.fget,
 ) -> tuple[MarketEvent, ...]:
     """Rebuild restart state only from completed canonical desktop applications.
 
@@ -540,7 +550,8 @@ def _desktop_applied_current_for_source(
     after_delta_id: str | None = None
     while True:
         try:
-            batch = collector_store.deltas_after_commit(
+            batch = _deltas_after_commit(
+                collector_store,
                 source_id=source_id,
                 after_delta_id=after_delta_id,
                 max_items=1000,
@@ -552,11 +563,17 @@ def _desktop_applied_current_for_source(
         if not batch:
             break
         for delta in batch:
+            if type(delta) is not _delta_type:
+                raise ProductCompositionError(
+                    "collector evidence returned a non-canonical delta type"
+                )
             try:
-                receipt = canonical_application.lookup_receipt(delta)
+                receipt = _lookup_receipt(canonical_application, delta)
                 if receipt is None:
                     continue
-                receipt.validate()
+                if type(receipt) is not _receipt_type:
+                    raise TypeError("desktop application receipt type is not canonical")
+                _validate_receipt(receipt)
             except Exception as exc:
                 raise ProductCompositionError(
                     "cannot verify desktop application receipt for product runtime restart"
@@ -577,7 +594,7 @@ def _desktop_applied_current_for_source(
         return ()
 
     try:
-        history = market_store.events()
+        history = _market_events(market_store)
     except Exception as exc:
         raise ProductCompositionError(
             "cannot verify canonical market history for product runtime restart"
@@ -589,8 +606,13 @@ def _desktop_applied_current_for_source(
         if event.source_id != source_id:
             continue
         try:
-            identity = (event.dedupe_key, canonical_event_digest(event))
-            quote_key = event.quote_key
+            if type(event) is not MarketEvent:
+                raise TypeError("market history returned a non-canonical event type")
+            if _dedupe_getter is None or _quote_getter is None:
+                raise RuntimeError("canonical MarketEvent identity descriptor is unavailable")
+            event_dedupe_key = _dedupe_getter(event)
+            identity = (event_dedupe_key, _canonical_digest(event))
+            quote_key = _quote_getter(event)
         except Exception as exc:
             raise ProductCompositionError(
                 "cannot verify canonical market identity for product runtime restart"
@@ -600,9 +622,12 @@ def _desktop_applied_current_for_source(
         matched_identities.add(identity)
         key = (event.source_id, quote_key)
         previous = latest.get(key)
-        if previous is None or (event.sequence, event.dedupe_key) > (
+        previous_dedupe_key = (
+            None if previous is None else _dedupe_getter(previous)
+        )
+        if previous is None or (event.sequence, event_dedupe_key) > (
             previous.sequence,
-            previous.dedupe_key,
+            previous_dedupe_key,
         ):
             latest[key] = event
 

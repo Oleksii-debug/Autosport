@@ -1098,6 +1098,16 @@ class PersistentLiveDecisionLoop:
         return tuple(results)
 
     def run_cycle(self) -> LiveCycleResult:
+        # PENDING/APPEND_PENDING is an already-started durable transaction. Finish
+        # or fail closed on that exact identity before honoring a later PAUSE/STOP;
+        # otherwise an operator control written after publication can strand an
+        # economic decision forever in an unverifiable half-state.
+        if (
+            self._progress is not None
+            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+        ):
+            return self._recover_unfinished_progress()
+
         if self.stopped:
             return LiveCycleResult(
                 LiveCycleStatus.STOPPED,
@@ -1108,12 +1118,6 @@ class PersistentLiveDecisionLoop:
                 LiveCycleStatus.PAUSED,
                 detail="durable PAUSE is active; provider was not polled",
             )
-
-        if (
-            self._progress is not None
-            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
-        ):
-            return self._recover_unfinished_progress()
 
         catalog_now = self._sample_clock()
         try:
@@ -2135,6 +2139,17 @@ class PersistentLiveDecisionLoop:
         _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
         self.intent_provenance.assert_available_at(decision_time)
         with WorkspaceEconomicLock(self.workspace):
+            durable_control = self._load_control()
+            if durable_control is None:
+                durable_control = _Control(self.loop_id, LiveControlState.RUNNING)
+            if (
+                durable_control != self._control
+                or durable_control.state is not LiveControlState.RUNNING
+            ):
+                raise LiveDecisionProgressError(
+                    "live decision control changed concurrently before pending publication"
+                )
+
             durable_progress = self._load_progress()
             if durable_progress != self._progress:
                 raise LiveDecisionProgressError(
@@ -2258,6 +2273,19 @@ class PersistentLiveDecisionLoop:
             "inputs": [spec.to_dict() for spec in candidate],
         }
         with WorkspaceEconomicLock(self.workspace):
+            durable_progress = self._load_progress()
+            if durable_progress != self._progress:
+                raise LiveDecisionProgressError(
+                    "live decision progress changed concurrently before dependency publication"
+                )
+            if (
+                durable_progress is not None
+                and durable_progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+            ):
+                raise LiveDecisionProgressError(
+                    "cannot mutate live dependency registry while a decision is unfinished"
+                )
+
             durable = self._load_input_registry() or ()
             if durable != expected_previous:
                 raise LiveDecisionProgressError(

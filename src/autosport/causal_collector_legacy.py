@@ -1037,7 +1037,52 @@ class CanonicalDesktopApplication:
                     "canonical application health marker lacks its durable post-state"
                 )
 
-        self._state.mark_complete(delta, completed_at=self.clock())
+        completed_at = self.clock()
+        if _canonical_digest(event) != digest:
+            raise DeltaConflictError(
+                "canonical market event changed before application completion"
+            )
+        current = self.health_store.get(delta.source_id)
+        if current != expected_after:
+            raise ApplicationReceiptError(
+                "canonical health effect changed before application completion"
+            )
+        market_store = getattr(self.market_bus, "store", None)
+        if type(market_store) is not _market_store_type:
+            raise ApplicationReceiptError(
+                "canonical application cannot reprove market storage before completion"
+            )
+        try:
+            history = _market_events(market_store, delta.event_id)
+        except Exception as exc:
+            raise ApplicationReceiptError(
+                "cannot reverify durable market effect before completion"
+            ) from exc
+        matches = []
+        for stored_event in history:
+            if type(stored_event) is not _market_event_type:
+                raise ApplicationReceiptError(
+                    "market persistence returned a non-canonical event type"
+                )
+            try:
+                stored_dedupe_key = _dedupe_getter(stored_event)
+                stored_digest = _canonical_digest(stored_event)
+            except Exception as exc:
+                raise ApplicationReceiptError(
+                    "cannot reverify durable market identity before completion"
+                ) from exc
+            if (
+                stored_event.source_id == delta.source_id
+                and stored_dedupe_key == delta.event_dedupe_key
+                and stored_digest == digest
+            ):
+                matches.append(stored_event)
+        if len(matches) != 1:
+            raise ApplicationReceiptError(
+                "canonical market effect changed before application completion"
+            )
+
+        self._state.mark_complete(delta, completed_at=completed_at)
         receipt = self._state.receipt(delta)
         if receipt is None:
             raise ApplicationReceiptError("canonical application did not reach durable completion")

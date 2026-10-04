@@ -4188,7 +4188,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 available_at="2026-09-19T21:19:30+00:00",
             )
             original_type = continuous_session_module.SettlementResolution
-            original_digest = continuous_session_module._settlement_outcomes_sha256
+            original_hashlib = continuous_session_module.hashlib
             try:
                 coordinator._state.record_settlement_evidence(
                     settlement_evidence=(resolution,),
@@ -4206,12 +4206,20 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 class _ForgedResolution(SettlementResolution):
                     pass
 
+                class _ForgedHashlib:
+                    @staticmethod
+                    def sha256(_payload):
+                        class _ForgedDigest:
+                            @staticmethod
+                            def hexdigest():
+                                return raw["settlement_outcome_digests"][
+                                    resolution.evidence_id
+                                ]
+
+                        return _ForgedDigest()
+
                 continuous_session_module.SettlementResolution = _ForgedResolution
-                continuous_session_module._settlement_outcomes_sha256 = (
-                    lambda _resolution: raw["settlement_outcome_digests"][
-                        resolution.evidence_id
-                    ]
-                )
+                continuous_session_module.hashlib = _ForgedHashlib
                 with self.assertRaisesRegex(
                     ContinuousSessionError,
                     "pending settlement outcome digest conflicts with durable evidence",
@@ -4219,7 +4227,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     coordinator.status()
             finally:
                 continuous_session_module.SettlementResolution = original_type
-                continuous_session_module._settlement_outcomes_sha256 = original_digest
+                continuous_session_module.hashlib = original_hashlib
                 store.close()
 
     def test_pending_settlement_outcomes_tamper_fails_digest_reproof(self) -> None:

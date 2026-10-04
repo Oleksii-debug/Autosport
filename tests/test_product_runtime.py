@@ -195,6 +195,60 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     desktop.resolve_event = lambda _delta: None
             finally:
                 runtime.close()
+    def test_builder_closure_binds_canonical_application_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event()
+            delta = _delta(event)
+            forged_calls = []
+
+            def forged_application(*_args, **_kwargs):
+                forged_calls.append("constructor")
+                raise AssertionError("module application rebind must be ignored")
+
+            def forged_apply(*_args, **_kwargs):
+                forged_calls.append("apply")
+                raise AssertionError("class apply rebind must be ignored")
+
+            def forged_lookup(*_args, **_kwargs):
+                forged_calls.append("lookup")
+                return None
+
+            with (
+                patch.object(
+                    product_runtime_module,
+                    "CanonicalDesktopApplication",
+                    forged_application,
+                ),
+                patch.object(
+                    causal_collector_legacy_module.CanonicalDesktopApplication,
+                    "apply",
+                    forged_apply,
+                ),
+                patch.object(
+                    causal_collector_legacy_module.CanonicalDesktopApplication,
+                    "lookup_receipt",
+                    forged_lookup,
+                ),
+            ):
+                runtime = build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(resolved_event=event),
+                    clock=clock,
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+                try:
+                    self.assertTrue(runtime.collector.delta_store.append(delta))
+                    self.assertEqual(
+                        runtime.coordinator.desktop_consumer.drain(as_of=clock.value),
+                        (delta.delta_id,),
+                    )
+                finally:
+                    runtime.close()
+
+            self.assertEqual(forged_calls, [])
     def test_product_desktop_authority_graph_rejects_post_build_rebind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -266,6 +320,8 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     receipt.canonical_event_digest,
                     delta.canonical_event_digest,
                 )
+                recovered = desktop.lookup_application_receipt(delta)
+                self.assertEqual(recovered, receipt)
             finally:
                 runtime.close()
 

@@ -4798,7 +4798,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     store.append_batch_accepted((first, second)),
                     [first, second],
                 )
-                self.assertEqual(store.committed_append_generation_head(), 2)
+                self.assertEqual(store.append_generation_hint(), 2)
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
@@ -4818,7 +4818,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     observed_ts="2026-09-16T19:00:00.750000+00:00",
                 )
                 self.assertTrue(store.append(third))
-                self.assertEqual(store.committed_append_generation_head(), 3)
+                self.assertEqual(store.append_generation_hint(), 3)
                 self.assertEqual(
                     [
                         (event.sequence, generation)

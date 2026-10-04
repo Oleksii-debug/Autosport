@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from threading import RLock
-from typing import Mapping
+from typing import Callable, Mapping
 
 from . import _paper_execution_reality_legacy as _paper_impl
 from .domain import MarketEvent, PaperTicket, TicketLeg
@@ -117,6 +117,14 @@ def _utc_timestamp(value: str, field_name: str) -> datetime:
 
 def _timestamp_text(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+# Recovery-clock selection is itself financial execution authority: a forged older
+# reservation timestamp can make an actually expired quote look executable. Keep
+# the durable reader capability captured at module initialization so caller/runtime
+# mutation of the ledger instance's public `events` attribute cannot fabricate the
+# pre-existing RUN_RESERVED fact used to choose the execution clock.
+_PAPER_EXECUTION_LEDGER_LOAD_UNL = PaperExecutionLedger._load_unlocked
 
 
 class PaperExecutionAdoptionRuntime:
@@ -506,6 +514,106 @@ class PaperExecutionAdoptionRuntime:
             self.config,
         )
 
+    def resolve_execution_started_at(
+        self,
+        *,
+        prepared: PreparedPaperExecution,
+        trigger_id: str,
+        proposed_started_at: str,
+    ) -> str:
+        """Resolve one exact #623 run start without backdating fresh execution.
+
+        A fresh run uses the caller's current product clock. Recovery reuses an
+        already-durable RUN_RESERVED timestamp so the exact same execution can be
+        resumed. An exposure-scope event alone is not execution start: a crash
+        before reservation must retry with the new current time and may expire.
+        """
+        if not isinstance(prepared, PreparedPaperExecution):
+            raise TypeError("prepared must be PreparedPaperExecution")
+        self._require_minted(prepared)
+        proposed_time = _utc_timestamp(
+            proposed_started_at,
+            "proposed PAPER execution started_at",
+        )
+        plan_time = _utc_timestamp(
+            prepared.execution_plan.created_at,
+            "PAPER execution plan created_at",
+        )
+        if proposed_time < plan_time:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution start clock precedes the authorized plan"
+            )
+
+        run_id = self.expected_run_id(prepared, trigger_id)
+        with self.ledger._lock:
+            events = tuple(
+                event
+                for event in _PAPER_EXECUTION_LEDGER_LOAD_UNL(self.ledger)
+                if event["run_id"] == run_id
+            )
+        reservations = [
+            event for event in events if event["event_type"] == "RUN_RESERVED"
+        ]
+        if not reservations:
+            unexpected = [
+                event["event_type"]
+                for event in events
+                if event["event_type"] != self._EXPOSURE_SCOPE_EVENT_TYPE
+            ]
+            if unexpected:
+                raise PaperExecutionAdoptionError(
+                    "PAPER execution history exists without a durable run reservation"
+                )
+            return proposed_started_at
+        if len(reservations) != 1:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution run must have exactly one durable reservation"
+            )
+
+        payload = reservations[0]["payload"]
+        expected_keys = {
+            "trigger_id",
+            "plan_id",
+            "plan_fingerprint",
+            "model_fingerprint",
+            "started_at",
+            "action_ids",
+            "observation_evidence_ids",
+        }
+        # Product-owned live execution adds the verified DecisionLedger origin
+        # to this same reservation. Start-time recovery consumes only the execution
+        # identity/timestamp here; the composed execute/load authority re-resolves
+        # and validates decision_origin itself.
+        allowed_keys = (
+            expected_keys,
+            expected_keys | {"decision_origin"},
+        )
+        if type(payload) is not dict or set(payload) not in allowed_keys:
+            raise PaperExecutionAdoptionError(
+                "durable PAPER execution reservation schema is invalid"
+            )
+        if (
+            payload["trigger_id"] != trigger_id
+            or payload["plan_id"] != prepared.execution_plan.plan_id
+            or payload["plan_fingerprint"] != prepared.execution_plan.fingerprint
+            or payload["model_fingerprint"] != self.config.fingerprint
+            or payload["action_ids"]
+            != [action.action_id for action in prepared.execution_plan.actions]
+        ):
+            raise PaperExecutionAdoptionError(
+                "durable PAPER execution reservation conflicts with prepared action"
+            )
+        durable_started_at = payload["started_at"]
+        durable_time = _utc_timestamp(
+            durable_started_at,
+            "durable PAPER execution started_at",
+        )
+        if durable_time < plan_time:
+            raise PaperExecutionAdoptionError(
+                "durable PAPER execution start precedes the authorized plan"
+            )
+        return durable_started_at
+
     @classmethod
     def _exposure_scope_payload(
         cls,
@@ -688,6 +796,53 @@ class PaperExecutionAdoptionRuntime:
                 prepared=prepared,
                 trigger_id=trigger_id,
                 started_at=started_at,
+                materialize_exposure=materialize_exposure,
+                observations=observations,
+                evidence_registry=evidence_registry,
+                suspended_action_ids=suspended_action_ids,
+            )
+
+    def execute_with_clock(
+        self,
+        *,
+        prepared: PreparedPaperExecution,
+        trigger_id: str,
+        clock: Callable[[], datetime],
+        materialize_exposure: bool,
+        observations: Mapping[str, ObservedPaperExecution] | None = None,
+        evidence_registry: PaperExecutionEvidenceRegistry | None = None,
+        suspended_action_ids: frozenset[str] = frozenset(),
+    ) -> PaperExecutionAdoptionResult:
+        """Sample the execution clock only after entering the canonical run lock."""
+        if not callable(clock):
+            raise TypeError("clock must be callable")
+        with self._execution_lock:
+            # The product clock is injected code and may execute arbitrary Python.
+            # Snapshot the already-composed authorities before invoking it. In
+            # particular, DecisionLedger-origin composition wraps execute(), so
+            # bypassing that surface via _execute_unlocked would mint an origin-less
+            # live PAPER reservation.
+            resolve_execution_started_at = self.resolve_execution_started_at
+            execute = self.execute
+            now = clock()
+            if not isinstance(now, datetime):
+                raise TypeError("PAPER execution clock must return datetime")
+            if now.tzinfo is None or now.utcoffset() is None:
+                raise ValueError(
+                    "PAPER execution clock must return a timezone-aware datetime"
+                )
+            proposed_started_at = now.astimezone(timezone.utc).isoformat()
+            resolved_started_at = resolve_execution_started_at(
+                prepared=prepared,
+                trigger_id=trigger_id,
+                proposed_started_at=proposed_started_at,
+            )
+            # _execution_lock is re-entrant. Re-enter through the canonical composed
+            # execute surface so decision-origin/recovery wrappers remain authoritative.
+            return execute(
+                prepared=prepared,
+                trigger_id=trigger_id,
+                started_at=resolved_started_at,
                 materialize_exposure=materialize_exposure,
                 observations=observations,
                 evidence_registry=evidence_registry,

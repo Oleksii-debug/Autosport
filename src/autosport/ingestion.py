@@ -443,3 +443,21 @@ class IngestionEngine:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+def _seal_ingestion_authority_call_surface() -> None:
+    """Expose only the supported poll_once API, not its captured authority bindings."""
+
+    poll_once_impl = IngestionEngine.poll_once
+
+    def poll_once(
+        self: IngestionEngine,
+        provider: MarketProvider,
+        max_items: int = 1000,
+    ) -> IngestionStats:
+        return poll_once_impl(self, provider, max_items)
+
+    IngestionEngine.poll_once = poll_once
+
+
+_seal_ingestion_authority_call_surface()
+del _seal_ingestion_authority_call_surface

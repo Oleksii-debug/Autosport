@@ -868,7 +868,12 @@ class ProphetXSessionLifecycle:
             credential_revision=self._scope_credential_revision,
             integration_role=self._scope_integration_role,
         )
-        self.workspace = Path(workspace)
+        try:
+            self.workspace = Path(workspace).resolve(strict=False)
+        except (OSError, RuntimeError, TypeError) as exc:
+            raise ProphetXSessionLifecycleError(
+                "workspace path cannot be resolved"
+            ) from exc
         self._scope_dir = (
             self.workspace
             / ".provider-session-lifecycle"

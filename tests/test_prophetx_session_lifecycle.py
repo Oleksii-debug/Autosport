@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone, tzinfo
 from hashlib import sha256
 import json
+from pathlib import Path
 
 import pytest
 
@@ -162,6 +163,39 @@ def test_timezone_normalization_overflow_fails_before_state_write(tmp_path):
         )
 
     assert not lifecycle.state_path.exists()
+
+
+def test_relative_workspace_is_frozen_against_cwd_change(tmp_path, monkeypatch):
+    first_cwd = tmp_path / "first"
+    second_cwd = tmp_path / "second"
+    workspace = first_cwd / "workspace"
+    workspace.mkdir(parents=True)
+    second_cwd.mkdir()
+
+    monkeypatch.chdir(first_cwd)
+    lifecycle = ProphetXSessionLifecycle(Path("workspace"), scope=_scope())
+    original_state_path = lifecycle.state_path
+    first = lifecycle.begin_login(
+        now=NOW,
+        access_token_available=False,
+    )
+
+    assert lifecycle.workspace == workspace.resolve()
+    assert lifecycle.workspace.is_absolute()
+    assert original_state_path.is_absolute()
+    assert first.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+
+    monkeypatch.chdir(second_cwd)
+    second = lifecycle.begin_login(
+        now=NOW + timedelta(seconds=1),
+        access_token_available=False,
+    )
+
+    assert lifecycle.state_path == original_state_path
+    assert second.action is ProphetXLoginAdmissionAction.WAIT_FOR_EXISTING_LOGIN
+    assert second.snapshot is not None
+    assert second.snapshot.attempt_id == first.attempt_id
+    assert not (second_cwd / "workspace").exists()
 
 
 def test_two_consumers_share_one_persisted_login_reservation(tmp_path):

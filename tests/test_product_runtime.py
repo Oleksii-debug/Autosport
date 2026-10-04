@@ -163,6 +163,38 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 restored.close()
 
+    def test_builder_ignores_product_desktop_consumer_module_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            forged_calls = []
+
+            def forged_consumer(*_args, **_kwargs):
+                forged_calls.append(True)
+                raise AssertionError("module rebind must not replace product consumer")
+
+            with patch.object(
+                product_runtime_module,
+                "_ProductDesktopDeltaConsumer",
+                forged_consumer,
+                create=True,
+            ):
+                runtime = build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+            try:
+                self.assertEqual(forged_calls, [])
+                desktop = runtime.coordinator.desktop_consumer
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product desktop authority field",
+                ):
+                    desktop.resolve_event = lambda _delta: None
+            finally:
+                runtime.close()
     def test_product_desktop_authority_graph_rejects_post_build_rebind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

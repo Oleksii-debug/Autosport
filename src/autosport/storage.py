@@ -2074,25 +2074,27 @@ class SQLiteMarketStore:
         # append commits SQLite before machine COMMIT, and BEGIN IMMEDIATE alone
         # therefore leaves a real SQLite-COMMIT -> machine-COMMIT window in which a
         # resolver could otherwise recover a still-live writer's PREPARE.
-        with self._connection_lock:
-            preexisting_cutoff = (
-                self.connection.execute(
-                    "SELECT 1 FROM market_replay_cutoffs WHERE cutoff_id=? LIMIT 1",
-                    (cutoff_id,),
-                ).fetchone()
-                is not None
-            )
-        append_guard = (
-            nullcontext()
-            if preexisting_cutoff
-            else self._market_append_issuance_lock(append_authority)
-        )
-
         # Lock order for first issuance is replay-cutoff sibling -> append sibling ->
         # this instance's SQLite connection. Append writers never acquire the replay
-        # sibling, so there is no reverse dependency. All locks are released before
-        # MarketEvent decoding.
+        # sibling, so there is no reverse dependency. Resolve the pre-existing hint
+        # only after owning the replay sibling, so another resolver cannot publish the
+        # same cutoff between admission and append-lock selection.
         with self._replay_cutoff_issuance_lock(authority):
+            with self._connection_lock:
+                preexisting_cutoff = (
+                    self.connection.execute(
+                        "SELECT 1 FROM market_replay_cutoffs WHERE cutoff_id=? LIMIT 1",
+                        (cutoff_id,),
+                    ).fetchone()
+                    is not None
+                )
+            append_guard = (
+                nullcontext()
+                if preexisting_cutoff
+                else self._market_append_issuance_lock(append_authority)
+            )
+
+            # All locks are released before MarketEvent decoding.
             with append_guard:
                 with self._connection_lock:
                     self._validate_causal_replay_state()

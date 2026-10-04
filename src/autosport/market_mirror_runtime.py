@@ -21,11 +21,17 @@ class MirrorInvalidationBatch:
     ``changed_keys`` is intentionally empty: bounded key tracking saturated, so a
     consumer must refresh from one coherent ``MarketMirror.view()`` rather than
     pretending that an incomplete affected-key list is authoritative.
+
+    ``semantic_refresh_keys`` is only a classification subset of ``changed_keys``.
+    It preserves the already-proven distinction between a fresh acquisition that
+    changed economic/provider state and a fresh acquisition that only refreshed local
+    liveness. It does not suppress invalidation and is not positive execution authority.
     """
 
     changed_keys: tuple[MirrorQuoteKey, ...]
     full_refresh_required: bool
     has_more: bool
+    semantic_refresh_keys: tuple[MirrorQuoteKey, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,6 +470,7 @@ class BoundedMirrorInvalidationBuffer:
         self._mirror = mirror
         self._max_dirty_keys = max_dirty_keys
         self._dirty: dict[MirrorQuoteKey, None] = {}
+        self._semantic_refresh: dict[MirrorQuoteKey, None] = {}
         self._full_refresh_required = False
         self._lock = RLock()
 
@@ -514,6 +521,12 @@ class BoundedMirrorInvalidationBuffer:
 
             key = (result.source_id, result.quote_key)
             if key in self._dirty:
+                # Coalescing must never relabel a batch containing a material update
+                # as refresh-only. A later APPLIED update therefore revokes an earlier
+                # refresh classification, while a later refresh cannot downgrade an
+                # already-material dirty key.
+                if result.status is MirrorUpdate.APPLIED:
+                    self._semantic_refresh.pop(key, None)
                 return result
 
             if len(self._dirty) >= self._max_dirty_keys:
@@ -521,10 +534,13 @@ class BoundedMirrorInvalidationBuffer:
                 # The mirror already contains this update, so degrade to one
                 # coherent full refresh rather than dropping durable state.
                 self._dirty.clear()
+                self._semantic_refresh.clear()
                 self._full_refresh_required = True
                 return result
 
             self._dirty[key] = None
+            if result.status is MirrorUpdate.SEMANTIC_REFRESH:
+                self._semantic_refresh[key] = None
             return result
 
     def accept_persisted(self, event: MarketEvent) -> MirrorApplyResult:
@@ -570,18 +586,25 @@ class BoundedMirrorInvalidationBuffer:
             if self._full_refresh_required:
                 self._full_refresh_required = False
                 self._dirty.clear()
+                self._semantic_refresh.clear()
                 return MirrorInvalidationBatch(
                     changed_keys=(),
                     full_refresh_required=True,
                     has_more=False,
+                    semantic_refresh_keys=(),
                 )
 
             count = min(max_items, len(self._dirty))
             keys = tuple(list(self._dirty)[:count])
+            semantic_refresh_keys = tuple(
+                key for key in keys if key in self._semantic_refresh
+            )
             for key in keys:
                 del self._dirty[key]
+                self._semantic_refresh.pop(key, None)
             return MirrorInvalidationBatch(
                 changed_keys=keys,
                 full_refresh_required=False,
                 has_more=bool(self._dirty),
+                semantic_refresh_keys=semantic_refresh_keys,
             )

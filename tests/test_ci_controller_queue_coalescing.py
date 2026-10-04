@@ -3112,3 +3112,14 @@ def test_scoped_main_kwdefaults_metadata_cannot_rebase_orchestration(
 
     assert scoped_controller.main(_scoped_main_args()) == 2
     assert forged_calls == []
+
+
+
+def test_scoped_main_has_no_implicit_argv_default_and_entrypoint_passes_sys_argv() -> None:
+    assert scoped_controller.main.__defaults__ is None
+
+    source = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py").read_text(
+        encoding="utf-8"
+    )
+    assert "raise SystemExit(main(sys.argv[1:]))" in source
+    assert "raise SystemExit(main())" not in source

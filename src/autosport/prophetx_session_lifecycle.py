@@ -113,9 +113,28 @@ def _sha256_hex(value: object, field: str) -> str:
 def _aware_utc(value: object, field: str) -> datetime:
     if type(value) is not datetime:
         raise ProphetXSessionLifecycleError(f"{field} must be an exact datetime")
-    if value.tzinfo is None or value.utcoffset() is None:
+    if value.tzinfo is None:
         raise ProphetXSessionLifecycleError(f"{field} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    try:
+        offset = value.utcoffset()
+    except Exception as exc:
+        raise ProphetXSessionLifecycleError(
+            f"{field} has invalid timezone offset"
+        ) from exc
+    if (
+        type(offset) is not timedelta
+        or not (-timedelta(days=1) < offset < timedelta(days=1))
+    ):
+        raise ProphetXSessionLifecycleError(
+            f"{field} must have a bounded concrete UTC offset"
+        )
+    try:
+        naive_utc = value.replace(tzinfo=None) - offset
+    except (OverflowError, ValueError) as exc:
+        raise ProphetXSessionLifecycleError(
+            f"{field} cannot be normalized to UTC"
+        ) from exc
+    return naive_utc.replace(tzinfo=timezone.utc)
 
 
 def _iso(value: datetime | None) -> str | None:

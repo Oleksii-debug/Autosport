@@ -1159,6 +1159,7 @@ def _research_context_hash(
 ) -> str:
     candidate_keys = {leg.quote_key for leg in candidate.legs}
     payload = {
+        "schema": "autosport.research.context.v2",
         "decision_ts": decision_ts,
         "book": {
             "initial_bankroll": str(book.initial_bankroll),
@@ -1177,7 +1178,12 @@ def _research_context_hash(
                     "bankroll_id": ticket.bankroll_id,
                     "currency": ticket.currency,
                     "legs": [
-                        {"quote_key": leg.quote_key, "locked_odds": str(leg.locked_odds)}
+                        {
+                            "quote_key": leg.quote_key,
+                            "locked_odds": str(leg.locked_odds),
+                            "sport": leg.sport,
+                            "exchange_side": leg.exchange_side,
+                        }
                         for leg in ticket.legs
                     ],
                 }

@@ -10,11 +10,16 @@ from pathlib import Path
 from autosport.decision_ledger import (
     ECONOMIC_DECISION_KIND,
     ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY,
+    RISK_POLICY_PROVENANCE_PAYLOAD_KEY,
     DecisionLedgerIntegrityError,
     DecisionRecord,
     JsonlDecisionLedger,
+    bind_economic_goal,
+    verify_economic_goal_binding,
 )
 from autosport.economic_goal import AutomationLevel, EconomicGoalContract
+from autosport.economic_goal_provenance import provenance_for
+from autosport.risk import PAPER_RISK_POLICY_SEMANTICS, PaperRiskPolicy
 
 
 class DecisionLedgerTests(unittest.TestCase):
@@ -105,6 +110,94 @@ class DecisionLedgerTests(unittest.TestCase):
             self.assertEqual(evidence["revision"], goal.revision)
             self.assertEqual(evidence["bankroll_id"], goal.bankroll_id)
             self.assertEqual(restarted.verify_integrity(), 1)
+
+    def test_economic_append_emits_current_risk_policy_semantics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            goal = self._economic_goal()
+            policy = PaperRiskPolicy(economic_goal=goal)
+            record = self._economic_record(decision_id="economic-policy-v2")
+
+            JsonlDecisionLedger(path).append_economic(
+                record,
+                goal,
+                risk_policy=policy,
+            )
+
+            restored = JsonlDecisionLedger(path).verified_economic_decision(
+                record.decision_id,
+                goal,
+                risk_policy=policy,
+            )
+            evidence = restored.payload[RISK_POLICY_PROVENANCE_PAYLOAD_KEY]
+            self.assertEqual(evidence, policy.provenance_record())
+            self.assertEqual(evidence["schema_version"], 2)
+            self.assertEqual(evidence["semantics"], PAPER_RISK_POLICY_SEMANTICS)
+
+    def test_exact_legacy_v1_risk_policy_binding_remains_restart_verifiable(self):
+        goal = self._economic_goal()
+        policy = PaperRiskPolicy(economic_goal=goal)
+        record = self._economic_record(decision_id="economic-policy-v1")
+        bound = bind_economic_goal(record, goal, policy)
+
+        legacy = {
+            "schema": "autosport.paper_risk_policy_provenance",
+            "schema_version": 1,
+            "max_ticket_fraction": str(policy.max_ticket_fraction),
+            "max_committed_fraction": str(policy.max_committed_fraction),
+            "minimum_cash_reserve_fraction": str(
+                policy.minimum_cash_reserve_fraction
+            ),
+            "economic_goal_contract_sha256": provenance_for(
+                goal
+            ).contract_sha256,
+        }
+        legacy_json = json.dumps(
+            legacy,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        legacy["sha256"] = hashlib.sha256(legacy_json).hexdigest()
+        payload = dict(bound.payload)
+        payload[RISK_POLICY_PROVENANCE_PAYLOAD_KEY] = legacy
+        historical = DecisionRecord(
+            replay_run_id=bound.replay_run_id,
+            agent=bound.agent,
+            observed_ts=bound.observed_ts,
+            action=bound.action,
+            payload=payload,
+            context_hash=bound.context_hash,
+            decision_id=bound.decision_id,
+            recorded_at=bound.recorded_at,
+            decision_kind=bound.decision_kind,
+        )
+
+        verify_economic_goal_binding(historical, goal, risk_policy=policy)
+
+        tampered_payload = dict(historical.payload)
+        tampered_legacy = dict(
+            tampered_payload[RISK_POLICY_PROVENANCE_PAYLOAD_KEY]
+        )
+        tampered_legacy["max_ticket_fraction"] = "0.99"
+        tampered_payload[RISK_POLICY_PROVENANCE_PAYLOAD_KEY] = tampered_legacy
+        tampered = DecisionRecord(
+            replay_run_id=historical.replay_run_id,
+            agent=historical.agent,
+            observed_ts=historical.observed_ts,
+            action=historical.action,
+            payload=tampered_payload,
+            context_hash=historical.context_hash,
+            decision_id=historical.decision_id,
+            recorded_at=historical.recorded_at,
+            decision_kind=historical.decision_kind,
+        )
+        with self.assertRaisesRegex(
+            DecisionLedgerIntegrityError,
+            "risk-policy provenance mismatch",
+        ):
+            verify_economic_goal_binding(tampered, goal, risk_policy=policy)
 
     def test_economic_restart_readback_fails_closed_when_binding_is_missing(self):
         with tempfile.TemporaryDirectory() as tmp:

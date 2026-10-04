@@ -154,6 +154,61 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
         )
         return book, ledger, runtime
 
+    def test_prepared_scope_inputs_are_canonical_before_mint(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "bankroll_id and currency must be supplied together",
+        ):
+            PaperExposureBinding(
+                action_id="a1",
+                sport="soccer",
+                bankroll_id="paper-bankroll",
+                currency=None,
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "currency must be three-letter uppercase ASCII",
+        ):
+            PaperExposureBinding(
+                action_id="a1",
+                sport="soccer",
+                bankroll_id="paper-bankroll",
+                currency="eur",
+            )
+
+        binding = PaperExposureBinding(
+            action_id="a1",
+            sport="soccer",
+            bankroll_id="paper-bankroll",
+            currency="EUR",
+        )
+        execution_plan = ExecutionPlan(
+            plan_id="adoption-plan-canonical-json",
+            bookmaker_profile_version="paper-profile-v1",
+            decision_id="decision-canonical-json",
+            approval_id="paper-only-no-real-money",
+            created_at=QUOTE_AT,
+            actions=(action("a1"),),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "canonical JSON object",
+        ):
+            PreparedPaperExecution(
+                execution_plan=execution_plan,
+                exposure_bindings=(binding,),
+                intent_evidence_json='{ "schema": "noncanonical" }',
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "valid canonical JSON",
+        ):
+            PreparedPaperExecution(
+                execution_plan=execution_plan,
+                exposure_bindings=(binding,),
+                intent_evidence_json="{not-json",
+            )
+
     def test_paper_value_lay_fails_before_execution_or_book_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, _ledger, runtime = self.runtime(tmp)

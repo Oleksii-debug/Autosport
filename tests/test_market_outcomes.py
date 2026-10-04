@@ -290,6 +290,31 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
                 datetime(2026, 9, 18, 15, 0, 0, tzinfo=timezone.utc)
             )
 
+    def test_datetime_subclass_cannot_execute_inside_authority_causal_check(self):
+        authority = self._authority(("away", "home"))
+        hooks = 0
+
+        class ExecutableDatetime(datetime):
+            def astimezone(self, tz=None):
+                nonlocal hooks
+                hooks += 1
+                object.__setattr__(authority, "source_revision", "tampered-by-time-hook")
+                return super().astimezone(tz)
+
+        decision = ExecutableDatetime(
+            2026,
+            9,
+            18,
+            15,
+            0,
+            2,
+            tzinfo=timezone.utc,
+        )
+        with self.assertRaisesRegex(TypeError, "decision_as_of must be an exact datetime"):
+            authority.assert_available_as_of(decision)
+        self.assertEqual(hooks, 0)
+        self.assertNotEqual(authority.source_revision, "tampered-by-time-hook")
+
     def test_authoritative_scenario_search_covers_unticketed_real_third_outcome(self):
         authority = self._authority()
         book = PaperBook("100")

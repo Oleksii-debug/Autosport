@@ -12,7 +12,10 @@ from .candidate_search import (
     ParlayCandidate,
 )
 from .domain import PaperTicket, TicketLeg, TicketStatus
-from .portfolio import _snapshot_open_tickets_for_analysis
+from .portfolio import (
+    _PORTFOLIO_DECIMAL_CONTEXT,
+    _snapshot_open_tickets_for_analysis,
+)
 from .scenario_search import ScenarioGroup, ScenarioSearchEngine, ScenarioSearchReport
 
 
@@ -140,7 +143,7 @@ class PortfolioAwareCandidateOptimizer:
             worst_proven = False
             best_proven = False
             try:
-                with localcontext(_CANDIDATE_DECIMAL_CONTEXT):
+                with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
                     observed_worst_change = (
                         with_report.observed_worst - base_report.observed_worst
                     )

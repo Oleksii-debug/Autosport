@@ -478,7 +478,8 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
                 economic_goal=economic_goal,
                 risk_policy=risk_policy,
                 runtime_strategy_id=runtime_strategy_id,
-            )
+            ),
+            replay_execution_receipt=result.replay.execution_receipt,
         )
         transaction.commit()
 

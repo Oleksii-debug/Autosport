@@ -173,7 +173,7 @@ class LiveObservationTests(unittest.TestCase):
                 decimal_odds=Decimal("2.20"),
                 observed_ts="2026-09-12T20:00:00+00:00",
                 ingest_ts="2026-09-12T20:00:00+00:00",
-                source_id="legacy-provider",
+                source_id="live-fixture",
                 sequence=3,
                 status="open",
                 source_ts="2026-09-12T19:59:59+00:00",
@@ -251,30 +251,31 @@ class LiveObservationTests(unittest.TestCase):
             )
 
             self.assertEqual(result.stats.accepted, 2)
-            self.assertEqual(
-                tuple(
+            self.assertIn(
+                legacy.dedupe_key,
+                {
                     event.dedupe_key
-                    for event in mirror.view(source_ids="legacy-provider").events
-                ),
-                (legacy.dedupe_key,),
+                    for event in mirror.view(source_ids="live-fixture").events
+                },
             )
             self.assertEqual(
                 mirror.active_view(
                     as_of=datetime.fromisoformat(_RECEIVE_TIME),
                     max_age=timedelta(minutes=2),
-                    source_ids="legacy-provider",
+                    event_ids="legacy-event",
                 ).events,
                 (),
             )
-            self.assertEqual(
-                len(
-                    mirror.active_view(
-                        as_of=datetime.fromisoformat(_RECEIVE_TIME),
-                        max_age=timedelta(minutes=2),
-                        source_ids="live-fixture",
-                    ).events
-                ),
-                2,
+            active_live = mirror.active_view(
+                as_of=datetime.fromisoformat(_RECEIVE_TIME),
+                max_age=timedelta(minutes=2),
+                source_ids="live-fixture",
+            )
+            self.assertEqual(len(active_live.events), 2)
+            self.assertEqual(len(result.current_quotes), 2)
+            self.assertNotIn(
+                legacy.dedupe_key,
+                {event.dedupe_key for event in result.current_quotes},
             )
             invalidations = updates.drain(max_items=10)
             self.assertFalse(invalidations.full_refresh_required)

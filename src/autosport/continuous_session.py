@@ -2190,12 +2190,16 @@ class _ContinuousSessionState:
         deltas: tuple[CollectorDelta, ...],
         backlog: bool,
     ) -> None:
+        if type(deltas) is not tuple:
+            raise TypeError("deltas must be an exact tuple")
         if type(backlog) is not bool:
             raise TypeError("backlog must be boolean")
         for delta in deltas:
-            if not isinstance(delta, CollectorDelta):
-                raise TypeError("deltas must contain CollectorDelta values")
-            delta.validate()
+            if type(delta) is not CollectorDelta:
+                raise TypeError(
+                    "deltas must contain exact CollectorDelta values"
+                )
+            CollectorDelta.validate(delta)
             if delta.source_id != self.source_id:
                 raise ContinuousSessionError(
                     "source-state projection delta belongs to another source"

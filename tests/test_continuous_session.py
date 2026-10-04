@@ -923,6 +923,71 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+
+    def test_source_projection_rejects_non_tuple_batch_before_checkpoint_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = _ContinuousSessionState(
+                root / "continuous_session.json",
+                session_id="session-source-type-seal",
+                source_id="provider-a",
+                clock=lambda: "2026-09-19T21:20:00+00:00",
+            )
+            before = (root / "continuous_session.json").read_bytes()
+            delta = _collector_delta(
+                delta_id="delta-exact-type",
+                gap_state=GapState.NONE,
+                sync_state=SyncState.READY,
+            )
+
+            with self.assertRaisesRegex(TypeError, "exact tuple"):
+                state.record_source_projection(
+                    deltas=[delta],  # type: ignore[arg-type]
+                    backlog=False,
+                )
+
+            self.assertEqual(
+                (root / "continuous_session.json").read_bytes(),
+                before,
+            )
+
+    def test_source_projection_rejects_collector_delta_subclass_before_checkpoint_mutation(self) -> None:
+        class ForgedCollectorDelta(CollectorDelta):
+            def validate(self) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = _ContinuousSessionState(
+                root / "continuous_session.json",
+                session_id="session-source-type-seal",
+                source_id="provider-a",
+                clock=lambda: "2026-09-19T21:20:00+00:00",
+            )
+            before = (root / "continuous_session.json").read_bytes()
+            canonical = _collector_delta(
+                delta_id="delta-exact-type",
+                gap_state=GapState.NONE,
+                sync_state=SyncState.READY,
+            )
+            forged = ForgedCollectorDelta(
+                **{
+                    field: getattr(canonical, field)
+                    for field in canonical.__dataclass_fields__
+                }
+            )
+
+            with self.assertRaisesRegex(TypeError, "exact CollectorDelta"):
+                state.record_source_projection(
+                    deltas=(forged,),
+                    backlog=False,
+                )
+
+            self.assertEqual(
+                (root / "continuous_session.json").read_bytes(),
+                before,
+            )
+
     def test_unresolved_gap_is_durable_in_status_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -837,6 +837,79 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.close()
 
+    def test_duplicate_visible_state_reuses_existing_ledger_market_frontier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            factory = _EmptyIntentFactory()
+            provider = _EmptyProvider()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=self._scientific_registry(
+                    workspace,
+                    self._strategy_version(),
+                ),
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            first = loop.run_cycle()
+            self.assertEqual(first.status, LiveCycleStatus.DECIDED)
+
+            first_record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertEqual(first_record.payload["market_append_generation"], 1)
+
+            peer_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                peer_store.append(
+                    MarketEvent(
+                        event_id="event-1",
+                        market_id="market-1",
+                        selection_id="selection-a",
+                        decimal_odds=Decimal("2.10"),
+                        observed_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                        source_id="provider-a",
+                        sequence=2,
+                        status="open",
+                        source_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                        ingest_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                    )
+                )
+            finally:
+                peer_store.close()
+
+            duplicate = loop.run_cycle()
+            self.assertEqual(duplicate.status, LiveCycleStatus.DUPLICATE_DECISION)
+            self.assertEqual(duplicate.decision_id, first.decision_id)
+            records = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].payload["market_append_generation"], 1)
+
+            committed = json.loads(loop.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(committed["phase"], "committed")
+            self.assertEqual(committed["market_append_generation"], 1)
+            self.assertEqual(
+                factory.calls[-1],
+                ("input-a", (("selection-a", 1, "open"),)),
+            )
+            loop.close()
+
     def test_decision_frontier_leaves_post_cutoff_peer_commit_for_next_cycle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

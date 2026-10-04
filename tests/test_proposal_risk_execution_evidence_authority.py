@@ -1255,7 +1255,7 @@ class ProductProposalRiskScenarioPopulationTests(unittest.TestCase):
         guard = scenario_population_authority._REQUIRE_DISPATCH_ORIGINAL
         original_defaults = guard.__defaults__
         try:
-            guard.__defaults__ = tuple(original_defaults)
+            guard.__defaults__ = tuple(list(original_defaults))
             self.assertIsNot(guard.__defaults__, original_defaults)
             with self.assertRaisesRegex(
                 ProductProposalRiskScenarioPopulationError,

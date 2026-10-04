@@ -99,6 +99,22 @@ class WindowsWebViewAsyncBusyFocusHandoffTests(unittest.TestCase):
                         f"{label} focus target {focus_id!r} is not programmatically focusable",
                     )
 
+    def test_native_close_in_progress_is_a_busy_keyboard_admission_fence(self) -> None:
+        script = (
+            Path(web_shell_index_path()).with_name("app.js").read_text(encoding="utf-8")
+        )
+        helper_start = script.index("function isAnyWorkerBusy(state)")
+        helper_end = script.index("\n  function syncOwnerConfirmationAvailability", helper_start)
+        helper = script[helper_start:helper_end]
+
+        self.assertIn("state.closing === true", helper)
+        self.assertIn("Object.values(state.busy).some(Boolean)", helper)
+        self.assertIn("const busyDisabled = isAnyWorkerBusy(state);", script)
+        self.assertIn(
+            "setDisabledWithFocusFallback(byId(id), busyDisabled);",
+            script,
+        )
+
     def test_runtime_actions_are_nonvacuous_positive_focus_handoff_controls(self) -> None:
         for method in (
             AutosportWebController._action_product_runtime_start,

@@ -937,6 +937,128 @@ def test_base_active_run_page_bound_and_parser_are_frozen(monkeypatch) -> None:
         "/actions/runs?event=pull_request&status=queued&per_page=100&page=2",
     ]
 
+def test_base_active_run_overlap_does_not_fake_total_count_completion(
+    monkeypatch,
+) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    requested: list[str] = []
+
+    def run_payload(run_id: int) -> dict[str, object]:
+        return {
+            "id": run_id,
+            "head_sha": HEAD_A,
+            "name": "CI",
+            "status": "queued",
+            "pull_requests": [{"number": 2008}],
+        }
+
+    def fake_request(path: str, **_kwargs):
+        requested.append(path)
+        if "page=1" in path:
+            return {
+                "total_count": 200,
+                "workflow_runs": [run_payload(run_id) for run_id in range(1, 101)],
+            }
+        if "page=2" in path:
+            return {
+                "total_count": 200,
+                "workflow_runs": [run_payload(run_id) for run_id in range(51, 151)],
+            }
+        if "page=3" in path:
+            return {
+                "total_count": 200,
+                "workflow_runs": [run_payload(run_id) for run_id in range(151, 201)],
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    runs = api._active_runs_for_status("queued")
+
+    assert {run.run_id for run in runs} == set(range(1, 201))
+    assert requested == [
+        "/actions/runs?event=pull_request&status=queued&per_page=100&page=1",
+        "/actions/runs?event=pull_request&status=queued&per_page=100&page=2",
+        "/actions/runs?event=pull_request&status=queued&per_page=100&page=3",
+    ]
+
+
+def test_base_active_run_queue_shrink_uses_short_page_as_safe_terminal_snapshot(
+    monkeypatch,
+) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    requested: list[str] = []
+
+    def run_payload(run_id: int) -> dict[str, object]:
+        return {
+            "id": run_id,
+            "head_sha": HEAD_A,
+            "name": "CI",
+            "status": "queued",
+            "pull_requests": [{"number": 2008}],
+        }
+
+    def fake_request(path: str, **_kwargs):
+        requested.append(path)
+        if "page=1" in path:
+            return {
+                "total_count": 150,
+                "workflow_runs": [run_payload(run_id) for run_id in range(1, 101)],
+            }
+        if "page=2" in path:
+            # The queue shrank while scanning. A short page is a terminal moving
+            # snapshot, not evidence that provider pagination is corrupt.
+            return {
+                "total_count": 130,
+                "workflow_runs": [run_payload(run_id) for run_id in range(101, 131)],
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    runs = api._active_runs_for_status("queued")
+
+    assert {run.run_id for run in runs} == set(range(1, 131))
+    assert requested == [
+        "/actions/runs?event=pull_request&status=queued&per_page=100&page=1",
+        "/actions/runs?event=pull_request&status=queued&per_page=100&page=2",
+    ]
+
+
+def test_base_active_run_reader_rejects_oversized_provider_page(monkeypatch) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+
+    def run_payload(run_id: int) -> dict[str, object]:
+        return {
+            "id": run_id,
+            "head_sha": HEAD_A,
+            "name": "CI",
+            "status": "queued",
+            "pull_requests": [{"number": 2008}],
+        }
+
+    def fake_request(path: str, **_kwargs):
+        assert "per_page=100&page=1" in path
+        return {
+            "total_count": 101,
+            "workflow_runs": [run_payload(run_id) for run_id in range(1, 102)],
+        }
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    with pytest.raises(CancellationError, match="invalid workflow-runs page size"):
+        api._active_runs_for_status("queued")
+
+
 def test_selector_ignores_rebound_coordinate_validators(monkeypatch) -> None:
     monkeypatch.setattr(
         controller_module,

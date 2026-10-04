@@ -31,6 +31,7 @@ def _parse_jsonl_event(line: str, line_number: int) -> MarketEvent:
 
 
 _EVENT_PAYLOAD_SEQUENCE_DOMAIN = "AUTOSPORT_REPLAY_EVENT_PAYLOAD_SEQUENCE_V1"
+_REPLAY_EXECUTION_RECEIPT_SCHEMA = "AUTOSPORT_REPLAY_EXECUTION_RECEIPT_V1"
 _HEX = frozenset("0123456789abcdef")
 
 
@@ -94,6 +95,167 @@ class ReplayLeakageFirewall:
             self._state = self._UNLOCKED
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class ReplayExecutionReceipt:
+    """Same-process product authority for one completed ReplayEngine execution.
+
+    The receipt authenticator is HMAC-SHA256 under a module-private key captured
+    by the issuer/verifier closure. Durable RunTransaction evidence must consume
+    and bind this receipt before process exit; the receipt is not a standalone
+    restart capability.
+    """
+
+    run_id: str
+    dataset_hash: str
+    event_count: int
+    input_event_payload_sequence_sha256: str
+    consumed_event_payload_sequence_sha256: str
+    applied_event_payload_sequence_sha256: str
+    consumed_event_payload_multiset_sha256: str
+    receipt_sha256: str
+
+    def __new__(
+        cls,
+        *args: object,
+        **kwargs: object,
+    ) -> "ReplayExecutionReceipt":
+        raise TypeError(
+            "ReplayExecutionReceipt is product-issued by ReplayEngine.run"
+        )
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError("ReplayExecutionReceipt must not be subclassed")
+
+
+_REPLAY_EXECUTION_RECEIPT_TYPE = ReplayExecutionReceipt
+
+
+def _canonical_replay_execution_payload(
+    *,
+    run_id: object,
+    dataset_hash: object,
+    event_count: object,
+    input_event_payload_sequence_sha256: object,
+    consumed_event_payload_sequence_sha256: object,
+    applied_event_payload_sequence_sha256: object,
+    consumed_event_payload_multiset_sha256: object,
+) -> dict[str, object]:
+    if (
+        type(run_id) is not str
+        or not run_id
+        or run_id != run_id.strip()
+        or len(run_id) > 512
+        or "\x00" in run_id
+        or "\r" in run_id
+        or "\n" in run_id
+    ):
+        raise ValueError("replay execution run_id must be canonical bounded text")
+    try:
+        run_id.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError("replay execution run_id must be valid UTF-8") from exc
+
+    def digest(value: object, name: str) -> str:
+        if (
+            type(value) is not str
+            or len(value) != 64
+            or any(ch not in _HEX for ch in value)
+        ):
+            raise ValueError(f"{name} must be lowercase SHA-256 hex")
+        return value
+
+    if type(event_count) is not int or event_count < 0:
+        raise ValueError("replay execution event_count must be a non-negative exact int")
+    return {
+        "schema": _REPLAY_EXECUTION_RECEIPT_SCHEMA,
+        "run_id": run_id,
+        "dataset_hash": digest(dataset_hash, "dataset_hash"),
+        "event_count": event_count,
+        "input_event_payload_sequence_sha256": digest(
+            input_event_payload_sequence_sha256,
+            "input_event_payload_sequence_sha256",
+        ),
+        "consumed_event_payload_sequence_sha256": digest(
+            consumed_event_payload_sequence_sha256,
+            "consumed_event_payload_sequence_sha256",
+        ),
+        "applied_event_payload_sequence_sha256": digest(
+            applied_event_payload_sequence_sha256,
+            "applied_event_payload_sequence_sha256",
+        ),
+        "consumed_event_payload_multiset_sha256": digest(
+            consumed_event_payload_multiset_sha256,
+            "consumed_event_payload_multiset_sha256",
+        ),
+    }
+
+
+def _build_replay_execution_receipt_authority(
+    receipt_type: type[ReplayExecutionReceipt],
+):
+    authority_key = secrets.token_bytes(32)
+
+    def authenticator(payload: dict[str, object]) -> str:
+        material = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return hmac.new(authority_key, material, hashlib.sha256).hexdigest()
+
+    def issue(**kwargs: object) -> ReplayExecutionReceipt:
+        payload = _canonical_replay_execution_payload(**kwargs)
+        result = object.__new__(receipt_type)
+        for field_name, value in payload.items():
+            if field_name != "schema":
+                object.__setattr__(result, field_name, value)
+        object.__setattr__(result, "receipt_sha256", authenticator(payload))
+        return result
+
+    def verify(candidate: ReplayExecutionReceipt) -> ReplayExecutionReceipt:
+        if type(candidate) is not receipt_type:
+            raise TypeError(
+                "candidate must be an exact product-issued ReplayExecutionReceipt"
+            )
+        payload = _canonical_replay_execution_payload(
+            run_id=candidate.run_id,
+            dataset_hash=candidate.dataset_hash,
+            event_count=candidate.event_count,
+            input_event_payload_sequence_sha256=(
+                candidate.input_event_payload_sequence_sha256
+            ),
+            consumed_event_payload_sequence_sha256=(
+                candidate.consumed_event_payload_sequence_sha256
+            ),
+            applied_event_payload_sequence_sha256=(
+                candidate.applied_event_payload_sequence_sha256
+            ),
+            consumed_event_payload_multiset_sha256=(
+                candidate.consumed_event_payload_multiset_sha256
+            ),
+        )
+        receipt_sha256 = candidate.receipt_sha256
+        if (
+            type(receipt_sha256) is not str
+            or len(receipt_sha256) != 64
+            or any(ch not in _HEX for ch in receipt_sha256)
+            or not hmac.compare_digest(receipt_sha256, authenticator(payload))
+        ):
+            raise ValueError("replay execution receipt authenticator mismatch")
+        return candidate
+
+    return issue, verify
+
+
+(
+    _issue_replay_execution_receipt,
+    verify_replay_execution_receipt,
+) = _build_replay_execution_receipt_authority(_REPLAY_EXECUTION_RECEIPT_TYPE)
+del _build_replay_execution_receipt_authority
+
+
 @dataclass(frozen=True, slots=True)
 class ReplayRun:
     run_id: str
@@ -105,6 +267,7 @@ class ReplayRun:
     consumed_event_payload_sequence_sha256: str | None = None
     applied_event_payload_sequence_sha256: str | None = None
     consumed_event_payload_multiset_sha256: str | None = None
+    execution_receipt: ReplayExecutionReceipt | None = None
 
 
 def _snapshot_replay_event(event: MarketEvent) -> MarketEvent:
@@ -277,24 +440,43 @@ class ReplayEngine:
                 applied_payloads.append(market_event_payload_sha256(event))
                 on_event(_snapshot_replay_event(event))
         self.firewall._complete_replay(completion_capability)
-        return ReplayRun(
-            run_id=run_id or str(uuid.uuid4()),
+        resolved_run_id = run_id or str(uuid.uuid4())
+        completed_at = utc_now_iso()
+        applied_sequence_sha256 = market_event_payload_sequence_sha256(
+            tuple(applied_payloads)
+        )
+        receipt = _issue_replay_execution_receipt(
+            run_id=resolved_run_id,
             dataset_hash=self.dataset_hash,
             event_count=count,
-            started_at=started,
-            completed_at=utc_now_iso(),
             input_event_payload_sequence_sha256=(
                 self.input_event_payload_sequence_sha256
             ),
             consumed_event_payload_sequence_sha256=(
                 self._consumed_event_payload_sequence_sha256
             ),
-            applied_event_payload_sequence_sha256=(
-                market_event_payload_sequence_sha256(tuple(applied_payloads))
-            ),
+            applied_event_payload_sequence_sha256=applied_sequence_sha256,
             consumed_event_payload_multiset_sha256=(
                 self._consumed_event_payload_multiset_sha256
             ),
+        )
+        return ReplayRun(
+            run_id=resolved_run_id,
+            dataset_hash=self.dataset_hash,
+            event_count=count,
+            started_at=started,
+            completed_at=completed_at,
+            input_event_payload_sequence_sha256=(
+                self.input_event_payload_sequence_sha256
+            ),
+            consumed_event_payload_sequence_sha256=(
+                self._consumed_event_payload_sequence_sha256
+            ),
+            applied_event_payload_sequence_sha256=applied_sequence_sha256,
+            consumed_event_payload_multiset_sha256=(
+                self._consumed_event_payload_multiset_sha256
+            ),
+            execution_receipt=receipt,
         )
 
 

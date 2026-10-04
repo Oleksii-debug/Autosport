@@ -1272,6 +1272,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
         exclude_run_ids: tuple[int, ...] = (),
         _cancel_effect=None,
         _cancel_effect_code=None,
+        _qualification_reader=None,
+        _qualification_reader_code=None,
     ) -> tuple[int, ...]:
         """Cancel uniquely-associated active runs whose PR metadata disappeared.
 
@@ -1292,6 +1294,38 @@ class WorkflowScopedGitHubApi(GitHubApi):
             or getattr(_cancel_effect, "__code__", None) is not _cancel_effect_code
         ):
             raise CancellationError("canonical cancel effect authority changed")
+        if _qualification_reader is None:
+            _qualification_reader = _trusted_live_pr_qualification
+            _qualification_reader_code = getattr(
+                _qualification_reader,
+                "__code__",
+                None,
+            )
+        if (
+            _qualification_reader_code is None
+            or getattr(_qualification_reader, "__code__", None)
+            is not _qualification_reader_code
+        ):
+            raise CancellationError("canonical qualification reader authority changed")
+
+        def qualification_state_from_trusted_read(value) -> tuple[str, bool]:
+            if type(value) is tuple:
+                if len(value) != 2 or type(value[1]) is not bool:
+                    raise CancellationError(
+                        "invalid trusted pull request qualification"
+                    )
+                head_sha = value[0]
+                if type(head_sha) is not str or len(head_sha) != 40:
+                    raise CancellationError(
+                        "invalid trusted pull request qualification"
+                    )
+                head_sha = head_sha.lower()
+                if any(ch not in "0123456789abcdef" for ch in head_sha):
+                    raise CancellationError(
+                        "invalid trusted pull request qualification"
+                    )
+                return (head_sha, value[1])
+            return _pull_request_qualification_state(value)
 
         if any(type(run_id) is not int or run_id <= 0 for run_id in exclude_run_ids):
             raise CancellationError("invalid excluded run id")
@@ -1338,11 +1372,25 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 continue
 
             try:
-                qualification = _trusted_live_pr_qualification(self, pr_number)
+                if (
+                    getattr(_qualification_reader, "__code__", None)
+                    is not _qualification_reader_code
+                ):
+                    raise CancellationError(
+                        "canonical qualification reader authority changed"
+                    )
+                qualification = _qualification_reader(self, pr_number)
+                if (
+                    getattr(_qualification_reader, "__code__", None)
+                    is not _qualification_reader_code
+                ):
+                    raise CancellationError(
+                        "canonical qualification reader authority changed"
+                    )
             except CancellationError:
                 continue
             qualification_head, integration_capable = (
-                _pull_request_qualification_state(qualification)
+                qualification_state_from_trusted_read(qualification)
             )
             if (
                 qualification_head == candidate_head_sha
@@ -2421,6 +2469,8 @@ def _build_main(
                 exclude_run_ids=orphan_excluded_run_ids,
                 _cancel_effect=orphan_effect_impl,
                 _cancel_effect_code=orphan_effect_code,
+                _qualification_reader=trusted_qualification_impl,
+                _qualification_reader_code=trusted_qualification_code,
             )
             require_main_dispatch()
 

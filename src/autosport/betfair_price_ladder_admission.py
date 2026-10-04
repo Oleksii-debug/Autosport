@@ -382,6 +382,7 @@ def _install_price_ladder_admission_authority():
     sha256_function = sha256
     weakref_ref = ref
     classic_bands = _CLASSIC_BANDS
+    exact_type = type
 
     def canonical_dispatch_intact() -> bool:
         return (
@@ -431,6 +432,26 @@ def _install_price_ladder_admission_authority():
         *,
         max_evidence_age: timedelta,
     ) -> BetfairPriceLadderAdmission:
+        # The exact-ingress contract must not depend on mutable builtins.type.
+        # Otherwise a Decimal subclass can spoof exact-type admission and
+        # override arithmetic methods used by the mechanical tick-grid proof.
+        if exact_type(observation) is not observation_type:
+            raise TypeError(
+                "observation must be exact BetfairMarketPriceLadderObservation"
+            )
+        if (
+            exact_type(price) is not decimal_type
+            or not price.is_finite()
+            or price <= 0
+        ):
+            raise ValueError("price must be a positive finite exact Decimal")
+        if (
+            exact_type(max_evidence_age) is not timedelta_type
+            or max_evidence_age <= timedelta_type(0)
+        ):
+            raise ValueError(
+                "max_evidence_age must be a positive exact timedelta"
+            )
         if not canonical_dispatch_intact():
             raise RuntimeError(
                 "canonical Betfair price-ladder assessor changed"
@@ -441,7 +462,7 @@ def _install_price_ladder_admission_authority():
             price,
             max_evidence_age=max_age,
         )
-        if type(result) is not result_type:
+        if exact_type(result) is not result_type:
             raise TypeError("price-ladder assessor returned invalid result type")
         # Close the final issuance race against a concurrently observed
         # incompatible MarketDescription revision. The result registry also keeps
@@ -466,7 +487,7 @@ def _install_price_ladder_admission_authority():
         return result
 
     def is_authoritative(result: BetfairPriceLadderAdmission) -> bool:
-        if not canonical_dispatch_intact() or type(result) is not result_type:
+        if not canonical_dispatch_intact() or exact_type(result) is not result_type:
             return False
         current = issued.get(id(result))
         if current is None or current[0]() is not result:
@@ -493,7 +514,7 @@ def _install_price_ladder_admission_authority():
 
     def admissible(result: BetfairPriceLadderAdmission) -> bool:
         return (
-            type(result) is result_type
+            exact_type(result) is result_type
             and result.state is state_type.PRICE_LADDER_ADMISSIBLE
             and is_authoritative(result)
         )

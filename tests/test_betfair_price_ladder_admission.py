@@ -710,6 +710,37 @@ def test_builtin_vars_rebinding_cannot_hide_transport_instance_override(
             _assess(receipt, Decimal("2.01"))
 
 
+class _OffGridDecimal(Decimal):
+    def as_integer_ratio(self):
+        return Decimal("2.00").as_integer_ratio()
+
+    def as_tuple(self):
+        return Decimal("2.00").as_tuple()
+
+
+def test_builtin_type_rebinding_cannot_admit_decimal_subclass_off_grid(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    receipt, _client = _canonical_receipt(
+        PriceLadderTransport("CLASSIC")
+    )
+    real_type = type
+    price = _OffGridDecimal("2.01")
+
+    def forged_type(value):
+        if real_type(value) is _OffGridDecimal:
+            return Decimal
+        return real_type(value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "type", forged_type)
+        with pytest.raises(
+            ValueError,
+            match="price must be a positive finite exact Decimal",
+        ):
+            _assess(receipt, price)
+
+
 def test_provider_parser_rebinding_during_io_cannot_mint_ladder_authority(
     monkeypatch: pytest.MonkeyPatch,
 ):

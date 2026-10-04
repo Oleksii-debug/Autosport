@@ -382,6 +382,78 @@ def test_empty_settlement_validation_verifies_committed_tip_without_history_scan
                 )
 
 
+def test_pre_wave_v4_pending_record_recovers_as_non_rebindable_legacy_evidence() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        state = continuous_session._ContinuousSessionState(
+            path,
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        legacy_item = {
+            "event_identity": "provider-a:event-pre-wave",
+            "settlement_ref": "provider-result:pre-wave",
+            "evidence_id": "receipt-pre-wave-pending",
+            "evidence_sha256": "b" * 64,
+            "available_at": _AT,
+            "quote_outcomes_sha256": None,
+        }
+        legacy_record = state._build_evidence_record(
+            legacy_item,
+            sequence=1,
+            previous_record_sha256=state._EMPTY_EVIDENCE_TIP,
+        )
+        assert legacy_record["schema_version"] == 1
+        assert "quote_outcomes_sha256" not in legacy_record
+
+        checkpoint = json.loads(path.read_text(encoding="utf-8"))
+        checkpoint["settlement_evidence_pending"] = {
+            "base_count": 0,
+            "base_tip_sha256": state._EMPTY_EVIDENCE_TIP,
+            "success_at": _AT,
+            "full_refresh": False,
+            "records": [legacy_record],
+        }
+        path.write_text(
+            json.dumps(checkpoint, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        restarted = continuous_session._ContinuousSessionState(
+            path,
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        status = restarted.snapshot()
+        assert status.settlement_evidence_count == 1
+        assert status.cycles_completed == 1
+        assert status.settlement_evidence[0]["quote_outcomes_sha256"] is None
+
+        candidate = continuous_session.SettlementResolution(
+            event_identity="provider-a:event-pre-wave",
+            settlement_ref="provider-result:pre-wave",
+            quote_outcomes={
+                "provider-a:event-pre-wave:winner:home": "win",
+            },
+            evidence_id="receipt-pre-wave-pending",
+            evidence_sha256="b" * 64,
+            available_at=_AT,
+        )
+        try:
+            restarted.validate_settlement_evidence(
+                settlement_evidence=(candidate,)
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "pre-Wave pending receipt was rebound to post-hoc outcomes"
+            )
+
+
 def test_pending_settlement_journal_recovers_after_write_crash() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

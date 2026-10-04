@@ -1091,6 +1091,13 @@ class PaperBook:
                 if schema_version is not None and schema_version >= 7
                 else None
             )
+            if (
+                (schema_version is None or schema_version < 8)
+                and "market_semantics_id" in raw_leg
+            ):
+                raise ValueError(
+                    "ticket leg market_semantics_id is unsupported before schema 8"
+                )
             market_semantics_id = (
                 cls._required_snapshot_field(
                     raw_leg,

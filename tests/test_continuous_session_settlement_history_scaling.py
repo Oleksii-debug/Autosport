@@ -145,7 +145,7 @@ def test_unrelated_failure_checkpoint_preserves_settlement_journal_bytes() -> No
         checkpoint = json.loads(
             (root / "continuous_session.json").read_text(encoding="utf-8")
         )
-        assert checkpoint["schema_version"] == 3
+        assert checkpoint["schema_version"] == 4
         assert "settlement_evidence" not in checkpoint
         assert checkpoint["last_error_code"] == "SYNTHETIC_PROVIDER_FAILURE"
         assert len(state.snapshot().settlement_evidence) == _LARGE_HISTORY
@@ -262,7 +262,7 @@ def test_empty_legacy_migration_rejects_orphan_journal_without_checkpoint_rewrit
             pass
         else:
             raise AssertionError(
-                "empty legacy migration published schema v3 over an orphan journal"
+                "empty legacy migration published schema v4 over an orphan journal"
             )
 
         assert checkpoint_path.read_bytes() == before
@@ -711,6 +711,38 @@ def test_wrong_session_id_cannot_migrate_legacy_checkpoint() -> None:
         assert not journal.exists()
 
 
+def test_wave_m_schema_v3_is_not_misread_as_bounded_journal_schema() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        foreign = _checkpoint_payload(1)
+        foreign["schema_version"] = 3
+        for item in foreign["settlement_evidence"]:
+            item["quote_outcomes_sha256"] = "a" * 64
+        path.write_text(
+            json.dumps(foreign, sort_keys=True),
+            encoding="utf-8",
+        )
+        before = path.read_bytes()
+
+        try:
+            continuous_session._ContinuousSessionState(
+                path,
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "Wave M schema v3 was misread as the bounded journal checkpoint schema"
+            )
+
+        assert path.read_bytes() == before
+        assert not (root / "continuous_session.settlement-evidence").exists()
+
+
 def test_legacy_v2_migration_preserves_session_truth_and_evidence() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -719,7 +751,7 @@ def test_legacy_v2_migration_preserves_session_truth_and_evidence() -> None:
         checkpoint = json.loads(
             (root / "continuous_session.json").read_text(encoding="utf-8")
         )
-        assert checkpoint["schema_version"] == 3
+        assert checkpoint["schema_version"] == 4
         assert checkpoint["cycles_completed"] == _SMALL_HISTORY
         assert checkpoint["settlement_evidence_count"] == _SMALL_HISTORY
         assert "settlement_evidence" not in checkpoint
@@ -792,7 +824,7 @@ def test_legacy_migration_recovers_from_partial_journal_publication() -> None:
             clock=lambda: _AT,
         )
         checkpoint = json.loads(path.read_text(encoding="utf-8"))
-        assert checkpoint["schema_version"] == 3
+        assert checkpoint["schema_version"] == 4
         assert checkpoint["settlement_evidence_count"] == _SMALL_HISTORY
         assert len(restarted.snapshot().settlement_evidence) == _SMALL_HISTORY
 

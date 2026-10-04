@@ -136,6 +136,38 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertFalse(store.connection.in_transaction)
             store.close()
 
+    def test_live_append_hook_subclass_return_is_rejected_before_serialization(self) -> None:
+        class ForgingAcceptedEvent(MarketEvent):
+            def to_dict(self):
+                raise AssertionError("subclass serialization must not be consulted")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+            forged = ForgingAcceptedEvent.from_dict(event.to_dict())
+
+            def insert_then_forge(events):
+                accepted = SQLiteMarketStore.append_batch_accepted(store, events)
+                self.assertEqual(len(accepted), 1)
+                return [forged]
+
+            with patch.object(
+                store,
+                "append_batch_accepted",
+                side_effect=insert_then_forge,
+            ):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "must return exact MarketEvent instances",
+                ):
+                    store._append_live_batch_accepted([event])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertFalse(store.connection.in_transaction)
+            store.close()
+
     def test_live_append_hook_cannot_retroactively_upgrade_existing_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

@@ -34,9 +34,12 @@ from .risk_sampling_occurrence_authority import (
     ProductIidDrawPlanError,
     ProductIidExpectedDrawPlan,
     ProductIidRunAdmissionReceipt,
+    expected_replay_consumed_payload_multiset_sha256,
+    expected_replay_input_payload_sequence_sha256,
     resolve_product_iid_expected_draw_plan,
     resolve_product_iid_run_admission,
 )
+from .run_registry import ReconciliationError, RunRegistry
 from .run_transaction import RunTransaction, RunTransactionError
 
 
@@ -94,6 +97,17 @@ _DRAW_PLAN_CODE = getattr(_DRAW_PLAN, "__code__", None)
 _RUN_ADMISSION_TYPE = ProductIidRunAdmissionReceipt
 _RUN_ADMISSION = resolve_product_iid_run_admission
 _RUN_ADMISSION_CODE = getattr(_RUN_ADMISSION, "__code__", None)
+_EXPECTED_REPLAY_SEQUENCE = expected_replay_input_payload_sequence_sha256
+_EXPECTED_REPLAY_SEQUENCE_CODE = getattr(_EXPECTED_REPLAY_SEQUENCE, "__code__", None)
+_EXPECTED_REPLAY_MULTISET = expected_replay_consumed_payload_multiset_sha256
+_EXPECTED_REPLAY_MULTISET_CODE = getattr(_EXPECTED_REPLAY_MULTISET, "__code__", None)
+_REGISTRY_TYPE = RunRegistry
+_REGISTRY_COMPLETED_SUMMARY = RunRegistry.verified_completed_summary_for_run
+_REGISTRY_COMPLETED_SUMMARY_CODE = getattr(
+    _REGISTRY_COMPLETED_SUMMARY,
+    "__code__",
+    None,
+)
 
 
 class ProductRunCapitalPathError(RuntimeError):
@@ -352,6 +366,19 @@ def _require_dispatch() -> None:
         or ProductIidRunAdmissionReceipt is not _RUN_ADMISSION_TYPE
         or resolve_product_iid_run_admission is not _RUN_ADMISSION
         or getattr(_RUN_ADMISSION, "__code__", None) is not _RUN_ADMISSION_CODE
+        or expected_replay_input_payload_sequence_sha256
+        is not _EXPECTED_REPLAY_SEQUENCE
+        or getattr(_EXPECTED_REPLAY_SEQUENCE, "__code__", None)
+        is not _EXPECTED_REPLAY_SEQUENCE_CODE
+        or expected_replay_consumed_payload_multiset_sha256
+        is not _EXPECTED_REPLAY_MULTISET
+        or getattr(_EXPECTED_REPLAY_MULTISET, "__code__", None)
+        is not _EXPECTED_REPLAY_MULTISET_CODE
+        or RunRegistry is not _REGISTRY_TYPE
+        or _REGISTRY_TYPE.verified_completed_summary_for_run
+        is not _REGISTRY_COMPLETED_SUMMARY
+        or getattr(_REGISTRY_COMPLETED_SUMMARY, "__code__", None)
+        is not _REGISTRY_COMPLETED_SUMMARY_CODE
     ):
         raise ProductRunCapitalPathError(
             "risk-path occurrence authority dispatch changed"
@@ -621,6 +648,10 @@ class ProductRunCapitalPathEvidence:
     expected_draw_plan_sha256: str
     expected_draw_transcript_sha256: str
     run_admission_receipt_sha256: str
+    expected_replay_input_event_payload_sequence_sha256: str
+    completed_replay_input_event_payload_sequence_sha256: str
+    expected_replay_consumed_event_payload_multiset_sha256: str
+    completed_replay_consumed_event_payload_multiset_sha256: str
     settlement_effects_sha256: str
     replay_source_evidence_sha256: str
     source_evidence_sha256: str
@@ -657,6 +688,10 @@ class ProductRunCapitalPathEvidence:
 
     @property
     def run_admission_bound(self) -> bool:
+        return True
+
+    @property
+    def replay_input_binding_proven(self) -> bool:
         return True
 
     @property
@@ -797,12 +832,48 @@ def resolve_product_run_capital_path_evidence(
         raise ProductRunCapitalPathError(
             "expected IID draw does not bind the exact fixed-N member"
         )
+    try:
+        expected_replay_input_sha256 = _EXPECTED_REPLAY_SEQUENCE(expected_draw)
+        expected_replay_multiset_sha256 = _EXPECTED_REPLAY_MULTISET(expected_draw)
+    except ProductIidDrawPlanError as exc:
+        raise ProductRunCapitalPathError(
+            "expected IID draw replay identity cannot be derived"
+        ) from exc
+    _require_dispatch()
     if type(settlement_bridge) is not _BRIDGE_TYPE:
         raise TypeError(
             "settlement_bridge must be exact PaperSettlementLearningBridge"
         )
 
     root = Path(workspace).expanduser().resolve(strict=False)
+    try:
+        completed_summary, _completed_summary_sha256 = _REGISTRY_COMPLETED_SUMMARY(
+            _REGISTRY_TYPE(root / "run_registry.json"),
+            run_id,
+        )
+    except (ReconciliationError, OSError, ValueError, KeyError) as exc:
+        raise ProductRunCapitalPathError(
+            "completed replay payload evidence cannot be re-resolved"
+        ) from exc
+    _require_dispatch()
+    completed_replay_input_sha256 = _sha(
+        completed_summary.get("replay_input_event_payload_sequence_sha256"),
+        "completed replay input event payload sequence sha256",
+    )
+    completed_replay_multiset_sha256 = _sha(
+        completed_summary.get("replay_consumed_event_payload_multiset_sha256"),
+        "completed replay consumed event payload multiset sha256",
+    )
+    completed_event_count = completed_summary.get("event_count")
+    if (
+        type(completed_event_count) is not int
+        or completed_event_count != expected_draw.draw_count
+        or completed_replay_input_sha256 != expected_replay_input_sha256
+        or completed_replay_multiset_sha256 != expected_replay_multiset_sha256
+    ):
+        raise ProductRunCapitalPathError(
+            "completed replay input does not bind the frozen IID draw payloads"
+        )
     if Path(settlement_bridge.state_path).parent.resolve(strict=False) != root:
         raise ProductRunCapitalPathError(
             "settlement bridge state belongs to another workspace"
@@ -923,6 +994,18 @@ def resolve_product_run_capital_path_evidence(
             admission.receipt_sha256,
             "run_admission_receipt_sha256",
         ),
+        "expected_replay_input_event_payload_sequence_sha256": (
+            expected_replay_input_sha256
+        ),
+        "completed_replay_input_event_payload_sequence_sha256": (
+            completed_replay_input_sha256
+        ),
+        "expected_replay_consumed_event_payload_multiset_sha256": (
+            expected_replay_multiset_sha256
+        ),
+        "completed_replay_consumed_event_payload_multiset_sha256": (
+            completed_replay_multiset_sha256
+        ),
         "settlement_effects_sha256": effects_sha,
         "replay_source_evidence_sha256": replay.source_evidence_sha256,
         "product_precommit_bound": True,
@@ -930,6 +1013,7 @@ def resolve_product_run_capital_path_evidence(
         "sampling_frame_materialized": True,
         "expected_draw_product_derived": True,
         "run_admission_bound": True,
+        "replay_input_binding_proven": True,
         "execution_consumption_proven": False,
         "sampling_occurrence_ancestry_proven": False,
         "iid_qualified": False,
@@ -963,6 +1047,22 @@ def resolve_product_run_capital_path_evidence(
         (
             "run_admission_receipt_sha256",
             _sha(admission.receipt_sha256, "run_admission_receipt_sha256"),
+        ),
+        (
+            "expected_replay_input_event_payload_sequence_sha256",
+            expected_replay_input_sha256,
+        ),
+        (
+            "completed_replay_input_event_payload_sequence_sha256",
+            completed_replay_input_sha256,
+        ),
+        (
+            "expected_replay_consumed_event_payload_multiset_sha256",
+            expected_replay_multiset_sha256,
+        ),
+        (
+            "completed_replay_consumed_event_payload_multiset_sha256",
+            completed_replay_multiset_sha256,
         ),
         ("settlement_effects_sha256", effects_sha),
         (
@@ -1069,6 +1169,10 @@ def _build_product_run_capital_path_evidence_verifier(
         "expected_draw_plan_sha256",
         "expected_draw_transcript_sha256",
         "run_admission_receipt_sha256",
+        "expected_replay_input_event_payload_sequence_sha256",
+        "completed_replay_input_event_payload_sequence_sha256",
+        "expected_replay_consumed_event_payload_multiset_sha256",
+        "completed_replay_consumed_event_payload_multiset_sha256",
         "settlement_effects_sha256",
         "replay_source_evidence_sha256",
         "source_evidence_sha256",

@@ -43,6 +43,28 @@ class _ChangingOffsetTz(tzinfo):
         return "CHANGING"
 
 
+class _InvalidOffsetTz(tzinfo):
+    def utcoffset(self, _dt: datetime | None):
+        return "invalid"
+
+    def dst(self, _dt: datetime | None) -> timedelta:
+        return timedelta(0)
+
+    def tzname(self, _dt: datetime | None) -> str:
+        return "INVALID"
+
+
+class _ExtremeOffsetTz(tzinfo):
+    def utcoffset(self, _dt: datetime | None) -> timedelta:
+        return timedelta(hours=23)
+
+    def dst(self, _dt: datetime | None) -> timedelta:
+        return timedelta(0)
+
+    def tzname(self, _dt: datetime | None) -> str:
+        return "EXTREME"
+
+
 def _scope(
     *,
     key: str = "key-a",
@@ -108,6 +130,38 @@ def test_lifecycle_time_normalization_uses_one_offset_observation(tmp_path):
     assert admission.snapshot.attempt_started_at == NOW
     assert admission.snapshot.slot_hold_started_at == NOW
     assert admission.snapshot.slot_hold_until == NOW + CONSERVATIVE_SESSION_SLOT_HOLD
+
+
+def test_invalid_timezone_offset_is_bounded_lifecycle_error(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    supplied = datetime(2026, 10, 3, 20, 0, tzinfo=_InvalidOffsetTz())
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="invalid timezone offset",
+    ):
+        lifecycle.begin_login(
+            now=supplied,
+            access_token_available=False,
+        )
+
+    assert not lifecycle.state_path.exists()
+
+
+def test_timezone_normalization_overflow_fails_before_state_write(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    supplied = datetime(1, 1, 1, 0, 0, tzinfo=_ExtremeOffsetTz())
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="cannot be normalized to UTC",
+    ):
+        lifecycle.begin_login(
+            now=supplied,
+            access_token_available=False,
+        )
+
+    assert not lifecycle.state_path.exists()
 
 
 def test_two_consumers_share_one_persisted_login_reservation(tmp_path):

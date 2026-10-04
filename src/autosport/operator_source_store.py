@@ -4,7 +4,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .integrity import atomic_write_json, durable_path_lock
+from .integrity import (
+    atomic_write_json,
+    durable_path_lock,
+    read_bounded_regular_file_no_follow,
+)
 from .json_integrity import strict_json_loads
 from .operator_source_config import (
     OperatorSourceConfig,
@@ -50,12 +54,19 @@ class OperatorSourceConfigStore:
         if not self.path.exists():
             return None
         try:
-            raw = self.path.read_bytes()
+            raw = read_bounded_regular_file_no_follow(
+                self.path,
+                max_bytes=_MAX_PERSISTED_BYTES,
+            )
+        except OverflowError as exc:
+            raise OperatorSourceStoreError(
+                "operator source configuration has invalid persisted size"
+            ) from exc
         except OSError as exc:
             raise OperatorSourceStoreError(
                 "operator source configuration cannot be read"
             ) from exc
-        if not raw or len(raw) > _MAX_PERSISTED_BYTES:
+        if not raw:
             raise OperatorSourceStoreError(
                 "operator source configuration has invalid persisted size"
             )

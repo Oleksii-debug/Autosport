@@ -45,4 +45,4 @@ def test_recovery_configuration_error_with_broken_str_stays_fail_closed() -> Non
         ),
     )
     assert app.status.value == text("ui.status.recovery.configuration_rejected")
-    showerror.assert_called_once_with(text("ui.dialog.title"), expected)
+    showerror.assert_called_once_with(text("ui.dialog.title"), expected, parent=app)

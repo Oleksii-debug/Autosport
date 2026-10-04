@@ -124,6 +124,27 @@ class MarketMirror:
         return as_of.astimezone(timezone.utc), max_age
 
     @classmethod
+    def _event_causally_available(
+        cls,
+        event: MarketEvent,
+        *,
+        boundary: datetime,
+    ) -> bool:
+        """Return whether all causal clocks make one event usable at boundary."""
+
+        source_time = cls._utc_timestamp(event.source_ts or event.observed_ts)
+        observed_time = cls._utc_timestamp(event.observed_ts)
+        ingest_time = cls._utc_timestamp(event.ingest_ts)
+        return (
+            source_time is not None
+            and observed_time is not None
+            and ingest_time is not None
+            and source_time <= boundary
+            and observed_time <= boundary
+            and ingest_time <= boundary
+        )
+
+    @classmethod
     def _decision_visible_event(
         cls,
         event: MarketEvent,
@@ -135,17 +156,10 @@ class MarketMirror:
 
         if event.status not in cls._DECISION_ELIGIBLE_STATUSES:
             return False
+        if not cls._event_causally_available(event, boundary=boundary):
+            return False
         source_time = cls._utc_timestamp(event.source_ts or event.observed_ts)
-        observed_time = cls._utc_timestamp(event.observed_ts)
-        ingest_time = cls._utc_timestamp(event.ingest_ts)
-        if (
-            source_time is None
-            or observed_time is None
-            or ingest_time is None
-            or source_time > boundary
-            or observed_time > boundary
-            or ingest_time > boundary
-        ):
+        if source_time is None:
             return False
         age = boundary - source_time
         return timedelta(0) <= age <= max_age
@@ -513,6 +527,91 @@ class MarketMirror:
         return self.active_view(as_of=as_of, max_age=max_age).events
 
     @classmethod
+    def _decision_view_from_proven_history(
+        cls,
+        events_with_generation: Iterable[tuple[MarketEvent, int]],
+        *,
+        boundary: datetime,
+        max_age: timedelta,
+        source_ids: frozenset[str] | None,
+        sports: frozenset[str] | None,
+        event_ids: frozenset[str] | None,
+        market_ids: frozenset[str] | None,
+        selection_ids: frozenset[str] | None,
+    ) -> MirrorSnapshot:
+        """Reconstruct latest causally available state from already-proven history."""
+
+        mirror = cls()
+        for event, append_generation in events_with_generation:
+            if type(append_generation) is not int or append_generation < 0:
+                raise ValueError(
+                    "market history append generation must be a non-negative int"
+                )
+            if append_generation == 0:
+                # Legacy baseline remains an audit/sequence fence only.
+                mirror._apply_with_causal_authority(
+                    event,
+                    decision_causal=False,
+                )
+                continue
+            if not cls._event_causally_available(event, boundary=boundary):
+                # A future successor must not negatively erase the latest predecessor
+                # that was actually available at this decision boundary.
+                continue
+            mirror._apply_with_causal_authority(
+                event,
+                decision_causal=True,
+            )
+        return mirror.active_view(
+            as_of=boundary,
+            max_age=max_age,
+            source_ids=source_ids,
+            sports=sports,
+            event_ids=event_ids,
+            market_ids=market_ids,
+            selection_ids=selection_ids,
+        )
+
+    @classmethod
+    def current_history_view_from_store(
+        cls,
+        store: SQLiteMarketStore,
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+        source_ids: str | Iterable[str] | None = None,
+        sports: str | Iterable[str] | None = None,
+        event_ids: str | Iterable[str] | None = None,
+        market_ids: str | Iterable[str] | None = None,
+        selection_ids: str | Iterable[str] | None = None,
+    ) -> MirrorSnapshot:
+        """Resolve current live as-of state from verified append history without a cutoff.
+
+        This is an exceptional live fallback for a latest projection containing a
+        causally-future successor. It verifies the existing product-issued append
+        history but does not create a replay cutoff or a second durable authority.
+        """
+
+        if not isinstance(store, SQLiteMarketStore):
+            raise TypeError("store must be a SQLiteMarketStore")
+        boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
+        selected_sources = cls._selector(source_ids, name="source_ids")
+        selected_sports = cls._selector(sports, name="sports")
+        selected_events = cls._selector(event_ids, name="event_ids")
+        selected_markets = cls._selector(market_ids, name="market_ids")
+        selected_selections = cls._selector(selection_ids, name="selection_ids")
+        return cls._decision_view_from_proven_history(
+            store.events_with_append_generation(),
+            boundary=boundary,
+            max_age=age_limit,
+            source_ids=selected_sources,
+            sports=selected_sports,
+            event_ids=selected_events,
+            market_ids=selected_markets,
+            selection_ids=selected_selections,
+        )
+
+    @classmethod
     def replay_view_from_store(
         cls,
         store: SQLiteMarketStore,
@@ -553,32 +652,13 @@ class MarketMirror:
         selected_markets = cls._selector(market_ids, name="market_ids")
         selected_selections = cls._selector(selection_ids, name="selection_ids")
 
-        mirror = cls()
         replay_events = store.replay_events_at_frozen_cutoff(
             as_of=boundary.isoformat(),
             _with_append_generation=True,
         )
-        for event, append_generation in replay_events:
-            if append_generation == 0:
-                # Legacy baseline is immutable audit/order state. It participates in
-                # source-local sequence fencing but never becomes decision-causal.
-                mirror._apply_with_causal_authority(
-                    event,
-                    decision_causal=False,
-                )
-                continue
-
-            observed = cls._utc_timestamp(event.observed_ts)
-            ingested = cls._utc_timestamp(event.ingest_ts)
-            if observed is None or ingested is None:
-                continue
-            if observed <= boundary and ingested <= boundary:
-                mirror._apply_with_causal_authority(
-                    event,
-                    decision_causal=True,
-                )
-        return mirror.active_view(
-            as_of=boundary,
+        return cls._decision_view_from_proven_history(
+            replay_events,
+            boundary=boundary,
             max_age=age_limit,
             source_ids=selected_sources,
             sports=selected_sports,

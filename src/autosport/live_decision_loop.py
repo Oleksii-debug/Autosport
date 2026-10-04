@@ -1579,18 +1579,42 @@ class PersistentLiveDecisionLoop:
             if incremental
             else self.dependencies.decision_view
         )
-        for input_id in input_ids:
-            snapshot = reader(
-                input_id,
-                as_of=as_of,
-                max_age=self.max_quote_age,
-            )
-            snapshots[input_id] = snapshot
-            self._input_market_sha256[input_id] = _canonical_json_sha256(
-                [event.to_dict() for event in snapshot.events]
-            )
-            self._record_freshness_deadline(input_id, snapshot)
-            self._record_availability_deadline(input_id, as_of)
+        history_store: SQLiteMarketStore | None = None
+        owns_history_store = False
+        try:
+            for input_id in input_ids:
+                if self.dependencies.requires_current_history_fallback(
+                    input_id,
+                    as_of=as_of,
+                ):
+                    if history_store is None:
+                        history_store = self._default_market_store
+                        if history_store is None:
+                            history_store = SQLiteMarketStore(
+                                self.workspace / "market.db"
+                            )
+                            owns_history_store = True
+                    snapshot = self.dependencies.current_history_view(
+                        input_id,
+                        history_store,
+                        as_of=as_of,
+                        max_age=self.max_quote_age,
+                    )
+                else:
+                    snapshot = reader(
+                        input_id,
+                        as_of=as_of,
+                        max_age=self.max_quote_age,
+                    )
+                snapshots[input_id] = snapshot
+                self._input_market_sha256[input_id] = _canonical_json_sha256(
+                    [event.to_dict() for event in snapshot.events]
+                )
+                self._record_freshness_deadline(input_id, snapshot)
+                self._record_availability_deadline(input_id, as_of)
+        finally:
+            if owns_history_store and history_store is not None:
+                history_store.close()
         return snapshots
 
     def _refresh_intents_from_snapshots(

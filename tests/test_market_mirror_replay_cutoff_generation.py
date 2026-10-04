@@ -4695,6 +4695,58 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_verified_current_history_preserves_predecessor_hidden_by_future_successor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            try:
+                predecessor = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                successor = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:00.500000+00:00",
+                    ingest_ts="2026-09-16T19:00:02+00:00",
+                )
+                self.assertTrue(store.append(predecessor))
+                self.assertTrue(store.append(successor))
+
+                live = MarketMirror.current_history_view_from_store(
+                    store,
+                    as_of=self.CUTOFF,
+                    max_age=timedelta(minutes=2),
+                )
+                replay = self.replay(store)
+
+                self.assertEqual(len(live.events), 1)
+                self.assertEqual(live.events[0].sequence, 1)
+                self.assertEqual(self.semantic_events(live), self.semantic_events(replay))
+            finally:
+                store.close()
+
+            reopened = SQLiteMarketStore(path)
+            try:
+                before_boundary = MarketMirror.current_history_view_from_store(
+                    reopened,
+                    as_of=self.CUTOFF,
+                    max_age=timedelta(minutes=2),
+                )
+                self.assertEqual(len(before_boundary.events), 1)
+                self.assertEqual(before_boundary.events[0].sequence, 1)
+
+                after_boundary = MarketMirror.current_history_view_from_store(
+                    reopened,
+                    as_of=self.CUTOFF + timedelta(seconds=1),
+                    max_age=timedelta(minutes=2),
+                )
+                self.assertEqual(len(after_boundary.events), 1)
+                self.assertEqual(after_boundary.events[0].sequence, 2)
+            finally:
+                reopened.close()
+
     def test_live_active_view_excludes_late_local_availability(self) -> None:
         mirror = MarketMirror()
         late_ingest = self.event(

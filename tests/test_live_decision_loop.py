@@ -1576,6 +1576,81 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(result.status, LiveCycleStatus.DECIDED)
             self.assertEqual(factory.calls, [("input-a", ())])
 
+    def test_future_successor_preserves_visible_predecessor_across_restart_until_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            first_clock = _ManualClock(self.START + timedelta(seconds=1))
+            predecessor = self._event(sequence=1, odds="2.00")
+            successor = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.10"),
+                observed_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                source_id="provider-a",
+                sequence=2,
+                status="open",
+                source_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=4)).isoformat(),
+            )
+            first_factory = _EmptyIntentFactory()
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(predecessor,), (successor,)],
+                ),
+                factory=first_factory,
+                clock=first_clock,
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                first_factory.calls[-1],
+                ("input-a", (("selection-a", 1, "open"),)),
+            )
+
+            first_factory.calls.clear()
+            first_clock.value = self.START + timedelta(seconds=2)
+            first.run_cycle()
+            self.assertEqual(
+                first_factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+            self.assertEqual(
+                first._availability_deadlines["input-a"],
+                self.START + timedelta(seconds=4),
+            )
+            first.close()
+
+            resumed_clock = _ManualClock(self.START + timedelta(seconds=3))
+            resumed_factory = _EmptyIntentFactory()
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(), ()]),
+                factory=resumed_factory,
+                clock=resumed_clock,
+            )
+            self.assertEqual(resumed.run_cycle().status, LiveCycleStatus.NO_CHANGE)
+            self.assertEqual(
+                resumed_factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+            self.assertEqual(
+                resumed._availability_deadlines["input-a"],
+                self.START + timedelta(seconds=4),
+            )
+
+            resumed_factory.calls.clear()
+            resumed_clock.value = self.START + timedelta(seconds=4)
+            self.assertEqual(resumed.run_cycle().status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                resumed_factory.calls,
+                [("input-a", (("selection-a", 2, "open"),))],
+            )
+            resumed.close()
+
     def test_future_local_availability_recomputes_at_exact_boundary_without_new_market_delta(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

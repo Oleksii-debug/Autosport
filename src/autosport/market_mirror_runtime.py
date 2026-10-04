@@ -227,6 +227,46 @@ class FocusedMirrorDependencyIndex:
         dependency = self._dependency(input_id)
         return self._mirror.causal_view(**self._selectors(dependency))
 
+    def requires_current_history_fallback(
+        self,
+        input_id: str,
+        *,
+        as_of: datetime,
+    ) -> bool:
+        """Return whether latest-only state hides an earlier causally available value."""
+
+        dependency = self._dependency(input_id)
+        boundary, _ = MarketMirror._decision_boundary(
+            as_of=as_of,
+            max_age=timedelta(0),
+        )
+        current = self._mirror.causal_view(**self._selectors(dependency))
+        return any(
+            not MarketMirror._event_causally_available(
+                event,
+                boundary=boundary,
+            )
+            for event in current.events
+        )
+
+    def current_history_view(
+        self,
+        input_id: str,
+        store: SQLiteMarketStore,
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+    ) -> MirrorSnapshot:
+        """Resolve one live input from verified durable history without replay issuance."""
+
+        dependency = self._dependency(input_id)
+        return MarketMirror.current_history_view_from_store(
+            store,
+            as_of=as_of,
+            max_age=max_age,
+            **self._selectors(dependency),
+        )
+
     def decision_view(
         self,
         input_id: str,

@@ -535,6 +535,62 @@ def test_active_runs_public_entrypoint_has_no_mutable_default_authority() -> Non
     assert WorkflowScopedGitHubApi.active_runs.__kwdefaults__ is None
 
 
+def test_cancel_rejects_historical_association_kwdefaults_rebase(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    helper = WorkflowScopedGitHubApi._historical_associated_pr_number
+    defaults = helper.__kwdefaults__
+    assert defaults is not None
+    forged_calls: list[object] = []
+
+    def forged_encoder(params) -> str:
+        forged_calls.append(params)
+        return "per_page=100&page=2"
+
+    monkeypatch.setitem(defaults, "_encode_query", forged_encoder)
+    monkeypatch.setitem(defaults, "_encode_query_code", forged_encoder.__code__)
+
+    with pytest.raises(
+        CancellationError,
+        match="scoped cancellation revalidation dispatch changed",
+    ):
+        api.cancel(7012)
+    assert forged_calls == []
+
+
+def test_cancel_rejects_canonical_branch_kwdefaults_rebase(monkeypatch) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    helper = WorkflowScopedGitHubApi._canonical_branch_head
+    defaults = helper.__kwdefaults__
+    assert defaults is not None
+    forged_calls: list[str] = []
+
+    def forged_quote(branch: str, *, safe: str = "/") -> str:
+        forged_calls.append(branch)
+        return "attacker%2Fbranch"
+
+    monkeypatch.setitem(defaults, "_encode_branch", forged_quote)
+    monkeypatch.setitem(defaults, "_encode_branch_code", forged_quote.__code__)
+
+    with pytest.raises(
+        CancellationError,
+        match="scoped cancellation revalidation dispatch changed",
+    ):
+        api.cancel(7012)
+    assert forged_calls == []
+
+
 def test_main_rejects_preentry_orphan_method_rebind(monkeypatch) -> None:
     forged_calls: list[str] = []
 

@@ -288,7 +288,7 @@ class MarketBookAndPriceLadderTransport(MarketBookTransport):
             + ',"result":[{"marketId":"1.234","description":'
             + '{"priceLadderDescription":{"type":"'
             + self.ladder_type
-            + '"}}]}'
+            + '"}}}]}'
         ).encode("utf-8")
 
 

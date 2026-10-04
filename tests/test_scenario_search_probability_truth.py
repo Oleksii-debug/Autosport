@@ -234,6 +234,43 @@ class ScenarioSearchProbabilityTruthTests(unittest.TestCase):
         self.assertEqual(hostile.observed_worst, baseline.observed_worst)
         self.assertEqual(hostile.observed_best, baseline.observed_best)
 
+    def test_branch_and_bound_proof_is_independent_of_ambient_decimal_context(self) -> None:
+        book = PaperBook("1000")
+        a1 = TicketLeg("e1", "winner", "a", Decimal("2.3456789"))
+        b1 = TicketLeg("e1", "winner", "b", Decimal("3.4567891"))
+        a2 = TicketLeg("e2", "winner", "a", Decimal("1.9876543"))
+        b2 = TicketLeg("e2", "winner", "b", Decimal("2.8765432"))
+        tickets = [
+            book.open_ticket([a1], "1.23456789"),
+            book.open_ticket([a2], "2.34567891"),
+        ]
+        groups = [
+            ScenarioGroup(
+                "e1-winner",
+                (ScenarioOutcome(a1.quote_key), ScenarioOutcome(b1.quote_key)),
+            ),
+            ScenarioGroup(
+                "e2-winner",
+                (ScenarioOutcome(a2.quote_key), ScenarioOutcome(b2.quote_key)),
+            ),
+        ]
+        engine = ScenarioSearchEngine(
+            exact_state_limit=1,
+            branch_node_limit=1000,
+            sample_count=7,
+            seed=19,
+        )
+
+        baseline = engine.analyse(tickets, groups)
+        with localcontext() as context:
+            context.prec = 2
+            hostile = engine.analyse(tickets, groups)
+
+        self.assertEqual(baseline.mode, "branch-and-bound-exact-extrema")
+        self.assertTrue(baseline.worst_proven)
+        self.assertTrue(baseline.best_proven)
+        self.assertEqual(hostile, baseline)
+
     def test_zero_probability_outcome_cannot_be_selected_at_zero_target(self) -> None:
         outcomes = (
             ScenarioOutcome("event|winner|never", Decimal("0")),

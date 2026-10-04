@@ -982,6 +982,39 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_settlement_collection_rejects_lifecycle_read_retargeting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, lifecycle, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+            )
+            lifecycle._read = lambda: {
+                "schema": "autosport.continuous_event_lifecycle",
+                "schema_version": 1,
+                "sources": {},
+                "events": {},
+            }
+            try:
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "lifecycle record dispatch changed",
+                ):
+                    coordinator._settlement_resolutions(as_of=clock())
+            finally:
+                store.close()
+
     def test_outcome_authority_method_retargeting_cannot_change_truth_origin(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

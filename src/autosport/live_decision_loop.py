@@ -1632,8 +1632,11 @@ class PersistentLiveDecisionLoop:
             ):
                 continue
             available_at = max(source_time, observed_time, ingest_time)
-            expires_at = source_time + self.max_quote_age
-            if boundary < available_at <= expires_at:
+            availability_age = available_at - source_time
+            if (
+                boundary < available_at
+                and timedelta(0) <= availability_age <= self.max_quote_age
+            ):
                 deadlines.append(available_at)
 
         deadline = min(deadlines) if deadlines else None

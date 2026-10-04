@@ -202,6 +202,17 @@ def _install_execution_evidence_guard() -> None:
     )
     precommit_descriptor_names = (
         "__new__",
+        "workspace_instance_id",
+        "binding_sha256",
+        "target_sha256",
+        "target_decision_ts",
+        "candidate_vector_sha256",
+        "evaluated_stakes",
+        "planned_member_ids",
+        "membership_outcome_reveal_after",
+        "confidence_level",
+        "ruin_threshold",
+        "proposal_evaluation_scope",
         "binding_identity_proven",
         "proposal_target_counterfactual_execution_proven",
         "risk_upper_bound_for_target",
@@ -255,7 +266,7 @@ def _install_execution_evidence_guard() -> None:
     )
     if any(value is None for _, value in precommit_descriptor_witnesses):
         raise RuntimeError(
-            "proposal risk execution evidence precommit truth descriptors are unavailable"
+            "proposal risk execution evidence precommit input/truth descriptors are unavailable"
         )
     if any(value is None for _, value in row_descriptor_witnesses):
         raise RuntimeError(

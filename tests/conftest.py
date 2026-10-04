@@ -263,6 +263,13 @@ _RECOMPOSED_BETFAIR_PROVIDER_MODULES = frozenset(
 _BETFAIR_FINAL_CONFIRMATION_MODULES = frozenset(
     {"test_betfair_final_send_confirmation"}
 )
+_BETFAIR_OPERATOR_CONFIRMATION_BRIDGE_MODULES = (
+    _RECOMPOSED_BETFAIR_PROVIDER_MODULES
+    | {
+        "test_betfair_stop_ledger_boundary",
+        "test_betfair_trusted_runtime_write_boundary",
+    }
+)
 _BETFAIR_STOP_PROFILE_MODULES = (
     _RECOMPOSED_BETFAIR_PROVIDER_MODULES | _BETFAIR_FINAL_CONFIRMATION_MODULES
 )
@@ -318,7 +325,7 @@ def _bind_recomposed_betfair_operator_confirmation(request, monkeypatch):
     if module is None:
         return
     module_name = module.__name__.rsplit(".", 1)[-1]
-    if module_name not in _RECOMPOSED_BETFAIR_PROVIDER_MODULES:
+    if module_name not in _BETFAIR_OPERATOR_CONFIRMATION_BRIDGE_MODULES:
         return
     original_execute = getattr(module, "execute_betfair_supervised_action", None)
     if not callable(original_execute):

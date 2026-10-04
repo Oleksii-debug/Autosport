@@ -823,6 +823,69 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_post_commit_path_failure_keeps_cutoff_prepare_recoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            moved_path = Path(directory) / "market-moved.db"
+            store = SQLiteMarketStore(path)
+            try:
+                self.assertTrue(
+                    store.append(
+                        self.event(
+                            sequence=1,
+                            odds="2.00",
+                            observed_ts="2026-09-16T19:00:00+00:00",
+                        )
+                    )
+                )
+                authority = store._replay_cutoff_authority()
+                original_require = store._require_database_path_identity
+                replaced = False
+
+                def commit_then_fail_postcheck():
+                    nonlocal replaced
+                    original_require()
+                    store.connection.commit()
+                    if not replaced:
+                        replaced = True
+                        try:
+                            os.replace(path, moved_path)
+                            path.touch()
+                        except OSError as exc:
+                            self.skipTest(
+                                f"open SQLite pathname replacement unavailable on this platform: {exc}"
+                            )
+                    original_require()
+
+                with patch.object(
+                    store,
+                    "_commit_stable_database_path",
+                    new=commit_then_fail_postcheck,
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "market database pathname no longer identifies the opened database",
+                    ):
+                        self.replay(store)
+
+                self.assertTrue(replaced)
+                self.assertEqual(authority.read_history()[-1].phase.value, "PREPARE")
+
+                try:
+                    path.unlink()
+                    os.replace(moved_path, path)
+                except OSError as exc:
+                    self.skipTest(
+                        f"database pathname restoration unavailable on this platform: {exc}"
+                    )
+
+                recovered = self.replay(store)
+                self.assertEqual(len(recovered.events), 1)
+                self.assertEqual(recovered.events[0].sequence, 1)
+                self.assertEqual(authority.read_history()[-1].phase.value, "COMMIT")
+            finally:
+                store.close()
+
     def test_persist_and_apply_duplicate_uses_persisted_local_clocks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
@@ -972,6 +1035,66 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     record for record in after if record.phase.value == "COMMIT"
                 ]
                 self.assertEqual(after_commits, before_commits)
+            finally:
+                store.close()
+
+    def test_post_commit_path_failure_keeps_append_prepare_recoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            moved_path = Path(directory) / "market-moved.db"
+            store = SQLiteMarketStore(path)
+            authority = store._market_append_authority()
+            original_require = store._require_database_path_identity
+            replaced = False
+
+            def commit_then_fail_postcheck():
+                nonlocal replaced
+                original_require()
+                store.connection.commit()
+                if not replaced:
+                    replaced = True
+                    try:
+                        os.replace(path, moved_path)
+                        path.touch()
+                    except OSError as exc:
+                        self.skipTest(
+                            f"open SQLite pathname replacement unavailable on this platform: {exc}"
+                        )
+                original_require()
+
+            try:
+                with patch.object(
+                    store,
+                    "_commit_stable_database_path",
+                    new=commit_then_fail_postcheck,
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "market database pathname no longer identifies the opened database",
+                    ):
+                        store.append(
+                            self.event(
+                                sequence=1,
+                                odds="2.00",
+                                observed_ts="2026-09-16T19:00:00+00:00",
+                            )
+                        )
+
+                self.assertTrue(replaced)
+                self.assertEqual(authority.read_history()[-1].phase.value, "PREPARE")
+
+                try:
+                    path.unlink()
+                    os.replace(moved_path, path)
+                except OSError as exc:
+                    self.skipTest(
+                        f"database pathname restoration unavailable on this platform: {exc}"
+                    )
+
+                events = store.events()
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0].sequence, 1)
+                self.assertEqual(authority.read_history()[-1].phase.value, "COMMIT")
             finally:
                 store.close()
 

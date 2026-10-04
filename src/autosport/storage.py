@@ -911,8 +911,8 @@ class SQLiteMarketStore:
         _decode_history=_event_from_history_row,
         _source_payload_fn=_source_payload,
         _decode_current=_event_from_current_row,
-        _history_columns_sql=_history_columns_sql,
-        _current_columns_sql=_current_columns_sql,
+        _history_columns_sql=_HISTORY_COLUMNS_SQL,
+        _current_columns_sql=_CURRENT_COLUMNS_SQL,
     ) -> bool:
         payload = _validate_event(event)
         incoming_key = _projection_key(event)
@@ -978,7 +978,7 @@ class SQLiteMarketStore:
         event: MarketEvent,
         *,
         _dedupe_key=_market_event_dedupe_key,
-        _authority=_authority,
+        _authority=_LIVE_RECEIPT_AUTHORITY,
     ) -> None:
         cursor = self.connection.execute(
             """INSERT INTO market_event_live_receipts
@@ -1031,12 +1031,12 @@ class SQLiteMarketStore:
         _dedupe_key=_market_event_dedupe_key,
         _quote_key=_market_event_quote_key,
         _canonical_payload_fn=_canonical_payload,
-        _history_columns_sql=_history_columns_sql,
-        _current_columns_sql=_current_columns_sql,
+        _history_columns_sql=_HISTORY_COLUMNS_SQL,
+        _current_columns_sql=_CURRENT_COLUMNS_SQL,
         _decode_current=_event_from_current_row,
         _projection_key=_projection_order_key,
         _decode_history=_event_from_history_row,
-        _authority=_authority,
+        _authority=_LIVE_RECEIPT_AUTHORITY,
     ) -> list[MarketEvent]:
         """Persist one live-ingestion batch and its receipt witnesses atomically.
 
@@ -1230,11 +1230,11 @@ class SQLiteMarketStore:
         event: MarketEvent,
         *,
         _market_event_type: type[MarketEvent],
-        _history_columns=_history_columns,
+        _history_columns=_HISTORY_COLUMNS,
         _dedupe_key=_market_event_dedupe_key,
         _decode_history=_event_from_history_row,
         _canonical_payload_fn=_canonical_payload,
-        _authority=_authority,
+        _authority=_LIVE_RECEIPT_AUTHORITY,
     ) -> bool:
         if type(event) is not _market_event_type:
             raise TypeError("event must be an exact MarketEvent")

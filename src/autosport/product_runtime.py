@@ -1158,6 +1158,7 @@ def _build_autonomous_product_runtime_impl(
     settlement_learning_handoff: SettlementLearningHandoff | None = None,
     _desktop_restart_reader,
     _desktop_delivery_resolver,
+    _desktop_consumer_type,
 ) -> AutonomousProductRuntime:
     """Construct or restore one canonical headless PAPER product runtime.
 
@@ -1261,7 +1262,7 @@ def _build_autonomous_product_runtime_impl(
             )
             accept_persisted(event)
 
-        desktop = _ProductDesktopDeltaConsumer(
+        desktop = _desktop_consumer_type(
             collector_store,
             DesktopDeltaCheckpointStore(root / "desktop_acks.json"),
             resolve_event=source.resolve_event,
@@ -1308,6 +1309,7 @@ def _bind_autonomous_product_runtime_builder(
     implementation,
     desktop_restart_reader,
     desktop_delivery_resolver,
+    desktop_consumer_type,
 ):
     """Expose the product builder without mutable restart/delivery dispatch."""
 
@@ -1331,6 +1333,7 @@ def _bind_autonomous_product_runtime_builder(
             settlement_learning_handoff=settlement_learning_handoff,
             _desktop_restart_reader=desktop_restart_reader,
             _desktop_delivery_resolver=desktop_delivery_resolver,
+            _desktop_consumer_type=desktop_consumer_type,
         )
 
     build_autonomous_product_runtime.__doc__ = implementation.__doc__
@@ -1341,7 +1344,9 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     _build_autonomous_product_runtime_impl,
     _desktop_applied_current_for_source,
     _desktop_applied_event_for_receipt,
+    _ProductDesktopDeltaConsumer,
 )
+del _ProductDesktopDeltaConsumer
 del _build_autonomous_product_runtime_impl
 del _desktop_applied_current_for_source
 del _desktop_applied_event_for_receipt

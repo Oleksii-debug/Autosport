@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -1714,6 +1715,77 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 )
 
             self.assertIsNotNone(original_identity)
+
+    def test_version_three_manifest_without_learning_identity_reopens_without_handoff(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            runtime.close()
+
+            manifest_path = root / "product_composition.json"
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+            raw["schema_version"] = 3
+            raw.pop("settlement_learning_handoff_identity")
+            manifest_path.write_text(
+                json.dumps(raw, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            restored = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertIsNone(
+                    restored.manifest.settlement_learning_handoff_identity
+                )
+            finally:
+                restored.close()
+
+    def test_version_three_manifest_rejects_new_learning_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            runtime.close()
+
+            manifest_path = root / "product_composition.json"
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+            raw["schema_version"] = 3
+            raw.pop("settlement_learning_handoff_identity")
+            manifest_path.write_text(
+                json.dumps(raw, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ProductCompositionError,
+                "settlement learning handoff identity conflicts with durable product composition",
+            ):
+                build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                    settlement_learning_handoff=_LearningHandoff(),
+                )
 
     def test_legacy_manifest_without_source_resolver_identity_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -89,6 +89,12 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
                     clock=lambda: next(observation_clock_values),
                 )
 
+            reopened = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                trusted_after_retry = reopened.trusted_live_events()
+            finally:
+                reopened.close()
+
         self.assertEqual(len(transport_calls), 1)
         self.assertEqual(append_attempts, 4)
         self.assertIsNotNone(failed_chunk)
@@ -98,6 +104,11 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
         self.assertEqual(result.stats.accepted, 5)
         self.assertEqual(result.stats.rejected, 0)
         self.assertEqual(len(result.current_quotes), 5)
+        self.assertEqual(len(trusted_after_retry), 5)
+        self.assertEqual(
+            {event.selection_id for event in trusted_after_retry},
+            {event.selection_id for event in result.current_quotes},
+        )
         self.assertEqual(
             {event.selection_id for event in result.current_quotes},
             {

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 from fractions import Fraction
-from operator import attrgetter
+from operator import attrgetter, itemgetter
 
 MAX_PLACE_INSTRUCTIONS = 50
 BACK_MIN_STAKE_EUR = Decimal("2.00")
@@ -76,6 +76,7 @@ def _build_italian_limit_batch_admission_meta():
         {
             "__dataclass_fields__",
             "__init__",
+            "__new__",
             "__post_init__",
             "state",
             "reason_codes",
@@ -122,54 +123,60 @@ _ItalianLimitBatchAdmissionMeta = _build_italian_limit_batch_admission_meta()
 del _build_italian_limit_batch_admission_meta
 
 
-@dataclass(frozen=True, slots=True)
-class ItalianLimitBatchAdmission(metaclass=_ItalianLimitBatchAdmissionMeta):
-    """Result for represented rule checks, never a provider admission token."""
+class ItalianLimitBatchAdmission(
+    tuple,
+    metaclass=_ItalianLimitBatchAdmissionMeta,
+):
+    """Immutable result for represented rules, never a provider admission token."""
 
-    state: ItalianLimitAdmissionState
-    reason_codes: tuple[str, ...]
-    preselected_returns_eur: tuple[Decimal, ...]
+    __slots__ = ()
 
-    def __post_init__(
-        self,
+    def __new__(
+        cls,
+        state: ItalianLimitAdmissionState,
+        reason_codes: tuple[str, ...],
+        preselected_returns_eur: tuple[Decimal, ...],
         _state_type=ItalianLimitAdmissionState,
         _decimal_type=Decimal,
         _error_type=ItalianOrderAdmissionError,
-    ) -> None:
-        if type(self.state) is not _state_type:
+    ):
+        if type(state) is not _state_type:
             raise _error_type(
                 "state must be exact ItalianLimitAdmissionState"
             )
-        if type(self.reason_codes) is not tuple or any(
+        if type(reason_codes) is not tuple or any(
             type(reason) is not str or not reason
-            for reason in self.reason_codes
+            for reason in reason_codes
         ):
             raise _error_type(
                 "reason_codes must be an exact tuple of non-empty strings"
             )
-        if type(self.preselected_returns_eur) is not tuple or any(
+        if type(preselected_returns_eur) is not tuple or any(
             type(value) is not _decimal_type
             or not value.is_finite()
             or value <= 0
-            for value in self.preselected_returns_eur
+            for value in preselected_returns_eur
         ):
             raise _error_type(
                 "preselected_returns_eur must contain positive finite Decimals"
             )
         if (
-            self.state is _state_type.RULESET_SATISFIED_UNBOUND
-            and self.reason_codes
+            state is _state_type.RULESET_SATISFIED_UNBOUND
+            and reason_codes
         ):
             raise _error_type(
                 "RULESET_SATISFIED_UNBOUND cannot carry rejection reasons"
             )
-        if (
-            self.state is _state_type.REJECTED
-            and not self.reason_codes
-        ):
-            raise _error_type(
-                "REJECTED result requires a reason"
-            )
+        if state is _state_type.REJECTED and not reason_codes:
+            raise _error_type("REJECTED result requires a reason")
+        return tuple.__new__(
+            cls,
+            (state, reason_codes, preselected_returns_eur),
+        )
+
+    state = property(itemgetter(0))
+    reason_codes = property(itemgetter(1))
+    preselected_returns_eur = property(itemgetter(2))
 
     @property
     def ruleset_satisfied_unbound(
@@ -179,7 +186,7 @@ class ItalianLimitBatchAdmission(metaclass=_ItalianLimitBatchAdmissionMeta):
         return self.state is _state_type.RULESET_SATISFIED_UNBOUND
 
     # These claims are intentionally hard-false. Keep their getters out of
-    # mutable Python bytecode and their backing values off instance slots.
+    # mutable Python bytecode and their backing values off instance storage.
     _admissible_constant = False
     _jurisdiction_bound_constant = False
     _account_currency_bound_constant = False

@@ -1,0 +1,1124 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from dataclasses import dataclass
+from decimal import Decimal, localcontext
+from enum import Enum
+from typing import Any
+
+from .real_execution_ledger import (
+    AcknowledgementStatus,
+    AttemptState,
+    ExecutionAttemptReadView,
+    ExecutionLedgerIntegrityError,
+    RealExecutionLedger,
+    VerifiedExecutionPlanView,
+)
+
+
+class ExecutionCapitalAtRiskError(RuntimeError):
+    """Base error for conservative real-execution capital-at-risk derivation."""
+
+
+class ExecutionCapitalAtRiskUnsupported(ExecutionCapitalAtRiskError):
+    """The durable execution facts do not bound monetary liability exactly enough."""
+
+
+class ExecutionCapitalAtRiskStale(ExecutionCapitalAtRiskError):
+    """The ledger moved after the evidence snapshot was derived."""
+
+
+class CapitalRiskTruth(str, Enum):
+    CONSERVATIVE_BOUND = "CONSERVATIVE_BOUND"
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptCapitalAtRisk:
+    attempt_id: str
+    action_id: str
+    state: AttemptState
+    bookmaker_id: str
+    account_id: str
+    event_id: str
+    market_id: str
+    selection_id: str
+    side: str
+    requested_stake: Decimal
+    requested_odds: Decimal
+    requested_capital_at_limit: Decimal
+    confirmed_open_capital: Decimal
+    contingent_unknown_capital: Decimal
+    confirmed_released_capital: Decimal
+    max_plausible_capital_at_risk: Decimal
+
+    def __post_init__(self) -> None:
+        if type(self.state) is not AttemptState:
+            raise ExecutionCapitalAtRiskError("attempt state must be exact AttemptState")
+        for name in (
+            "attempt_id",
+            "action_id",
+            "bookmaker_id",
+            "account_id",
+            "event_id",
+            "market_id",
+            "selection_id",
+            "side",
+        ):
+            value = getattr(self, name)
+            if type(value) is not str or not value.strip():
+                raise ExecutionCapitalAtRiskError(f"{name} must be non-empty text")
+        if self.bookmaker_id != "betfair" or self.side != "BACK":
+            raise ExecutionCapitalAtRiskUnsupported(
+                "capital-risk attempt supports exact Betfair BACK only"
+            )
+        for name in (
+            "requested_stake",
+            "requested_odds",
+            "requested_capital_at_limit",
+            "confirmed_open_capital",
+            "contingent_unknown_capital",
+            "confirmed_released_capital",
+            "max_plausible_capital_at_risk",
+        ):
+            value = getattr(self, name)
+            if (
+                type(value) is not Decimal
+                or not value.is_finite()
+                or value < 0
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    f"{name} must be exact finite non-negative Decimal"
+                )
+        if self.requested_odds <= 0 or self.requested_stake <= 0:
+            raise ExecutionCapitalAtRiskError(
+                "requested odds/stake must be positive"
+            )
+        if self.requested_capital_at_limit != self.requested_stake:
+            raise ExecutionCapitalAtRiskError(
+                "Betfair BACK requested capital must equal requested stake"
+            )
+        if self.confirmed_released_capital != 0:
+            raise ExecutionCapitalAtRiskError(
+                "conservative floor cannot claim released capital"
+            )
+        if self.max_plausible_capital_at_risk != _add(
+            self.confirmed_open_capital,
+            self.contingent_unknown_capital,
+        ):
+            raise ExecutionCapitalAtRiskError(
+                "attempt maximum must equal confirmed plus contingent capital"
+            )
+        if self.state is AttemptState.RESERVED:
+            if (
+                self.confirmed_open_capital != 0
+                or self.contingent_unknown_capital != 0
+                or self.max_plausible_capital_at_risk != 0
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "RESERVED attempt cannot claim external capital"
+                )
+        elif self.state in {
+            AttemptState.SUBMITTED,
+            AttemptState.UNKNOWN,
+            AttemptState.REJECTED,
+            AttemptState.RECONCILED_NOT_FOUND,
+        }:
+            if (
+                self.confirmed_open_capital != 0
+                or self.contingent_unknown_capital != self.requested_stake
+                or self.max_plausible_capital_at_risk != self.requested_stake
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "unconfirmed/negative-ledger attempt must retain full "
+                    "requested BACK stake as contingent capital"
+                )
+        elif self.state in {AttemptState.ACCEPTED, AttemptState.PARTIAL}:
+            if self.confirmed_open_capital > self.requested_stake:
+                raise ExecutionCapitalAtRiskError(
+                    "confirmed capital cannot exceed requested BACK stake"
+                )
+            expected_contingent = _subtract_nonnegative(
+                self.requested_stake,
+                self.confirmed_open_capital,
+            )
+            if (
+                self.contingent_unknown_capital != expected_contingent
+                or self.max_plausible_capital_at_risk != self.requested_stake
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "accepted/PARTIAL BACK attempt must retain exact remainder"
+                )
+        else:
+            raise ExecutionCapitalAtRiskUnsupported(
+                f"unsupported attempt state: {self.state!r}"
+            )
+
+    @property
+    def truth(self) -> CapitalRiskTruth:
+        return CapitalRiskTruth.CONSERVATIVE_BOUND
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class ExecutionCapitalAtRiskEvidence:
+    """Conservative exposure facts from one immutable verified ledger snapshot.
+
+    This object never grants execution authority and never treats generic ledger
+    REJECTED/RECONCILED_NOT_FOUND facts as provider-origin capital-release proof.
+    """
+
+    ledger_source_sha256: str
+    snapshot_sha256: str
+    event_count: int
+    plan_id: str
+    plan_fingerprint: str
+    plan_stale: bool
+    attempts: tuple[AttemptCapitalAtRisk, ...]
+    confirmed_open_capital: Decimal
+    contingent_unknown_capital: Decimal
+    confirmed_released_capital: Decimal
+    max_plausible_capital_at_risk: Decimal
+    evidence_sha256: str
+    execution_authority: bool = False
+    capital_release_authority: bool = False
+    residual_capacity_authority: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.event_count) is not int or self.event_count < 0:
+            raise ExecutionCapitalAtRiskError(
+                "event_count must be a non-negative integer"
+            )
+        for name in ("ledger_source_sha256", "snapshot_sha256", "plan_id", "plan_fingerprint"):
+            value = getattr(self, name)
+            if type(value) is not str or not value.strip():
+                raise ExecutionCapitalAtRiskError(f"{name} must be non-empty text")
+        for name in (
+            "ledger_source_sha256",
+            "snapshot_sha256",
+            "plan_fingerprint",
+            "evidence_sha256",
+        ):
+            value = getattr(self, name)
+            if (
+                len(value) != 64
+                or any(char not in "0123456789abcdef" for char in value)
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    f"{name} must be lowercase sha256 text"
+                )
+        if type(self.plan_stale) is not bool:
+            raise ExecutionCapitalAtRiskError("plan_stale must be exact bool")
+        if type(self.attempts) is not tuple or any(
+            type(item) is not AttemptCapitalAtRisk for item in self.attempts
+        ):
+            raise ExecutionCapitalAtRiskError(
+                "attempts must be exact AttemptCapitalAtRisk tuple"
+            )
+        account_ids = {item.account_id for item in self.attempts}
+        if len(account_ids) > 1:
+            raise ExecutionCapitalAtRiskUnsupported(
+                "capital-at-risk evidence cannot aggregate multiple account scopes "
+                "without canonical common-denomination authority"
+            )
+        if (
+            self.execution_authority is not False
+            or self.capital_release_authority is not False
+            or self.residual_capacity_authority is not False
+        ):
+            raise ExecutionCapitalAtRiskError(
+                "capital-risk floor cannot grant execution, release, "
+                "or residual-capacity authority"
+            )
+        for name in (
+            "confirmed_open_capital",
+            "contingent_unknown_capital",
+            "confirmed_released_capital",
+            "max_plausible_capital_at_risk",
+        ):
+            value = getattr(self, name)
+            if (
+                type(value) is not Decimal
+                or not value.is_finite()
+                or value < 0
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    f"{name} must be exact finite non-negative Decimal"
+                )
+        expected_confirmed = _sum_capital(
+            tuple(item.confirmed_open_capital for item in self.attempts)
+        )
+        expected_contingent = _sum_capital(
+            tuple(item.contingent_unknown_capital for item in self.attempts)
+        )
+        expected_maximum = _sum_capital(
+            tuple(item.max_plausible_capital_at_risk for item in self.attempts)
+        )
+        if self.confirmed_open_capital != expected_confirmed:
+            raise ExecutionCapitalAtRiskError(
+                "confirmed aggregate does not match attempts"
+            )
+        if self.contingent_unknown_capital != expected_contingent:
+            raise ExecutionCapitalAtRiskError(
+                "contingent aggregate does not match attempts"
+            )
+        if self.confirmed_released_capital != 0:
+            raise ExecutionCapitalAtRiskError(
+                "conservative floor cannot claim released capital"
+            )
+        if self.max_plausible_capital_at_risk != expected_maximum:
+            raise ExecutionCapitalAtRiskError(
+                "maximum aggregate does not match attempts"
+            )
+
+    @property
+    def truth(self) -> CapitalRiskTruth:
+        return CapitalRiskTruth.CONSERVATIVE_BOUND
+
+    def assert_issued_current(self, ledger: RealExecutionLedger) -> None:
+        """Prove canonical derivation and unchanged durable ledger bytes.
+
+        This is deliberately weaker than provider-origin or execution authority.
+        Positive currentness is earned by re-deriving the complete conservative
+        exposure from canonical durable execution truth, not by registry membership
+        or caller-mutable object provenance.
+        """
+
+        if type(self) is not ExecutionCapitalAtRiskEvidence:
+            raise ExecutionCapitalAtRiskError(
+                "capital-at-risk evidence must be exact canonical type"
+            )
+        if type(ledger) is not RealExecutionLedger:
+            raise ExecutionCapitalAtRiskError(
+                "ledger must be exact RealExecutionLedger"
+            )
+        if _evidence_digest(self) != self.evidence_sha256:
+            raise ExecutionCapitalAtRiskError(
+                "capital-at-risk evidence identity is invalid"
+            )
+        if _ledger_source_sha256(ledger) != self.ledger_source_sha256:
+            raise ExecutionCapitalAtRiskStale(
+                "capital-at-risk evidence belongs to a different execution ledger source"
+            )
+        _require_ledger_read_authority()
+        try:
+            snapshot = _READ_VERIFIED_SNAPSHOT(ledger)
+        except ExecutionLedgerIntegrityError as exc:
+            raise ExecutionCapitalAtRiskStale(
+                "execution ledger currentness failed during capital-at-risk validation"
+            ) from exc
+        _require_ledger_read_authority()
+        if (
+            snapshot.sha256 != self.snapshot_sha256
+            or snapshot.event_count != self.event_count
+        ):
+            raise ExecutionCapitalAtRiskStale(
+                "execution ledger changed after capital-at-risk resolution"
+            )
+
+
+# Compatibility aliases remain intentionally observable. They are not authority.
+# The actual reader identities and code witnesses live in the installer closure so
+# a caller cannot coherently move both the expected witness and the executable by
+# rewriting module globals.
+_VERIFIED_EXECUTION_VIEW = RealExecutionLedger.verified_execution_view
+_VERIFIED_SNAPSHOT = RealExecutionLedger.verified_snapshot
+
+
+def _install_ledger_read_authority():
+    ledger_type = RealExecutionLedger
+    verified_execution_view = ledger_type.verified_execution_view
+    verified_snapshot = ledger_type.verified_snapshot
+    execution_view_code = verified_execution_view.__code__
+    snapshot_code = verified_snapshot.__code__
+    execution_view_globals = verified_execution_view.__globals__
+    snapshot_globals = verified_snapshot.__globals__
+    exact_globals = globals
+    exact_getattr = getattr
+    exact_vars = vars
+    missing = object()
+
+    # Reuse the canonical #2090 read-view authority pattern: pin the constructor
+    # aliases used by the ledger method itself, not only the consumer's imported
+    # aliases.  Otherwise unchanged verified_execution_view bytecode can still
+    # construct attacker-selected DTO classes after an upstream global rebind.
+    verified_plan_view_type = execution_view_globals["VerifiedExecutionPlanView"]
+    attempt_read_view_type = execution_view_globals["ExecutionAttemptReadView"]
+    provider_evidence_view_type = execution_view_globals["ProviderEvidenceBindingView"]
+    execution_attempt_type = execution_view_globals["ExecutionAttempt"]
+    execution_action_type = execution_view_globals["ExecutionAction"]
+    external_acknowledgement_type = execution_view_globals["ExternalAcknowledgement"]
+    execution_plan_type = execution_view_globals["ExecutionPlan"]
+    snapshot_type = snapshot_globals["VerifiedExecutionLedgerSnapshot"]
+    attempt_state_type = execution_view_globals["AttemptState"]
+    view_type_bindings = (
+        ("VerifiedExecutionPlanView", verified_plan_view_type),
+        ("ExecutionAttemptReadView", attempt_read_view_type),
+        ("ProviderEvidenceBindingView", provider_evidence_view_type),
+        ("ExecutionAttempt", execution_attempt_type),
+        ("ExecutionAction", execution_action_type),
+        ("ExternalAcknowledgement", external_acknowledgement_type),
+        ("ExecutionPlan", execution_plan_type),
+        ("AttemptState", attempt_state_type),
+    )
+    snapshot_type_bindings = (
+        ("VerifiedExecutionLedgerSnapshot", snapshot_type),
+    )
+    monotonic_authority_type = execution_view_globals["_MONOTONIC_AUTHORITY_TYPE"]
+    monotonic_recover = execution_view_globals["_MONOTONIC_RECOVER"]
+    monotonic_recover_code = exact_getattr(monotonic_recover, "__code__", None)
+    monotonic_error_type = execution_view_globals[
+        "MonotonicWorkspaceAuthorityError"
+    ]
+    if monotonic_recover_code is None:
+        raise ExecutionCapitalAtRiskError(
+            "canonical execution-ledger monotonic recovery authority is incomplete"
+        )
+
+    # These are the direct RealExecutionLedger call targets used while projecting
+    # the verified plan/snapshot.  Reject class rebinding/code mutation and instance
+    # shadowing before any risk projection can consume them.
+    ledger_method_names = (
+        "verified_execution_view",
+        "verified_snapshot",
+        "_parse",
+        "_plan_event",
+        "_plan_from_dict",
+        "_attempt_events",
+        "_state",
+        "_acknowledgement_from_dict",
+        "_found_reconciliation_from_dict",
+        "_reconciliation_snapshot_from_dict",
+        "_stale",
+        "_read_verified_state",
+        "_read_serialized",
+        "_acquire_posix_ledger_read_lock",
+        "_ensure_existing_path_durable",
+        "_recover_monotonic_state",
+        "_monotonic_state_sha256",
+        "_canonical_monotonic_authority",
+        "_monotonic_authority_identity",
+    )
+
+    def descriptor_code(value: object) -> object | None:
+        if isinstance(value, (classmethod, staticmethod)):
+            value = value.__func__
+        return exact_getattr(value, "__code__", None)
+
+    # Exact constructor aliases are not sufficient when the classes themselves
+    # remain mutable Python objects.  Pin the dataclass constructor/post-init code
+    # and every slot descriptor that carries ledger-derived authority, so an
+    # in-place class mutation cannot turn a canonical exact-type view into an
+    # underreported projection.
+    read_view_types = (
+        verified_plan_view_type,
+        attempt_read_view_type,
+        provider_evidence_view_type,
+        execution_attempt_type,
+        execution_action_type,
+        external_acknowledgement_type,
+        execution_plan_type,
+        snapshot_type,
+    )
+    read_view_type_authorities = []
+    for owner in read_view_types:
+        owner_vars = exact_vars(owner)
+        fields = owner_vars.get("__dataclass_fields__", missing)
+        init = owner_vars.get("__init__", missing)
+        init_code = descriptor_code(init)
+        post_init = owner_vars.get("__post_init__", missing)
+        post_init_code = (
+            descriptor_code(post_init) if post_init is not missing else None
+        )
+        if (
+            type(fields) is not dict
+            or init is missing
+            or init_code is None
+        ):
+            raise ExecutionCapitalAtRiskError(
+                "canonical execution read-view type authority is incomplete"
+            )
+        field_authorities = tuple(
+            (
+                name,
+                field,
+                owner_vars.get(name, missing),
+            )
+            for name, field in fields.items()
+        )
+        if any(
+            descriptor is missing
+            for _, _, descriptor in field_authorities
+        ):
+            raise ExecutionCapitalAtRiskError(
+                "canonical execution read-view field authority is incomplete"
+            )
+        read_view_type_authorities.append(
+            (
+                owner,
+                fields,
+                field_authorities,
+                init,
+                init_code,
+                post_init,
+                post_init_code,
+                exact_getattr(owner, "__getattribute__", missing),
+            )
+        )
+    read_view_type_authorities = tuple(read_view_type_authorities)
+
+    ledger_methods = tuple(
+        (
+            name,
+            ledger_type.__dict__.get(name, missing),
+            descriptor_code(ledger_type.__dict__.get(name, missing)),
+        )
+        for name in ledger_method_names
+    )
+    if any(value is missing or code is None for _, value, code in ledger_methods):
+        raise ExecutionCapitalAtRiskError(
+            "canonical execution-ledger read authority is incomplete"
+        )
+
+    def require(ledger: RealExecutionLedger | None = None) -> None:
+        namespace = exact_globals()
+        if (
+            namespace.get("RealExecutionLedger") is not ledger_type
+            or namespace.get("_VERIFIED_EXECUTION_VIEW")
+            is not verified_execution_view
+            or namespace.get("_VERIFIED_SNAPSHOT") is not verified_snapshot
+            or namespace.get("_READ_VERIFIED_EXECUTION_VIEW")
+            is not read_execution_view
+            or namespace.get("_READ_VERIFIED_SNAPSHOT") is not read_snapshot
+            or ledger_type.__dict__.get("verified_execution_view")
+            is not verified_execution_view
+            or ledger_type.__dict__.get("verified_snapshot")
+            is not verified_snapshot
+            or exact_getattr(verified_execution_view, "__code__", None)
+            is not execution_view_code
+            or exact_getattr(verified_snapshot, "__code__", None)
+            is not snapshot_code
+            or exact_getattr(verified_execution_view, "__globals__", None)
+            is not execution_view_globals
+            or exact_getattr(verified_snapshot, "__globals__", None)
+            is not snapshot_globals
+            or any(
+                execution_view_globals.get(name, missing) is not expected
+                for name, expected in view_type_bindings
+            )
+            or any(
+                snapshot_globals.get(name, missing) is not expected
+                for name, expected in snapshot_type_bindings
+            )
+            or execution_view_globals.get(
+                "_MONOTONIC_AUTHORITY_TYPE", missing
+            )
+            is not monotonic_authority_type
+            or execution_view_globals.get("_MONOTONIC_RECOVER", missing)
+            is not monotonic_recover
+            or exact_getattr(monotonic_recover, "__code__", None)
+            is not monotonic_recover_code
+            or execution_view_globals.get(
+                "MonotonicWorkspaceAuthorityError", missing
+            )
+            is not monotonic_error_type
+        ):
+            raise ExecutionCapitalAtRiskError(
+                "canonical execution-ledger read authority changed"
+            )
+        for (
+            owner,
+            fields,
+            field_authorities,
+            init,
+            init_code,
+            post_init,
+            post_init_code,
+            getattribute,
+        ) in read_view_type_authorities:
+            owner_vars = exact_vars(owner)
+            current_fields = owner_vars.get("__dataclass_fields__", missing)
+            current_init = owner_vars.get("__init__", missing)
+            current_post_init = owner_vars.get("__post_init__", missing)
+            if (
+                current_fields is not fields
+                or current_init is not init
+                or descriptor_code(current_init) is not init_code
+                or current_post_init is not post_init
+                or (
+                    post_init is not missing
+                    and descriptor_code(current_post_init) is not post_init_code
+                )
+                or exact_getattr(owner, "__getattribute__", missing)
+                is not getattribute
+                or any(
+                    current_fields.get(name, missing) is not field
+                    or owner_vars.get(name, missing) is not descriptor
+                    for name, field, descriptor in field_authorities
+                )
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "canonical execution read-view type authority changed"
+                )
+
+        for name, expected, expected_code in ledger_methods:
+            current = ledger_type.__dict__.get(name, missing)
+            if (
+                current is not expected
+                or descriptor_code(current) is not expected_code
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "canonical execution-ledger read authority changed"
+                )
+            if ledger is not None and name in getattr(ledger, "__dict__", {}):
+                raise ExecutionCapitalAtRiskError(
+                    "canonical execution-ledger read authority changed"
+                )
+
+    def read_execution_view(
+        ledger: RealExecutionLedger,
+        plan_id: str,
+    ) -> VerifiedExecutionPlanView:
+        require(ledger)
+        if type(ledger) is not ledger_type:
+            raise TypeError("ledger must be exact RealExecutionLedger")
+        value = verified_execution_view(ledger, plan_id)
+        require(ledger)
+        if type(value) is not verified_plan_view_type:
+            raise ExecutionCapitalAtRiskError(
+                "canonical execution plan view type authority changed"
+            )
+        if type(value.plan) is not execution_plan_type:
+            raise ExecutionCapitalAtRiskError(
+                "canonical execution plan type authority changed"
+            )
+        if type(value.attempts) is not tuple:
+            raise ExecutionCapitalAtRiskError(
+                "canonical execution attempt collection is invalid"
+            )
+        for item in value.attempts:
+            if type(item) is not attempt_read_view_type:
+                raise ExecutionCapitalAtRiskError(
+                    "canonical execution attempt read-view type authority changed"
+                )
+            if type(item.attempt) is not execution_attempt_type:
+                raise ExecutionCapitalAtRiskError(
+                    "canonical execution attempt type authority changed"
+                )
+            if type(item.action) is not execution_action_type:
+                raise ExecutionCapitalAtRiskError(
+                    "canonical execution action type authority changed"
+                )
+            if type(item.state) is not attempt_state_type:
+                raise ExecutionCapitalAtRiskError(
+                    "canonical execution attempt state authority changed"
+                )
+            if (
+                item.provider_evidence is not None
+                and type(item.provider_evidence) is not provider_evidence_view_type
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "canonical provider evidence view type authority changed"
+                )
+            if (
+                item.acknowledgement is not None
+                and type(item.acknowledgement)
+                is not external_acknowledgement_type
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "canonical acknowledgement view type authority changed"
+                )
+        return value
+
+    def read_snapshot(ledger: RealExecutionLedger):
+        require(ledger)
+        if type(ledger) is not ledger_type:
+            raise TypeError("ledger must be exact RealExecutionLedger")
+        value = verified_snapshot(ledger)
+        require(ledger)
+        if type(value) is not snapshot_type:
+            raise ExecutionCapitalAtRiskError(
+                "canonical execution snapshot type authority changed"
+            )
+        return value
+
+    return require, read_execution_view, read_snapshot
+
+(
+    _require_ledger_read_authority,
+    _READ_VERIFIED_EXECUTION_VIEW,
+    _READ_VERIFIED_SNAPSHOT,
+) = _install_ledger_read_authority()
+del _install_ledger_read_authority
+
+
+_MAX_EXACT_PRECISION = 4096
+
+
+def _ledger_source_sha256(ledger: RealExecutionLedger) -> str:
+    """Return restart-stable trusted-process identity for one ledger pathname."""
+
+    canonical_path = os.path.normcase(
+        os.path.realpath(os.path.abspath(os.fspath(ledger.path)))
+    )
+    return hashlib.sha256(canonical_path.encode("utf-8")).hexdigest()
+
+
+def _decimal_text(value: Decimal) -> str:
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise ExecutionCapitalAtRiskError("capital value must be a finite Decimal")
+    if value.is_zero():
+        return "0"
+    sign, raw_digits, raw_exponent = value.as_tuple()
+    digits = list(raw_digits)
+    exponent = int(raw_exponent)
+    while digits and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    coefficient = "".join(str(digit) for digit in digits) or "0"
+    prefix = "-" if sign else ""
+    return f"{prefix}{coefficient}e{exponent}"
+
+
+def _bounded_precision(required: int) -> int:
+    precision = max(64, required)
+    if precision > _MAX_EXACT_PRECISION:
+        raise ExecutionCapitalAtRiskUnsupported(
+            "execution Decimal scale exceeds exact risk-arithmetic bound"
+        )
+    return precision
+
+
+def _add_precision(*values: Decimal) -> int:
+    exponents = [int(value.as_tuple().exponent) for value in values]
+    minimum_exponent = min(exponents)
+    aligned_widths = [
+        max(1, len(value.as_tuple().digits))
+        + int(value.as_tuple().exponent)
+        - minimum_exponent
+        for value in values
+    ]
+    return _bounded_precision(max(aligned_widths) + 2)
+
+
+def _add(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext() as context:
+        context.prec = _add_precision(left, right)
+        return left + right
+
+
+def _subtract(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext() as context:
+        context.prec = _add_precision(left, right)
+        return left - right
+
+
+def _subtract_nonnegative(left: Decimal, right: Decimal) -> Decimal:
+    result = _subtract(left, right)
+    if result < 0:
+        return Decimal(0)
+    return result
+
+
+def _requested_limit_capital(attempt: ExecutionAttemptReadView) -> Decimal:
+    action = attempt.action
+    if action.bookmaker_id != "betfair":
+        raise ExecutionCapitalAtRiskUnsupported(
+            "generic provider stake is not a universal capital-at-risk unit"
+        )
+    if action.side != "BACK":
+        raise ExecutionCapitalAtRiskUnsupported(
+            "this conservative floor supports Betfair BACK only; "
+            "provider-specific liability must come from canonical order economics"
+        )
+    return action.requested_stake
+
+
+def _accepted_capital(attempt: ExecutionAttemptReadView) -> Decimal:
+    acknowledgement = attempt.acknowledgement
+    if acknowledgement is None:
+        raise ExecutionCapitalAtRiskError(
+            "accepted/PARTIAL state lacks durable acknowledgement"
+        )
+    if acknowledgement.status not in {
+        AcknowledgementStatus.ACCEPTED,
+        AcknowledgementStatus.PARTIAL,
+    }:
+        raise ExecutionCapitalAtRiskError(
+            "accepted/PARTIAL state conflicts with acknowledgement status"
+        )
+    if (
+        acknowledgement.accepted_stake is None
+        or acknowledgement.accepted_odds is None
+    ):
+        raise ExecutionCapitalAtRiskError(
+            "accepted/PARTIAL acknowledgement lacks exact stake/odds"
+        )
+    if attempt.action.side != "BACK":
+        raise ExecutionCapitalAtRiskUnsupported(
+            "accepted provider liability is unsupported outside Betfair BACK"
+        )
+    return acknowledgement.accepted_stake
+
+
+def _attempt_risk(attempt: ExecutionAttemptReadView) -> AttemptCapitalAtRisk:
+    action = attempt.action
+    requested = _requested_limit_capital(attempt)
+    zero = Decimal(0)
+
+    if attempt.state is AttemptState.RESERVED:
+        confirmed = zero
+        contingent = zero
+        maximum = zero
+    elif attempt.state in {AttemptState.SUBMITTED, AttemptState.UNKNOWN}:
+        confirmed = zero
+        # For the supported BACK seam, monetary commitment equals stake and is
+        # independent of matched odds. UNKNOWN retains the full requested stake.
+        contingent = requested
+        maximum = requested
+    elif attempt.state in {AttemptState.ACCEPTED, AttemptState.PARTIAL}:
+        confirmed = _accepted_capital(attempt)
+        acknowledgement = attempt.acknowledgement
+        assert acknowledgement is not None
+        assert acknowledgement.accepted_stake is not None
+        contingent = _subtract_nonnegative(
+            action.requested_stake,
+            acknowledgement.accepted_stake,
+        )
+        maximum = _add(confirmed, contingent)
+    elif attempt.state in {
+        AttemptState.REJECTED,
+        AttemptState.RECONCILED_NOT_FOUND,
+    }:
+        confirmed = zero
+        # These are durable ledger facts, not provider-origin release authority.
+        # Retain the full possible BACK effect rather than freeing capital.
+        contingent = requested
+        maximum = requested
+    else:  # pragma: no cover - protects future enum widening
+        raise ExecutionCapitalAtRiskUnsupported(
+            f"unsupported durable attempt state: {attempt.state!r}"
+        )
+
+    return AttemptCapitalAtRisk(
+        attempt_id=attempt.attempt.attempt_id,
+        action_id=action.action_id,
+        state=attempt.state,
+        bookmaker_id=action.bookmaker_id,
+        account_id=action.account_id,
+        event_id=action.event_id,
+        market_id=action.market_id,
+        selection_id=action.selection_id,
+        side=action.side,
+        requested_stake=action.requested_stake,
+        requested_odds=action.requested_odds,
+        requested_capital_at_limit=requested,
+        confirmed_open_capital=confirmed,
+        contingent_unknown_capital=contingent,
+        confirmed_released_capital=zero,
+        max_plausible_capital_at_risk=maximum,
+    )
+
+
+def _sum_capital(values: tuple[Decimal, ...]) -> Decimal:
+    total = Decimal(0)
+    for value in values:
+        total = _add(total, value)
+    return total
+
+
+def _attempt_payload(value: AttemptCapitalAtRisk) -> dict[str, Any]:
+    return {
+        "attempt_id": value.attempt_id,
+        "action_id": value.action_id,
+        "state": value.state.value,
+        "bookmaker_id": value.bookmaker_id,
+        "account_id": value.account_id,
+        "event_id": value.event_id,
+        "market_id": value.market_id,
+        "selection_id": value.selection_id,
+        "side": value.side,
+        "requested_stake": _decimal_text(value.requested_stake),
+        "requested_odds": _decimal_text(value.requested_odds),
+        "requested_capital_at_limit": _decimal_text(
+            value.requested_capital_at_limit
+        ),
+        "confirmed_open_capital": _decimal_text(
+            value.confirmed_open_capital
+        ),
+        "contingent_unknown_capital": _decimal_text(
+            value.contingent_unknown_capital
+        ),
+        "confirmed_released_capital": _decimal_text(
+            value.confirmed_released_capital
+        ),
+        "max_plausible_capital_at_risk": _decimal_text(
+            value.max_plausible_capital_at_risk
+        ),
+    }
+
+
+def _evidence_payload(value: ExecutionCapitalAtRiskEvidence) -> dict[str, Any]:
+    return {
+        "schema": "autosport.execution_capital_at_risk",
+        "schema_version": 2,
+        "ledger_source_sha256": value.ledger_source_sha256,
+        "snapshot_sha256": value.snapshot_sha256,
+        "event_count": value.event_count,
+        "plan_id": value.plan_id,
+        "plan_fingerprint": value.plan_fingerprint,
+        "plan_stale": value.plan_stale,
+        "attempts": [_attempt_payload(item) for item in value.attempts],
+        "confirmed_open_capital": _decimal_text(value.confirmed_open_capital),
+        "contingent_unknown_capital": _decimal_text(
+            value.contingent_unknown_capital
+        ),
+        "confirmed_released_capital": _decimal_text(
+            value.confirmed_released_capital
+        ),
+        "max_plausible_capital_at_risk": _decimal_text(
+            value.max_plausible_capital_at_risk
+        ),
+        "execution_authority": value.execution_authority,
+        "capital_release_authority": value.capital_release_authority,
+        "residual_capacity_authority": value.residual_capacity_authority,
+    }
+
+
+def _evidence_digest(value: ExecutionCapitalAtRiskEvidence) -> str:
+    encoded = json.dumps(
+        _evidence_payload(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def resolve_execution_capital_at_risk(
+    ledger: RealExecutionLedger,
+    plan_id: str,
+) -> ExecutionCapitalAtRiskEvidence:
+    """Derive conservative monetary exposure from one verified execution snapshot."""
+
+    if type(ledger) is not RealExecutionLedger:
+        raise TypeError("ledger must be exact RealExecutionLedger")
+    if not isinstance(plan_id, str) or not plan_id.strip():
+        raise ValueError("plan_id must be non-empty text")
+
+    ledger_source_sha256 = _ledger_source_sha256(ledger)
+    _require_ledger_read_authority()
+    view: VerifiedExecutionPlanView = _READ_VERIFIED_EXECUTION_VIEW(
+        ledger,
+        plan_id,
+    )
+    _require_ledger_read_authority()
+    attempts = tuple(_attempt_risk(item) for item in view.attempts)
+    account_ids = {item.account_id for item in attempts}
+    if len(account_ids) > 1:
+        raise ExecutionCapitalAtRiskUnsupported(
+            "capital-at-risk evidence cannot aggregate multiple account scopes "
+            "without canonical common-denomination authority"
+        )
+
+    confirmed = _sum_capital(
+        tuple(item.confirmed_open_capital for item in attempts)
+    )
+    contingent = _sum_capital(
+        tuple(item.contingent_unknown_capital for item in attempts)
+    )
+    released = Decimal(0)
+    maximum = _sum_capital(
+        tuple(item.max_plausible_capital_at_risk for item in attempts)
+    )
+
+    provisional = ExecutionCapitalAtRiskEvidence(
+        ledger_source_sha256=ledger_source_sha256,
+        snapshot_sha256=view.snapshot_sha256,
+        event_count=view.event_count,
+        plan_id=view.plan.plan_id,
+        plan_fingerprint=view.plan_fingerprint,
+        plan_stale=view.stale,
+        attempts=attempts,
+        confirmed_open_capital=confirmed,
+        contingent_unknown_capital=contingent,
+        confirmed_released_capital=released,
+        max_plausible_capital_at_risk=maximum,
+        evidence_sha256="0" * 64,
+    )
+    evidence = ExecutionCapitalAtRiskEvidence(
+        ledger_source_sha256=provisional.ledger_source_sha256,
+        snapshot_sha256=provisional.snapshot_sha256,
+        event_count=provisional.event_count,
+        plan_id=provisional.plan_id,
+        plan_fingerprint=provisional.plan_fingerprint,
+        plan_stale=provisional.plan_stale,
+        attempts=provisional.attempts,
+        confirmed_open_capital=provisional.confirmed_open_capital,
+        contingent_unknown_capital=provisional.contingent_unknown_capital,
+        confirmed_released_capital=provisional.confirmed_released_capital,
+        max_plausible_capital_at_risk=provisional.max_plausible_capital_at_risk,
+        evidence_sha256=_evidence_digest(provisional),
+    )
+
+    if _ledger_source_sha256(ledger) != ledger_source_sha256:
+        raise ExecutionCapitalAtRiskStale(
+            "execution ledger source changed during capital-at-risk resolution"
+        )
+    _require_ledger_read_authority()
+    after = _READ_VERIFIED_SNAPSHOT(ledger)
+    _require_ledger_read_authority()
+    if (
+        after.sha256 != view.snapshot_sha256
+        or after.event_count != view.event_count
+    ):
+        raise ExecutionCapitalAtRiskStale(
+            "execution ledger changed during capital-at-risk resolution"
+        )
+    return evidence
+
+
+def _install_capital_risk_dispatch_authority() -> None:
+    raw_resolve = resolve_execution_capital_at_risk
+    raw_resolve_code = raw_resolve.__code__
+    raw_currentness = ExecutionCapitalAtRiskEvidence.assert_issued_current
+    raw_currentness_code = raw_currentness.__code__
+    require_reader = _require_ledger_read_authority
+    read_execution_view = _READ_VERIFIED_EXECUTION_VIEW
+    read_snapshot = _READ_VERIFIED_SNAPSHOT
+    exact_globals = globals
+    exact_getattr = getattr
+
+    # Every Python helper that can change the conservative monetary projection is
+    # part of the authority graph.  raw_resolve/raw_currentness use module-global
+    # lookups, so pin both binding identity and executable identity here rather
+    # than allowing coordinated helper rebinding to redefine "canonical" risk.
+    derivation_functions = (
+        ("_ledger_source_sha256", _ledger_source_sha256, _ledger_source_sha256.__code__),
+        ("_requested_limit_capital", _requested_limit_capital, _requested_limit_capital.__code__),
+        ("_accepted_capital", _accepted_capital, _accepted_capital.__code__),
+        ("_attempt_risk", _attempt_risk, _attempt_risk.__code__),
+        ("_sum_capital", _sum_capital, _sum_capital.__code__),
+        ("_bounded_precision", _bounded_precision, _bounded_precision.__code__),
+        ("_add_precision", _add_precision, _add_precision.__code__),
+        ("_add", _add, _add.__code__),
+        ("_subtract", _subtract, _subtract.__code__),
+        ("_subtract_nonnegative", _subtract_nonnegative, _subtract_nonnegative.__code__),
+        ("_decimal_text", _decimal_text, _decimal_text.__code__),
+        ("_attempt_payload", _attempt_payload, _attempt_payload.__code__),
+        ("_evidence_payload", _evidence_payload, _evidence_payload.__code__),
+        ("_evidence_digest", _evidence_digest, _evidence_digest.__code__),
+    )
+    derivation_bindings = (
+        ("Decimal", Decimal),
+        ("localcontext", localcontext),
+        ("AttemptState", AttemptState),
+        ("AcknowledgementStatus", AcknowledgementStatus),
+        ("ExecutionAttemptReadView", ExecutionAttemptReadView),
+        ("VerifiedExecutionPlanView", VerifiedExecutionPlanView),
+        ("RealExecutionLedger", RealExecutionLedger),
+        ("ExecutionLedgerIntegrityError", ExecutionLedgerIntegrityError),
+        ("AttemptCapitalAtRisk", AttemptCapitalAtRisk),
+        ("ExecutionCapitalAtRiskEvidence", ExecutionCapitalAtRiskEvidence),
+        ("_MAX_EXACT_PRECISION", _MAX_EXACT_PRECISION),
+    )
+    attempt_post_init = AttemptCapitalAtRisk.__post_init__
+    attempt_post_init_code = attempt_post_init.__code__
+    evidence_post_init = ExecutionCapitalAtRiskEvidence.__post_init__
+    evidence_post_init_code = evidence_post_init.__code__
+    json_module = json
+    json_dumps = json.dumps
+    json_dumps_code = exact_getattr(json_dumps, "__code__", None)
+    hashlib_module = hashlib
+    sha256 = hashlib.sha256
+    os_module = os
+    os_path = os.path
+    path_normcase = os.path.normcase
+    path_realpath = os.path.realpath
+    path_abspath = os.path.abspath
+    os_fspath = os.fspath
+
+    def require_dispatch() -> None:
+        namespace = exact_globals()
+        if (
+            namespace.get("_require_ledger_read_authority") is not require_reader
+            or namespace.get("_READ_VERIFIED_EXECUTION_VIEW")
+            is not read_execution_view
+            or namespace.get("_READ_VERIFIED_SNAPSHOT") is not read_snapshot
+            or exact_getattr(raw_resolve, "__code__", None)
+            is not raw_resolve_code
+            or exact_getattr(raw_currentness, "__code__", None)
+            is not raw_currentness_code
+            or AttemptCapitalAtRisk.__post_init__ is not attempt_post_init
+            or exact_getattr(attempt_post_init, "__code__", None)
+            is not attempt_post_init_code
+            or ExecutionCapitalAtRiskEvidence.__post_init__ is not evidence_post_init
+            or exact_getattr(evidence_post_init, "__code__", None)
+            is not evidence_post_init_code
+            or namespace.get("json") is not json_module
+            or json_module.dumps is not json_dumps
+            or exact_getattr(json_dumps, "__code__", None) is not json_dumps_code
+            or namespace.get("hashlib") is not hashlib_module
+            or hashlib_module.sha256 is not sha256
+            or namespace.get("os") is not os_module
+            or os_module.path is not os_path
+            or os_path.normcase is not path_normcase
+            or os_path.realpath is not path_realpath
+            or os_path.abspath is not path_abspath
+            or os_module.fspath is not os_fspath
+        ):
+            raise ExecutionCapitalAtRiskError(
+                "capital-risk ledger read dispatch changed"
+            )
+        for name, expected, expected_code in derivation_functions:
+            current = namespace.get(name)
+            if (
+                current is not expected
+                or exact_getattr(expected, "__code__", None) is not expected_code
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "capital-risk ledger read dispatch changed"
+                )
+        for name, expected in derivation_bindings:
+            if namespace.get(name) is not expected:
+                raise ExecutionCapitalAtRiskError(
+                    "capital-risk ledger read dispatch changed"
+                )
+
+    def authoritative_resolve(
+        ledger: RealExecutionLedger,
+        plan_id: str,
+    ) -> ExecutionCapitalAtRiskEvidence:
+        require_dispatch()
+        value = raw_resolve(ledger, plan_id)
+        require_dispatch()
+        return value
+
+    def authoritative_currentness(
+        self: ExecutionCapitalAtRiskEvidence,
+        ledger: RealExecutionLedger,
+    ) -> None:
+        # Snapshot/current-source validation is necessary but not sufficient:
+        # caller-created evidence can copy those identities while understating risk.
+        # Re-derive the complete canonical evidence from the same durable ledger and
+        # require the same canonical payload digest. No mutable issuance registry is
+        # involved, and the full derivation helper graph is pinned above.
+        require_dispatch()
+        raw_currentness(self, ledger)
+        require_dispatch()
+        canonical = raw_resolve(ledger, self.plan_id)
+        require_dispatch()
+        if canonical.evidence_sha256 != self.evidence_sha256:
+            raise ExecutionCapitalAtRiskError(
+                "capital-at-risk evidence is not current product-issued authority"
+            )
+        # Close the check/use interval if the ledger advanced after re-derivation.
+        raw_currentness(self, ledger)
+        require_dispatch()
+
+    globals()["resolve_execution_capital_at_risk"] = authoritative_resolve
+    ExecutionCapitalAtRiskEvidence.assert_issued_current = authoritative_currentness
+
+_install_capital_risk_dispatch_authority()
+del _install_capital_risk_dispatch_authority

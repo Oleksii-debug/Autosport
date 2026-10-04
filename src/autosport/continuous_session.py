@@ -184,7 +184,11 @@ class _ContinuousSessionCoordinatorMeta(type):
         raise TypeError("canonical settlement consumer metaclass is not extensible")
 
     def __new__(mcls, name, bases, namespace, **kwargs):
-        protected = {"_settle", "_settlement_consumer_bindings_sealed"}
+        protected = {
+            "_settle",
+            "__setattr__",
+            "_settlement_consumer_bindings_sealed",
+        }
         inherits_sealed_consumer = any(
             any(
                 ancestor.__dict__.get(
@@ -206,6 +210,7 @@ class _ContinuousSessionCoordinatorMeta(type):
         )
         if sealed and name in {
             "_settle",
+            "__setattr__",
             "_settlement_consumer_bindings_sealed",
         }:
             raise TypeError("canonical settlement consumer entry binding is immutable")
@@ -890,8 +895,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
     _settlement_consumer_bindings_sealed = False
     _authority_fields_sealed = False
-    _AUTHORITY_FIELDS = frozenset(
-        {
+
+    def __setattr__(self, name: str, value: object) -> None:
+        try:
+            sealed = object.__getattribute__(self, "_authority_fields_sealed")
+        except AttributeError:
+            sealed = False
+        if sealed and name in {
             "_authority_fields_sealed",
             "workspace",
             "collector",
@@ -910,15 +920,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             "causal_view",
             "initial_bankroll",
             "_state",
-        }
-    )
-
-    def __setattr__(self, name: str, value: object) -> None:
-        try:
-            sealed = object.__getattribute__(self, "_authority_fields_sealed")
-        except AttributeError:
-            sealed = False
-        if sealed and name in type(self)._AUTHORITY_FIELDS:
+        }:
             raise ContinuousSessionError(
                 f"continuous session authority field {name} is immutable after construction"
             )

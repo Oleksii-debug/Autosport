@@ -1134,6 +1134,122 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             controller.close()
             stale.close()
 
+    def test_pause_race_during_failed_observation_suppresses_provider_gap_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            controller = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            calls = {"count": 0}
+
+            def fail_after_pause(_updates):
+                calls["count"] += 1
+                controller.pause()
+                raise ProviderUnavailableError("provider unavailable")
+
+            stale = self._loop(
+                workspace,
+                observer=fail_after_pause,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+
+            result = stale.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.PAUSED)
+            self.assertEqual(calls["count"], 1)
+            self.assertTrue(stale.paused)
+            self.assertFalse(stale.progress_path.exists())
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            controller.close()
+            stale.close()
+
+    def test_registry_change_during_failed_observation_blocks_provider_gap_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            controller = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            calls = {"count": 0}
+
+            def fail_after_registry_change(_updates):
+                calls["count"] += 1
+                controller.register_input(
+                    "peer-input",
+                    selection_ids="selection-peer",
+                )
+                raise ProviderUnavailableError("provider unavailable")
+
+            stale = self._loop(
+                workspace,
+                observer=fail_after_registry_change,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "dependency registry changed concurrently before cycle",
+            ):
+                stale.run_cycle()
+
+            self.assertEqual(calls["count"], 1)
+            self.assertFalse(stale.progress_path.exists())
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertEqual(controller.dependencies.input_ids, ("peer-input",))
+            controller.close()
+            stale.close()
+
+    def test_progress_change_during_failed_observation_blocks_provider_gap_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            controller = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            calls = {"count": 0}
+
+            def fail_after_pending(_updates):
+                calls["count"] += 1
+                controller._write_pending(
+                    decision_ts=self.START.isoformat(),
+                    market_state_sha256="c" * 64,
+                    affected_input_ids=(),
+                    gate="normal",
+                )
+                raise ProviderUnavailableError("provider unavailable")
+
+            stale = self._loop(
+                workspace,
+                observer=fail_after_pending,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "progress changed concurrently before cycle",
+            ):
+                stale.run_cycle()
+
+            self.assertEqual(calls["count"], 1)
+            self.assertTrue(stale.progress_path.exists())
+            self.assertEqual(
+                json.loads(stale.progress_path.read_text(encoding="utf-8"))["phase"],
+                "pending",
+            )
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            controller.close()
+            stale.close()
+
     def test_stop_during_catalog_refresh_blocks_market_provider_poll(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

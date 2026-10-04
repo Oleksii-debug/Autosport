@@ -1363,54 +1363,63 @@ class SQLiteMarketStore:
                     )
 
                 # Re-read and independently prove the exact durable state after
-                # issuance/recovery. A caller-inserted row with no machine-state
-                # ancestry fails here even when its SQLite shape is individually valid.
-                self._validate_causal_replay_state()
-                cutoff_rows = self._validated_replay_cutoff_rows()
-                observed_state_sha256 = (
-                    self._replay_cutoff_authority_state_sha256(cutoff_rows)
-                )
-                self._recover_replay_cutoff_authority(
-                    authority,
-                    observed_state_sha256,
-                )
-                current_row = next(
-                    (
-                        (stored_as_of, max_generation)
-                        for stored_cutoff_id, stored_as_of, max_generation in cutoff_rows
-                        if stored_cutoff_id == cutoff_id
-                    ),
-                    None,
-                )
-                if current_row is None:
-                    raise RuntimeError("causal replay cutoff issuance disappeared")
+                # issuance/recovery, then consume rows from that same SQLite read
+                # snapshot. In WAL mode this deferred transaction does not take the
+                # writer lock, but it prevents a second connection from changing a
+                # previously verified frozen corpus between binding verification and
+                # the SELECT whose rows escape to replay consumers.
+                self.connection.execute("BEGIN")
+                try:
+                    self._validate_causal_replay_state()
+                    cutoff_rows = self._validated_replay_cutoff_rows()
+                    observed_state_sha256 = (
+                        self._replay_cutoff_authority_state_sha256(cutoff_rows)
+                    )
+                    self._recover_replay_cutoff_authority(
+                        authority,
+                        observed_state_sha256,
+                    )
+                    current_row = next(
+                        (
+                            (stored_as_of, max_generation)
+                            for stored_cutoff_id, stored_as_of, max_generation in cutoff_rows
+                            if stored_cutoff_id == cutoff_id
+                        ),
+                        None,
+                    )
+                    if current_row is None:
+                        raise RuntimeError("causal replay cutoff issuance disappeared")
 
-                stored_as_of, max_generation = current_row
-                if stored_as_of != canonical_as_of:
-                    raise ValueError("causal replay cutoff authority is invalid")
-                corpus_sha256 = self._frozen_replay_corpus_sha256(max_generation)
-                expected_binding_sha256 = _replay_cutoff_binding_sha256(
-                    cutoff_id=cutoff_id,
-                    canonical_as_of=canonical_as_of,
-                    max_append_generation=max_generation,
-                    corpus_sha256=corpus_sha256,
-                )
-                self._require_independent_cutoff_issuance(
-                    authority,
-                    expected_binding_sha256=expected_binding_sha256,
-                )
+                    stored_as_of, max_generation = current_row
+                    if stored_as_of != canonical_as_of:
+                        raise ValueError("causal replay cutoff authority is invalid")
+                    corpus_sha256 = self._frozen_replay_corpus_sha256(max_generation)
+                    expected_binding_sha256 = _replay_cutoff_binding_sha256(
+                        cutoff_id=cutoff_id,
+                        canonical_as_of=canonical_as_of,
+                        max_append_generation=max_generation,
+                        corpus_sha256=corpus_sha256,
+                    )
+                    self._require_independent_cutoff_issuance(
+                        authority,
+                        expected_binding_sha256=expected_binding_sha256,
+                    )
 
-                qualified_columns = ",".join(
-                    f"m.{column}" for column in _HISTORY_COLUMNS
-                )
-                rows = self.connection.execute(
-                    f"""SELECT {qualified_columns}
-                        FROM market_events AS m
-                        JOIN market_event_commit_order AS c
-                          ON c.dedupe_key = m.dedupe_key
-                        WHERE c.append_generation <= ?""",
-                    (max_generation,),
-                ).fetchall()
+                    qualified_columns = ",".join(
+                        f"m.{column}" for column in _HISTORY_COLUMNS
+                    )
+                    rows = self.connection.execute(
+                        f"""SELECT {qualified_columns}
+                            FROM market_events AS m
+                            JOIN market_event_commit_order AS c
+                              ON c.dedupe_key = m.dedupe_key
+                            WHERE c.append_generation <= ?""",
+                        (max_generation,),
+                    ).fetchall()
+                    self.connection.commit()
+                except Exception:
+                    self.connection.rollback()
+                    raise
 
         events = [_event_from_history_row(row) for row in rows]
         return sorted(events, key=_event_order_key)

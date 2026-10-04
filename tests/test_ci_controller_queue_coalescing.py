@@ -2903,6 +2903,99 @@ def test_zero_association_commit_coordinate_ignores_rebound_sha_helper(
     ]
 
 
+def test_canonical_branch_head_rejects_quote_default_rebase(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    encoder = scoped_controller.quote
+    defaults = encoder.__defaults__
+    assert defaults is not None and defaults
+    invoked = {"value": False}
+    canonical_request = scoped_controller.GitHubApi._request
+
+    def forbidden_urlopen(*_args, **_kwargs):
+        invoked["value"] = True
+        raise AssertionError("rebased branch encoder must not reach transport")
+
+    monkeypatch.setattr(
+        encoder,
+        "__defaults__",
+        defaults[:-1] + ("ignore",),
+    )
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        forbidden_urlopen,
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="invalid canonical head branch",
+    ):
+        api._canonical_branch_head("feature/original")
+    assert not invoked["value"]
+
+
+def test_canonical_branch_head_rejects_quote_default_rebase_during_read(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    encoder = scoped_controller.quote
+    defaults = encoder.__defaults__
+    assert defaults is not None and defaults
+    canonical_request = scoped_controller.GitHubApi._request
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'{"object":{"sha":"'
+                + STALE_HEAD.encode("ascii")
+                + b'"}}'
+            )
+
+    def mutating_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        assert request.full_url.endswith(
+            "/git/ref/heads/feature%2Foriginal"
+        )
+        monkeypatch.setattr(
+            encoder,
+            "__defaults__",
+            defaults[:-1] + ("ignore",),
+        )
+        return FakeResponse()
+
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        mutating_urlopen,
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="canonical branch request dispatch changed",
+    ):
+        api._canonical_branch_head("feature/original")
+
+
 def test_canonical_branch_head_ignores_rebound_sha_and_quote_helpers(
     monkeypatch,
 ) -> None:

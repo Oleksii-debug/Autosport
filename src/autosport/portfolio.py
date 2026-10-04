@@ -34,8 +34,21 @@ _PORTFOLIO_DECIMAL_CONTEXT = Context(
 )
 
 
-def _require_finite_decimal(value: object, label: str) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
+def _canonical_decimal(
+    value: object,
+    *,
+    _decimal_type: type[Decimal] = Decimal,
+) -> Decimal:
+    return _decimal_type(value)
+
+
+def _require_finite_decimal(
+    value: object,
+    label: str,
+    *,
+    _decimal_type: type[Decimal] = Decimal,
+) -> Decimal:
+    if type(value) is not _decimal_type or not value.is_finite():
         raise ValueError(f"{label} must be a finite Decimal")
     return value
 
@@ -46,30 +59,113 @@ def _portfolio_arithmetic_error(exc: DecimalException) -> ValueError:
     )
 
 
+def _is_open_ticket_status(
+    value: object,
+    *,
+    _status_type: type[TicketStatus] = TicketStatus,
+    _open_status: TicketStatus = TicketStatus.OPEN,
+) -> bool:
+    if type(value) is not _status_type:
+        raise ValueError("portfolio ticket status must be exact TicketStatus")
+    return value is _open_status
+
+
+_AnalysisLegFingerprint = tuple[
+    str,
+    str,
+    str,
+    Decimal,
+    str | None,
+    str | None,
+]
+
+
+def _analysis_leg_fingerprint(
+    leg: TicketLeg,
+    *,
+    _ticket_leg_type: type[TicketLeg] = TicketLeg,
+) -> _AnalysisLegFingerprint:
+    """Detach the exact nested leg fields consumed by portfolio economics."""
+
+    if type(leg) is not _ticket_leg_type:
+        raise ValueError("portfolio ticket leg must be exact TicketLeg")
+    return (
+        leg.event_id,
+        leg.market_id,
+        leg.selection_id,
+        leg.locked_odds,
+        leg.sport,
+        leg.exchange_side,
+    )
+
+
 def _analysis_ticket_fingerprint(
     ticket: PaperTicket,
+    *,
+    _paper_ticket_type: type[PaperTicket] = PaperTicket,
+    _leg_fingerprint=_analysis_leg_fingerprint,
 ) -> tuple[
     str,
     Decimal,
-    tuple[TicketLeg, ...],
+    tuple[_AnalysisLegFingerprint, ...],
     str,
     TicketStatus,
+    Decimal,
+    str | None,
     tuple[str, ...],
 ]:
-    """Return exactly the mutable ticket fields consumed by scenario analysis."""
+    """Return detached mutable ticket fields consumed by scenario analysis."""
 
+    if type(ticket) is not _paper_ticket_type:
+        raise ValueError("portfolio ticket must be exact PaperTicket")
+    legs = ticket.legs
+    if type(legs) is not tuple:
+        raise ValueError("portfolio ticket legs must be an exact tuple")
     return (
         ticket.ticket_id,
         ticket.stake,
-        ticket.legs,
+        tuple(_leg_fingerprint(leg) for leg in legs),
         ticket.placed_at,
         ticket.status,
+        ticket.payout,
+        ticket.settled_at,
         ticket.provider_source_ids,
     )
 
 
+def _validate_open_ticket_economics_for_analysis(
+    ticket_id: object,
+    stake: object,
+    legs: object,
+    *,
+    _validate_ticket_leg=PaperBook._validate_ticket_leg,
+) -> None:
+    amount = _require_finite_decimal(
+        stake,
+        f"portfolio ticket {ticket_id} stake",
+    )
+    if amount <= 0:
+        raise ValueError(f"portfolio ticket {ticket_id} stake must be positive")
+    if type(legs) is not tuple or not legs:
+        raise ValueError(
+            f"portfolio ticket {ticket_id} requires at least one canonical leg"
+        )
+    for leg in legs:
+        _validate_ticket_leg(leg, ticket_id=ticket_id)
+    quote_keys = tuple(leg.quote_key for leg in legs)
+    if len(quote_keys) != len(set(quote_keys)):
+        raise ValueError(
+            f"portfolio ticket {ticket_id} contains duplicate quote_key leg"
+        )
+
+
 def _snapshot_open_tickets_for_analysis(
     tickets: list[PaperTicket],
+    *,
+    _paper_ticket_type: type[PaperTicket] = PaperTicket,
+    _ticket_leg_type: type[TicketLeg] = TicketLeg,
+    _open_status: TicketStatus = TicketStatus.OPEN,
+    _validate_placed_at=PaperBook._validate_placed_at,
 ) -> list[PaperTicket]:
     """Detach one causally coherent cut of mutable ticket economics.
 
@@ -83,6 +179,7 @@ def _snapshot_open_tickets_for_analysis(
     source_tickets = tuple(tickets)
     captured: list[tuple[object, ...]] = []
     snapshots: list[PaperTicket] = []
+    seen_ticket_ids: set[str] = set()
 
     for ticket in source_tickets:
         fingerprint = _analysis_ticket_fingerprint(ticket)
@@ -90,20 +187,63 @@ def _snapshot_open_tickets_for_analysis(
         (
             ticket_id,
             stake,
-            legs,
+            leg_fingerprints,
             placed_at,
             status,
+            payout,
+            settled_at,
             provider_source_ids,
         ) = fingerprint
-        if status is not TicketStatus.OPEN:
+        if type(ticket_id) is not str or not ticket_id or ticket_id != ticket_id.strip():
+            raise ValueError("portfolio ticket_id must be canonical non-empty text")
+        if ticket_id in seen_ticket_ids:
+            raise ValueError("portfolio ticket_id values must be unique")
+        seen_ticket_ids.add(ticket_id)
+        if not _is_open_ticket_status(status):
             continue
+        open_payout = _require_finite_decimal(
+            payout,
+            f"portfolio ticket {ticket_id} payout",
+        )
+        if open_payout != 0:
+            raise ValueError(
+                f"portfolio open ticket {ticket_id} payout must be zero"
+            )
+        if settled_at is not None:
+            raise ValueError(
+                f"portfolio open ticket {ticket_id} cannot have settled_at"
+            )
+        _validate_placed_at(placed_at, snapshot=True)
+        detached_legs = tuple(
+            _ticket_leg_type(
+                event_id,
+                market_id,
+                selection_id,
+                locked_odds,
+                sport=sport,
+                exchange_side=exchange_side,
+            )
+            for (
+                event_id,
+                market_id,
+                selection_id,
+                locked_odds,
+                sport,
+                exchange_side,
+            ) in leg_fingerprints
+        )
+        _validate_open_ticket_economics_for_analysis(
+            ticket_id,
+            stake,
+            detached_legs,
+        )
         snapshots.append(
-            PaperTicket(
+            _paper_ticket_type(
                 ticket_id=ticket_id,
                 stake=stake,
-                legs=tuple(legs),
+                legs=detached_legs,
                 placed_at=placed_at,
-                status=TicketStatus.OPEN,
+                status=_open_status,
                 provider_source_ids=tuple(provider_source_ids),
             )
         )
@@ -125,21 +265,46 @@ def _snapshot_open_tickets_for_analysis(
     return snapshots
 
 
+def _normalize_resolution_keys_for_analysis(
+    values: object,
+    label: str,
+    *,
+    _normalizer=PaperBook._normalize_resolution_keys,
+) -> set[str]:
+    return _normalizer(values, label)
+
+
+def _settlement_result_for_analysis(
+    ticket: PaperTicket,
+    balance: Decimal,
+    winning_quote_keys: set[str],
+    void_quote_keys: set[str],
+    *,
+    _settlement_result=PaperBook._settlement_result,
+) -> tuple[TicketStatus, Decimal, Decimal]:
+    return _settlement_result(
+        ticket,
+        balance,
+        winning_quote_keys,
+        void_quote_keys,
+    )
+
+
 def _scenario_profit_in_context(
     tickets: list[PaperTicket],
     winning_quote_keys: set[str],
 ) -> Decimal:
     """Calculate one scenario while the canonical local context is active."""
 
-    total = Decimal("0")
+    total = _canonical_decimal("0")
     for ticket in tickets:
-        if ticket.status is not TicketStatus.OPEN:
+        if not _is_open_ticket_status(ticket.status):
             continue
         stake = _require_finite_decimal(
             ticket.stake,
             f"portfolio ticket {ticket.ticket_id} stake",
         )
-        combined_odds = Decimal("1")
+        combined_odds = _canonical_decimal("1")
         for leg in ticket.legs:
             odds = _require_finite_decimal(
                 leg.locked_odds,
@@ -192,13 +357,29 @@ class PortfolioEngine:
 
     @staticmethod
     def affected_tickets(tickets: list[PaperTicket], quote_key: str) -> list[str]:
-        return [ticket.ticket_id for ticket in tickets if ticket.status is TicketStatus.OPEN and any(leg.quote_key == quote_key for leg in ticket.legs)]
+        if (
+            type(quote_key) is not str
+            or not quote_key
+            or quote_key != quote_key.strip()
+        ):
+            raise ValueError("quote_key must be canonical non-empty text")
+        ticket_snapshot = _snapshot_open_tickets_for_analysis(tickets)
+        return [
+            ticket.ticket_id
+            for ticket in ticket_snapshot
+            if any(leg.quote_key == quote_key for leg in ticket.legs)
+        ]
 
     @staticmethod
     def scenario_profit(tickets: list[PaperTicket], winning_quote_keys: set[str]) -> Decimal:
+        winning_snapshot = _normalize_resolution_keys_for_analysis(
+            winning_quote_keys,
+            "winning_quote_keys",
+        )
+        ticket_snapshot = _snapshot_open_tickets_for_analysis(tickets)
         try:
             with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
-                return _scenario_profit_in_context(tickets, winning_quote_keys)
+                return _scenario_profit_in_context(ticket_snapshot, winning_snapshot)
         except DecimalException as exc:
             raise _portfolio_arithmetic_error(exc) from exc
 
@@ -235,9 +416,9 @@ class PortfolioEngine:
 
         try:
             with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
-                total = Decimal("0")
+                total = _canonical_decimal("0")
                 for ticket in ticket_snapshot:
-                    if ticket.status is not TicketStatus.OPEN:
+                    if not _is_open_ticket_status(ticket.status):
                         continue
                     stake = _require_finite_decimal(
                         ticket.stake,
@@ -259,9 +440,9 @@ class PortfolioEngine:
                         for quote_key in leg_keys
                         if snapshot[quote_key] == "void"
                     }
-                    _status, payout, _balance = PaperBook._settlement_result(
+                    _status, payout, _balance = _settlement_result_for_analysis(
                         ticket,
-                        Decimal("0"),
+                        _canonical_decimal("0"),
                         winners,
                         voids,
                     )
@@ -294,7 +475,7 @@ class PortfolioEngine:
         if not grouped.issubset(all_keys):
             raise ValueError("exclusive group contains quote not present in portfolio")
         if not open_tickets:
-            zero = Decimal("0")
+            zero = _canonical_decimal("0")
             return PortfolioReport("exact", 1, zero, zero, zero)
         ungrouped = sorted(all_keys - grouped)
         state_count = 2 ** len(ungrouped)
@@ -311,7 +492,7 @@ class PortfolioEngine:
                 else:
                     profits = list(self._sample_profits(open_tickets, groups, ungrouped))
                     mode = "conservative-approximate" if groups else "approximate"
-                mean_case = sum(profits, Decimal("0")) / Decimal(len(profits))
+                mean_case = sum(profits, _canonical_decimal("0")) / _canonical_decimal(len(profits))
                 if not mean_case.is_finite():
                     raise ValueError("portfolio mean scenario profit must be finite")
         except DecimalException as exc:

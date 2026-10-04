@@ -474,5 +474,98 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
             self.assertEqual(report.best_case, Decimal("10"))
 
 
+    def test_nested_leg_odds_are_detached_before_direct_scenario_evaluation(self) -> None:
+        _book, ticket, leg = self._open_ticket()
+        original_profit = portfolio_module._scenario_profit_in_context
+
+        def mutate_source_leg_then_calculate(tickets, winning_quote_keys):
+            object.__setattr__(leg, "locked_odds", Decimal("100"))
+            return original_profit(tickets, winning_quote_keys)
+
+        with patch(
+            "autosport.portfolio._scenario_profit_in_context",
+            side_effect=mutate_source_leg_then_calculate,
+        ):
+            profit = PortfolioEngine.scenario_profit([ticket], {leg.quote_key})
+
+        self.assertEqual(leg.locked_odds, Decimal("100"))
+        self.assertEqual(
+            profit,
+            Decimal("10"),
+            "nested TicketLeg odds must be detached from the mutable source graph",
+        )
+
+    def test_nested_leg_quote_identity_is_detached_before_direct_evaluation(self) -> None:
+        _book, ticket, leg = self._open_ticket()
+        winning_quote_key = leg.quote_key
+        original_profit = portfolio_module._scenario_profit_in_context
+
+        def mutate_source_leg_then_calculate(tickets, winning_quote_keys):
+            object.__setattr__(leg, "event_id", "event-mutated-after-snapshot")
+            return original_profit(tickets, winning_quote_keys)
+
+        with patch(
+            "autosport.portfolio._scenario_profit_in_context",
+            side_effect=mutate_source_leg_then_calculate,
+        ):
+            profit = PortfolioEngine.scenario_profit([ticket], {winning_quote_key})
+
+        self.assertNotEqual(leg.quote_key, winning_quote_key)
+        self.assertEqual(
+            profit,
+            Decimal("10"),
+            "nested quote identity must be frozen before scenario evaluation",
+        )
+
+    def test_nested_leg_mutation_crossing_capture_window_fails_closed(self) -> None:
+        _book, ticket, leg = self._open_ticket()
+        original_validate = (
+            portfolio_module._validate_open_ticket_economics_for_analysis
+        )
+        mutated = False
+
+        def validate_then_mutate_source_leg(ticket_id, stake, legs):
+            nonlocal mutated
+            original_validate(ticket_id, stake, legs)
+            if not mutated:
+                mutated = True
+                object.__setattr__(leg, "locked_odds", Decimal("3"))
+
+        with patch(
+            "autosport.portfolio._validate_open_ticket_economics_for_analysis",
+            side_effect=validate_then_mutate_source_leg,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "portfolio ticket changed during snapshot",
+            ):
+                PortfolioEngine.scenario_profit([ticket], {leg.quote_key})
+
+        self.assertEqual(leg.locked_odds, Decimal("3"))
+
+    def test_ticket_leg_global_rebind_cannot_redirect_nested_snapshot_root(self) -> None:
+        _book, ticket, leg = self._open_ticket()
+
+        class PoisonTicketLeg:
+            def __new__(cls, *args, **kwargs):
+                raise AssertionError("rebound TicketLeg constructor executed")
+
+        with patch.object(portfolio_module, "TicketLeg", PoisonTicketLeg):
+            self.assertEqual(
+                PortfolioEngine.scenario_profit([ticket], {leg.quote_key}),
+                Decimal("10"),
+            )
+            self.assertEqual(
+                PortfolioEngine.scenario_profit_settlements(
+                    [ticket],
+                    {leg.quote_key: "win"},
+                ),
+                Decimal("10"),
+            )
+            report = PortfolioEngine().analyse([ticket])
+            self.assertEqual(report.worst_case, Decimal("-10"))
+            self.assertEqual(report.best_case, Decimal("10"))
+
+
 if __name__ == "__main__":
     unittest.main()

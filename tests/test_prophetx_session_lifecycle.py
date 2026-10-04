@@ -2531,6 +2531,31 @@ def test_renewal_dispatch_rebases_crash_uncertainty_horizon(tmp_path):
     assert blocked.retry_at == dispatched.slot_hold_until
 
 
+def test_expired_login_reservation_cannot_consume_stale_effect_authority(
+    tmp_path,
+):
+    lifecycle = _lifecycle(tmp_path)
+    issued = lifecycle.begin_login(now=NOW, access_token_available=False)
+
+    assert lifecycle.consume_effect_authority(
+        issued,
+        now=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
+    ) is False
+    unchanged = lifecycle.read_snapshot()
+    assert unchanged == issued.snapshot
+
+    renewed = lifecycle.begin_login(
+        now=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
+        access_token_available=False,
+    )
+    assert renewed.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+    assert renewed.attempt_id != issued.attempt_id
+    assert lifecycle.consume_effect_authority(
+        issued,
+        now=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
+    ) is False
+
+
 def test_expired_renewal_cannot_consume_stale_effect_authority(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)

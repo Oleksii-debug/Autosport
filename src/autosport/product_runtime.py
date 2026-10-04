@@ -2210,6 +2210,11 @@ def _build_autonomous_product_runtime_impl(
     _paper_book_type,
     _runtime_type,
     _runtime_lease_type,
+    _runtime_lease_init,
+    _runtime_lease_acquire,
+    _runtime_lease_release,
+    _runtime_lease_bind_operation_fence,
+    _runtime_lease_authority_active_getter,
     _source_resolver_identity_fn,
     _settlement_authority_identity_fn,
     _settlement_learning_handoff_identity_fn,
@@ -2262,8 +2267,10 @@ def _build_autonomous_product_runtime_impl(
     resolved_clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
 
     lease_stack = ExitStack()
+    raw_runtime_lease = object.__new__(_runtime_lease_type)
     try:
-        runtime_lease = lease_stack.enter_context(_runtime_lease_type(root))
+        _runtime_lease_init(raw_runtime_lease, root)
+        _runtime_lease_acquire(raw_runtime_lease)
     except WorkspaceEconomicLockBusyError as exc:
         raise ProductCompositionError(
             "another Autosport product runtime already owns this workspace"
@@ -2272,6 +2279,7 @@ def _build_autonomous_product_runtime_impl(
         raise ProductCompositionError(
             "cannot establish exclusive product runtime workspace authority"
         ) from exc
+    lease_stack.callback(_runtime_lease_release, raw_runtime_lease)
 
     with lease_stack:
         source_resolver_identity = _source_resolver_identity_fn(
@@ -3088,6 +3096,31 @@ def _build_autonomous_product_runtime_impl(
         )
         product_start_transition_store = ProductStartTransitionStoreProxy()
 
+        def product_runtime_lease_release(_proxy):
+            return _runtime_lease_release(raw_runtime_lease)
+
+        def product_runtime_lease_bind_operation_fence(_proxy, operation_fence):
+            return _runtime_lease_bind_operation_fence(
+                raw_runtime_lease,
+                operation_fence,
+            )
+
+        def product_runtime_lease_authority_active():
+            return _runtime_lease_authority_active_getter(raw_runtime_lease)
+
+        ProductRuntimeLeaseProxy = build_sealed_product_proxy_type(
+            "ProductRuntimeLeaseProxy",
+            methods={
+                "release": product_runtime_lease_release,
+                "bind_operation_fence": product_runtime_lease_bind_operation_fence,
+            },
+            properties={
+                "authority_active": product_runtime_lease_authority_active,
+            },
+            authority_label="runtime lease",
+        )
+        product_runtime_lease = ProductRuntimeLeaseProxy()
+
         runtime = _runtime_type(
             workspace=root,
             manifest=manifest,
@@ -3098,10 +3131,10 @@ def _build_autonomous_product_runtime_impl(
             mirror=mirror,
             invalidations=invalidations,
             dependencies=dependencies,
-            _runtime_lease=runtime_lease,
+            _runtime_lease=product_runtime_lease,
             _start_transition_store=product_start_transition_store,
         )
-        runtime_lease.bind_operation_fence(runtime._operation_fence)
+        product_runtime_lease.bind_operation_fence(runtime._operation_fence)
         runtime._recover_interrupted_start()
         lease_stack.pop_all()
         return runtime
@@ -3118,6 +3151,11 @@ def _bind_autonomous_product_runtime_builder(
     paper_book_type,
     runtime_type,
     runtime_lease_type,
+    runtime_lease_init,
+    runtime_lease_acquire,
+    runtime_lease_release,
+    runtime_lease_bind_operation_fence,
+    runtime_lease_authority_active_getter,
     source_resolver_identity_fn,
     settlement_authority_identity_fn,
     settlement_learning_handoff_identity_fn,
@@ -3173,6 +3211,11 @@ def _bind_autonomous_product_runtime_builder(
             _paper_book_type=paper_book_type,
             _runtime_type=runtime_type,
             _runtime_lease_type=runtime_lease_type,
+            _runtime_lease_init=runtime_lease_init,
+            _runtime_lease_acquire=runtime_lease_acquire,
+            _runtime_lease_release=runtime_lease_release,
+            _runtime_lease_bind_operation_fence=runtime_lease_bind_operation_fence,
+            _runtime_lease_authority_active_getter=runtime_lease_authority_active_getter,
             _source_resolver_identity_fn=source_resolver_identity_fn,
             _settlement_authority_identity_fn=settlement_authority_identity_fn,
             _settlement_learning_handoff_identity_fn=settlement_learning_handoff_identity_fn,
@@ -3215,6 +3258,11 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     PaperBook,
     _ProductAutonomousProductRuntime,
     _ProductRuntimeLease,
+    _ProductRuntimeLease.__init__,
+    _ProductRuntimeLease.acquire,
+    _ProductRuntimeLease.release,
+    _ProductRuntimeLease.bind_operation_fence,
+    _ProductRuntimeLease.authority_active.fget,
     _source_resolver_identity,
     _settlement_authority_identity,
     _settlement_learning_handoff_identity,

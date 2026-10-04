@@ -21,7 +21,12 @@ from autosport.betfair_supervised_execution import (
     PlaceOrdersOutcome,
     execute_betfair_supervised_action,
 )
-from autosport.real_execution_ledger import AttemptState
+from autosport.real_execution_ledger import (
+    AttemptState,
+    ExecutionLedgerBusyError,
+    RealExecutionLedger,
+)
+from autosport.supervised_execution import SupervisedExecutionError
 from autosport.supervised_confirmation import (
     SupervisedConfirmationAuthority,
     SupervisedConfirmationConflictError,
@@ -763,3 +768,171 @@ def test_final_send_review_payload_preserves_review_schema_domain() -> None:
         assert spec.review_payload["schema_version"] == 1
         assert spec.review_payload["decision_id"] == spec.decision_id
         assert spec.review_payload["decision_sha256"] == spec.decision_sha256
+
+
+
+def test_durable_approval_revoked_after_reservation_denies_before_submit_and_confirmation(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-final-durable-approval-revoked"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        authority, review, receipt = _confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        competing = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        transport = _accepted_transport(action)
+        client = _enabled_client(profile, transport, store=goal_store)
+        original_bind = ledger.bind_provider_order_reference
+
+        def bind_then_revoke(*args, **kwargs):
+            provider_ref = original_bind(*args, **kwargs)
+            competing.revoke_supervised_approval(
+                plan_id=bound.execution_plan.plan_id,
+                approval_id=approval.ledger_identity,
+                approval_fingerprint=approval.fingerprint,
+                revoked_at=SUBMITTED_AT,
+                revocation_evidence_sha256="d" * 64,
+            )
+            return provider_ref
+
+        monkeypatch.setattr(
+            ledger,
+            "bind_provider_order_reference",
+            bind_then_revoke,
+        )
+
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="durable supervised approval is missing or revoked",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
+        assert _audit_receipt(authority, review, receipt).receipt.consumed_at is None
+
+
+def test_durable_approval_revocation_is_fenced_through_confirmed_provider_send() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-final-durable-approval-race"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        authority, review, receipt = _confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        competing = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        revocation_was_fenced = False
+
+        def respond_while_revocation_attempts_to_commit(request):
+            nonlocal revocation_was_fenced
+            with pytest.raises(ExecutionLedgerBusyError):
+                competing.revoke_supervised_approval(
+                    plan_id=bound.execution_plan.plan_id,
+                    approval_id=approval.ledger_identity,
+                    approval_fingerprint=approval.fingerprint,
+                    revoked_at=SUBMITTED_AT,
+                    revocation_evidence_sha256="e" * 64,
+                )
+            revocation_was_fenced = True
+            return _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+                bet_id="bet-final-durable-approval-race",
+                order_status="EXECUTION_COMPLETE",
+            )
+
+        transport = _Transport(respond_while_revocation_attempts_to_commit)
+        client = _enabled_client(profile, transport, store=goal_store)
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            confirmation_receipt_id=receipt.receipt_id,
+            confirmation_review_sha256=review.review_sha256,
+        )
+
+        assert revocation_was_fenced
+        assert len(transport.calls) == 1
+        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
+        assert result.attempt_state is AttemptState.ACCEPTED
+        consumed = _audit_receipt(authority, review, receipt).receipt
+        assert consumed.consumed_at is not None
+
+        competing.revoke_supervised_approval(
+            plan_id=bound.execution_plan.plan_id,
+            approval_id=approval.ledger_identity,
+            approval_fingerprint=approval.fingerprint,
+            revoked_at=SUBMITTED_AT,
+            revocation_evidence_sha256="e" * 64,
+        )
+        assert not ledger.supervised_approval_is_active(
+            plan_id=bound.execution_plan.plan_id,
+            approval_id=approval.ledger_identity,
+            approval_fingerprint=approval.fingerprint,
+        )
+
+
+def test_final_approval_authority_rebinding_fails_before_submit_or_confirmation(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-final-approval-authority-rebound"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        authority, review, receipt = _confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _accepted_transport(action)
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        monkeypatch.setattr(
+            provider_tests.betfair_execution._supervised_execution_runtime,
+            "_require_durable_approval",
+            lambda *_args, **_kwargs: None,
+        )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="final supervised approval authority changed",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
+        assert _audit_receipt(authority, review, receipt).receipt.consumed_at is None

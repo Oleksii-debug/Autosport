@@ -570,7 +570,35 @@ def _utc(value: datetime, field: str) -> datetime:
 
 
 def _nonnegative_decimal(value: Decimal, field: str) -> Decimal:
-    if type(value) is not Decimal or not value.is_finite() or value < 0:
+    """Validate the actual C Decimal type without a mutable module trust root."""
+
+    runtime_type = (1).__class__.__class__
+    method_descriptor_type = runtime_type(
+        runtime_type.__getattribute__(
+            "".__class__,
+            "__dict__",
+        )["upper"]
+    )
+    decimal_type = runtime_type(value)
+    try:
+        decimal_namespace = runtime_type.__getattribute__(
+            decimal_type,
+            "__dict__",
+        )
+        as_tuple_descriptor = decimal_namespace.get("as_tuple")
+        is_finite_descriptor = decimal_namespace.get("is_finite")
+        exact_decimal = bool(
+            runtime_type.__getattribute__(decimal_type, "__module__") == "decimal"
+            and runtime_type.__getattribute__(decimal_type, "__qualname__")
+            == "Decimal"
+            and runtime_type(as_tuple_descriptor) is method_descriptor_type
+            and runtime_type(is_finite_descriptor) is method_descriptor_type
+            and as_tuple_descriptor.__objclass__ is decimal_type
+            and is_finite_descriptor.__objclass__ is decimal_type
+        )
+    except (AttributeError, TypeError):
+        exact_decimal = False
+    if not exact_decimal or not value.is_finite() or value < 0:
         raise BetfairAccountFundsPrecheckError(
             f"{field} must be a finite non-negative Decimal"
         )

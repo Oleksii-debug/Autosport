@@ -1679,6 +1679,30 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
         self.assertFalse(forged.grants_ticket_authority)
         self.assertFalse(forged.grants_real_money_authority)
 
+    def test_mapping_resolver_closure_binder_mutation_is_rejected(self) -> None:
+        resolver = (
+            terminal_mapping_authority
+            .resolve_product_proposal_risk_terminal_state_mapping
+        )
+        closure = resolver.__closure__
+        self.assertIsNotNone(closure)
+        self.assertEqual(len(closure), 1)
+        cell = closure[0]
+        original = cell.cell_contents
+
+        def forged_bind(_instance):
+            return None
+
+        try:
+            cell.cell_contents = forged_bind
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "public resolver root changed",
+            ):
+                self._binding(("winner:other-a", "winner:selection-b"))
+        finally:
+            cell.cell_contents = original
+
     def test_protocol_constant_rebind_is_rejected(self) -> None:
         original = terminal_mapping_authority._MAPPING_SCHEMA
         try:

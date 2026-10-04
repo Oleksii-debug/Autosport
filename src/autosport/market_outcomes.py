@@ -239,8 +239,8 @@ class MarketSettlementOutcomeAuthority:
             raise TypeError(
                 "MarketSettlementOutcomeAuthority must come from verified evidence"
             )
-        if not isinstance(self.identity, MarketOutcomeIdentity):
-            raise TypeError("identity must be MarketOutcomeIdentity")
+        if type(self.identity) is not MarketOutcomeIdentity:
+            raise TypeError("identity must be the exact MarketOutcomeIdentity type")
         if self.identity.market_type is not MarketType.WINNER:
             raise ValueError(
                 "authoritative terminal outcome semantics currently support winner markets only"
@@ -258,14 +258,14 @@ class MarketSettlementOutcomeAuthority:
         for selection_id in selections:
             self.identity.quote_key(selection_id)
 
-        if not isinstance(self.roster_basis, OutcomeRosterBasis):
-            raise ValueError("roster_basis must be an OutcomeRosterBasis")
+        if type(self.roster_basis) is not OutcomeRosterBasis:
+            raise ValueError("roster_basis must be the exact OutcomeRosterBasis type")
         if self.roster_basis is OutcomeRosterBasis.OBSERVED_ROWS_ONLY:
             raise ValueError(
                 "observed quote rows cannot establish exhaustive market outcome authority"
             )
-        if not isinstance(self.settlement_semantics, SettlementSemantics):
-            raise ValueError("settlement_semantics must be SettlementSemantics")
+        if type(self.settlement_semantics) is not SettlementSemantics:
+            raise ValueError("settlement_semantics must be the exact SettlementSemantics type")
 
         _canonical_text("source_revision", self.source_revision)
         _, cutoff = _canonical_timestamp("causal_cutoff", self.causal_cutoff)

@@ -1008,6 +1008,71 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             self.assertEqual(health_store.get("provider-a").status, "healthy")
 
+    def test_provider_gap_cannot_borrow_failure_from_another_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=400)).isoformat(),
+                received=0,
+                accepted=0,
+                rejected=0,
+                cursor=None,
+                latest_source_ts=None,
+                quality_flags=(),
+            )
+            health_store.record_failure(
+                "provider-b",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                error=ProviderUnavailableError("provider-b offline"),
+            )
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+
+            def ambiguous_failure(updates):
+                del updates
+                raise ProviderUnavailableError("observation unavailable")
+
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=InMemoryProvider("provider-a", []),
+                observation_runner=ambiguous_failure,
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            loop.register_input(
+                "input-b",
+                source_ids="provider-b",
+                selection_ids="selection-b",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("durable failed provider health evidence", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            self.assertEqual(health_store.get("provider-a").status, "healthy")
+            self.assertEqual(health_store.get("provider-b").status, "failed")
+
+
     def test_default_provider_health_write_failure_cannot_mint_provider_gap_decision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

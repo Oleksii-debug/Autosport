@@ -33,6 +33,17 @@ from .recovery import transaction_history_requires_recovery
 from .replay import ReplayEngine, ReplayRun
 from .research_strategy import ResearchStrategyPlan
 from .risk import PaperRiskPolicy
+from .risk_sampling_membership import ResolvedFixedNRiskMembership
+from .risk_sampling_occurrence_authority import (
+    ProductIidDrawPlanError,
+    ProductIidRunExecutionReceipt,
+    expected_replay_consumed_payload_multiset_sha256,
+    expected_replay_input_payload_sequence_sha256,
+    issue_product_iid_run_admission,
+    materialize_product_iid_member_market_events,
+    resolve_product_iid_expected_draw_plan,
+    resolve_product_iid_run_execution,
+)
 from .run_registry import MixedStrategyWorkspaceError, RunRegistry, UnresolvedExperimentError
 from .run_transaction import RunTransaction
 from .settlement import SettlementEngine
@@ -163,6 +174,12 @@ class ObservationResult:
     stats: IngestionStats
     health: SourceHealthState
     current_quotes: tuple[MarketEvent, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class IidMemberSessionResult:
+    session: SessionResult
+    execution: ProductIidRunExecutionReceipt
 
 
 class AutosportSession(metaclass=_AutosportSessionMeta):
@@ -333,6 +350,162 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
                 runtime_strategy_id=runtime_strategy_id,
             )
 
+    def run_iid_member_dataset(
+        self,
+        dataset: ReplayDataset,
+        *,
+        membership: ResolvedFixedNRiskMembership,
+        registry_path: str | Path,
+        sampling_manifest_json: str,
+        sampling_frame_json: str,
+        horizon_json: str,
+        member_index: int,
+        authority_root: str | Path | None = None,
+        speed: float = 0.0,
+    ) -> IidMemberSessionResult:
+        """Execute one fixed-N IID member from the frozen product draw plan.
+
+        This path never weakens ReplayEngine ordering or MarketMirror suppression.
+        A sampled transcript is admitted only when the exact materialized event
+        sequence is already replay-compatible; otherwise the run fails before
+        RunRegistry or economic state mutation.
+        """
+
+        with WorkspaceEconomicLock(self.workspace):
+            plan = resolve_product_iid_expected_draw_plan(
+                membership,
+                registry_path=registry_path,
+                workspace=self.workspace,
+                sampling_manifest_json=sampling_manifest_json,
+                sampling_frame_json=sampling_frame_json,
+                horizon_json=horizon_json,
+                authority_root=authority_root,
+            )
+            if type(member_index) is not int or member_index < 0:
+                raise ProductIidDrawPlanError(
+                    "member_index must be a non-negative exact integer"
+                )
+            if member_index >= len(plan.member_draws):
+                raise ProductIidDrawPlanError(
+                    "member_index is outside the expected draw plan"
+                )
+            draw = plan.member_draws[member_index]
+
+            corpus_events = dataset.load_market_events()
+            verified_sports = dataset._assert_sport_scope(corpus_events)
+            if self.research_plan is not None:
+                self.research_plan.preflight(corpus_events)
+            member_events = materialize_product_iid_member_market_events(
+                plan,
+                member_index=member_index,
+                market_events=corpus_events,
+            )
+
+            expected_sequence = expected_replay_input_payload_sequence_sha256(draw)
+            expected_multiset = expected_replay_consumed_payload_multiset_sha256(draw)
+            preflight = ReplayEngine(member_events).run(
+                lambda _event: None,
+                speed=0.0,
+                run_id=draw.member_id,
+            )
+            if (
+                preflight.event_count != draw.draw_count
+                or preflight.input_event_payload_sequence_sha256
+                != expected_sequence
+                or preflight.consumed_event_payload_sequence_sha256
+                != expected_sequence
+                or preflight.applied_event_payload_sequence_sha256
+                != expected_sequence
+                or preflight.consumed_event_payload_multiset_sha256
+                != expected_multiset
+            ):
+                raise ProductIidDrawPlanError(
+                    "IID draw is not replay-compatible without causal reordering "
+                    "or current-state suppression"
+                )
+
+            admission = issue_product_iid_run_admission(
+                membership,
+                registry_path=registry_path,
+                workspace=self.workspace,
+                sampling_manifest_json=sampling_manifest_json,
+                sampling_frame_json=sampling_frame_json,
+                horizon_json=horizon_json,
+                member_index=member_index,
+                authority_root=authority_root,
+            )
+            if (
+                admission.member_id != draw.member_id
+                or admission.member_index != member_index
+                or admission.expected_draw_plan_sha256 != plan.plan_sha256
+                or admission.expected_draw_transcript_sha256
+                != draw.draw_transcript_sha256
+                or admission.run_admission_bound is not False
+            ):
+                raise ProductIidDrawPlanError(
+                    "IID run-admission differs from the frozen member draw"
+                )
+
+            economic_goal, risk_policy = self._capture_economic_authority()
+            prior_strategy_ids = self.registry.strategy_ids()
+            if economic_goal is None and any(
+                value.startswith(self.strategy_id + "::economic:")
+                for value in prior_strategy_ids
+            ):
+                raise ValueError(
+                    "persisted EconomicGoal authority is missing for a workspace "
+                    "with economic-goal runtime history"
+                )
+            if (
+                economic_goal is not None
+                and self.strategy.strategy_id == "baseline-v1"
+            ):
+                raise ValueError(
+                    "baseline-v1 does not have proven EconomicGoal-aware sizing semantics"
+                )
+            runtime_strategy_id = self._runtime_strategy_identity(
+                economic_goal,
+                risk_policy,
+            )
+            outcome_lineage = outcome_lineage_binding_from_dataset(dataset)
+            if outcome_lineage is not None:
+                self.registry.assert_outcome_lineage_compatible(outcome_lineage)
+
+            result = self._run_dataset_locked(
+                dataset,
+                market_events=list(member_events),
+                verified_sports=verified_sports,
+                speed=speed,
+                allow_repeat=True,
+                outcome_lineage=outcome_lineage,
+                economic_goal=economic_goal,
+                risk_policy=risk_policy,
+                runtime_strategy_id=runtime_strategy_id,
+                run_id=draw.member_id,
+                sampling_draw_admission_receipt_sha256=admission.receipt_sha256,
+            )
+            execution = resolve_product_iid_run_execution(
+                membership,
+                registry_path=registry_path,
+                workspace=self.workspace,
+                sampling_manifest_json=sampling_manifest_json,
+                sampling_frame_json=sampling_frame_json,
+                horizon_json=horizon_json,
+                member_index=member_index,
+                authority_root=authority_root,
+            )
+            if (
+                type(execution) is not ProductIidRunExecutionReceipt
+                or execution.member_id != draw.member_id
+                or execution.expected_draw_plan_sha256 != plan.plan_sha256
+                or execution.execution_consumption_proven is not True
+                or execution.occurrence_ancestry_proven is not True
+            ):
+                raise ProductIidDrawPlanError(
+                    "IID member run completed without canonical execution proof"
+                )
+            return IidMemberSessionResult(result, execution)
+
     @_seal_settlement_consumer_entry
     @_bind_canonical_settlement_engine
     def _run_dataset_locked(
@@ -347,6 +520,8 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
         economic_goal: EconomicGoalContract | None = None,
         risk_policy: PaperRiskPolicy | None = None,
         runtime_strategy_id: str | None = None,
+        run_id: str | None = None,
+        sampling_draw_admission_receipt_sha256: str | None = None,
         _settlement_engine_type: type[SettlementEngine],
     ) -> SessionResult:
         if SettlementEngine is not _settlement_engine_type:
@@ -361,7 +536,7 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
         base_book_hash = sha256_file(self.book_path)
         base_ledger_hash = base_ledger_snapshot.sha256
 
-        run_id = str(uuid.uuid4())
+        run_id = run_id or str(uuid.uuid4())
         experiment_key = self.registry.begin(
             dataset.market_sha256,
             dataset.results_sha256,
@@ -371,6 +546,9 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
             base_paper_book_sha256=base_book_hash,
             base_decision_ledger_sha256=base_ledger_hash,
             outcome_lineage=outcome_lineage,
+            sampling_draw_admission_receipt_sha256=(
+                sampling_draw_admission_receipt_sha256
+            ),
         )
         try:
             transaction = RunTransaction.start(
@@ -382,6 +560,9 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
                 strategy_id=runtime_strategy_id,
                 base_paper_book_sha256=base_book_hash,
                 base_decision_ledger_sha256=base_ledger_hash,
+                sampling_draw_admission_receipt_sha256=(
+                    sampling_draw_admission_receipt_sha256
+                ),
             )
         except Exception:
             # No economic mutation occurs before the transaction object exists.

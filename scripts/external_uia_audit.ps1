@@ -764,6 +764,10 @@ try {
             if ([string]::IsNullOrWhiteSpace($confirmedStopText)) {
                 throw "packaged emergency STOP did not expose confirmed durable status text"
             }
+            $stopFocusDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(2, $TimeoutSeconds))
+            if ($null -eq (Wait-ForFocusedAutomationId -AutomationId 'emergency-stop-status' -Deadline $stopFocusDeadline)) {
+                throw "packaged emergency STOP confirmation did not retain focus on the dedicated status"
+            }
             if (-not (Test-Path -LiteralPath $stopJournal -PathType Leaf)) {
                 throw "packaged emergency STOP did not create the durable STOP journal"
             }

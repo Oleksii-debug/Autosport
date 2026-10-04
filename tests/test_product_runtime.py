@@ -90,6 +90,12 @@ class _FallbackResolverDispatchSource(_Source):
         raise AttributeError(name)
 
 
+class _MutatingCatalogSource(_Source):
+    def fetch_catalog_page(self, checkpoint):
+        self.product_source_configuration_sha256 = "2" * 64
+        return _Source.fetch_catalog_page(self, checkpoint)
+
+
 def _replacement_source_resolve_event(self, delta):
     if delta.event_id == "never":
         raise AssertionError("replacement resolver executable semantics")
@@ -987,6 +993,36 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     initial_bankroll="100",
                 )
             self.assertFalse((root / "product_composition.json").exists())
+
+    def test_catalog_evidence_is_not_published_if_source_authority_changes_in_fetch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = _MutatingCatalogSource(configuration_sha256="1" * 64)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "source resolver authority changed after product composition",
+                ):
+                    runtime.tick()
+
+                self.assertEqual(runtime.lifecycle.records(), ())
+                self.assertEqual(
+                    runtime.collector.delta_store.deltas_after_commit(
+                        source_id=source.source_id,
+                    ),
+                    (),
+                )
+            finally:
+                runtime.close()
 
     def test_tick_rejects_post_build_acquisition_rebind_before_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

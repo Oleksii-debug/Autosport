@@ -1,11 +1,15 @@
+import sqlite3
 import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.storage as storage_module
+from autosport.domain import MarketEvent
 from autosport.ingestion_health import SourceHealthStore
 from autosport.live_observation import (
     OneShotObservationWorker,
@@ -123,6 +127,121 @@ class LiveObservationTests(unittest.TestCase):
                 self.assertEqual(updates.pending_count, 2)
             finally:
                 store.close()
+
+    def test_long_lived_reconciliation_preserves_generation_zero_as_noncausal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "market.db"
+            legacy = MarketEvent(
+                event_id="legacy-event",
+                market_id="winner",
+                selection_id="legacy-selection",
+                decimal_odds=Decimal("2.20"),
+                observed_ts="2026-09-12T20:00:00+00:00",
+                ingest_ts="2026-09-12T20:00:00+00:00",
+                source_id="legacy-provider",
+                sequence=3,
+                status="open",
+                source_ts="2026-09-12T19:59:59+00:00",
+            )
+            payload = storage_module._canonical_payload(legacy)
+
+            raw = sqlite3.connect(path)
+            try:
+                raw.execute(
+                    """CREATE TABLE market_events (
+                        dedupe_key TEXT PRIMARY KEY,
+                        quote_key TEXT NOT NULL,
+                        event_id TEXT NOT NULL,
+                        market_id TEXT NOT NULL,
+                        selection_id TEXT NOT NULL,
+                        decimal_odds TEXT NOT NULL,
+                        observed_ts TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL
+                    )"""
+                )
+                raw.execute(
+                    """CREATE TABLE current_quotes (
+                        source_id TEXT NOT NULL,
+                        quote_key TEXT NOT NULL,
+                        observed_ts TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        PRIMARY KEY (source_id, quote_key)
+                    )"""
+                )
+                raw.execute(
+                    """INSERT INTO market_events
+                       (dedupe_key,quote_key,event_id,market_id,selection_id,
+                        decimal_odds,observed_ts,source_id,sequence,payload_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        legacy.dedupe_key,
+                        legacy.quote_key,
+                        legacy.event_id,
+                        legacy.market_id,
+                        legacy.selection_id,
+                        str(legacy.decimal_odds),
+                        legacy.observed_ts,
+                        legacy.source_id,
+                        legacy.sequence,
+                        payload,
+                    ),
+                )
+                raw.execute(
+                    """INSERT INTO current_quotes
+                       (source_id,quote_key,observed_ts,sequence,payload_json)
+                       VALUES (?,?,?,?,?)""",
+                    (
+                        legacy.source_id,
+                        legacy.quote_key,
+                        legacy.observed_ts,
+                        legacy.sequence,
+                        payload,
+                    ),
+                )
+                raw.commit()
+            finally:
+                raw.close()
+
+            mirror = MarketMirror()
+            updates = BoundedMirrorInvalidationBuffer(mirror)
+            result = observe_workspace_once(
+                root,
+                self._provider(),
+                max_items=10,
+                clock=lambda: _RECEIVE_TIME,
+                mirror_updates=updates,
+            )
+
+            self.assertEqual(result.stats.accepted, 2)
+            self.assertEqual(
+                tuple(
+                    event.dedupe_key
+                    for event in mirror.view(source_ids="legacy-provider").events
+                ),
+                (legacy.dedupe_key,),
+            )
+            self.assertEqual(
+                mirror.active_view(
+                    as_of=datetime.fromisoformat(_RECEIVE_TIME),
+                    max_age=timedelta(minutes=2),
+                    source_ids="legacy-provider",
+                ).events,
+                (),
+            )
+            self.assertEqual(
+                len(
+                    mirror.active_view(
+                        as_of=datetime.fromisoformat(_RECEIVE_TIME),
+                        max_age=timedelta(minutes=2),
+                        source_ids="live-fixture",
+                    ).events
+                ),
+                2,
+            )
 
     def test_worker_refuses_second_start_until_terminal_message_is_consumed(self):
         # Build the real observation result outside the worker timing window. This

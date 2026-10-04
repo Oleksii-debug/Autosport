@@ -16,7 +16,12 @@ from .portfolio import (
     _PORTFOLIO_DECIMAL_CONTEXT,
     _snapshot_open_tickets_for_analysis,
 )
-from .scenario_search import ScenarioGroup, ScenarioSearchEngine, ScenarioSearchReport
+from .scenario_search import (
+    ScenarioGroup,
+    ScenarioSearchEngine,
+    ScenarioSearchReport,
+    _scenario_conservative_bounds,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +39,7 @@ class CandidatePortfolioImpact:
     conservative_ceiling_change: Decimal
     expected_case_change: Decimal | None
     expected_change_mode: str | None
+    scenario_reports_authoritative: bool
     worst_case_change_proven: bool
     best_case_change_proven: bool
     ranking_risk_change: Decimal
@@ -43,12 +49,20 @@ class CandidatePortfolioImpact:
     @property
     def scenario_worst_case_change_proven(self) -> bool:
         """True only for exact extrema inside the supplied scenario model."""
-        return self.base_report.worst_proven and self.with_candidate_report.worst_proven
+        return (
+            self.scenario_reports_authoritative
+            and self.base_report.worst_proven
+            and self.with_candidate_report.worst_proven
+        )
 
     @property
     def scenario_best_case_change_proven(self) -> bool:
         """True only for exact extrema inside the supplied scenario model."""
-        return self.base_report.best_proven and self.with_candidate_report.best_proven
+        return (
+            self.scenario_reports_authoritative
+            and self.base_report.best_proven
+            and self.with_candidate_report.best_proven
+        )
 
     @property
     def exact_marginal_extrema(self) -> bool:
@@ -116,7 +130,17 @@ class PortfolioAwareCandidateOptimizer:
 
         quote_to_group = _quote_group_map(scenario_groups)
         open_existing = _snapshot_open_tickets_for_analysis(existing_tickets)
-        base_report = self.scenario_engine.analyse(open_existing, scenario_groups)
+        scenario_reports_authoritative = type(self.scenario_engine) is ScenarioSearchEngine
+        base_floor, base_ceiling = _scenario_conservative_bounds(open_existing)
+        base_report = self.scenario_engine.analyse(
+            _snapshot_open_tickets_for_analysis(open_existing),
+            list(scenario_groups),
+        )
+        _validate_scenario_report(
+            base_report,
+            canonical_floor=base_floor,
+            canonical_ceiling=base_ceiling,
+        )
         ranked: list[CandidatePortfolioImpact] = []
         seen_candidate_identities: set[
             tuple[tuple[str, str, str, str, str, str], ...]
@@ -131,7 +155,17 @@ class PortfolioAwareCandidateOptimizer:
             synthetic = _candidate_ticket(canonical_candidate, amount, quote_to_group)
             touched_groups = {quote_to_group[leg.quote_key] for leg in synthetic.legs}
             dependent = _dependent_existing_ticket_ids(open_existing, touched_groups, quote_to_group)
-            with_report = self.scenario_engine.analyse(open_existing + [synthetic], scenario_groups)
+            with_candidate_tickets = open_existing + [synthetic]
+            with_floor, with_ceiling = _scenario_conservative_bounds(with_candidate_tickets)
+            with_report = self.scenario_engine.analyse(
+                _snapshot_open_tickets_for_analysis(with_candidate_tickets),
+                list(scenario_groups),
+            )
+            _validate_scenario_report(
+                with_report,
+                canonical_floor=with_floor,
+                canonical_ceiling=with_ceiling,
+            )
 
             # This API accepts caller-supplied ScenarioGroup models, not product-owned
             # MarketSettlementOutcomeAuthority evidence. Report flags returned by an
@@ -144,19 +178,16 @@ class PortfolioAwareCandidateOptimizer:
                     observed_worst_change = (
                         with_report.observed_worst - base_report.observed_worst
                     )
-                    conservative_floor_change = (
-                        with_report.conservative_floor - base_report.conservative_floor
-                    )
+                    conservative_floor_change = with_floor - base_floor
                     observed_best_change = (
                         with_report.observed_best - base_report.observed_best
                     )
-                    conservative_ceiling_change = (
-                        with_report.conservative_ceiling - base_report.conservative_ceiling
-                    )
+                    conservative_ceiling_change = with_ceiling - base_ceiling
 
                     expected_change: Decimal | None = None
                     if (
-                        base_report.expected_case is not None
+                        scenario_reports_authoritative
+                        and base_report.expected_case is not None
                         and with_report.expected_case is not None
                     ):
                         expected_change = (
@@ -207,6 +238,7 @@ class PortfolioAwareCandidateOptimizer:
                     conservative_ceiling_change=conservative_ceiling_change,
                     expected_case_change=expected_change,
                     expected_change_mode=expected_mode,
+                    scenario_reports_authoritative=scenario_reports_authoritative,
                     worst_case_change_proven=worst_proven,
                     best_case_change_proven=best_proven,
                     ranking_risk_change=ranking_risk_change,
@@ -393,6 +425,73 @@ def _dependent_existing_ticket_ids(
         if ticket_groups.intersection(touched_groups):
             dependent.append(ticket.ticket_id)
     return tuple(sorted(dependent))
+
+
+def _validate_scenario_report(
+    report: ScenarioSearchReport,
+    *,
+    canonical_floor: Decimal,
+    canonical_ceiling: Decimal,
+) -> None:
+    """Validate report shape and independently derived conservative bounds."""
+
+    if type(report) is not ScenarioSearchReport:
+        raise ValueError("scenario engine must return exact ScenarioSearchReport")
+    if (
+        type(report.total_states) is not int
+        or report.total_states <= 0
+        or type(report.nodes_explored) is not int
+        or report.nodes_explored < 0
+    ):
+        raise ValueError("scenario report state counts must be bounded integers")
+    if type(report.mode) is not str or not report.mode or report.mode != report.mode.strip():
+        raise ValueError("scenario report mode must be canonical text")
+    if type(report.worst_proven) is not bool or type(report.best_proven) is not bool:
+        raise ValueError("scenario report proof flags must be bool")
+    if (
+        type(report.outcome_space_exhaustive) is not bool
+        or type(report.outcome_space_exact) is not bool
+    ):
+        raise ValueError("scenario report outcome-space flags must be bool")
+
+    numeric = (
+        report.observed_worst,
+        report.observed_best,
+        report.conservative_floor,
+        report.conservative_ceiling,
+    )
+    if any(type(value) is not Decimal or not value.is_finite() for value in numeric):
+        raise ValueError("scenario report risk values must be exact finite Decimal")
+    if (
+        report.conservative_floor != canonical_floor
+        or report.conservative_ceiling != canonical_ceiling
+    ):
+        raise ValueError("scenario report conservative bounds mismatch")
+    if not (
+        canonical_floor
+        <= report.observed_worst
+        <= report.observed_best
+        <= canonical_ceiling
+    ):
+        raise ValueError("scenario report observed extrema exceed conservative bounds")
+
+    if report.expected_case is None:
+        if report.expected_mode is not None:
+            raise ValueError("scenario expected mode requires expected_case")
+    else:
+        if (
+            type(report.expected_case) is not Decimal
+            or not report.expected_case.is_finite()
+            or report.expected_case < canonical_floor
+            or report.expected_case > canonical_ceiling
+        ):
+            raise ValueError("scenario expected_case exceeds conservative bounds")
+        if (
+            type(report.expected_mode) is not str
+            or not report.expected_mode
+            or report.expected_mode != report.expected_mode.strip()
+        ):
+            raise ValueError("scenario expected mode must be canonical text")
 
 
 def _expected_change_mode(base: str | None, with_candidate: str | None) -> str | None:

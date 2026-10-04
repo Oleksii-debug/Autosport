@@ -658,10 +658,12 @@ def _current_economic_state(
 
 def _require_parent_ledger_roots(
     precommit: ProductProposalRiskEvaluationPrecommit,
+    terminal_population: ProductProposalTargetTerminalPopulation,
     ledger: JsonlDecisionLedger,
     goal: object,
     policy: PaperRiskPolicy,
 ) -> None:
+    terminal_action_id = _TERMINAL_PARENT_ACTION_PREFIX + precommit.target_sha256
     try:
         parent = _LEDGER_RESOLVE(
             ledger,
@@ -673,6 +675,12 @@ def _require_parent_ledger_roots(
         target = _LEDGER_RESOLVE(
             ledger,
             target_action_id,
+            goal,
+            risk_policy=policy,
+        )
+        terminal = _LEDGER_RESOLVE(
+            ledger,
+            terminal_action_id,
             goal,
             risk_policy=policy,
         )
@@ -695,7 +703,8 @@ def _require_parent_ledger_roots(
         or parent.payload.get("target_sha256") != precommit.target_sha256
         or parent.payload.get("candidate_vector_sha256")
         != precommit.candidate_vector_sha256
-        or parent.payload.get("planned_member_ids") != precommit.planned_member_ids
+        or tuple(parent.payload.get("planned_member_ids", ()))
+        != precommit.planned_member_ids
         or parent.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
         != precommit.decision_id
         or parent.payload.get("proposal_target_counterfactual_execution_proven")
@@ -733,6 +742,48 @@ def _require_parent_ledger_roots(
     ):
         raise ProductProposalRiskScenarioPopulationError(
             "proposal risk target ledger identity changed"
+        )
+    if terminal is None:
+        raise ProductProposalRiskScenarioPopulationError(
+            "provider terminal population is missing from the canonical Decision Ledger"
+        )
+    if (
+        terminal_population.decision_id != terminal_action_id
+        or terminal.decision_id != terminal_action_id
+        or terminal.replay_run_id != terminal_action_id
+        or terminal.action != _TERMINAL_PARENT_ACTION
+        or terminal.agent != _TERMINAL_PARENT_AGENT
+        or terminal.context_hash != terminal_population.population_sha256
+        or terminal.payload.get("schema") != _TERMINAL_PARENT_SCHEMA
+        or terminal.payload.get("population_sha256")
+        != terminal_population.population_sha256
+        or terminal.payload.get("workspace_instance_id")
+        != precommit.workspace_instance_id
+        or terminal.payload.get("target_sha256") != precommit.target_sha256
+        or terminal.payload.get("candidate_vector_sha256")
+        != precommit.candidate_vector_sha256
+        or tuple(terminal.payload.get("market_group_sha256s", ()))
+        != terminal_population.market_group_sha256s
+        or terminal.payload.get("terminal_market_count")
+        != terminal_population.terminal_market_count
+        or terminal.payload.get("terminal_state_count")
+        != terminal_population.terminal_state_count
+        or terminal.payload.get("terminal_space_exact")
+        is not terminal_population.terminal_space_exact
+        or terminal.payload.get("terminal_space_exhaustive") is not True
+        or terminal.payload.get("probability_model_bound") is not False
+        or terminal.payload.get("scientific_precommit_bound") is not False
+        or terminal.payload.get("iid_member_mapping_proven") is not False
+        or terminal.payload.get("proposal_target_counterfactual_execution_proven")
+        is not False
+        or terminal.payload.get("risk_upper_bound_for_target") is not False
+        or terminal.payload.get("grants_ticket_authority") is not False
+        or terminal.payload.get("grants_real_money_authority") is not False
+        or terminal.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
+        != terminal_action_id
+    ):
+        raise ProductProposalRiskScenarioPopulationError(
+            "provider terminal population ledger identity changed"
         )
 
 
@@ -849,6 +900,7 @@ def _authority_tip(
 
 def _record_values(
     precommit: ProductProposalRiskEvaluationPrecommit,
+    terminal_population: ProductProposalTargetTerminalPopulation,
     record: DecisionRecord,
 ) -> dict[str, object]:
     payload = record.payload
@@ -864,9 +916,15 @@ def _record_values(
         "sampling_manifest_sha256",
         "membership_causal_cutoff",
         "scientific_precommit_sha256",
+        "terminal_population_sha256",
+        "terminal_market_group_sha256s",
+        "terminal_market_count",
+        "terminal_state_count",
+        "terminal_space_exact",
         "bound_at",
         "binding_scope",
         "members",
+        "provider_terminal_population_proven",
         "product_scenario_source_provenance_proven",
         "terminal_mapping_proven",
         "scenario_execution_proven",
@@ -885,6 +943,10 @@ def _record_values(
     if payload["schema"] != _SCHEMA or payload["binding_scope"] != _BINDING_SCOPE:
         raise ProductProposalRiskScenarioPopulationError(
             "scenario population protocol identity changed"
+        )
+    if payload["provider_terminal_population_proven"] is not True:
+        raise ProductProposalRiskScenarioPopulationError(
+            "scenario population lost provider terminal-population proof"
         )
     for name in (
         "product_scenario_source_provenance_proven",
@@ -913,6 +975,21 @@ def _record_values(
         raise ProductProposalRiskScenarioPopulationError(
             "scenario population scientific binding changed"
         )
+    if (
+        payload["terminal_population_sha256"]
+        != terminal_population.population_sha256
+        or tuple(payload["terminal_market_group_sha256s"])
+        != terminal_population.market_group_sha256s
+        or payload["terminal_market_count"]
+        != terminal_population.terminal_market_count
+        or payload["terminal_state_count"]
+        != terminal_population.terminal_state_count
+        or payload["terminal_space_exact"]
+        is not terminal_population.terminal_space_exact
+    ):
+        raise ProductProposalRiskScenarioPopulationError(
+            "scenario population provider terminal binding changed"
+        )
     expected_stakes = [
         _decimal_text(value, "evaluated_stake") for value in precommit.evaluated_stakes
     ]
@@ -930,14 +1007,7 @@ def _record_values(
         raise ProductProposalRiskScenarioPopulationError(
             "scenario population members are missing"
         )
-    expected_member_keys = {
-        "member_id",
-        "scenario_id",
-        "scenario_source_sha256",
-        "mapping_sha256",
-        "settlement_semantics_sha256",
-        "causal_cutoff",
-    }
+    expected_member_keys = {"member_id", "scenario_id", "mapping_sha256"}
     members: list[CounterfactualScenarioMemberBinding] = []
     for index, raw in enumerate(raw_members):
         if not hasattr(raw, "keys") or set(raw) != expected_member_keys:
@@ -948,10 +1018,7 @@ def _record_values(
             CounterfactualScenarioMemberBinding(
                 member_id=raw["member_id"],
                 scenario_id=raw["scenario_id"],
-                scenario_source_sha256=raw["scenario_source_sha256"],
                 mapping_sha256=raw["mapping_sha256"],
-                settlement_semantics_sha256=raw["settlement_semantics_sha256"],
-                causal_cutoff=raw["causal_cutoff"],
             )
         )
     bound_at = payload["bound_at"]
@@ -962,7 +1029,12 @@ def _record_values(
             "scenario population durable timestamp predates the proposal target"
         )
     validated = _validate_members(precommit, tuple(members))
-    material = _population_material(precommit, validated, bound_at=bound_at)
+    material = _population_material(
+        precommit,
+        terminal_population,
+        validated,
+        bound_at=bound_at,
+    )
     return {
         "members": validated,
         "bound_at": bound_at,
@@ -975,6 +1047,7 @@ def _recover_population_authority(
     *,
     ledger_record: DecisionRecord | None,
     precommit: ProductProposalRiskEvaluationPrecommit,
+    terminal_population: ProductProposalTargetTerminalPopulation,
 ) -> str | None:
     current, pending = _authority_tip(authority)
     if pending is None:
@@ -985,13 +1058,20 @@ def _recover_population_authority(
         and ledger_record.context_hash == pending_sha
         and ledger_record.payload.get("precommit_binding_sha256")
         == precommit.binding_sha256
+        and ledger_record.payload.get("terminal_population_sha256")
+        == terminal_population.population_sha256
         and ledger_record.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
         == _ACTION_PREFIX + precommit.binding_sha256
     )
     if matches:
-        matches = _record_values(
-            precommit, ledger_record
-        )["population_sha256"] == pending_sha
+        matches = (
+            _record_values(
+                precommit,
+                terminal_population,
+                ledger_record,
+            )["population_sha256"]
+            == pending_sha
+        )
     try:
         recovery = authority.recover(
             observed_state_sha256=(
@@ -1041,6 +1121,7 @@ def _require_authority_committed(
 
 def _mint(
     precommit: ProductProposalRiskEvaluationPrecommit,
+    terminal_population: ProductProposalTargetTerminalPopulation,
     record: DecisionRecord,
     values: dict[str, object],
     *,
@@ -1056,16 +1137,14 @@ def _mint(
         "candidate_vector_sha256": precommit.candidate_vector_sha256,
         "evaluated_stakes": precommit.evaluated_stakes,
         "planned_member_ids": precommit.planned_member_ids,
+        "terminal_population_sha256": terminal_population.population_sha256,
+        "terminal_market_group_sha256s": terminal_population.market_group_sha256s,
+        "terminal_market_count": terminal_population.terminal_market_count,
+        "terminal_state_count": terminal_population.terminal_state_count,
+        "terminal_space_exact": terminal_population.terminal_space_exact,
         "bound_at": values["bound_at"],
         "member_scenario_ids": tuple(member.scenario_id for member in members),
-        "member_scenario_source_sha256s": tuple(
-            member.scenario_source_sha256 for member in members
-        ),
         "member_mapping_sha256s": tuple(member.mapping_sha256 for member in members),
-        "member_settlement_semantics_sha256s": tuple(
-            member.settlement_semantics_sha256 for member in members
-        ),
-        "member_causal_cutoffs": tuple(member.causal_cutoff for member in members),
         "binding_scope": _BINDING_SCOPE,
         "population_sha256": values["population_sha256"],
     }
@@ -1078,9 +1157,10 @@ def _mint(
 def issue_product_proposal_risk_scenario_population(
     workspace: Path,
     precommit: ProductProposalRiskEvaluationPrecommit,
+    terminal_population: ProductProposalTargetTerminalPopulation,
     members: tuple[CounterfactualScenarioMemberBinding, ...],
 ) -> ProductProposalRiskScenarioPopulation:
-    """Durably bind the first exact member→scenario vector for one precommit."""
+    """Durably bind one fixed-N member→scenario vector to verified terminal space."""
 
     if _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL:
         raise ProductProposalRiskScenarioPopulationError(
@@ -1088,6 +1168,7 @@ def issue_product_proposal_risk_scenario_population(
         )
     _REQUIRE_DISPATCH_ORIGINAL()
     precommit = _require_precommit(precommit)
+    terminal_population = _require_terminal_population(precommit, terminal_population)
     workspace = _workspace_path(workspace)
     validated = _validate_members(precommit, members)
     action_id = _ACTION_PREFIX + precommit.binding_sha256
@@ -1096,7 +1177,13 @@ def issue_product_proposal_risk_scenario_population(
         workspace_instance_id = _require_current_target_authority(workspace, precommit)
         goal, policy, ledger = _current_economic_state(workspace)
         _require_current_precommit_economics(precommit, goal, policy)
-        _require_parent_ledger_roots(precommit, ledger, goal, policy)
+        _require_parent_ledger_roots(
+            precommit,
+            terminal_population,
+            ledger,
+            goal,
+            policy,
+        )
         authority = _population_authority(
             workspace, workspace_instance_id, precommit.binding_sha256
         )
@@ -1110,17 +1197,25 @@ def issue_product_proposal_risk_scenario_population(
             ) from exc
 
         committed = _recover_population_authority(
-            authority, ledger_record=existing, precommit=precommit
+            authority,
+            ledger_record=existing,
+            precommit=precommit,
+            terminal_population=terminal_population,
         )
         if committed is not None:
             if existing is None:
                 raise ProductProposalRiskScenarioPopulationError(
                     "scenario population authority exists but ledger record is missing"
                 )
-            values = _record_values(precommit, existing)
+            values = _record_values(
+                precommit,
+                terminal_population,
+                existing,
+            )
             requested_sha256 = _digest(
                 _population_material(
                     precommit,
+                    terminal_population,
                     validated,
                     bound_at=values["bound_at"],
                 )
@@ -1134,7 +1229,12 @@ def issue_product_proposal_risk_scenario_population(
                     "a different scenario population is already bound to this precommit"
                 )
             _require_authority_committed(authority, committed)
-            return _mint(precommit, existing, values)
+            return _mint(
+                precommit,
+                terminal_population,
+                existing,
+                values,
+            )
         if existing is not None:
             raise ProductProposalRiskScenarioPopulationError(
                 "scenario population ledger record exists without independent authority"
@@ -1147,7 +1247,12 @@ def issue_product_proposal_risk_scenario_population(
             raise ProductProposalRiskScenarioPopulationError(
                 "product clock predates the proposal target"
             )
-        material = _population_material(precommit, validated, bound_at=bound_at)
+        material = _population_material(
+            precommit,
+            terminal_population,
+            validated,
+            bound_at=bound_at,
+        )
         population_sha256 = _digest(material)
 
         try:
@@ -1190,7 +1295,10 @@ def issue_product_proposal_risk_scenario_population(
                 crossed = None
             try:
                 _recover_population_authority(
-                    authority, ledger_record=crossed, precommit=precommit
+                    authority,
+                    ledger_record=crossed,
+                    precommit=precommit,
+                    terminal_population=terminal_population,
                 )
             except ProductProposalRiskScenarioPopulationError:
                 pass
@@ -1207,7 +1315,11 @@ def issue_product_proposal_risk_scenario_population(
             raise ProductProposalRiskScenarioPopulationError(
                 "scenario population append did not re-resolve"
             )
-        values = _record_values(precommit, existing)
+        values = _record_values(
+            precommit,
+            terminal_population,
+            existing,
+        )
         if (
             values["population_sha256"] != population_sha256
             or existing.context_hash != population_sha256
@@ -1226,14 +1338,20 @@ def issue_product_proposal_risk_scenario_population(
                 "scenario population authority COMMIT failed; exact recovery is required"
             ) from exc
         _require_authority_committed(authority, population_sha256)
-        return _mint(precommit, existing, values)
+        return _mint(
+            precommit,
+            terminal_population,
+            existing,
+            values,
+        )
 
 
 def resolve_product_proposal_risk_scenario_population(
     workspace: Path,
     precommit: ProductProposalRiskEvaluationPrecommit,
+    terminal_population: ProductProposalTargetTerminalPopulation,
 ) -> ProductProposalRiskScenarioPopulation:
-    """Re-resolve the unique durable scenario population for one exact precommit."""
+    """Re-resolve the durable mapping against the same verified terminal population."""
 
     if _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL:
         raise ProductProposalRiskScenarioPopulationError(
@@ -1241,13 +1359,20 @@ def resolve_product_proposal_risk_scenario_population(
         )
     _REQUIRE_DISPATCH_ORIGINAL()
     precommit = _require_precommit(precommit)
+    terminal_population = _require_terminal_population(precommit, terminal_population)
     workspace = _workspace_path(workspace)
     action_id = _ACTION_PREFIX + precommit.binding_sha256
     with _LOCK_TYPE(workspace):
         workspace_instance_id = _require_current_target_authority(workspace, precommit)
         goal, policy, ledger = _current_economic_state(workspace)
         _require_current_precommit_economics(precommit, goal, policy)
-        _require_parent_ledger_roots(precommit, ledger, goal, policy)
+        _require_parent_ledger_roots(
+            precommit,
+            terminal_population,
+            ledger,
+            goal,
+            policy,
+        )
         authority = _population_authority(
             workspace, workspace_instance_id, precommit.binding_sha256
         )
@@ -1260,7 +1385,10 @@ def resolve_product_proposal_risk_scenario_population(
                 "scenario population Decision Ledger re-resolution failed"
             ) from exc
         committed = _recover_population_authority(
-            authority, ledger_record=record, precommit=precommit
+            authority,
+            ledger_record=record,
+            precommit=precommit,
+            terminal_population=terminal_population,
         )
         if committed is None:
             raise ProductProposalRiskScenarioPopulationError(
@@ -1270,7 +1398,11 @@ def resolve_product_proposal_risk_scenario_population(
             raise ProductProposalRiskScenarioPopulationError(
                 "scenario population is missing from the canonical Decision Ledger"
             )
-        values = _record_values(precommit, record)
+        values = _record_values(
+            precommit,
+            terminal_population,
+            record,
+        )
         if (
             committed != values["population_sha256"]
             or record.context_hash != committed
@@ -1279,9 +1411,15 @@ def resolve_product_proposal_risk_scenario_population(
                 "scenario population durable authorities disagree"
             )
         _require_authority_committed(authority, committed)
-        return _mint(precommit, record, values)
+        return _mint(
+            precommit,
+            terminal_population,
+            record,
+            values,
+        )
 
 
+del _IDENTITY_PROVEN
 del _IDENTITY_PROVEN
 del _BIND_IDENTITY
 

@@ -1257,6 +1257,35 @@ class RunRegistry:
         if summary.get("transaction_schema_version") != manifest.get("schema_version"):
             raise ReconciliationError("completed run transaction schema mismatch")
 
+        replay_evidence_fields = (
+            "replay_input_event_payload_sequence_sha256",
+            "replay_consumed_event_payload_sequence_sha256",
+            "replay_applied_event_payload_sequence_sha256",
+            "replay_consumed_event_payload_multiset_sha256",
+        )
+        present_replay_evidence = tuple(
+            field_name
+            for field_name in replay_evidence_fields
+            if field_name in summary
+        )
+        if present_replay_evidence:
+            if len(present_replay_evidence) != len(replay_evidence_fields):
+                raise ReconciliationError(
+                    "completed run replay payload evidence is incomplete"
+                )
+            if any(
+                not _is_canonical_sha256(summary.get(field_name))
+                for field_name in replay_evidence_fields
+            ):
+                raise ReconciliationError(
+                    "completed run replay payload evidence is invalid"
+                )
+            event_count = summary.get("event_count")
+            if type(event_count) is not int or event_count < 0:
+                raise ReconciliationError(
+                    "completed run replay event_count is invalid"
+                )
+
         targets = manifest.get("targets")
         new_state = manifest.get("new")
         if not isinstance(targets, dict) or targets.get("summary") != expected_name:

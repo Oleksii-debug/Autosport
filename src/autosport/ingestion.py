@@ -20,6 +20,38 @@ from .providers import CanonicalNormalizer, MarketProvider, ProviderUnavailableE
 Clock = Callable[[], str]
 
 
+def _stamp_live_event(
+    event: object,
+    ingest_ts: str,
+    *,
+    _market_event_type: type[MarketEvent] = MarketEvent,
+    _replace=replace,
+) -> MarketEvent:
+    if type(event) is not _market_event_type:
+        raise TypeError("normalizer must return exact MarketEvent")
+    stamped = _replace(event, ingest_ts=ingest_ts)
+    if type(stamped) is not _market_event_type or stamped.ingest_ts != ingest_ts:
+        raise TypeError("live ingestion timestamp stamping lost canonical authority")
+    return stamped
+
+
+def _publish_normalized_live_batch(
+    bus: object,
+    events: list[MarketEvent],
+    *,
+    _market_bus_type: type[MarketEventBus] = MarketEventBus,
+    _live_publish=MarketEventBus._publish_many_live_ingestion,
+    _generic_publish=MarketEventBus.publish_many,
+) -> int:
+    if type(bus) is _market_bus_type:
+        return _live_publish(bus, events)
+    if isinstance(bus, _market_bus_type):
+        # Subclasses are non-canonical and stay provenance-neutral even if they
+        # override publication methods.
+        return _generic_publish(bus, events)
+    return bus.publish_many(events)
+
+
 @dataclass(frozen=True, slots=True)
 class IngestionStats:
     source_id: str
@@ -305,12 +337,10 @@ class IngestionEngine:
                     continue
             try:
                 event = self.normalizer.normalize(batch.source_id, quote)
-                if type(event) is not MarketEvent:
-                    raise TypeError("normalizer must return exact MarketEvent")
                 # Provider/adaptor observation clocks remain evidence fields.
                 # Durable ingestion time is owned by this post-acquisition
                 # product clock, never by provider-controlled quote payloads.
-                event = replace(event, ingest_ts=now)
+                event = _stamp_live_event(event, now)
             except (TypeError, ValueError):
                 flags.add("INVALID_QUOTE")
                 rejected += 1
@@ -346,17 +376,7 @@ class IngestionEngine:
         # acquisition/validation/normalization already succeeded.
         ordered_flags = tuple(sorted(flags))
         try:
-            if type(self.bus) is MarketEventBus:
-                accepted = MarketEventBus._publish_many_live_ingestion(
-                    self.bus,
-                    normalized,
-                )
-            elif isinstance(self.bus, MarketEventBus):
-                # Subclasses are non-canonical and stay provenance-neutral even if
-                # they override publication methods.
-                accepted = MarketEventBus.publish_many(self.bus, normalized)
-            else:
-                accepted = self.bus.publish_many(normalized)
+            accepted = _publish_normalized_live_batch(self.bus, normalized)
         except MarketEventDeliveryError as delivery_error:
             # MarketEventDeliveryError can only be raised after transactional
             # persistence succeeds. Preserve the exact storage-derived outcome in

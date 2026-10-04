@@ -11,6 +11,35 @@ from .domain import MarketEvent, _quote_identity
 from .storage import SQLiteMarketStore
 
 
+def _require_market_store(
+    store: object,
+    *,
+    exact: bool,
+    error_message: str,
+    _store_type: type[SQLiteMarketStore] = SQLiteMarketStore,
+) -> SQLiteMarketStore:
+    valid = type(store) is _store_type if exact else isinstance(store, _store_type)
+    if not valid:
+        raise TypeError(error_message)
+    return store
+
+
+def _trusted_live_events(
+    store: SQLiteMarketStore,
+    *,
+    _read=SQLiteMarketStore.trusted_live_events,
+) -> list[MarketEvent]:
+    return _read(store)
+
+
+def _trusted_live_current_by_source(
+    store: SQLiteMarketStore,
+    *,
+    _read=SQLiteMarketStore.trusted_live_current_by_source,
+) -> dict[tuple[str, str], MarketEvent]:
+    return _read(store)
+
+
 class MarketMirrorRevisionChanged(RuntimeError):
     """The canonical mirror advanced past a decision's captured revision."""
 
@@ -485,20 +514,23 @@ class MarketMirror:
         reconstructed mirror then applies the same canonical status/freshness/selectors
         contract as a live active_view.
         """
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
         if type(require_live_receipt_authority) is not bool:
             raise TypeError("require_live_receipt_authority must be bool")
-        if require_live_receipt_authority and type(store) is not SQLiteMarketStore:
-            raise TypeError(
+        canonical_store = _require_market_store(
+            store,
+            exact=require_live_receipt_authority,
+            error_message=(
                 "trusted live replay requires an exact SQLiteMarketStore"
-            )
+                if require_live_receipt_authority
+                else "store must be a SQLiteMarketStore"
+            ),
+        )
         boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
         mirror = cls()
         history = (
-            SQLiteMarketStore.trusted_live_events(store)
+            _trusted_live_events(canonical_store)
             if require_live_receipt_authority
-            else store.events()
+            else canonical_store.events()
         )
         for event in history:
             observed = cls._utc_timestamp(event.observed_ts)
@@ -527,10 +559,13 @@ class MarketMirror:
         every historical observation here would add unbounded startup cost without
         adding authority.
         """
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
+        canonical_store = _require_market_store(
+            store,
+            exact=False,
+            error_message="store must be a SQLiteMarketStore",
+        )
         mirror = cls()
-        current = store.current_by_source()
+        current = canonical_store.current_by_source()
         for key in sorted(current):
             mirror.apply(current[key])
         return mirror
@@ -544,10 +579,13 @@ class MarketMirror:
         restart. The receipt side table is intentionally prospective: rows written
         before that authority existed stay absent from this live projection.
         """
-        if type(store) is not SQLiteMarketStore:
-            raise TypeError("live store must be an exact SQLiteMarketStore")
+        canonical_store = _require_market_store(
+            store,
+            exact=True,
+            error_message="live store must be an exact SQLiteMarketStore",
+        )
         mirror = cls()
-        current = SQLiteMarketStore.trusted_live_current_by_source(store)
+        current = _trusted_live_current_by_source(canonical_store)
         for key in sorted(current):
             mirror.apply(current[key])
         return mirror

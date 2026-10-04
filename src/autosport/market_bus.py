@@ -58,36 +58,48 @@ class MarketEventBus:
         self._notify(accepted)
         return len(accepted)
 
-    def _publish_many_live_ingestion(self, events: Iterable[MarketEvent]) -> int:
+    def _publish_many_live_ingestion(
+        self,
+        events: Iterable[MarketEvent],
+        *,
+        _store_type: type[SQLiteMarketStore] = SQLiteMarketStore,
+        _live_append=SQLiteMarketStore._append_live_batch_accepted,
+        _deepcopy=deepcopy,
+    ) -> int:
         """Persist through the product-owned live-receipt authority seam.
 
         Generic bus publication intentionally remains provenance-neutral for replay,
         import and tests. IngestionEngine is the sole production caller of this private
         path after it overwrites ingest_ts from its post-acquisition product clock.
         """
-        if type(self) is not MarketEventBus:
+        if type(self) is not __class__:
             raise TypeError("live ingestion requires an exact MarketEventBus")
-        if type(self.store) is not SQLiteMarketStore:
+        if type(self.store) is not _store_type:
             raise TypeError("live ingestion requires an exact SQLiteMarketStore")
-        accepted = SQLiteMarketStore._append_live_batch_accepted(
+        accepted = _live_append(
             self.store,
-            (deepcopy(event) for event in events),
+            (_deepcopy(event) for event in events),
         )
-        self._notify(accepted)
+        __class__._notify(self, accepted)
         return len(accepted)
 
-    def _notify(self, events: Iterable[MarketEvent]) -> None:
+    def _notify(
+        self,
+        events: Iterable[MarketEvent],
+        *,
+        _deepcopy=deepcopy,
+    ) -> None:
         # Persistence has already succeeded. Keep an independent value snapshot for
         # delivery-error evidence and isolate every callback from mutable nested
         # metadata so one subscriber cannot rewrite another subscriber's view of
         # the durable accepted event.
-        accepted_events = tuple(deepcopy(event) for event in events)
+        accepted_events = tuple(_deepcopy(event) for event in events)
         subscribers = tuple(self.subscribers)
         failures: list[Exception] = []
         for event in accepted_events:
             for callback in subscribers:
                 try:
-                    callback(deepcopy(event))
+                    callback(_deepcopy(event))
                 except Exception as exc:
                     failures.append(exc)
         if failures:

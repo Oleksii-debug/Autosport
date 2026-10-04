@@ -2265,6 +2265,54 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertEqual(clock_calls, [True, True])
             market_store.close()
 
+    def test_canonical_application_completion_ignores_journal_dispatch_rebind(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "canonical-application.json"
+            market_store = SQLiteMarketStore(root / "market.db")
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                SourceHealthStore(root / "health.json"),
+                state_path,
+                clock=lambda: "2026-01-01T00:00:05+00:00",
+            )
+            forged_receipt = DesktopApplicationReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                receipt_id=(
+                    f"canonical-desktop:{delta.delta_id}:"
+                    f"{delta.canonical_event_digest[:16]}"
+                ),
+                applied_at="2026-01-01T00:00:05+00:00",
+            )
+
+            with (
+                patch.object(
+                    causal_collector_legacy_module._CanonicalDesktopApplicationStore,
+                    "mark_complete",
+                    lambda _self, _delta, *, completed_at: None,
+                ),
+                patch.object(
+                    causal_collector_legacy_module._CanonicalDesktopApplicationStore,
+                    "receipt",
+                    lambda _self, _delta: forged_receipt,
+                ),
+            ):
+                receipt = application.apply(delta, event)
+
+            self.assertEqual(receipt, forged_receipt)
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            item = persisted["applications"][delta.delta_id]
+            self.assertEqual(
+                item["completed_at"],
+                "2026-01-01T00:00:05+00:00",
+            )
+            self.assertTrue(item["market_applied"])
+            self.assertTrue(item["health_applied"])
+            market_store.close()
+
     def test_canonical_application_revalidates_journal_after_completion_clock_callback(self):
         event = MarketEvent.from_dict(event_payload())
         delta = self.make_delta(payload=event.to_dict())

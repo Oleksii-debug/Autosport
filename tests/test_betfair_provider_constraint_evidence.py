@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
+import pickle
 
 import pytest
+
+import autosport.betfair_provider_constraint_evidence as constraint_evidence
 
 from autosport.betfair_provider_constraint_evidence import (
     BetfairConstraintResolutionState,
@@ -382,3 +385,126 @@ def test_hard_false_authority_surfaces_are_non_python_and_sealed() -> None:
 
         with pytest.raises(TypeError, match="authority surface is sealed"):
             cls._current_constraint_authority_constant = True
+
+
+def test_structural_evidence_and_resolution_are_instance_immutable() -> None:
+    item = observation()
+    original_generation = item.generation_sha256
+    with pytest.raises(AttributeError):
+        object.__setattr__(item, "min_standard_size", Decimal("2"))
+    with pytest.raises(AttributeError):
+        object.__setattr__(item, "available_at", T0 + timedelta(days=3))
+    assert item.min_standard_size == Decimal("1")
+    assert item.generation_sha256 == original_generation
+
+    result = resolve(item)
+    original_resolution = result.resolution_sha256
+    with pytest.raises(AttributeError):
+        object.__setattr__(result, "min_standard_size", Decimal("999"))
+    with pytest.raises(AttributeError):
+        object.__setattr__(
+            result,
+            "state",
+            BetfairConstraintResolutionState.CONFLICTING_UNVERIFIED,
+        )
+    assert result.min_standard_size == Decimal("1")
+    assert result.state is BetfairConstraintResolutionState.CONSISTENT_UNVERIFIED
+    assert result.resolution_sha256 == original_resolution
+    assert result.current_constraint_authority is False
+    assert result.execution_authorized is False
+
+
+def test_structural_evidence_class_identity_surface_is_sealed() -> None:
+    for name, value in (
+        ("min_standard_size", property(lambda _self: Decimal("999"))),
+        ("available_at", property(lambda _self: T0)),
+        ("semantic_sha256", property(lambda _self: "0" * 64)),
+        ("generation_sha256", property(lambda _self: "0" * 64)),
+    ):
+        with pytest.raises(TypeError, match="authority surface is sealed"):
+            setattr(BetfairProviderConstraintObservation, name, value)
+
+
+def test_constraint_evidence_tuple_reconstruction_round_trip() -> None:
+    item = observation()
+    restored_item = pickle.loads(pickle.dumps(item))
+    assert type(restored_item) is BetfairProviderConstraintObservation
+    assert restored_item == item
+    assert restored_item.semantic_sha256 == item.semantic_sha256
+    assert restored_item.generation_sha256 == item.generation_sha256
+    assert restored_item.provider_origin_proven is False
+
+    result = resolve(item)
+    restored_result = pickle.loads(pickle.dumps(result))
+    assert type(restored_result) is type(result)
+    assert restored_result == result
+    assert restored_result.resolution_sha256 == result.resolution_sha256
+    assert restored_result.current_constraint_authority is False
+    assert restored_result.execution_authorized is False
+
+
+def test_resolver_captures_structural_dependencies_against_module_rebinding(
+    monkeypatch,
+) -> None:
+    item = observation()
+
+    monkeypatch.setattr(constraint_evidence, "PROVIDER_ID", "attacker")
+    monkeypatch.setattr(constraint_evidence, "ORDER_FAMILY", "OTHER")
+    monkeypatch.setattr(constraint_evidence, "SCHEMA_VERSION", 999)
+    monkeypatch.setattr(constraint_evidence, "_MAX_OBSERVATIONS", 0)
+    monkeypatch.setattr(constraint_evidence, "_MAX_DECIMAL_DIGITS", 1)
+    monkeypatch.setattr(constraint_evidence, "_MAX_ABS_EXPONENT", 0)
+    monkeypatch.setattr(
+        constraint_evidence,
+        "BetfairProviderConstraintObservation",
+        object,
+    )
+    monkeypatch.setattr(
+        constraint_evidence,
+        "BetfairProviderConstraintResolution",
+        object,
+    )
+    monkeypatch.setattr(
+        constraint_evidence,
+        "BetfairConstraintResolutionState",
+        object,
+    )
+    monkeypatch.setattr(
+        constraint_evidence,
+        "_utc",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("live _utc dispatch")
+        ),
+    )
+    monkeypatch.setattr(
+        constraint_evidence,
+        "_scope",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("live _scope dispatch")
+        ),
+    )
+    monkeypatch.setattr(
+        constraint_evidence,
+        "_currency",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("live _currency dispatch")
+        ),
+    )
+    monkeypatch.setattr(
+        constraint_evidence,
+        "_canonical_sha256",
+        lambda *_args, **_kwargs: "0" * 64,
+    )
+
+    result = resolve_betfair_standard_limit_constraint_evidence(
+        observations=(item,),
+        as_of=T0 + timedelta(days=1),
+        jurisdiction_scope="UK_INTERNATIONAL",
+        currency_code="GBP",
+    )
+    assert result.state is BetfairConstraintResolutionState.CONSISTENT_UNVERIFIED
+    assert result.min_standard_size == Decimal("1")
+    assert result.min_payout == Decimal("10")
+    assert result.provider_origin_proven is False
+    assert result.current_constraint_authority is False
+    assert result.execution_authorized is False

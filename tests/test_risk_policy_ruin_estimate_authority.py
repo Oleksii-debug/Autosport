@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.risk_policy_ruin_estimate_authority as policy_module
 from autosport.risk_evaluation_precommit_authority import (
     ProductFixedNRiskEvaluationPrecommitAuthority,
 )
@@ -231,3 +232,37 @@ def test_policy_estimate_cannot_be_caller_constructed_or_subclassed() -> None:
     with pytest.raises(TypeError, match="must not be subclassed"):
         class ForgedEstimate(ProductFixedNRiskPolicyEstimate):
             pass
+
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    ("_sha", "_decimal_text", "_instant", "_canonical_json"),
+)
+def test_policy_estimate_derivation_rejects_internal_helper_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    monkeypatch.setattr(policy_module, helper_name, lambda *args, **kwargs: None)
+
+    with pytest.raises(
+        ProductFixedNRiskPolicyEstimateError,
+        match="dispatch changed",
+    ):
+        _derive_policy_estimate_material(_precommit(), _observations())
+
+
+def test_policy_estimate_dispatch_rejects_derivation_helper_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        policy_module,
+        "_derive_policy_estimate_material",
+        lambda *args, **kwargs: {},
+    )
+
+    with pytest.raises(
+        ProductFixedNRiskPolicyEstimateError,
+        match="dispatch changed",
+    ):
+        policy_module._require_dispatch()

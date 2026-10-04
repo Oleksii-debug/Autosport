@@ -52,6 +52,23 @@ class RunRegistryIdentityIntegrityTests(unittest.TestCase):
             raw = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(raw["runs"], {})
 
+    def test_begin_rejects_invalid_draw_admission_digest_before_persisting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "registry.json"
+            registry = RunRegistry.initialize_pristine(path)
+
+            with self.assertRaisesRegex(ValueError, "canonical SHA-256"):
+                registry.begin(
+                    "a" * 64,
+                    "b" * 64,
+                    "strategy",
+                    "run-1",
+                    sampling_draw_admission_receipt_sha256="not-a-sha256",
+                )
+
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(raw["runs"], {})
+
     def test_self_consistent_nonhex_persisted_digest_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "registry.json"

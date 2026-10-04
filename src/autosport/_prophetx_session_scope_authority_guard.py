@@ -119,6 +119,18 @@ def _install_scope_authority_guard() -> None:
         # every slot rejects equal-looking object replacement as well as value drift.
         if any(now is not original for now, original in zip(current, expected)):
             raise error_type("session scope authority changed")
+        scope_dir = expected[-2]
+        state_path = expected[-1]
+        try:
+            resolved_scope_dir = scope_dir.resolve(strict=False)
+            resolved_state_path = state_path.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise error_type("session scope filesystem authority changed") from exc
+        if (
+            resolved_scope_dir != scope_dir
+            or resolved_state_path != state_path
+        ):
+            raise error_type("session scope filesystem authority changed")
 
     def guarded_init(self, *args, **kwargs) -> None:
         original_init(self, *args, **kwargs)

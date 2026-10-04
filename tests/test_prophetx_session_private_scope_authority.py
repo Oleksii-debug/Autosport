@@ -68,6 +68,32 @@ def test_private_scope_primitive_rebind_cannot_poison_original_pool_state(tmp_pa
     assert not original_state_path.exists()
 
 
+def test_scope_directory_alias_created_after_construction_fails_closed(tmp_path):
+    lifecycle = ProphetXSessionLifecycle(tmp_path, scope=_scope())
+    state = object.__getattribute__(lifecycle, "__dict__")
+    scope_dir = state["_scope_dir"]
+    original_state_path = state["_state_path"]
+    outside = tmp_path / "outside-session-pool"
+    outside.mkdir()
+    scope_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        scope_dir.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"directory symlink is unavailable: {exc}")
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="session scope filesystem authority changed",
+    ):
+        lifecycle.begin_login(
+            now=NOW,
+            access_token_available=False,
+        )
+
+    assert list(outside.iterdir()) == []
+    assert original_state_path.resolve(strict=False) != original_state_path
+
+
 def test_state_path_rebind_cannot_redirect_durable_session_write(tmp_path):
     lifecycle = ProphetXSessionLifecycle(tmp_path, scope=_scope())
     original_state_path = lifecycle.state_path

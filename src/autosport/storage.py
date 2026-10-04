@@ -13,6 +13,7 @@ from typing import Final, Iterable
 from .domain import MarketEvent
 from .monotonic_workspace_authority import (
     AuthorityPhase,
+    AuthorityRecord,
     MonotonicAuthorityRecoveryRequiredError,
     MonotonicAuthorityRollbackError,
     MonotonicWorkspaceAuthority,
@@ -1100,7 +1101,7 @@ class SQLiteMarketStore:
 
     @staticmethod
     def _append_authority_committed_tip(
-        history: tuple,
+        history: tuple[AuthorityRecord, ...],
     ) -> tuple[int, str]:
         commits = tuple(
             record for record in history if record.phase is AuthorityPhase.COMMIT

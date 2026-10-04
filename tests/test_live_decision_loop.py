@@ -88,7 +88,10 @@ class _DurableObserver:
         try:
             bus = MarketEventBus(store)
             bus.subscribe(updates.accept_persisted)
-            bus.publish_many(item)
+            # This fixture represents already product-stamped live observations.
+            # Use the explicit internal live seam so restart tests carry the same
+            # prospective receipt authority as production IngestionEngine writes.
+            bus._publish_many_live_ingestion(item)
         finally:
             store.close()
         return object()

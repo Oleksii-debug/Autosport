@@ -155,7 +155,7 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 restored.close()
 
-    def test_runtime_preload_excludes_other_source_market_history(self) -> None:
+    def test_runtime_preload_rejects_unreceipted_market_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             store = SQLiteMarketStore(root / "market.db")
@@ -182,25 +182,168 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 initial_bankroll="100",
             )
             try:
-                snapshot = runtime.mirror.snapshot()
-                self.assertEqual(len(snapshot), 1)
-                self.assertEqual(snapshot[0].source_id, "provider-a")
-                self.assertEqual(snapshot[0].sequence, 1)
-                self.assertEqual(runtime.invalidations.pending_count, 1)
-                self.assertIsNone(
-                    runtime.mirror.get(
-                        "provider-b",
-                        "event-1",
-                        "winner",
-                        "player-a",
-                    )
-                )
+                self.assertEqual(runtime.mirror.snapshot(), ())
+                self.assertEqual(runtime.invalidations.pending_count, 0)
                 self.assertEqual(
                     len(runtime.market_store.current_by_source()),
                     2,
                 )
             finally:
                 runtime.close()
+
+    def test_live_ingestion_receipt_does_not_authorize_desktop_runtime_preload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event = _event()
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                bus = MarketEventBus(store)
+                self.assertEqual(bus._publish_many_live_ingestion([event]), 1)
+                self.assertTrue(store.has_trusted_live_receipt(event))
+                self.assertEqual(
+                    store.trusted_live_current_by_source()[
+                        (event.source_id, event.quote_key)
+                    ].sequence,
+                    event.sequence,
+                )
+            finally:
+                store.close()
+
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(event.source_id),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertEqual(runtime.mirror.snapshot(), ())
+                self.assertEqual(runtime.invalidations.pending_count, 0)
+                self.assertEqual(
+                    runtime.market_store.trusted_live_current_by_source()[
+                        (event.source_id, event.quote_key)
+                    ].sequence,
+                    event.sequence,
+                )
+            finally:
+                runtime.close()
+
+    def test_completed_desktop_receipt_without_ack_authorizes_restart_preload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event()
+            delta = _delta(event)
+            source = _Source(resolved_event=event)
+
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                receipt = runtime.coordinator.desktop_consumer.apply_event(delta, event)
+                self.assertEqual(receipt.delta_id, delta.delta_id)
+                self.assertEqual(
+                    receipt.canonical_event_digest,
+                    delta.canonical_event_digest,
+                )
+                self.assertIsNone(
+                    DesktopDeltaCheckpointStore(
+                        root / "desktop_acks.json"
+                    ).application_receipt(delta)
+                )
+            finally:
+                runtime.close()
+
+            restored = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                snapshot = restored.mirror.snapshot()
+                self.assertEqual(len(snapshot), 1)
+                self.assertEqual(snapshot[0].dedupe_key, event.dedupe_key)
+                self.assertEqual(snapshot[0].sequence, event.sequence)
+                self.assertEqual(restored.invalidations.pending_count, 1)
+            finally:
+                restored.close()
+
+    def test_newer_same_source_generic_history_cannot_override_desktop_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event()
+            delta = _delta(event)
+            source = _Source(resolved_event=event)
+
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                self.assertEqual(
+                    runtime.coordinator.desktop_consumer.drain(as_of=clock.value),
+                    (delta.delta_id,),
+                )
+            finally:
+                runtime.close()
+
+            generic = MarketEvent.from_dict(
+                {
+                    **event.to_dict(),
+                    "decimal_odds": "9.99",
+                    "observed_ts": "2026-09-20T14:00:00+00:00",
+                    "sequence": 99,
+                    "source_ts": "2026-09-20T13:59:59+00:00",
+                    "ingest_ts": "2026-09-20T14:00:01+00:00",
+                }
+            )
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                self.assertTrue(store.append(generic))
+                self.assertFalse(store.has_trusted_live_receipt(generic))
+                self.assertEqual(
+                    store.current_by_source()[
+                        (generic.source_id, generic.quote_key)
+                    ].sequence,
+                    generic.sequence,
+                )
+            finally:
+                store.close()
+
+            restored = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                snapshot = restored.mirror.snapshot()
+                self.assertEqual(len(snapshot), 1)
+                self.assertEqual(snapshot[0].dedupe_key, event.dedupe_key)
+                self.assertEqual(snapshot[0].sequence, 1)
+                self.assertEqual(str(snapshot[0].decimal_odds), "1.80")
+                self.assertEqual(restored.invalidations.pending_count, 1)
+                self.assertEqual(
+                    restored.market_store.current_by_source()[
+                        (generic.source_id, generic.quote_key)
+                    ].sequence,
+                    99,
+                )
+            finally:
+                restored.close()
 
     def test_restart_with_different_source_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -302,6 +302,7 @@ class PaperExecutionAdoptionRuntime:
                 or leg.selection_id != event.selection_id
                 or leg.sport != event.sport
                 or leg.exchange_side != event.exchange_side
+                or leg.market_semantics_id != event.market_semantics_id
             ):
                 raise PaperExecutionAdoptionError(
                     "ticket leg identity does not match canonical execution quote"

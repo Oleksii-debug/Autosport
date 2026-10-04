@@ -30,6 +30,13 @@ def test_sufficient_authority_property_rebinding_is_rejected() -> None:
         del ExecutionFeasibilitySnapshot.sufficient
 
 
+def test_result_metaclass_is_not_exposed_as_module_mutation_handle() -> None:
+    assert not hasattr(
+        feasibility_module,
+        "_ExecutionFeasibilityResultMeta",
+    )
+
+
 def test_caller_cannot_mint_positive_execution_feasibility_result() -> None:
     """Positive feasibility must come from the canonical product resolver only."""
 

@@ -314,6 +314,11 @@ class ExecutionFeasibilitySnapshot(metaclass=_ExecutionFeasibilityResultMeta):
         )
 
 
+# The guard can obtain the metaclass through type(snapshot_type); keeping a
+# writable module-level alias would only preserve an unnecessary mutation seam.
+del _ExecutionFeasibilityResultMeta
+
+
 # This seal is an API-level provenance fence inside a trusted Python process.
 # Ordinary imports expose neither a writable issuance registry nor a callable
 # mint. Arbitrary same-interpreter reflection/object-graph/code mutation is

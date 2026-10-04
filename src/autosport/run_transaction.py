@@ -89,7 +89,7 @@ class TransactionIdentity:
     strategy_id: str
     base_paper_book_sha256: str | None
     base_decision_ledger_sha256: str | None
-    sampling_draw_admission_receipt_sha256: str | None
+    sampling_draw_admission_receipt_sha256: str | None = None
 
 
 class RunTransaction:

@@ -33,7 +33,7 @@ from .market_mirror_runtime import (
     FocusedMirrorDependency,
     FocusedMirrorDependencyIndex,
 )
-from .opportunity import Opportunity, OpportunityContractError
+from .opportunity import Opportunity, OpportunityContractError, QuoteRef
 from .paper import PaperBook
 from .paper_execution_adoption import (
     PaperExecutionAdoptionRuntime,
@@ -976,21 +976,55 @@ class PersistentLiveDecisionLoop:
             self._observe = observation_runner
 
         if self.decision_ledger.path.exists():
-            with WorkspaceEconomicLock(self.workspace):
-                self.decision_ledger.verify_integrity()
-                if self._progress is None:
-                    live_run_id = f"live:{self.loop_id}"
-                    if self._verified_latest_ledger_record(
-                        replay_run_id=live_run_id,
-                    ) is not None:
-                        raise LiveDecisionProgressError(
-                            "durable live decision history exists but progress is missing"
+            def verify_decision_history(
+                committed_market_history: tuple[
+                    tuple[MarketEvent, int], ...
+                ]
+                | None = None,
+            ) -> None:
+                with WorkspaceEconomicLock(self.workspace):
+                    self.decision_ledger.verify_integrity()
+                    if self._progress is None:
+                        live_run_id = f"live:{self.loop_id}"
+                        if self._verified_latest_ledger_record(
+                            replay_run_id=live_run_id,
+                        ) is not None:
+                            raise LiveDecisionProgressError(
+                                "durable live decision history exists but "
+                                "progress is missing"
+                            )
+                    if (
+                        self._progress is not None
+                        and self._progress.phase == _PHASE_COMMITTED
+                    ):
+                        self._verify_committed_progress_ledger_binding(
+                            self._progress,
+                            committed_market_history=committed_market_history,
                         )
-                if (
-                    self._progress is not None
-                    and self._progress.phase == _PHASE_COMMITTED
-                ):
-                    self._verify_committed_progress_ledger_binding(self._progress)
+
+            committed_generation = (
+                self._progress.market_append_generation
+                if self._progress is not None
+                and self._progress.phase == _PHASE_COMMITTED
+                else None
+            )
+            if committed_generation is None:
+                verify_decision_history()
+            else:
+                prefix_reader = (
+                    SQLiteMarketStore.open_frozen_prefix_reader(
+                        self.workspace / "market.db"
+                    )
+                )
+                try:
+                    with prefix_reader._guard_committed_append_boundary(
+                        committed_generation
+                    ) as committed_history:
+                        verify_decision_history(
+                            tuple(committed_history)
+                        )
+                finally:
+                    prefix_reader.close()
         elif (
             self._progress is not None
             and self._progress.phase == _PHASE_COMMITTED
@@ -3097,6 +3131,70 @@ class PersistentLiveDecisionLoop:
                 )
             canonical_opportunities.append(opportunity)
 
+        if progress.market_append_generation is not None:
+            if committed_market_history is None:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision lacks proven market prefix"
+                )
+            _, committed_decision_time = _canonical_timestamp(
+                "committed decision_ts",
+                progress.decision_ts,
+            )
+            boundary, age_limit = MarketMirror._decision_boundary(
+                as_of=committed_decision_time,
+                max_age=self.max_quote_age,
+            )
+            committed_snapshot = (
+                MarketMirror._decision_view_from_proven_history(
+                    committed_market_history,
+                    boundary=boundary,
+                    max_age=age_limit,
+                    source_ids=None,
+                    sports=None,
+                    event_ids=None,
+                    market_ids=None,
+                    selection_ids=None,
+                )
+            )
+            if (
+                self._market_state_sha256_for_events(
+                    committed_snapshot.events
+                )
+                != progress.market_state_sha256
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision market state conflicts with "
+                    "proven append prefix"
+                )
+
+            history_events = tuple(
+                event
+                for event, generation in committed_market_history
+                if generation > 0
+            )
+            for opportunity in canonical_opportunities:
+                for quote in opportunity.quotes:
+                    matching_events = tuple(
+                        event
+                        for event in history_events
+                        if QuoteRef.from_market_event(
+                            event,
+                            market_snapshot_hash=(
+                                quote.market_snapshot_hash
+                            ),
+                        )
+                        == quote
+                    )
+                    if len(matching_events) != 1:
+                        raise DecisionLedgerIntegrityError(
+                            "committed live decision quote is not bound to "
+                            "proven market history"
+                        )
+        elif committed_market_history is not None:
+            raise DecisionLedgerIntegrityError(
+                "legacy committed decision unexpectedly supplied market prefix"
+            )
+
         try:
             execution_events = runtime.ledger.events(run_id)
         except PaperExecutionIntegrityError as exc:
@@ -3513,6 +3611,11 @@ class PersistentLiveDecisionLoop:
     def _verify_committed_progress_ledger_binding(
         self,
         progress: _Progress,
+        *,
+        committed_market_history: tuple[
+            tuple[MarketEvent, int], ...
+        ]
+        | None = None,
     ) -> None:
         if progress.phase != _PHASE_COMMITTED:
             raise LiveDecisionProgressError(

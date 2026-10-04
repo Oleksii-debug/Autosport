@@ -3561,6 +3561,93 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 )
             self.assertEqual(resumed_observer.calls, 0)
 
+    def test_committed_positive_requires_quote_in_proven_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+            model = PaperExecutionModelConfig(
+                model_id="live-paper-market-prefix-test",
+                model_version="1",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="live-paper-market-prefix-test",
+                seed="live-paper-market-prefix",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            book = PaperBook("1000")
+            execution_ledger = PaperExecutionLedger(
+                workspace / "paper-execution.jsonl"
+            )
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=execution_ledger,
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            goal = EconomicGoalContract(
+                goal_id="goal-live-market-prefix",
+                revision=1,
+                bankroll_id="bankroll-live-test",
+                currency="EUR",
+                max_risk_of_ruin=Decimal("1"),
+            )
+            authority = EconomicDecisionAuthority(
+                goal,
+                PaperRiskPolicy(economic_goal=goal),
+            )
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(event,)]),
+                factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                book=book,
+                authority=authority,
+                paper_execution=execution,
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+            first.close()
+
+            resumed_book = PaperBook.load(workspace / "paper_book.json")
+            resumed_execution = PaperExecutionAdoptionRuntime(
+                book=resumed_book,
+                ledger=execution_ledger,
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            resumed_observer = _DurableObserver(workspace, [()])
+            with (
+                patch.object(
+                    SQLiteMarketStore,
+                    "_events_at_append_boundary_unlocked",
+                    return_value=[],
+                ),
+                self.assertRaisesRegex(
+                    DecisionLedgerIntegrityError,
+                    "market state conflicts with proven append prefix",
+                ),
+            ):
+                self._loop(
+                    workspace,
+                    observer=resumed_observer,
+                    factory=_PositiveIntentFactory(
+                        self.INTENT_CONFIG_SHA256
+                    ),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                    book=resumed_book,
+                    authority=authority,
+                    paper_execution=resumed_execution,
+                )
+            self.assertEqual(resumed_observer.calls, 0)
+
     def test_committed_positive_rejects_rehashed_execution_loss(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

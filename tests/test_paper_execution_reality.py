@@ -242,6 +242,80 @@ class PaperExecutionRealityTests(unittest.TestCase):
             self.assertTrue(result.attempts[1].suspended)
             self.assertEqual(result.pending_action_ids, ("a3",))
 
+    def test_suspension_set_is_durable_run_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            current = plan(action("a1"), action("a2"), action("a3"))
+            suspended = frozenset({"a2"})
+            first = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-suspend-identity",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                suspended_action_ids=suspended,
+            )
+            restarted = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-suspend-identity",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                suspended_action_ids=suspended,
+            )
+            self.assertEqual(restarted, first)
+            reserve = next(
+                event
+                for event in ledger.events()
+                if event["event_type"] == "RUN_RESERVED"
+            )
+            self.assertEqual(
+                reserve["payload"]["suspended_action_ids"],
+                ["a2"],
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "event_key already has different payload",
+            ):
+                execute_paper_plan(
+                    plan=current,
+                    trigger_id="trigger-suspend-identity",
+                    config=config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                )
+
+    def test_observation_and_suspension_cannot_claim_same_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            current = plan(action("a1"))
+            obs, registry = registered_observation(
+                ledger,
+                current.actions[0],
+                PaperAttemptOutcome.ACCEPTED,
+            )
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "both observed and synthetically suspended",
+            ):
+                execute_paper_plan(
+                    plan=current,
+                    trigger_id="trigger-observed-suspended",
+                    config=config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                    observations={"a1": obs},
+                    evidence_registry=registry,
+                    suspended_action_ids=frozenset({"a1"}),
+                )
+            self.assertFalse(
+                any(
+                    event["event_type"] == "RUN_RESERVED"
+                    for event in ledger.events()
+                )
+            )
+
     def test_stale_quote_fails_closed_without_claiming_a_fill(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")

@@ -159,6 +159,37 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 restored.close()
 
+    def test_runtime_ack_clock_allows_application_after_causal_cutoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event()
+            delta = _delta(event)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(resolved_event=event),
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                self.assertEqual(
+                    runtime.coordinator.desktop_consumer.drain(
+                        as_of="2026-09-20T13:57:59+00:00",
+                    ),
+                    (delta.delta_id,),
+                )
+                self.assertEqual(runtime.mirror.snapshot(), (event,))
+                self.assertEqual(runtime.invalidations.pending_count, 1)
+                receipt = DesktopDeltaCheckpointStore(
+                    root / "desktop_acks.json"
+                ).application_receipt(delta)
+                self.assertIsNotNone(receipt)
+                self.assertEqual(receipt.applied_at, clock.value)
+            finally:
+                runtime.close()
+
     def test_runtime_preload_excludes_unreceipted_market_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

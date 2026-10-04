@@ -2728,6 +2728,106 @@ def test_active_run_scan_rejects_urlencode_default_rebase(monkeypatch) -> None:
     assert requested == []
 
 
+def test_historical_association_rejects_inflight_request_default_rebase(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    request_impl = scoped_controller.GitHubApi._request
+    defaults = request_impl.__kwdefaults__
+    assert defaults is not None
+    requested: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            item = (
+                b'{"number":303,"head":{"sha":"'
+                + HEAD.encode("ascii")
+                + b'"}}'
+            )
+            return b"[" + b",".join(item for _ in range(100)) + b"]"
+
+    def mutating_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        requested.append(request.full_url)
+        monkeypatch.setitem(defaults, "_json_parse_int", str)
+        return FakeResponse()
+
+    monkeypatch.setitem(
+        request_impl.__globals__,
+        "urlopen",
+        mutating_urlopen,
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="historical association request dispatch changed",
+    ):
+        api._historical_associated_pr_number(HEAD)
+
+    assert len(requested) == 1
+
+
+def test_zero_association_rejects_inflight_request_default_rebase(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    request_impl = scoped_controller.GitHubApi._request
+    defaults = request_impl.__kwdefaults__
+    assert defaults is not None
+    requested: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            item = b'{"number":303}'
+            return b"[" + b",".join(item for _ in range(100)) + b"]"
+
+    def mutating_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        requested.append(request.full_url)
+        monkeypatch.setitem(defaults, "_json_parse_int", str)
+        return FakeResponse()
+
+    monkeypatch.setitem(
+        request_impl.__globals__,
+        "urlopen",
+        mutating_urlopen,
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="historical association request dispatch changed",
+    ):
+        api._historical_head_has_no_associated_prs(HEAD)
+
+    assert len(requested) == 1
+
+
 def test_historical_association_pr_identity_ignores_rebound_compat_validators(
     monkeypatch,
 ) -> None:

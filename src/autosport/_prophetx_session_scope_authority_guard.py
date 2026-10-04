@@ -41,15 +41,15 @@ def _install_scope_authority_guard() -> None:
         }
     )
     records: dict[int, tuple[object, ...]] = {}
-    record_seals: set[tuple[int, int, tuple[int, ...]]] = set()
+    # Keep the exact authority tuple itself alive outside the replaceable key->record
+    # mapping.  An integer id alone is not enough: Python may reuse the id after a
+    # removed tuple is collected.  Exact-object retention makes replacement/re-anchoring
+    # fail closed even if an allocator later recycles an address.
+    sealed_records: list[tuple[object, ...]] = []
     records_lock = RLock()
 
-    def _record_seal(instance_id: int, record: tuple[object, ...]):
-        return (
-            instance_id,
-            id(record),
-            tuple(id(value) for value in record),
-        )
+    def _forget_sealed(record: tuple[object, ...]) -> None:
+        sealed_records[:] = [candidate for candidate in sealed_records if candidate is not record]
 
     def _snapshot(instance) -> tuple[object, ...]:
         state = original_getattribute(instance, "__dict__")
@@ -77,24 +77,23 @@ def _install_scope_authority_guard() -> None:
                 current = records.get(instance_id)
                 if current is not None and current[0] is dead_ref:
                     records.pop(instance_id, None)
-                    record_seals.discard(_record_seal(instance_id, current))
+                    _forget_sealed(current)
 
         instance_ref = ref(instance, _discard)
         record = (instance_ref, *expected)
         with records_lock:
             previous = records.get(instance_id)
             if previous is not None:
-                record_seals.discard(_record_seal(instance_id, previous))
+                _forget_sealed(previous)
             records[instance_id] = record
-            record_seals.add(_record_seal(instance_id, record))
+            sealed_records.append(record)
 
     def _require_current(instance) -> None:
         instance_id = id(instance)
         with records_lock:
             record = records.get(instance_id)
-            sealed = (
-                record is not None
-                and _record_seal(instance_id, record) in record_seals
+            sealed = record is not None and any(
+                candidate is record for candidate in sealed_records
             )
         if record is None:
             # Canonical __init__ reads protected scope/path attributes before the

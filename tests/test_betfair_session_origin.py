@@ -372,9 +372,7 @@ def test_module_exposes_no_registration_or_registry_mint_hook():
         assert not hasattr(subject, name), name
 
 
-def test_product_login_route_binds_to_exact_current_k07_context(monkeypatch, tmp_path):
-    """Exercise the full route -> credentials -> K07 -> bound-context composition."""
-
+def _build_authoritative_spanish_binding(monkeypatch, tmp_path):
     import json
     import urllib.request as _urllib_request
 
@@ -408,9 +406,6 @@ def test_product_login_route_binds_to_exact_current_k07_context(monkeypatch, tmp
         assert timeout > 0
         return LoginResponse()
 
-    # Keep Autosport's canonical login function/transport intact while replacing
-    # only lower stdlib effects. The resulting object still truthfully claims
-    # process-local selected-route authority, never remote-provider attestation.
     monkeypatch.setattr(
         subject.ssl.SSLContext,
         "load_cert_chain",
@@ -479,14 +474,24 @@ def test_product_login_route_binds_to_exact_current_k07_context(monkeypatch, tmp
         identity,
         client=client,
     )
-
-    assert bound.jurisdiction is BetfairLoginJurisdiction.SPAIN
-    assert bound.session_context_id == identity.session_context_id
-    assert bound.account_identity_id == identity.identity_id
     assert is_authoritative_betfair_authenticated_jurisdiction(
         bound,
         client=client,
     )
+    return session, client, identity, bound
+
+
+def test_product_login_route_binds_to_exact_current_k07_context(
+    monkeypatch, tmp_path
+):
+    session, client, identity, bound = _build_authoritative_spanish_binding(
+        monkeypatch,
+        tmp_path,
+    )
+
+    assert bound.jurisdiction is BetfairLoginJurisdiction.SPAIN
+    assert bound.session_context_id == identity.session_context_id
+    assert bound.account_identity_id == identity.identity_id
     assert bound.remote_provider_origin_proven is False
     assert bound.remote_provider_jurisdiction_proven is False
     assert bound.execution_authorized is False
@@ -499,6 +504,85 @@ def test_product_login_route_binds_to_exact_current_k07_context(monkeypatch, tmp
         bound,
         client=client,
     )
+
+
+def test_observed_origin_tamper_revokes_authority_monotonically(
+    monkeypatch, tmp_path
+):
+    session, _client, _identity, _bound = _build_authoritative_spanish_binding(
+        monkeypatch,
+        tmp_path,
+    )
+    original = session.origin.response_sha256
+    object.__setattr__(session.origin, "response_sha256", "e" * 64)
+
+    assert not is_authoritative_betfair_session_origin(
+        session.origin,
+        credentials=session.credentials,
+    )
+
+    object.__setattr__(session.origin, "response_sha256", original)
+    assert not is_authoritative_betfair_session_origin(
+        session.origin,
+        credentials=session.credentials,
+    )
+
+
+def test_observed_bound_tamper_revokes_authority_monotonically(
+    monkeypatch, tmp_path
+):
+    _session, client, _identity, bound = _build_authoritative_spanish_binding(
+        monkeypatch,
+        tmp_path,
+    )
+    original = bound.session_context_id
+    object.__setattr__(
+        bound,
+        "session_context_id",
+        "betfair-session-context:" + "f" * 64,
+    )
+
+    assert not is_authoritative_betfair_authenticated_jurisdiction(
+        bound,
+        client=client,
+    )
+
+    object.__setattr__(bound, "session_context_id", original)
+    assert not is_authoritative_betfair_authenticated_jurisdiction(
+        bound,
+        client=client,
+    )
+
+
+def test_semantic_slot_descriptors_cannot_be_class_rebound():
+    for cls, names in (
+        (
+            BetfairSessionOrigin,
+            (
+                "venue_id",
+                "login_method",
+                "jurisdiction",
+                "login_endpoint",
+                "issued_at",
+                "response_sha256",
+                "origin_id",
+            ),
+        ),
+        (
+            BetfairAuthenticatedJurisdiction,
+            (
+                "venue_id",
+                "jurisdiction",
+                "session_context_id",
+                "account_identity_id",
+                "session_origin_id",
+                "authority_id",
+            ),
+        ),
+    ):
+        for name in names:
+            with pytest.raises(TypeError, match="authority surface is sealed"):
+                setattr(cls, name, property(lambda _self: None))
 
 
 def test_public_authority_false_getters_are_non_python_and_sealed():

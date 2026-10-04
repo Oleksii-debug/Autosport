@@ -266,11 +266,93 @@ def _build_admission_authority():
     error_type = BetfairStandardLimitAdmissionError
     record_type = _IssuedRecord
 
-    snapshot_action_fn = _snapshot_action
     exact_multiply_fn = _exact_multiply
     utc_fn = _utc
-    make_result_fn = _make_result
-    fingerprint_fn = _fingerprint
+    result_digest_fn = _result_sha256
+    policy_version = POLICY_VERSION
+
+    selection_slot = action_type.__dict__["selection_id"]
+    side_slot = action_type.__dict__["side"]
+    size_slot = action_type.__dict__["size"]
+    price_slot = action_type.__dict__["price"]
+    order_type_slot = action_type.__dict__["order_type"]
+    target_slot = action_type.__dict__["bet_target_type"]
+    positive_decimal_fn = _positive_decimal
+    decimal_one = Decimal("1")
+
+    def snapshot_action_fn(
+        action: BetfairStandardLimitAction,
+    ) -> tuple[int, str, Decimal, Decimal]:
+        owner = type(action)
+        selection_id = selection_slot.__get__(action, owner)
+        side = side_slot.__get__(action, owner)
+        size = size_slot.__get__(action, owner)
+        price = price_slot.__get__(action, owner)
+        order_type = order_type_slot.__get__(action, owner)
+        target = target_slot.__get__(action, owner)
+        if type(selection_id) is not int or selection_id <= 0:
+            raise error_type("selection_id changed after construction")
+        if type(side) is not str or side not in {"BACK", "LAY"}:
+            raise error_type("side changed after construction")
+        positive_decimal_fn(size, "size")
+        positive_decimal_fn(price, "price")
+        if price <= decimal_one:
+            raise error_type("price must be greater than 1")
+        if order_type != "LIMIT" or target is not None:
+            raise error_type(
+                "action changed outside plain standard-size LIMIT"
+            )
+        return selection_id, side, size, price
+
+    def make_result_fn(
+        *,
+        state,
+        reason_codes,
+        as_of,
+        currency_code,
+        login_route,
+        submitted_payout,
+        account_identity_id,
+        jurisdiction_authority_id,
+        constraint_resolution_sha256,
+    ):
+        digest = result_digest_fn(
+            state=state,
+            reason_codes=reason_codes,
+            as_of=as_of,
+            currency_code=currency_code,
+            login_route=login_route,
+            submitted_payout=submitted_payout,
+            account_identity_id=account_identity_id,
+            jurisdiction_authority_id=jurisdiction_authority_id,
+            constraint_resolution_sha256=constraint_resolution_sha256,
+        )
+        return result_type(
+            state=state,
+            reason_codes=reason_codes,
+            as_of=as_of,
+            currency_code=currency_code,
+            login_route=login_route,
+            submitted_payout=submitted_payout,
+            account_identity_id=account_identity_id,
+            jurisdiction_authority_id=jurisdiction_authority_id,
+            constraint_resolution_sha256=constraint_resolution_sha256,
+            policy_version=policy_version,
+            result_sha256=digest,
+        )
+
+    def fingerprint_fn(value: BetfairStandardLimitAdmission) -> str:
+        return result_digest_fn(
+            state=value.state,
+            reason_codes=value.reason_codes,
+            as_of=value.as_of,
+            currency_code=value.currency_code,
+            login_route=value.login_route,
+            submitted_payout=value.submitted_payout,
+            account_identity_id=value.account_identity_id,
+            jurisdiction_authority_id=value.jurisdiction_authority_id,
+            constraint_resolution_sha256=value.constraint_resolution_sha256,
+        )
 
     issued: dict[int, _IssuedRecord] = {}
     lock = RLock()
@@ -637,20 +719,32 @@ def _snapshot_action(
     return selection_id, side, size, price
 
 
-def _positive_decimal(value: object, field: str) -> Decimal:
-    if type(value) is not Decimal or not value.is_finite() or value <= 0:
-        raise BetfairStandardLimitAdmissionError(
+def _positive_decimal(
+    value: object,
+    field: str,
+    _decimal_type=Decimal,
+    _max_digits=_MAX_DECIMAL_DIGITS,
+    _max_abs_exponent=_MAX_ABS_EXPONENT,
+    _error_type=BetfairStandardLimitAdmissionError,
+) -> Decimal:
+    if type(value) is not _decimal_type or not value.is_finite() or value <= 0:
+        raise _error_type(
             f"{field} must be exact positive finite Decimal"
         )
     _sign, digits, exponent = value.as_tuple()
-    if len(digits) > _MAX_DECIMAL_DIGITS or abs(exponent) > _MAX_ABS_EXPONENT:
-        raise BetfairStandardLimitAdmissionError(
+    if len(digits) > _max_digits or abs(exponent) > _max_abs_exponent:
+        raise _error_type(
             f"{field} exceeds bounded Decimal shape"
         )
     return value
 
 
-def _exact_multiply(left: Decimal, right: Decimal) -> Decimal:
+def _exact_multiply(
+    left: Decimal,
+    right: Decimal,
+    _decimal_type=Decimal,
+    _positive_decimal_fn=_positive_decimal,
+) -> Decimal:
     left_parts = left.as_tuple()
     right_parts = right.as_tuple()
     left_coefficient = 0
@@ -662,20 +756,33 @@ def _exact_multiply(left: Decimal, right: Decimal) -> Decimal:
     product = left_coefficient * right_coefficient
     digits = tuple(int(character) for character in str(product))
     exponent = left_parts.exponent + right_parts.exponent
-    value = Decimal((0, digits, exponent))
-    _positive_decimal(value, "submitted_payout")
+    value = _decimal_type((0, digits, exponent))
+    _positive_decimal_fn(value, "submitted_payout")
     return value
 
 
-def _utc(value: object, field: str) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
-        raise BetfairStandardLimitAdmissionError(
+def _utc(
+    value: object,
+    field: str,
+    _datetime_type=datetime,
+    _utc_zone=timezone.utc,
+    _error_type=BetfairStandardLimitAdmissionError,
+) -> datetime:
+    if (
+        type(value) is not _datetime_type
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
+        raise _error_type(
             f"{field} must be timezone-aware datetime"
         )
-    return value.astimezone(timezone.utc)
+    return value.astimezone(_utc_zone)
 
 
-def _currency(value: object) -> str:
+def _currency(
+    value: object,
+    _error_type=BetfairStandardLimitAdmissionError,
+) -> str:
     if (
         type(value) is not str
         or len(value) != 3
@@ -683,19 +790,23 @@ def _currency(value: object) -> str:
         or not value.isalpha()
         or value != value.upper()
     ):
-        raise BetfairStandardLimitAdmissionError(
+        raise _error_type(
             "currency_code must be three-letter uppercase ASCII"
         )
     return value
 
 
-def _sha256_hex(value: object, field: str) -> str:
+def _sha256_hex(
+    value: object,
+    field: str,
+    _error_type=BetfairStandardLimitAdmissionError,
+) -> str:
     if (
         type(value) is not str
         or len(value) != 64
         or any(character not in "0123456789abcdef" for character in value)
     ):
-        raise BetfairStandardLimitAdmissionError(
+        raise _error_type(
             f"{field} must be lowercase SHA-256 hex"
         )
     return value
@@ -719,30 +830,35 @@ def _result_sha256(
     account_identity_id: str | None,
     jurisdiction_authority_id: str | None,
     constraint_resolution_sha256: str | None,
+    _policy_version=POLICY_VERSION,
+    _utc_fn=_utc,
+    _decimal_text_fn=_decimal_text,
+    _json_dumps=json.dumps,
+    _sha256_fn=sha256,
 ) -> str:
     payload = {
         "schema": "autosport.betfair_standard_limit_admission",
-        "policy_version": POLICY_VERSION,
+        "policy_version": _policy_version,
         "state": state.value,
         "reason_codes": reason_codes,
-        "as_of": _utc(as_of, "as_of").isoformat(),
+        "as_of": _utc_fn(as_of, "as_of").isoformat(),
         "currency_code": currency_code,
         "login_route": login_route,
-        "submitted_payout": _decimal_text(submitted_payout),
+        "submitted_payout": _decimal_text_fn(submitted_payout),
         "account_identity_id": account_identity_id,
         "jurisdiction_authority_id": jurisdiction_authority_id,
         "constraint_resolution_sha256": constraint_resolution_sha256,
         "execution_authorized": False,
         "real_money_execution": False,
     }
-    raw = json.dumps(
+    raw = _json_dumps(
         payload,
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    return sha256(raw).hexdigest()
+    return _sha256_fn(raw).hexdigest()
 
 
 def _make_result(

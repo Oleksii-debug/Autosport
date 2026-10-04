@@ -1680,14 +1680,22 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
         self.assertFalse(forged.grants_real_money_authority)
 
     def test_mapping_resolver_closure_binder_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
         resolver = (
             terminal_mapping_authority
             .resolve_product_proposal_risk_terminal_state_mapping
         )
         closure = resolver.__closure__
         self.assertIsNotNone(closure)
-        self.assertEqual(len(closure), 1)
-        cell = closure[0]
+        binder_cells = [
+            cell
+            for cell in closure
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__name__", None) == "bind"
+        ]
+        self.assertEqual(len(binder_cells), 1)
+        cell = binder_cells[0]
         original = cell.cell_contents
 
         def forged_bind(_instance):
@@ -1697,11 +1705,68 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
             cell.cell_contents = forged_bind
             with self.assertRaisesRegex(
                 ProductProposalRiskTerminalStateMappingError,
-                "public resolver root changed",
+                "public resolver closure changed",
             ):
-                self._binding(("winner:other-a", "winner:selection-b"))
+                self._resolve(bindings)
         finally:
             cell.cell_contents = original
+
+    def test_mapping_resolver_ignores_module_global_core_rebind(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        original = (
+            terminal_mapping_authority
+            ._resolve_product_proposal_risk_terminal_state_mapping_values
+        )
+        try:
+            terminal_mapping_authority._resolve_product_proposal_risk_terminal_state_mapping_values = (
+                lambda *args, **kwargs: {
+                    "workspace_instance_id": "forged",
+                }
+            )
+            result = self._resolve(bindings)
+            self.assertTrue(result.mapping_identity_proven)
+            self.assertTrue(result.terminal_mapping_proven)
+        finally:
+            terminal_mapping_authority._resolve_product_proposal_risk_terminal_state_mapping_values = (
+                original
+            )
+
+    def test_mapping_resolver_rejects_captured_core_code_mutation(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        resolver = (
+            terminal_mapping_authority
+            .resolve_product_proposal_risk_terminal_state_mapping
+        )
+        closure = resolver.__closure__
+        self.assertIsNotNone(closure)
+        core_cells = [
+            cell
+            for cell in closure
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__name__", "").startswith(
+                "_resolve_product_proposal_risk_terminal_state_mapping_values"
+            )
+        ]
+        self.assertEqual(len(core_cells), 1)
+        core = core_cells[0].cell_contents
+        original_code = core.__code__
+
+        def forged_core(*_args, **_kwargs):
+            return {
+                "workspace_instance_id": self.precommit.workspace_instance_id,
+            }
+
+        try:
+            core.__code__ = forged_core.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "public resolver closure changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            core.__code__ = original_code
 
     def test_protocol_constant_rebind_is_rejected(self) -> None:
         original = terminal_mapping_authority._MAPPING_SCHEMA

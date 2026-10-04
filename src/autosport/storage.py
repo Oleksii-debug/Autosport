@@ -2271,6 +2271,96 @@ class SQLiteMarketStore:
     def append_many(self, events: Iterable[MarketEvent]) -> int:
         return len(self.append_batch_accepted(events))
 
+    def committed_append_generation_head(self) -> int:
+        """Return the exact independently committed positive append boundary.
+
+        The returned generation is a product-issued durable transition boundary, not a
+        raw SQLite MAX() observation.  Readers may persist it as a causal frontier and
+        later reconstruct the same immutable history prefix even after newer appends.
+        """
+
+        authority = self._market_append_authority()
+        with self._market_append_issuance_lock(authority):
+            with self._connection_lock:
+                self.connection.execute("BEGIN")
+                try:
+                    _validate_canonical_table(self.connection, "market_events")
+                    self._validate_causal_replay_state()
+                    self._require_product_issued_positive_history(authority)
+                    head = self._positive_append_generation_head()
+                    self._require_committed_append_authority_through(authority, head)
+                    self._commit_stable_database_path()
+                except BaseException:
+                    self.connection.rollback()
+                    raise
+        return head
+
+    def events_at_committed_append_boundary(
+        self,
+        max_generation: int,
+    ) -> list[tuple[MarketEvent, int]]:
+        """Read the trusted immutable history prefix at one committed append boundary.
+
+        Unlike replay cutoff issuance, this does not mint timestamp authority.  The
+        caller supplies a previously observed generation frontier; this method proves
+        that it is an exact independently committed append transition boundary and
+        returns only the canonical corpus at or below it.
+        """
+
+        if type(max_generation) is not int or max_generation < 0:
+            raise ValueError("max_generation must be a non-negative int")
+
+        authority = self._market_append_authority()
+        with self._market_append_issuance_lock(authority):
+            with self._connection_lock:
+                self.connection.execute("BEGIN")
+                try:
+                    _validate_canonical_table(self.connection, "market_events")
+                    self._validate_causal_replay_state()
+                    self._require_product_issued_positive_history(authority)
+                    current_head = self._positive_append_generation_head()
+                    if max_generation > current_head:
+                        raise MonotonicAuthorityRollbackError(
+                            "requested market append boundary exceeds committed authority"
+                        )
+                    self._require_committed_append_authority_through(
+                        authority,
+                        max_generation,
+                    )
+                    qualified_columns = ",".join(
+                        f"m.{column}" for column in _HISTORY_COLUMNS
+                    )
+                    rows = self.connection.execute(
+                        f"""SELECT c.append_generation, {qualified_columns}
+                            FROM market_events AS m
+                            JOIN market_event_commit_order AS c
+                              ON c.dedupe_key = m.dedupe_key
+                            WHERE c.append_generation <= ?""",
+                        (max_generation,),
+                    ).fetchall()
+
+                    events_with_generation: list[tuple[MarketEvent, int]] = []
+                    for row in rows:
+                        if len(row) != len(_HISTORY_COLUMNS) + 1:
+                            raise ValueError(
+                                "market event append-generation row has unexpected shape"
+                            )
+                        generation = row[0]
+                        if type(generation) is not int or generation < 0:
+                            raise ValueError(
+                                "market event append generation must be a non-negative int"
+                            )
+                        event = _event_from_history_row(tuple(row[1:]))
+                        events_with_generation.append((event, generation))
+                    self._commit_stable_database_path()
+                except BaseException:
+                    self.connection.rollback()
+                    raise
+        return sorted(
+            events_with_generation,
+            key=lambda item: _event_order_key(item[0]),
+        )
+
     def events_with_append_generation(
         self,
         event_id: str | None = None,

@@ -785,10 +785,135 @@ class ParlayApiProductSource:
             raise ProductSourceStateError(
                 "product source provider read authority is unavailable"
             )
+        read_batch_func = getattr(read_batch, "__func__", read_batch)
+        read_batch_self = getattr(read_batch, "__self__", None)
+        read_batch_code = getattr(read_batch_func, "__code__", None)
+        read_batch_defaults = getattr(read_batch_func, "__defaults__", None)
+        read_batch_kwdefaults = getattr(read_batch_func, "__kwdefaults__", None)
+        read_batch_kwitems = (
+            tuple(read_batch_kwdefaults.items())
+            if read_batch_kwdefaults is not None
+            else ()
+        )
         normalize = normalizer.normalize
+        normalize_func = getattr(normalize, "__func__", normalize)
+        normalize_self = getattr(normalize, "__self__", None)
+        normalize_code = getattr(normalize_func, "__code__", None)
+        normalize_defaults = getattr(normalize_func, "__defaults__", None)
+        normalize_kwdefaults = getattr(normalize_func, "__kwdefaults__", None)
+        normalize_kwitems = (
+            tuple(normalize_kwdefaults.items())
+            if normalize_kwdefaults is not None
+            else ()
+        )
+        if read_batch_code is None or normalize_code is None:
+            raise ProductSourceStateError(
+                "product source acquisition executable authority is unavailable"
+            )
+
+        def callable_metadata_current(
+            *,
+            owner: object,
+            name: str,
+            expected_self: object,
+            expected_func: object,
+            expected_code: object,
+            expected_defaults: object,
+            expected_kwdefaults: object,
+            expected_kwitems: tuple[tuple[str, object], ...],
+        ) -> bool:
+            rebound = getattr(owner, name, None)
+            rebound_func = getattr(rebound, "__func__", rebound)
+            current_kwdefaults = getattr(expected_func, "__kwdefaults__", None)
+            return (
+                callable(rebound)
+                and getattr(rebound, "__self__", None) is expected_self
+                and rebound_func is expected_func
+                and getattr(expected_func, "__code__", None) is expected_code
+                and getattr(expected_func, "__defaults__", None) is expected_defaults
+                and current_kwdefaults is expected_kwdefaults
+                and (
+                    expected_kwdefaults is None
+                    or (
+                        len(current_kwdefaults) == len(expected_kwitems)
+                        and all(
+                            key in current_kwdefaults
+                            and current_kwdefaults[key] is value
+                            for key, value in expected_kwitems
+                        )
+                    )
+                )
+            )
+
+        def provider_read(max_items: int) -> ProviderBatch:
+            if not callable_metadata_current(
+                owner=provider,
+                name="read_batch",
+                expected_self=read_batch_self,
+                expected_func=read_batch_func,
+                expected_code=read_batch_code,
+                expected_defaults=read_batch_defaults,
+                expected_kwdefaults=read_batch_kwdefaults,
+                expected_kwitems=read_batch_kwitems,
+            ):
+                raise ProductSourcePayloadError(
+                    "product source provider read executable changed during acquisition"
+                )
+            result = read_batch(max_items)
+            if not callable_metadata_current(
+                owner=provider,
+                name="read_batch",
+                expected_self=read_batch_self,
+                expected_func=read_batch_func,
+                expected_code=read_batch_code,
+                expected_defaults=read_batch_defaults,
+                expected_kwdefaults=read_batch_kwdefaults,
+                expected_kwitems=read_batch_kwitems,
+            ):
+                raise ProductSourcePayloadError(
+                    "product source provider read executable changed during acquisition"
+                )
+            return result
+
+        def canonical_normalize(current_source_id: str, quote: ProviderQuote) -> MarketEvent:
+            if (
+                self.normalizer is not normalizer
+                or not callable_metadata_current(
+                    owner=normalizer,
+                    name="normalize",
+                    expected_self=normalize_self,
+                    expected_func=normalize_func,
+                    expected_code=normalize_code,
+                    expected_defaults=normalize_defaults,
+                    expected_kwdefaults=normalize_kwdefaults,
+                    expected_kwitems=normalize_kwitems,
+                )
+            ):
+                raise ProductSourceStateError(
+                    "product source normalizer executable changed during acquisition"
+                )
+            event = normalize(current_source_id, quote)
+            if (
+                self.normalizer is not normalizer
+                or not callable_metadata_current(
+                    owner=normalizer,
+                    name="normalize",
+                    expected_self=normalize_self,
+                    expected_func=normalize_func,
+                    expected_code=normalize_code,
+                    expected_defaults=normalize_defaults,
+                    expected_kwdefaults=normalize_kwdefaults,
+                    expected_kwitems=normalize_kwitems,
+                )
+            ):
+                raise ProductSourceStateError(
+                    "product source normalizer executable changed during acquisition"
+                )
+            return event
+
         cursor, quotes, quality_flags = self._read_provider_snapshot(
             provider=provider,
-            read_batch=read_batch,
+            read_batch=provider_read,
             source_id=source_id,
         )
         if (
@@ -806,7 +931,7 @@ class ParlayApiProductSource:
         catalog_events = self._catalog_events(
             quotes,
             source_id=source_id,
-            normalize=normalize,
+            normalize=canonical_normalize,
         )
         committed_quotes = state["last_committed_quote_digests"]
         committed_dedupes = state["last_committed_dedupe_digests"]
@@ -816,7 +941,7 @@ class ParlayApiProductSource:
         seen_dedupes: dict[str, str] = {}
         items: list[dict[str, object]] = []
         for quote in quotes:
-            event = normalize(source_id, quote)
+            event = canonical_normalize(source_id, quote)
             digest = canonical_event_digest(event)
             previous_quote = seen_quotes.get(event.quote_key)
             if previous_quote is not None:

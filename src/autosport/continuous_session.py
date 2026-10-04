@@ -1430,6 +1430,10 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "settlement_evidence_count must be a non-negative integer"
             )
+        if count > 0 and raw["cycles_completed"] == 0:
+            raise ContinuousSessionError(
+                "committed settlement evidence requires a completed cycle"
+            )
         tip = _sha256(
             raw["settlement_evidence_tip_sha256"],
             "settlement_evidence_tip_sha256",

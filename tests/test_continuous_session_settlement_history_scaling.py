@@ -134,6 +134,30 @@ def _journal_snapshot(root: Path) -> dict[str, bytes]:
 
 
 
+
+def test_operational_checkpoint_rejects_evidence_history_without_completed_cycle() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        state = _state_with_history(root, 1)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["cycles_completed"] = 0
+        raw["last_success_at"] = None
+        path.write_text(json.dumps(raw, sort_keys=True), encoding="utf-8")
+        journal_before = _journal_snapshot(root)
+
+        try:
+            state.operational_snapshot()
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "operational checkpoint accepted settlement history with zero cycles"
+            )
+
+        assert _journal_snapshot(root) == journal_before
+
+
 def test_checkpoint_rejects_projection_identity_without_gap_sync_state() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

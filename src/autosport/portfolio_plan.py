@@ -3036,6 +3036,26 @@ def build_portfolio_plan(
         reason += "; ineligible intents zeroed: " + "; ".join(
             f"{intent_id}={rejection}" for intent_id, rejection in rejected
         )
+    if (
+        action
+        in {
+            PortfolioAction.STAKE_VECTOR,
+            PortfolioAction.HEDGE_REBALANCE,
+            PortfolioAction.PAPER_PLAN,
+        }
+        and PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+        != portfolio_sha256
+    ):
+        return _terminal_plan(
+            decision_ts=decision_ts,
+            action=PortfolioAction.WAIT,
+            reason="canonical portfolio changed during portfolio-plan construction",
+            intents=intents,
+            portfolio_sha256=None,
+            dependency_graph=None,
+            policy=risk_policy,
+            portfolio_truth=portfolio_truth,
+        )
     return PortfolioPlan(
         decision_ts=decision_ts,
         action=action,

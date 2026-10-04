@@ -198,6 +198,48 @@ def test_k07_verifier_alias_rebind_is_rejected_before_rebound_execution(
     assert calls == []
 
 
+def test_k07_resolver_alias_rebind_is_rejected_before_rebound_execution(
+    monkeypatch,
+) -> None:
+    client, _provider = _client(monkeypatch)
+    calls: list[object] = []
+
+    def hostile_resolver(value):
+        calls.append(value)
+        raise AssertionError("rebound K07 identity resolver executed")
+
+    monkeypatch.setattr(origin_guard, "_RESOLVE_IDENTITY", hostile_resolver)
+
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="authenticated identity verifier authority changed",
+    ):
+        _qualified_capture(client)
+
+    assert calls == []
+
+
+def test_k07_resolver_executable_drift_is_rejected_before_execution(
+    monkeypatch,
+) -> None:
+    client, _provider = _client(monkeypatch)
+
+    def hostile_resolver(value):
+        raise AssertionError("mutated K07 identity resolver executed")
+
+    monkeypatch.setattr(
+        origin_guard._RESOLVE_IDENTITY,
+        "__code__",
+        hostile_resolver.__code__,
+    )
+
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="authenticated identity verifier authority changed",
+    ):
+        _qualified_capture(client)
+
+
 def test_qualified_read_alias_rebind_is_rejected_before_rebound_execution(
     monkeypatch,
 ) -> None:

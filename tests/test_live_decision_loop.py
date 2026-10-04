@@ -3372,7 +3372,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed_observer.calls, 1)
             self.assertEqual(len(ledger.verified_records()), 2)
 
-    def test_default_pending_restart_uses_committed_market_frontier_after_late_backdated_append(self) -> None:
+    def test_pending_restart_uses_frontier_after_backdated_append(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             seed_store = SQLiteMarketStore(workspace / "market.db")

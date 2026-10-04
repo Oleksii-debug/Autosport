@@ -310,6 +310,102 @@ def test_pending_settlement_journal_recovers_after_write_crash() -> None:
         assert final_checkpoint["settlement_evidence_count"] == _SMALL_HISTORY + 1
 
 
+def test_pending_recovery_accepts_exact_already_written_pending_prefix() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        resolutions = (
+            continuous_session.SettlementResolution(
+                event_identity="provider-a:event-pending-prefix-a",
+                settlement_ref="provider-result:pending-prefix-a",
+                quote_outcomes={
+                    "provider-a:event-pending-prefix-a:winner:home": "win"
+                },
+                evidence_id="receipt-pending-prefix-a",
+                evidence_sha256="a" * 64,
+                available_at=_AT,
+            ),
+            continuous_session.SettlementResolution(
+                event_identity="provider-a:event-pending-prefix-b",
+                settlement_ref="provider-result:pending-prefix-b",
+                quote_outcomes={
+                    "provider-a:event-pending-prefix-b:winner:home": "loss"
+                },
+                evidence_id="receipt-pending-prefix-b",
+                evidence_sha256="b" * 64,
+                available_at=_AT,
+            ),
+        )
+        original_write = state._write_evidence_record
+        calls = 0
+
+        def crash_after_first_pending_record(record):
+            nonlocal calls
+            calls += 1
+            original_write(record)
+            if calls == 1:
+                raise OSError("synthetic crash after first pending record")
+
+        with patch.object(
+            state,
+            "_write_evidence_record",
+            crash_after_first_pending_record,
+        ):
+            try:
+                state.record_success(
+                    at=_AT,
+                    full_refresh=False,
+                    settlement_evidence=resolutions,
+                )
+            except OSError:
+                pass
+            else:
+                raise AssertionError(
+                    "synthetic partial pending write crash did not interrupt commit"
+                )
+
+        checkpoint = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        pending = checkpoint["settlement_evidence_pending"]
+        assert pending is not None
+        assert len(pending["records"]) == 2
+        first_pending_path = (
+            root
+            / "continuous_session.settlement-evidence"
+            / f"{pending['records'][0]['evidence_key_sha256']}.json"
+        )
+        second_pending_path = (
+            root
+            / "continuous_session.settlement-evidence"
+            / f"{pending['records'][1]['evidence_key_sha256']}.json"
+        )
+        assert first_pending_path.exists()
+        assert not second_pending_path.exists()
+
+        restarted = continuous_session._ContinuousSessionState(
+            root / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        recovered = restarted.snapshot()
+        assert recovered.cycles_completed == _SMALL_HISTORY + 1
+        assert {
+            "receipt-pending-prefix-a",
+            "receipt-pending-prefix-b",
+        }.issubset(
+            {item["evidence_id"] for item in recovered.settlement_evidence}
+        )
+        assert first_pending_path.exists()
+        assert second_pending_path.exists()
+        final_checkpoint = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        assert final_checkpoint["settlement_evidence_pending"] is None
+        assert final_checkpoint["settlement_evidence_count"] == _SMALL_HISTORY + 2
+
+
 def test_pending_recovery_rejects_corrupt_base_before_advancing_checkpoint() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

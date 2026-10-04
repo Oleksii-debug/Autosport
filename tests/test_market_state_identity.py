@@ -1,0 +1,125 @@
+from __future__ import annotations
+
+from decimal import Decimal
+
+import pytest
+
+from autosport.domain import MarketEvent
+from autosport.market_state_identity import (
+    MarketStateIdentityError,
+    PROPHETX_REST_MARKET_STATE_CONTRACT,
+    same_semantic_market_state,
+    semantic_market_state_identity,
+)
+
+
+def _event(
+    *,
+    sequence: int,
+    odds: str = "2.00",
+    contract: object = PROPHETX_REST_MARKET_STATE_CONTRACT,
+    source_id: str = "prophetx:sandbox",
+) -> MarketEvent:
+    metadata = {
+        "provider": "prophetx",
+        "environment": "sandbox",
+        "transport_surface": "v3_affiliate_get_markets",
+        "request_fingerprint_sha256": "a" * 64,
+        "product_acquisition_sequence": sequence,
+        "response_sha256": f"{sequence:x}".rjust(64, "0"),
+        "snapshot_fingerprint_sha256": (
+            f"{sequence + 100:x}".rjust(64, "0")
+        ),
+        "sequence_authority_id": "prophetx-rest-test-authority",
+        "sequence_source_id": (
+            "prophetx:sandbox:rest:v3-affiliate-get-markets"
+        ),
+    }
+    if contract is not None:
+        metadata["semantic_state_contract"] = contract
+    timestamp = f"2026-09-16T19:00:{sequence:02d}+00:00"
+    return MarketEvent(
+        event_id="event-1",
+        market_id="market-1",
+        selection_id="selection-1",
+        decimal_odds=Decimal(odds),
+        observed_ts=timestamp,
+        source_id=source_id,
+        sequence=sequence,
+        status="open",
+        ingest_ts=timestamp,
+        metadata=metadata,
+    )
+
+
+def test_acquisition_only_fields_do_not_change_semantic_identity() -> None:
+    first = _event(sequence=1)
+    second = _event(sequence=2)
+
+    assert first.dedupe_key != second.dedupe_key
+    assert semantic_market_state_identity(first) == (
+        semantic_market_state_identity(second)
+    )
+    assert same_semantic_market_state(first, second)
+
+
+def test_economic_change_remains_semantic_transition() -> None:
+    first = _event(sequence=1, odds="2.00")
+    changed = _event(sequence=2, odds="2.10")
+
+    assert semantic_market_state_identity(first) != (
+        semantic_market_state_identity(changed)
+    )
+    assert not same_semantic_market_state(first, changed)
+
+
+def test_absent_contract_preserves_legacy_event_semantics() -> None:
+    first = _event(sequence=1, contract=None)
+    second = _event(sequence=2, contract=None)
+
+    assert semantic_market_state_identity(first) is None
+    assert semantic_market_state_identity(second) is None
+    assert not same_semantic_market_state(first, second)
+
+
+@pytest.mark.parametrize(
+    ("contract", "source_id", "message"),
+    (
+        (
+            "autosport.prophetx-rest-market-state.v2",
+            "prophetx:sandbox",
+            "unsupported",
+        ),
+        (
+            PROPHETX_REST_MARKET_STATE_CONTRACT,
+            "provider-a",
+            "canonical source_id",
+        ),
+    ),
+)
+def test_malformed_or_rebound_contract_fails_closed(
+    contract: str,
+    source_id: str,
+    message: str,
+) -> None:
+    with pytest.raises(MarketStateIdentityError, match=message):
+        semantic_market_state_identity(
+            _event(
+                sequence=1,
+                contract=contract,
+                source_id=source_id,
+            )
+        )
+
+
+def test_acquisition_sequence_must_match_market_event_sequence() -> None:
+    event = _event(sequence=1)
+    payload = event.to_dict()
+    payload["metadata"]["product_acquisition_sequence"] = 2
+    forged = MarketEvent.from_dict(payload)
+
+    with pytest.raises(
+        MarketStateIdentityError,
+        match="acquisition sequence is inconsistent",
+    ):
+        semantic_market_state_identity(forged)

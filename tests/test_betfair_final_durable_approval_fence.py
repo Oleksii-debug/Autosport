@@ -104,6 +104,56 @@ def test_durable_revocation_after_attempt_reservation_denies_final_send(
         )
 
 
+def test_cross_instance_revocation_committed_before_final_fence_denies(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        competing = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        original_begin = betfair_execution.begin_supervised_attempt
+
+        def begin_then_competing_revoke(*args, **kwargs):
+            attempt = original_begin(*args, **kwargs)
+            competing.revoke_supervised_approval(
+                plan_id=bound.execution_plan.plan_id,
+                approval_id=approval.ledger_identity,
+                approval_fingerprint=approval.fingerprint,
+                revoked_at=RESERVED_AT,
+                revocation_evidence_sha256="c" * 64,
+            )
+            return attempt
+
+        monkeypatch.setattr(
+            betfair_execution,
+            "begin_supervised_attempt",
+            begin_then_competing_revoke,
+        )
+
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="durable supervised approval is missing or revoked",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-cross-instance-revoked-first",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert transport.calls == []
+        _assert_reserved_without_submission(
+            ledger,
+            bound.execution_plan.plan_id,
+            "attempt-cross-instance-revoked-first",
+        )
+
+
 def test_cross_instance_revocation_cannot_commit_during_provider_send() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
@@ -164,6 +214,48 @@ def test_cross_instance_revocation_cannot_commit_during_provider_send() -> None:
         )
 
 
+def test_submitted_fact_is_durable_and_cross_instance_visible_before_post() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        observer = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        observed_submitted = False
+
+        def inspect_then_respond(request):
+            nonlocal observed_submitted
+            view = observer.verified_execution_view(bound.execution_plan.plan_id)
+            attempt = next(
+                item
+                for item in view.attempts
+                if item.attempt.attempt_id == "attempt-durable-before-post"
+            )
+            assert attempt.state is AttemptState.SUBMITTED
+            assert attempt.submitted_at == SUBMITTED_AT
+            assert attempt.provider_order_ref is not None
+            observed_submitted = True
+            return _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+
+        transport = _Transport(inspect_then_respond)
+        client = _enabled_client(profile, transport, store=goal_store)
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-durable-before-post",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert observed_submitted
+        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
+        assert result.attempt_state is AttemptState.ACCEPTED
+
+
 def test_quote_expiry_exact_boundary_denies_before_submitted_or_transport() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
@@ -219,6 +311,36 @@ def test_approval_expiry_exact_boundary_denies_before_submitted_or_transport() -
             ledger,
             bound.execution_plan.plan_id,
             "attempt-expired-approval-final-send",
+        )
+
+
+def test_final_send_cannot_precede_attempt_reservation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        before_reservation = "2026-09-19T12:00:00+00:00"
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="final send time precedes attempt reservation",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-final-clock-before-reservation",
+                profile=profile,
+                client=client,
+                clock=lambda: before_reservation,
+            )
+
+        assert transport.calls == []
+        _assert_reserved_without_submission(
+            ledger,
+            bound.execution_plan.plan_id,
+            "attempt-final-clock-before-reservation",
         )
 
 

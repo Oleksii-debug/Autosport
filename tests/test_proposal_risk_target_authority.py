@@ -450,6 +450,48 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
                 self.workspace, first.target_sha256
             )
 
+    def test_missing_append_prepare_is_aborted_before_real_target_issue(self) -> None:
+        workspace_authority = proposal_target_authority._authority_for_workspace(
+            self.workspace
+        )
+        chain = proposal_target_authority._target_authority(
+            self.workspace, workspace_authority.workspace_instance_id
+        )
+        interrupted = "a" * 64
+        chain.prepare(
+            tx_id="interrupted-before-ledger-append",
+            observed_state_sha256=None,
+            intended_state_sha256=interrupted,
+            semantic_binding_sha256=interrupted,
+        )
+
+        issued = self._issue()
+
+        self.assertEqual(
+            resolve_product_proposal_risk_target(
+                self.workspace, issued.target_sha256
+            ),
+            issued,
+        )
+        phases = tuple(record.phase.value for record in chain.read_history())
+        self.assertIn("ABORT", phases)
+        self.assertEqual(phases[-1], "COMMIT")
+
+    def test_superseded_target_cannot_be_reissued_as_current(self) -> None:
+        first = self._issue()
+        second = issue_product_proposal_risk_target(
+            self.workspace,
+            signal_strengths=(Decimal("0.9"), Decimal("0.8")),
+            contexts=self._contexts(),
+        )
+        self.assertNotEqual(first.target_sha256, second.target_sha256)
+
+        with self.assertRaisesRegex(
+            ProductProposalRiskTargetError,
+            "superseded and cannot be reissued",
+        ):
+            self._issue()
+
     def test_target_chain_keeps_exact_append_history_while_only_latest_is_current(
         self,
     ) -> None:

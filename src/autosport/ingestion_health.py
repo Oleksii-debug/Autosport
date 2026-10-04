@@ -391,6 +391,38 @@ class SourceHealthStore:
         ).encode("utf-8")
         return hashlib.sha256(material).hexdigest()
 
+    def _bootstrap_validated_authority_state(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+        observed: str,
+    ) -> None:
+        # A first validated legacy image becomes the authority baseline only after
+        # the exact existing file and directory entry are durable.
+        _sync_existing_file(self.path)
+        _sync_parent_directory(self.path.parent)
+        binding = self._authority_binding(
+            None,
+            observed,
+            kind="BOOTSTRAP",
+        )
+        tx_id = self._next_authority_tx_id(
+            authority,
+            None,
+            observed,
+            binding,
+        )
+        authority.prepare(
+            tx_id=tx_id,
+            observed_state_sha256=None,
+            intended_state_sha256=observed,
+            semantic_binding_sha256=binding,
+        )
+        authority.commit(
+            tx_id=tx_id,
+            observed_state_sha256=observed,
+            semantic_binding_sha256=binding,
+        )
+
     def _recover_or_bootstrap_authority(
         self,
         observed: str | None,
@@ -398,51 +430,36 @@ class SourceHealthStore:
         authority = self._monotonic_authority()
         history = authority.read_history()
         if not history:
-            if observed is None:
-                return authority
-            # A first validated legacy image becomes the authority baseline only
-            # after the exact existing file and directory entry are durable.
-            _sync_existing_file(self.path)
-            _sync_parent_directory(self.path.parent)
-            binding = self._authority_binding(
-                None,
-                observed,
-                kind="BOOTSTRAP",
-            )
-            tx_id = self._next_authority_tx_id(
-                authority,
-                None,
-                observed,
-                binding,
-            )
-            authority.prepare(
-                tx_id=tx_id,
-                observed_state_sha256=None,
-                intended_state_sha256=observed,
-                semantic_binding_sha256=binding,
-            )
-            authority.commit(
-                tx_id=tx_id,
-                observed_state_sha256=observed,
-                semantic_binding_sha256=binding,
-            )
+            if observed is not None:
+                self._bootstrap_validated_authority_state(authority, observed)
             return authority
 
         pending = history[-1] if history[-1].phase is AuthorityPhase.PREPARE else None
-        if pending is None:
-            authority.recover(observed_state_sha256=observed)
+        if pending is not None:
+            if observed == pending.intended_state_sha256:
+                # The local replace happened before the prior writer stopped. Retry
+                # the durability barrier before converting PREPARE into COMMIT.
+                _sync_existing_file(self.path)
+                _sync_parent_directory(self.path.parent)
+            authority.recover(
+                observed_state_sha256=observed,
+                tx_id=pending.tx_id,
+                semantic_binding_sha256=pending.semantic_binding_sha256,
+            )
             return authority
 
-        if observed == pending.intended_state_sha256:
-            # The local replace happened before the prior writer stopped. Retry
-            # the durability barrier before converting PREPARE into COMMIT.
-            _sync_existing_file(self.path)
-            _sync_parent_directory(self.path.parent)
-        authority.recover(
-            observed_state_sha256=observed,
-            tx_id=pending.tx_id,
-            semantic_binding_sha256=pending.semantic_binding_sha256,
+        has_committed_state = any(
+            record.phase is AuthorityPhase.COMMIT for record in history
         )
+        if not has_committed_state and observed is not None:
+            # A first-generation PREPARE may have been ABORTed before any state was
+            # ever committed. Authority history exists, but there is still no high-
+            # water mark; a validated existing legacy image gets a fresh tip-bound
+            # bootstrap attempt rather than being mistaken for a rollback.
+            self._bootstrap_validated_authority_state(authority, observed)
+            return authority
+
+        authority.recover(observed_state_sha256=observed)
         return authority
 
     def _recover_current_for_write(self) -> None:

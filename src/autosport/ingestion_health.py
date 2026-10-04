@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
 from typing import BinaryIO
+from types import FunctionType
 
 from .monotonic_workspace_authority import (
     AuthorityPhase,
@@ -16,6 +17,8 @@ from .monotonic_workspace_authority import (
     MonotonicAuthorityRollbackError,
     MonotonicWorkspaceAuthority,
 )
+from . import secret_redaction as _secret_redaction
+from .secret_redaction import safe_exception_text
 
 
 _ALLOWED_HEALTH_STATUSES = frozenset({"unknown", "healthy", "degraded", "failed"})
@@ -43,6 +46,67 @@ _SCHEMA_V4 = 4
 _HISTORY_ENTRY_V2_FIELDS = frozenset({"recorded_at", "state"})
 _HISTORY_ENTRY_V3_FIELDS = frozenset({"recorded_at", "transition_order", "state"})
 _SOURCE_HEALTH_AUTHORITY_DOMAIN = "autosport.source-health-store.v1"
+_DURABLE_FAILURE_FALLBACK = "BaseException: exception details unavailable"
+
+
+def _build_durable_failure_renderer():
+    """Bind durable diagnostics to the canonical redaction executable graph.
+
+    Source-health JSON is durable security-sensitive evidence.  A late-bound or
+    code-swapped presentation helper must never acquire authority to persist raw
+    exception detail.  Normal diagnostics stay available while the canonical
+    redaction graph is unchanged; any dispatch/executable drift fails closed to a
+    fixed product-owned literal.
+    """
+
+    canonical_renderer = safe_exception_text
+    canonical_globals = canonical_renderer.__globals__
+
+    function_witness = tuple(
+        (name, value, value.__code__)
+        for name, value in canonical_globals.items()
+        if type(value) is FunctionType
+        and getattr(value, "__module__", None) == _secret_redaction.__name__
+    )
+    external_callable_witness = tuple(
+        (name, value)
+        for name, value in canonical_globals.items()
+        if callable(value)
+        and type(value) is not FunctionType
+        and not name.startswith("__")
+    )
+
+    def authority_current() -> bool:
+        if globals().get("safe_exception_text") is not canonical_renderer:
+            return False
+        if _secret_redaction.safe_exception_text is not canonical_renderer:
+            return False
+        for name, function, code in function_witness:
+            if canonical_globals.get(name) is not function:
+                return False
+            if function.__code__ is not code:
+                return False
+        for name, value in external_callable_witness:
+            if canonical_globals.get(name) is not value:
+                return False
+        return True
+
+    def render(exc: BaseException) -> str:
+        if not authority_current():
+            return _DURABLE_FAILURE_FALLBACK
+        try:
+            rendered = canonical_renderer(exc)
+        except BaseException:
+            return _DURABLE_FAILURE_FALLBACK
+        if not authority_current() or type(rendered) is not str or not rendered:
+            return _DURABLE_FAILURE_FALLBACK
+        return rendered
+
+    return render
+
+
+_DURABLE_FAILURE_RENDERER = _build_durable_failure_renderer()
+del _build_durable_failure_renderer
 
 
 def _source_health_authority_key(
@@ -788,7 +852,7 @@ class SourceHealthStore:
             state.total_failures += 1
             state.consecutive_failures += 1
             state.last_error_at = now
-            state.last_error = f"{type(error).__name__}: {error}"
+            state.last_error = _DURABLE_FAILURE_RENDERER(error)
             if failure_kind is None:
                 state.last_failure_kind = None
                 state.consecutive_failure_kind_count = 0

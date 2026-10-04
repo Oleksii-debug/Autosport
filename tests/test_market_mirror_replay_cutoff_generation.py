@@ -267,6 +267,64 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_restart_reproves_history_inside_projection_rebuild_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            original = self.event(
+                sequence=1,
+                odds="2.00",
+                observed_ts="2026-09-16T19:00:00+00:00",
+            )
+            store = SQLiteMarketStore(path)
+            try:
+                self.assertTrue(store.append(original))
+            finally:
+                store.close()
+
+            forged = self.event(
+                sequence=1,
+                odds="9.99",
+                observed_ts="2026-09-16T19:00:00+00:00",
+            )
+            original_rebuild = SQLiteMarketStore._rebuild_current_quotes
+            tampered = False
+
+            def tamper_before_rebuild(instance, *, append_authority):
+                nonlocal tampered
+                if not tampered:
+                    tampered = True
+                    external = sqlite3.connect(path)
+                    try:
+                        external.execute(
+                            """UPDATE market_events
+                               SET decimal_odds=?, payload_json=?
+                               WHERE dedupe_key=?""",
+                            (
+                                str(forged.decimal_odds),
+                                storage_module._canonical_payload(forged),
+                                original.dedupe_key,
+                            ),
+                        )
+                        external.commit()
+                    finally:
+                        external.close()
+                return original_rebuild(
+                    instance,
+                    append_authority=append_authority,
+                )
+
+            with patch.object(
+                SQLiteMarketStore,
+                "_rebuild_current_quotes",
+                new=tamper_before_rebuild,
+            ):
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "positive market append chronology is missing, forged, or unproven",
+                ):
+                    SQLiteMarketStore(path)
+            self.assertTrue(tampered)
+
     def test_late_backdated_append_cannot_rewrite_frozen_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

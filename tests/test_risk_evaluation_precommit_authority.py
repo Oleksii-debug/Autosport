@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.risk_sampling_membership as sampling_membership
 from autosport.risk_evaluation_precommit_authority import (
     ProductFixedNRiskEvaluationPrecommitAuthority,
     ProductRiskEvaluationPrecommitError,
@@ -297,5 +298,35 @@ def test_manifest_capital_rebinding_fails_closed(tmp_path) -> None:
             registry_path=registry,
             workspace=workspace,
             sampling_manifest_json=rebound,
+            authority_root=authority_root,
+        )
+
+
+def test_internal_structural_resolver_cannot_relabel_frozen_confidence(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    membership, workspace, registry, authority_root, _published, _issued, manifest = (
+        _state(tmp_path)
+    )
+    original_parse = sampling_membership._parse_design
+
+    def forged_parse(text):
+        payload, digest = original_parse(text)
+        rebound = dict(payload)
+        rebound["confidence_level"] = "0.99"
+        return rebound, digest
+
+    monkeypatch.setattr(sampling_membership, "_parse_design", forged_parse)
+
+    with pytest.raises(
+        ProductRiskEvaluationPrecommitError,
+        match="preregistration differs from product IID precommit",
+    ):
+        resolve_product_fixed_n_risk_evaluation_precommit(
+            membership,
+            registry_path=registry,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
             authority_root=authority_root,
         )

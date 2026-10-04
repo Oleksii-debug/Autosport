@@ -867,7 +867,7 @@ class SQLiteMarketStore:
             raise TypeError("event must be a MarketEvent")
         with self._connection_lock:
             row = self.connection.execute(
-                f"""SELECT {_HISTORY_COLUMNS_SQL},r.ingest_ts,r.authority
+                f"""SELECT {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)},r.ingest_ts,r.authority
                     FROM market_events AS m
                     INNER JOIN market_event_live_receipts AS r
                     ON r.dedupe_key=m.dedupe_key

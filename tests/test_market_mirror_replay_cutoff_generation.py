@@ -4214,6 +4214,81 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_existing_cutoff_ignores_noncontiguous_later_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(first))
+                frozen = self.replay(store)
+                self.assertEqual(self.semantic_events(frozen), (first.to_dict(),))
+
+                tail = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:00.500000+00:00",
+                )
+                self.direct_insert_positive_generation(
+                    store,
+                    tail,
+                    generation=3,
+                )
+
+                self.assertEqual(
+                    self.semantic_events(self.replay(store)),
+                    (first.to_dict(),),
+                )
+                with self.assertRaises(ValueError):
+                    self.replay(
+                        store,
+                        as_of=self.CUTOFF + timedelta(seconds=1),
+                    )
+            finally:
+                store.close()
+
+    def test_existing_cutoff_ignores_negative_later_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(first))
+                frozen = self.replay(store)
+                self.assertEqual(self.semantic_events(frozen), (first.to_dict(),))
+
+                tail = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:00.500000+00:00",
+                )
+                self.direct_insert_positive_generation(
+                    store,
+                    tail,
+                    generation=-1,
+                )
+
+                self.assertEqual(
+                    self.semantic_events(self.replay(store)),
+                    (first.to_dict(),),
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "append generation is invalid",
+                ):
+                    self.replay(
+                        store,
+                        as_of=self.CUTOFF + timedelta(seconds=1),
+                    )
+            finally:
+                store.close()
+
     def test_pending_cutoff_cannot_commit_over_unissued_append_generation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

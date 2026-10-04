@@ -1705,7 +1705,11 @@ class SQLiteMarketStore:
             f"""SELECT c.append_generation, {qualified_columns}
                 FROM market_event_commit_order AS c
                 JOIN market_events AS m ON m.dedupe_key = c.dedupe_key
-                WHERE c.append_generation <= ?
+                WHERE c.append_generation = 0
+                   OR (
+                       c.append_generation > 0
+                       AND c.append_generation <= ?
+                   )
                 ORDER BY c.append_generation, m.dedupe_key""",
             (max_generation,),
         ).fetchall()
@@ -2562,7 +2566,18 @@ class SQLiteMarketStore:
             # locks. Canonical corpus validation may still decode rows here as part of
             # the authority proof; do not overstate this as a lock-free decode path.
             with append_guard, self._connection_lock:
-                self._validate_causal_replay_state()
+                if preexisting_cutoff:
+                    _validate_canonical_table(self.connection, "market_events")
+                    _validate_canonical_table(
+                        self.connection,
+                        "market_event_commit_order",
+                    )
+                    _validate_canonical_table(
+                        self.connection,
+                        "market_replay_cutoffs",
+                    )
+                else:
+                    self._validate_causal_replay_state()
                 cutoff_rows = self._validated_replay_cutoff_rows()
                 observed_state_sha256 = (
                     self._replay_cutoff_authority_state_sha256(cutoff_rows)
@@ -2728,7 +2743,18 @@ class SQLiteMarketStore:
                 # the SELECT whose rows escape to replay consumers.
                 self.connection.execute("BEGIN")
                 try:
-                    self._validate_causal_replay_state()
+                    if preexisting_cutoff:
+                        _validate_canonical_table(self.connection, "market_events")
+                        _validate_canonical_table(
+                            self.connection,
+                            "market_event_commit_order",
+                        )
+                        _validate_canonical_table(
+                            self.connection,
+                            "market_replay_cutoffs",
+                        )
+                    else:
+                        self._validate_causal_replay_state()
                     cutoff_rows = self._validated_replay_cutoff_rows()
                     observed_state_sha256 = (
                         self._replay_cutoff_authority_state_sha256(cutoff_rows)
@@ -2769,7 +2795,11 @@ class SQLiteMarketStore:
                             FROM market_events AS m
                             JOIN market_event_commit_order AS c
                               ON c.dedupe_key = m.dedupe_key
-                            WHERE c.append_generation <= ?""",
+                            WHERE c.append_generation = 0
+                               OR (
+                                   c.append_generation > 0
+                                   AND c.append_generation <= ?
+                               )""",
                         (max_generation,),
                     ).fetchall()
                     self._commit_stable_database_path()

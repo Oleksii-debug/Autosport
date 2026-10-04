@@ -102,6 +102,9 @@ _APPEND_MACHINE_DOMAIN: Final = "data.market-event-positive-append.v1"
 _APPEND_MACHINE_KEY_PREFIX: Final = "sqlite-market-store-positive-append:"
 _APPEND_STATE_SCHEMA: Final = "autosport.market-event-positive-append.chain.v1"
 _APPEND_BINDING_SCHEMA: Final = "autosport.market-event-positive-append.binding.v1"
+_APPEND_BASELINE_SCHEMA: Final = "autosport.market-event-generation-zero-baseline.v1"
+_APPEND_BASELINE_BINDING_SCHEMA: Final = "autosport.market-event-generation-zero-baseline.binding.v1"
+_APPEND_BASELINE_TX_RE: Final = re.compile(r"^baseline-(?P<nonce>[0-9a-f]{32})$")
 _APPEND_TX_RE: Final = re.compile(
     r"^append-(?P<start>[1-9][0-9]*)-(?P<end>[1-9][0-9]*)-(?P<nonce>[0-9a-f]{32})$"
 )
@@ -168,6 +171,26 @@ def _replay_cutoff_id(canonical_as_of: str) -> str:
 
 def _canonical_sha256(payload: object) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _append_baseline_state_sha256(
+    entries: tuple[tuple[str, str], ...],
+) -> str:
+    return _canonical_sha256(
+        {
+            "schema": _APPEND_BASELINE_SCHEMA,
+            "entries": [list(entry) for entry in entries],
+        }
+    )
+
+
+def _append_baseline_binding_sha256(state_sha256: str) -> str:
+    return _canonical_sha256(
+        {
+            "schema": _APPEND_BASELINE_BINDING_SCHEMA,
+            "baseline_state_sha256": state_sha256,
+        }
+    )
 
 
 def _append_state_step_sha256(
@@ -726,6 +749,7 @@ class SQLiteMarketStore:
             self.connection.execute("PRAGMA journal_mode=WAL")
             self.connection.execute("PRAGMA synchronous=FULL")
             self._init_schema()
+            self._ensure_market_append_baseline_authority()
             self._rebuild_current_quotes()
         except Exception:
             self.connection.close()
@@ -970,17 +994,130 @@ class SQLiteMarketStore:
             authority.journal_dir / "market-positive-append-issuance"
         )
 
+    def _validated_generation_zero_entries(
+        self,
+    ) -> tuple[tuple[str, str], ...]:
+        qualified_columns = ",".join(
+            f"m.{column}" for column in _HISTORY_COLUMNS
+        )
+        rows = self.connection.execute(
+            f"""SELECT {qualified_columns}
+                FROM market_event_commit_order AS c
+                JOIN market_events AS m ON m.dedupe_key = c.dedupe_key
+                WHERE c.append_generation = 0
+                ORDER BY m.dedupe_key"""
+        ).fetchall()
+        entries: list[tuple[str, str]] = []
+        for row in rows:
+            history_row = tuple(row)
+            _event_from_history_row(history_row)
+            dedupe_key = history_row[0]
+            payload_json = history_row[-1]
+            if type(dedupe_key) is not str or type(payload_json) is not str:
+                raise ValueError("generation-zero market baseline row is invalid")
+            entries.append((dedupe_key, payload_json))
+        return tuple(entries)
+
+    def _generation_zero_baseline_state_sha256(self) -> str:
+        return _append_baseline_state_sha256(
+            self._validated_generation_zero_entries()
+        )
+
+    def _ensure_market_append_baseline_authority(self) -> None:
+        """Seal baseline membership without claiming historical receipt chronology."""
+
+        authority = self._market_append_authority()
+        observed_state_sha256 = self._generation_zero_baseline_state_sha256()
+        history = authority.read_history()
+
+        committed = tuple(
+            record for record in history if record.phase is AuthorityPhase.COMMIT
+        )
+        if not committed:
+            if history:
+                pending = history[-1]
+                if (
+                    pending.phase is not AuthorityPhase.PREPARE
+                    or _APPEND_BASELINE_TX_RE.fullmatch(pending.tx_id) is None
+                ):
+                    raise MonotonicAuthorityRollbackError(
+                        "market append authority lacks a committed generation-zero baseline"
+                    )
+                try:
+                    authority.recover(
+                        observed_state_sha256=observed_state_sha256,
+                    )
+                except MonotonicAuthorityRecoveryRequiredError:
+                    authority.recover(
+                        observed_state_sha256=observed_state_sha256,
+                        tx_id=pending.tx_id,
+                        semantic_binding_sha256=pending.semantic_binding_sha256,
+                    )
+                history = authority.read_history()
+                committed = tuple(
+                    record
+                    for record in history
+                    if record.phase is AuthorityPhase.COMMIT
+                )
+
+            if not committed:
+                binding_sha256 = _append_baseline_binding_sha256(
+                    observed_state_sha256
+                )
+                tx_id = f"baseline-{uuid.uuid4().hex}"
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=observed_state_sha256,
+                    semantic_binding_sha256=binding_sha256,
+                )
+                authority.recover(
+                    observed_state_sha256=observed_state_sha256,
+                    tx_id=tx_id,
+                    semantic_binding_sha256=binding_sha256,
+                )
+                history = authority.read_history()
+                committed = tuple(
+                    record
+                    for record in history
+                    if record.phase is AuthorityPhase.COMMIT
+                )
+
+        first_commit = committed[0]
+        if (
+            _APPEND_BASELINE_TX_RE.fullmatch(first_commit.tx_id) is None
+            or first_commit.previous_committed_state_sha256 is not None
+            or first_commit.intended_state_sha256 != observed_state_sha256
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "generation-zero market baseline is missing, changed, or unproven"
+            )
+
     @staticmethod
     def _append_authority_committed_tip(
         authority: MonotonicWorkspaceAuthority,
-    ) -> tuple[int, str | None]:
+    ) -> tuple[int, str]:
         history = authority.read_history()
+        commits = tuple(
+            record for record in history if record.phase is AuthorityPhase.COMMIT
+        )
+        if not commits:
+            raise MonotonicAuthorityRollbackError(
+                "market append authority lacks a committed generation-zero baseline"
+            )
+        baseline = commits[0]
+        if (
+            _APPEND_BASELINE_TX_RE.fullmatch(baseline.tx_id) is None
+            or baseline.previous_committed_state_sha256 is not None
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "market append authority baseline history is invalid"
+            )
+
         expected_start = 1
         committed_head = 0
-        committed_state_sha256: str | None = None
-        for record in history:
-            if record.phase is not AuthorityPhase.COMMIT:
-                continue
+        committed_state_sha256 = baseline.intended_state_sha256
+        for record in commits[1:]:
             match = _APPEND_TX_RE.fullmatch(record.tx_id)
             if match is None:
                 raise MonotonicAuthorityRollbackError(
@@ -1051,8 +1188,10 @@ class SQLiteMarketStore:
     @staticmethod
     def _append_state_from_entries(
         entries: tuple[tuple[int, str, str], ...],
-    ) -> str | None:
-        state_sha256: str | None = None
+        *,
+        baseline_state_sha256: str,
+    ) -> str:
+        state_sha256 = baseline_state_sha256
         expected_generation = 1
         for generation, dedupe_key, payload_json in entries:
             if generation != expected_generation:
@@ -1069,12 +1208,15 @@ class SQLiteMarketStore:
     def _recover_positive_append_authority(
         self,
         authority: MonotonicWorkspaceAuthority,
-    ) -> tuple[int, str | None]:
+    ) -> tuple[int, str]:
         history = authority.read_history()
         if history and history[-1].phase is AuthorityPhase.PREPARE:
             pending = history[-1]
             entries = self._validated_positive_append_entries()
-            observed_state_sha256 = self._append_state_from_entries(entries)
+            observed_state_sha256 = self._append_state_from_entries(
+                entries,
+                baseline_state_sha256=self._generation_zero_baseline_state_sha256(),
+            )
             try:
                 authority.recover(observed_state_sha256=observed_state_sha256)
             except MonotonicAuthorityRecoveryRequiredError:
@@ -1102,7 +1244,10 @@ class SQLiteMarketStore:
         # proof and cutoff publication.
         self._recover_positive_append_authority(authority)
         entries = self._validated_positive_append_entries()
-        observed_state_sha256 = self._append_state_from_entries(entries)
+        observed_state_sha256 = self._append_state_from_entries(
+            entries,
+            baseline_state_sha256=self._generation_zero_baseline_state_sha256(),
+        )
         committed_head, committed_state_sha256 = (
             self._append_authority_committed_tip(authority)
         )
@@ -1475,9 +1620,6 @@ class SQLiteMarketStore:
                             payload_json=payload_json,
                         )
                         expected_generation += 1
-                    if intended_state_sha256 is None:
-                        raise RuntimeError("accepted append batch has no authority state")
-
                     entry_tuple = tuple(entries)
                     binding_sha256 = _append_binding_sha256(
                         previous_state_sha256=committed_state_sha256,

@@ -737,6 +737,101 @@ class ProphetXRestRestartIdempotenceTests(unittest.TestCase):
             store_a.close()
             store_b.close()
 
+    def test_restart_after_partial_snapshot_delivery_publishes_only_missing_constituent(
+        self,
+    ) -> None:
+        first_provider = self._provider(
+            self._authority(create=True),
+            [_payload()],
+            clocks=["2026-10-04T12:00:00+00:00"],
+        )
+        first_store = SQLiteMarketStore(self.market_path)
+        first_bus = MarketEventBus(first_store)
+        first_engine = IngestionEngine(
+            first_bus,
+            clock=lambda: "2026-10-04T12:00:10+00:00",
+        )
+        try:
+            first_stats = first_engine.poll_once(first_provider, max_items=1)
+            self.assertEqual((first_stats.received, first_stats.accepted), (1, 1))
+            self.assertIn("TRUNCATED_BATCH", first_stats.quality_flags)
+            self.assertEqual(len(first_store.events()), 1)
+        finally:
+            first_store.close()
+
+        retry_provider = self._provider(
+            self._authority(create=False),
+            [_payload()],
+            response_salts=["restart-full-snapshot"],
+            clocks=["2026-10-04T12:01:00+00:00"],
+        )
+        reopened_store = SQLiteMarketStore(self.market_path)
+        delivered = []
+        retry_bus = MarketEventBus(reopened_store)
+        retry_bus.subscribe(delivered.append)
+        retry_engine = IngestionEngine(
+            retry_bus,
+            clock=lambda: "2026-10-04T12:01:10+00:00",
+        )
+        try:
+            retry_stats = retry_engine.poll_once(retry_provider)
+            self.assertEqual((retry_stats.received, retry_stats.accepted), (2, 1))
+            self.assertEqual(len(delivered), 1)
+            self.assertTrue(delivered[0].selection_id.endswith("strike-b"))
+            self.assertEqual(len(reopened_store.events()), 2)
+            self.assertEqual(
+                {event.selection_id for event in reopened_store.events()},
+                {
+                    "prophetx:sandbox:strike-a",
+                    "prophetx:sandbox:strike-b",
+                },
+            )
+        finally:
+            reopened_store.close()
+
+    def test_changed_request_scope_is_published_not_cross_deduplicated(self) -> None:
+        provider = self._provider(
+            self._authority(create=True),
+            [_payload(), _payload()],
+        )
+        _first_batch, first = self._normalized(provider)
+        _second_batch, second = self._normalized(provider)
+        metadata = deepcopy(second[0].metadata)
+        metadata["request_fingerprint_sha256"] = "0" * 64
+        changed_scope = replace(second[0], metadata=metadata)
+
+        store = SQLiteMarketStore(self.market_path)
+        try:
+            self.assertTrue(store.append(first[0]))
+            self.assertTrue(store.append(changed_scope))
+            self.assertEqual(len(store.events()), 2)
+            current = store.current_by_source()
+            self.assertEqual(
+                current[(changed_scope.source_id, changed_scope.quote_key)].sequence,
+                changed_scope.sequence,
+            )
+        finally:
+            store.close()
+
+    def test_rebound_sequence_source_identity_fails_closed_before_insert(self) -> None:
+        provider = self._provider(self._authority(create=True), [_payload()])
+        _batch, events = self._normalized(provider)
+        metadata = deepcopy(events[0].metadata)
+        metadata["sequence_source_id"] = "prophetx:sandbox:rest:other-surface"
+        rebound = replace(events[0], metadata=metadata)
+
+        store = SQLiteMarketStore(self.market_path)
+        try:
+            with self.assertRaisesRegex(
+                MarketStateIdentityError,
+                "canonical sequence source identity",
+            ):
+                store.append(rebound)
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.current_by_source(), {})
+        finally:
+            store.close()
+
     def test_non_prophetx_event_storage_semantics_are_unchanged(self) -> None:
         provider = self._provider(
             self._authority(create=True),

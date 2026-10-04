@@ -1015,6 +1015,37 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_settlement_collection_rejects_lifecycle_class_retargeting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-1",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            try:
+                with patch.object(
+                    ContinuousEventLifecycle,
+                    "records",
+                    lambda _self: (),
+                ):
+                    with self.assertRaisesRegex(
+                        ContinuousSessionError,
+                        "lifecycle record dispatch changed",
+                    ):
+                        coordinator._settlement_resolutions(as_of=clock())
+            finally:
+                store.close()
+
     def test_outcome_authority_method_retargeting_cannot_change_truth_origin(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

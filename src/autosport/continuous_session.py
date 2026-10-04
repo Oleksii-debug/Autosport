@@ -450,13 +450,20 @@ def _bind_continuous_state_settlement_integrity(method):
     canonical_sha256 = hashlib.sha256
     canonical_datetime_type = datetime
     canonical_timezone_utc = timezone.utc
+    canonical_resolution_type = SettlementResolution
+    canonical_hex = frozenset("0123456789abcdef")
+    canonical_outcomes = frozenset({"win", "loss", "void"})
 
-    def canonical_instant(value: object, field: str) -> datetime:
+    def canonical_text(value: object, field: str) -> str:
         if type(value) is not str or not value or value.strip() != value:
             raise ValueError(f"{field} must be a non-empty trimmed string")
+        return value
+
+    def canonical_instant(value: object, field: str) -> datetime:
+        raw = canonical_text(value, field)
         try:
             parsed = canonical_datetime_type.fromisoformat(
-                value.replace("Z", "+00:00")
+                raw.replace("Z", "+00:00")
             )
         except ValueError as exc:
             raise ValueError(f"{field} must be valid ISO-8601") from exc
@@ -465,8 +472,32 @@ def _bind_continuous_state_settlement_integrity(method):
         return parsed.astimezone(canonical_timezone_utc)
 
     def outcomes_digest(evidence: SettlementResolution) -> str:
+        if type(evidence) is not canonical_resolution_type:
+            raise TypeError("settlement evidence must be canonical")
+        canonical_text(evidence.event_identity, "event_identity")
+        canonical_text(evidence.settlement_ref, "settlement_ref")
+        canonical_text(evidence.evidence_id, "evidence_id")
+        digest = evidence.evidence_sha256
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in canonical_hex for character in digest)
+        ):
+            raise ValueError(
+                "evidence_sha256 must be a lowercase SHA-256 hex digest"
+            )
+        canonical_instant(evidence.available_at, "available_at")
+        quote_outcomes = evidence.quote_outcomes
+        if type(quote_outcomes) is not dict or not quote_outcomes:
+            raise ValueError("quote_outcomes must be a non-empty exact dict")
+        normalized_outcomes: dict[str, str] = {}
+        for quote_key, outcome in quote_outcomes.items():
+            canonical_key = canonical_text(quote_key, "quote_outcomes quote_key")
+            if type(outcome) is not str or outcome not in canonical_outcomes:
+                raise ValueError("quote_outcomes contains unsupported outcome")
+            normalized_outcomes[canonical_key] = outcome
         payload = canonical_json_dumps(
-            dict(sorted(evidence.quote_outcomes.items())),
+            dict(sorted(normalized_outcomes.items())),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -475,6 +506,8 @@ def _bind_continuous_state_settlement_integrity(method):
         return canonical_sha256(payload).hexdigest()
 
     def guarded(self, raw, settlement_evidence):
+        if type(settlement_evidence) is not tuple:
+            raise TypeError("settlement_evidence must be a tuple")
         return method(
             self,
             raw,

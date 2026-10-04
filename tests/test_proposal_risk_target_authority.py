@@ -14,6 +14,8 @@ from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_store import EconomicGoalStore
 from autosport.paper import PaperBook
+from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
+import autosport.proposal_risk_target_authority as proposal_target_authority
 from autosport.proposal_risk_target_authority import (
     ProductProposalRiskTarget,
     ProductProposalRiskTargetError,
@@ -318,6 +320,40 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ProductProposalRiskTargetError,
                 "dispatch authority changed",
+            ):
+                self._issue()
+
+    def test_internal_product_state_helper_rebinding_fails_closed(self) -> None:
+        original = proposal_target_authority._current_product_state
+
+        def fake(workspace: Path) -> object:
+            return original(workspace)
+
+        with patch.object(
+            proposal_target_authority,
+            "_current_product_state",
+            fake,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "internal helper authority changed",
+            ):
+                self._issue()
+
+    def test_monotonic_authority_recover_rebinding_fails_closed(self) -> None:
+        original = MonotonicWorkspaceAuthority.recover
+
+        def fake(self: object, **kwargs: object) -> object:
+            return original(self, **kwargs)
+
+        with patch.object(
+            MonotonicWorkspaceAuthority,
+            "recover",
+            fake,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "monotonic authority recover",
             ):
                 self._issue()
 

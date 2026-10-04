@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import multiprocessing
+import os
 import tempfile
 
 import pytest
@@ -23,6 +25,7 @@ from autosport.supervised_execution import (
 from test_betfair_supervised_execution import (
     APPROVAL_EXPIRES_AT,
     QUOTE_EXPIRES_AT,
+    READBACK_AT,
     RESERVED_AT,
     SUBMITTED_AT,
     _Transport,
@@ -30,6 +33,30 @@ from test_betfair_supervised_execution import (
     _prepared,
     _response,
 )
+
+
+def _crash_during_provider_send_worker(workspace: str) -> None:
+    import autosport.supervised_execution as supervised_execution
+
+    supervised_execution._trusted_now = lambda: RESERVED_AT
+    profile, bound, approval, ledger, action, goal_store = _prepared(workspace)
+
+    def crash_after_submitted(_request):
+        os._exit(91)
+
+    transport = _Transport(crash_after_submitted)
+    client = _enabled_client(profile, transport, store=goal_store)
+    execute_betfair_supervised_action(
+        ledger,
+        bound,
+        approval,
+        action_id=action.action_id,
+        attempt_id="attempt-crash-after-submitted",
+        profile=profile,
+        client=client,
+        clock=lambda: SUBMITTED_AT,
+    )
+    os._exit(92)
 
 
 @pytest.fixture(autouse=True)
@@ -168,6 +195,48 @@ def test_cross_instance_revocation_committed_before_final_fence_denies(
             ledger,
             bound.execution_plan.plan_id,
             "attempt-cross-instance-revoked-first",
+        )
+
+
+def test_process_kill_after_submitted_releases_writer_for_restart_recovery(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        context = multiprocessing.get_context("spawn")
+        process = context.Process(
+            target=_crash_during_provider_send_worker,
+            args=(tmp,),
+        )
+        process.start()
+        process.join(timeout=30)
+        if process.is_alive():
+            process.kill()
+            process.join()
+            pytest.fail("provider-send crash worker did not terminate")
+
+        assert process.exitcode == 91
+
+        restarted = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        assert restarted._lock_path.exists()
+        assert (
+            restarted.attempt_state("attempt-crash-after-submitted")
+            is AttemptState.SUBMITTED
+        )
+
+        monkeypatch.setattr(
+            "autosport.real_execution_ledger._now",
+            lambda: READBACK_AT,
+        )
+        assert restarted.recover_uncertain() == (
+            "attempt-crash-after-submitted",
+        )
+        assert (
+            restarted.attempt_state("attempt-crash-after-submitted")
+            is AttemptState.UNKNOWN
+        )
+        assert not restarted.can_retry_action(
+            plan_id="plan-1",
+            action_id="action-1",
         )
 
 

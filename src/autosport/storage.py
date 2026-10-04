@@ -573,6 +573,7 @@ class SQLiteMarketStore:
     def __init__(self, path: str | Path = "autosport.db") -> None:
         self.path = Path(path)
         self._connection_lock = RLock()
+        self._live_receipt_write_depth = 0
         self.connection = sqlite3.connect(self.path, check_same_thread=False)
         try:
             self.connection.execute("PRAGMA journal_mode=WAL")
@@ -811,21 +812,20 @@ class SQLiteMarketStore:
         self,
         events: Iterable[MarketEvent],
     ) -> list[MarketEvent]:
-        """Persist newly received live events with atomic product-owned receipt authority.
+        """Enter live-receipt authority around the canonical batch transaction.
 
-        This is deliberately a private ingestion seam. Generic append/replay/import
-        callers persist market truth without acquiring live-receipt authority. A
-        duplicate row is never upgraded: only a market row inserted for the first time
-        in this same transaction receives the receipt witness.
+        ``append_batch_accepted`` remains the storage retry/fault-injection choke
+        point. Only rows first inserted while this private context is active receive
+        a receipt witness; duplicate/import/replay rows can never be upgraded.
         """
-        accepted: list[MarketEvent] = []
         with self._connection_lock:
-            with self.connection:
-                for event in events:
-                    if self._insert_one(event):
-                        self._insert_live_receipt_authority(event)
-                        accepted.append(event)
-        return accepted
+            if self._live_receipt_write_depth != 0:
+                raise RuntimeError("nested live receipt authority write is not allowed")
+            self._live_receipt_write_depth = 1
+            try:
+                return self.append_batch_accepted(events)
+            finally:
+                self._live_receipt_write_depth = 0
 
     def append(self, event: MarketEvent) -> bool:
         with self._connection_lock:
@@ -836,9 +836,12 @@ class SQLiteMarketStore:
         """Insert one normalized batch in one transaction and return newly accepted events."""
         accepted: list[MarketEvent] = []
         with self._connection_lock:
+            live_receipt_authority = self._live_receipt_write_depth == 1
             with self.connection:
                 for event in events:
                     if self._insert_one(event):
+                        if live_receipt_authority:
+                            self._insert_live_receipt_authority(event)
                         accepted.append(event)
         return accepted
 

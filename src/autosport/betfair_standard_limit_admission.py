@@ -446,9 +446,25 @@ def _build_admission_authority():
             jurisdiction_value is not None
             and jurisdiction_value.jurisdiction is jurisdiction_enum.SPAIN
             and constraint_value is not None
-            and constraint_value.jurisdiction_scope != "SPAIN"
         ):
-            reasons.append("CONSTRAINT_JURISDICTION_SCOPE_MISMATCH")
+            if constraint_value.jurisdiction_scope != "SPAIN":
+                reasons.append("CONSTRAINT_JURISDICTION_SCOPE_MISMATCH")
+            elif (
+                constraint_value.state
+                is constraint_state_type.CONSISTENT_UNVERIFIED
+                and constraint_value.min_standard_size is not None
+                and action_snapshot[2] < constraint_value.min_standard_size
+                and constraint_value.lower_minimum_payout_enabled is True
+            ):
+                spain_diagnostic = spain_assess(
+                    backer_stake=action_snapshot[2],
+                    as_of=current,
+                    minimum_stake_evidence=None,
+                    uses_bet_target=False,
+                    uses_lower_minimum_payout_exception=True,
+                )
+                if spain_diagnostic.state is spain_state_type.REJECTED:
+                    reasons.append("SPAIN_RULE:" + spain_diagnostic.reason)
 
         deduped = tuple(dict.fromkeys(reasons))
         if deduped:

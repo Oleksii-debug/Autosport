@@ -2073,14 +2073,30 @@ def _resolve_product_proposal_risk_scenario_population_unbound(
         )
 
 
-def _make_public_operations(_bind_identity):
+def _make_public_operations(
+    _bind_identity,
+    _issue_core,
+    _resolve_core,
+):
+    _bind_code = getattr(_bind_identity, "__code__", None)
+    _issue_core_code = getattr(_issue_core, "__code__", None)
+    _resolve_core_code = getattr(_resolve_core, "__code__", None)
+
     def issue(
         workspace: Path,
         precommit: ProductProposalRiskEvaluationPrecommit,
         terminal_population: ProductProposalTargetTerminalPopulation,
         members: tuple[CounterfactualScenarioMemberBinding, ...],
     ) -> ProductProposalRiskScenarioPopulation:
-        instance = _issue_product_proposal_risk_scenario_population_unbound(
+        if (
+            getattr(_bind_identity, "__code__", None) is not _bind_code
+            or getattr(_issue_core, "__code__", None)
+            is not _issue_core_code
+        ):
+            raise ProductProposalRiskScenarioPopulationError(
+                "scenario population public issue closure changed"
+            )
+        instance = _issue_core(
             workspace,
             precommit,
             terminal_population,
@@ -2094,7 +2110,15 @@ def _make_public_operations(_bind_identity):
         precommit: ProductProposalRiskEvaluationPrecommit,
         terminal_population: ProductProposalTargetTerminalPopulation,
     ) -> ProductProposalRiskScenarioPopulation:
-        instance = _resolve_product_proposal_risk_scenario_population_unbound(
+        if (
+            getattr(_bind_identity, "__code__", None) is not _bind_code
+            or getattr(_resolve_core, "__code__", None)
+            is not _resolve_core_code
+        ):
+            raise ProductProposalRiskScenarioPopulationError(
+                "scenario population public resolve closure changed"
+            )
+        instance = _resolve_core(
             workspace,
             precommit,
             terminal_population,
@@ -2120,7 +2144,11 @@ def _make_public_operations(_bind_identity):
 (
     issue_product_proposal_risk_scenario_population,
     resolve_product_proposal_risk_scenario_population,
-) = _make_public_operations(_BIND_IDENTITY)
+) = _make_public_operations(
+    _BIND_IDENTITY,
+    _issue_product_proposal_risk_scenario_population_unbound,
+    _resolve_product_proposal_risk_scenario_population_unbound,
+)
 _PUBLIC_ISSUE_EXPECTED = issue_product_proposal_risk_scenario_population
 _PUBLIC_ISSUE_CODE = getattr(_PUBLIC_ISSUE_EXPECTED, "__code__", None)
 _PUBLIC_ISSUE_CLOSURE = getattr(_PUBLIC_ISSUE_EXPECTED, "__closure__", None)

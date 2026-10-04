@@ -8,6 +8,7 @@ import pytest
 import autosport.risk_membership_publication as publication
 import autosport.risk_randomization_precommit as randomization
 import autosport.risk_sampling_occurrence_authority as draw_authority
+import autosport.session as session_module
 from autosport.dataset import ReplayDataset
 from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.domain import MarketEvent
@@ -1274,6 +1275,116 @@ def test_session_rejects_duplicate_iid_occurrence_before_registry_mutation(
     finally:
         session.close()
 
+    assert RunRegistry(workspace / "run_registry.json")._read()["runs"] == {}
+
+
+def test_session_iid_runner_rejects_plan_resolver_rebinding_before_dataset_read(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    dataset = _iid_replay_dataset(workspace, event)
+    session = AutosportSession(workspace, initial_bankroll="100")
+    attacker_called = False
+
+    def forged_resolver(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("forged IID resolver executed")
+
+    monkeypatch.setattr(
+        session_module,
+        "resolve_product_iid_expected_draw_plan",
+        forged_resolver,
+    )
+    try:
+        with pytest.raises(
+            ProductIidDrawPlanError,
+            match="session execution authority dispatch changed",
+        ):
+            session.run_iid_member_dataset(
+                dataset,
+                membership=membership,
+                registry_path=registry_path,
+                sampling_manifest_json=manifest,
+                sampling_frame_json=frame_json,
+                horizon_json=horizon_json,
+                member_index=0,
+                authority_root=authority_root,
+            )
+    finally:
+        session.close()
+
+    assert attacker_called is False
+    assert RunRegistry(workspace / "run_registry.json")._read()["runs"] == {}
+
+
+def test_session_iid_runner_rejects_replay_engine_rebinding_before_admission(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    dataset = _iid_replay_dataset(workspace, event)
+    session = AutosportSession(workspace, initial_bankroll="100")
+    attacker_called = False
+
+    class ForgedReplayEngine:
+        def __init__(self, *_args, **_kwargs) -> None:
+            nonlocal attacker_called
+            attacker_called = True
+
+    monkeypatch.setattr(session_module, "ReplayEngine", ForgedReplayEngine)
+    try:
+        with pytest.raises(
+            ProductIidDrawPlanError,
+            match="session execution authority dispatch changed",
+        ):
+            session.run_iid_member_dataset(
+                dataset,
+                membership=membership,
+                registry_path=registry_path,
+                sampling_manifest_json=manifest,
+                sampling_frame_json=frame_json,
+                horizon_json=horizon_json,
+                member_index=0,
+                authority_root=authority_root,
+            )
+    finally:
+        session.close()
+
+    assert attacker_called is False
     assert RunRegistry(workspace / "run_registry.json")._read()["runs"] == {}
 
 

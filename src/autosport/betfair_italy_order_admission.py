@@ -12,7 +12,6 @@ must compose this result rather than being inferred from it.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 from fractions import Fraction
@@ -40,34 +39,65 @@ class ItalianLimitAdmissionState(str, Enum):
     REJECTED = "REJECTED"
 
 
-@dataclass(frozen=True, slots=True)
-class ItalianLimitInstruction:
-    """Minimal standard-size LIMIT projection needed by represented .it rules."""
+class ItalianLimitInstruction(tuple):
+    """Immutable standard-size LIMIT projection for represented .it rules."""
 
-    selection_id: int
-    side: str
-    size: Decimal
-    price: Decimal
-    bet_target_type: str | None = None
+    __slots__ = ()
 
-    def __post_init__(self) -> None:
-        if type(self.selection_id) is not int or self.selection_id <= 0:
-            raise ItalianOrderAdmissionError(
-                "selection_id must be a positive integer"
-            )
-        if type(self.side) is not str or self.side not in {"BACK", "LAY"}:
-            raise ItalianOrderAdmissionError("side must be exactly BACK or LAY")
-        _positive_decimal(self.size, "size")
-        _positive_decimal(self.price, "price")
-        if self.price <= Decimal("1"):
-            raise ItalianOrderAdmissionError("price must be greater than 1")
-        if self.bet_target_type is not None and (
-            type(self.bet_target_type) is not str
-            or self.bet_target_type not in {"PAYOUT", "BACKERS_PROFIT"}
+    def __new__(
+        cls,
+        selection_id: int,
+        side: str,
+        size: Decimal,
+        price: Decimal,
+        bet_target_type: str | None = None,
+        _decimal_type=Decimal,
+        _error_type=ItalianOrderAdmissionError,
+        _max_digits=_MAX_DECIMAL_DIGITS,
+        _max_abs_exponent=_MAX_ABS_EXPONENT,
+    ):
+        if type(selection_id) is not int or selection_id <= 0:
+            raise _error_type("selection_id must be a positive integer")
+        if type(side) is not str or side not in {"BACK", "LAY"}:
+            raise _error_type("side must be exactly BACK or LAY")
+
+        for value, field in ((size, "size"), (price, "price")):
+            if (
+                type(value) is not _decimal_type
+                or not value.is_finite()
+                or value <= 0
+            ):
+                raise _error_type(
+                    f"{field} must be an exact positive finite Decimal"
+                )
+            parts = value.as_tuple()
+            if (
+                len(parts.digits) > _max_digits
+                or abs(parts.exponent) > _max_abs_exponent
+            ):
+                raise _error_type(
+                    f"{field} exceeds bounded Decimal shape"
+                )
+
+        if price <= _decimal_type("1"):
+            raise _error_type("price must be greater than 1")
+        if bet_target_type is not None and (
+            type(bet_target_type) is not str
+            or bet_target_type not in {"PAYOUT", "BACKERS_PROFIT"}
         ):
-            raise ItalianOrderAdmissionError(
+            raise _error_type(
                 "bet_target_type must be PAYOUT, BACKERS_PROFIT, or None"
             )
+        return tuple.__new__(
+            cls,
+            (selection_id, side, size, price, bet_target_type),
+        )
+
+    selection_id = property(itemgetter(0))
+    side = property(itemgetter(1))
+    size = property(itemgetter(2))
+    price = property(itemgetter(3))
+    bet_target_type = property(itemgetter(4))
 
 
 def _build_italian_limit_batch_admission_meta():
@@ -210,26 +240,6 @@ class ItalianLimitBatchAdmission(
 
 _ItalianLimitBatchAdmissionMeta.seal(ItalianLimitBatchAdmission)
 
-
-def _positive_decimal(value: object, field: str) -> Decimal:
-    decimal_type = Decimal
-    if (
-        type(value) is not decimal_type
-        or not value.is_finite()
-        or value <= 0
-    ):
-        raise ItalianOrderAdmissionError(
-            f"{field} must be an exact positive finite Decimal"
-        )
-    parts = value.as_tuple()
-    if (
-        len(parts.digits) > _MAX_DECIMAL_DIGITS
-        or abs(parts.exponent) > _MAX_ABS_EXPONENT
-    ):
-        raise ItalianOrderAdmissionError(
-            f"{field} exceeds bounded Decimal shape"
-        )
-    return value
 
 
 def _build_italian_limit_evaluator():

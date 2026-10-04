@@ -38,7 +38,10 @@ def test_trusted_supersession_controller_uses_lightweight_runner() -> None:
         "cancel_superseded_head_runs",
     )
     assert "runs-on: ubuntu-slim" in block
-    assert "timeout-minutes: 5" in block
+    # The workflow-wide controller has a 24-request transport budget at a
+    # canonical 20s/request timeout, so its trusted sweep needs the explicit
+    # ten-minute envelope. Admission-only jobs remain capped at five minutes.
+    assert "timeout-minutes: 10" in block
     assert "actions/checkout@" in block
     assert "cancel_superseded_pr_workflow_runs_scoped.py" in block
 

@@ -777,6 +777,75 @@ class PaperExecutionRealityTests(unittest.TestCase):
                 )
             self.assertFalse(path.exists())
 
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "not durably registered",
+            ):
+                ledger.reserve_run(
+                    run_id=run_id,
+                    trigger_id="trigger-invalid-reservation",
+                    plan=current,
+                    config=model,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={
+                        "a1": "paper-exec-evidence-v1-" + "a" * 64
+                    },
+                )
+            self.assertFalse(path.exists())
+
+    def test_observed_evidence_must_predate_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = plan(action("a1"))
+            observation, registry = registered_observation(
+                ledger,
+                current.actions[0],
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.40",
+                stake="10.00",
+            )
+            execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-evidence-chronology",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                observations={"a1": observation},
+                evidence_registry=registry,
+            )
+            events = list(ledger.events())
+            evidence_index = next(
+                index
+                for index, item in enumerate(events)
+                if item["event_type"]
+                == "OBSERVATION_EVIDENCE_REGISTERED"
+            )
+            reservation_index = next(
+                index
+                for index, item in enumerate(events)
+                if item["event_type"] == "RUN_RESERVED"
+            )
+            events[evidence_index], events[reservation_index] = (
+                events[reservation_index],
+                events[evidence_index],
+            )
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "evidence was not durable before RUN_RESERVED",
+            ):
+                execute_paper_plan(
+                    plan=current,
+                    trigger_id="trigger-evidence-chronology",
+                    config=config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                    observations={"a1": observation},
+                    evidence_registry=registry,
+                )
+
     def test_attempt_transition_requires_reservation_before_side_effect(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = PaperExecutionLedger(

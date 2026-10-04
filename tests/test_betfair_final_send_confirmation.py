@@ -912,7 +912,7 @@ def test_final_approval_authority_rebinding_fails_before_submit_or_confirmation(
         client = _enabled_client(profile, transport, store=goal_store)
 
         monkeypatch.setattr(
-            provider_tests.betfair_execution._supervised_execution_runtime,
+            provider_tests.betfair_supervised_execution._supervised_execution_runtime,
             "_require_durable_approval",
             lambda *_args, **_kwargs: None,
         )

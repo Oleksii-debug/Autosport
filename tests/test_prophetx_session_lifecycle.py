@@ -1136,6 +1136,73 @@ def test_revocation_during_renewal_preserves_ambiguous_refresh_slot_horizon(tmp_
     assert revoked.slot_hold_until > active.access_expires_at
 
 
+@pytest.mark.parametrize(
+    "login_failure,renewal_failure",
+    [
+        (ProphetXLoginFailureClass.CREDENTIAL_REJECTED, None),
+        (None, ProphetXRenewalFailureClass.CREDENTIAL_REJECTED),
+    ],
+)
+def test_credential_rejection_evidence_cannot_be_reclassified_as_wait(
+    login_failure,
+    renewal_failure,
+):
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="credential-rejection evidence cannot appear outside",
+    ):
+        ProphetXSessionSnapshot(
+            state=ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+            generation=7,
+            credential_revision="rev-1",
+            integration_role="market-maker-primary",
+            last_transition_at=NOW,
+            slot_hold_until=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
+            last_failure_class=login_failure,
+            last_renewal_failure_class=renewal_failure,
+        )
+
+
+def test_credential_rejected_state_rejects_nonfuture_provider_slot_hold():
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="credential-rejected provider-slot hold must be future",
+    ):
+        ProphetXSessionSnapshot(
+            state=ProphetXSessionState.CREDENTIAL_REJECTED,
+            generation=8,
+            credential_revision="rev-1",
+            integration_role="market-maker-primary",
+            last_transition_at=NOW,
+            slot_hold_until=NOW,
+            last_failure_class=ProphetXLoginFailureClass.CREDENTIAL_REJECTED,
+        )
+
+
+def test_persisted_credential_rejection_cannot_launder_through_wait_state(
+    tmp_path,
+):
+    lifecycle = _lifecycle(tmp_path)
+    _active(lifecycle)
+    revoked = lifecycle.record_credential_revoked(
+        now=NOW + timedelta(minutes=2)
+    )
+    assert revoked.slot_hold_until is not None
+
+    payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
+    payload["state"] = ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY.value
+    lifecycle.state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="credential-rejection evidence cannot appear outside",
+    ):
+        lifecycle.begin_login(
+            now=revoked.slot_hold_until,
+            access_token_available=False,
+        )
+
+
 def test_renewal_persisted_state_remains_secret_free(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)

@@ -307,6 +307,23 @@ class ProphetXSessionSnapshot:
                 raise ProphetXSessionLifecycleError(
                     "credential-rejected state requires exact rejection evidence"
                 )
+            if (
+                self.slot_hold_until is not None
+                and self.slot_hold_until <= self.last_transition_at
+            ):
+                raise ProphetXSessionLifecycleError(
+                    "credential-rejected provider-slot hold must be future"
+                )
+        elif (
+            self.last_failure_class
+            is ProphetXLoginFailureClass.CREDENTIAL_REJECTED
+            or self.last_renewal_failure_class
+            is ProphetXRenewalFailureClass.CREDENTIAL_REJECTED
+        ):
+            raise ProphetXSessionLifecycleError(
+                "credential-rejection evidence cannot appear outside "
+                "credential-rejected state"
+            )
 
         if self.state in {
             ProphetXSessionState.LOGIN_IN_FLIGHT,

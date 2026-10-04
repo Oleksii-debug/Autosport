@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+import autosport.champion_policy as champion_policy_module
 from autosport.champion_policy import (
     ChampionPolicyError,
     POLICY_ARTIFACT_KIND,
@@ -192,6 +193,78 @@ def _load_with_authority(registry, store, policy, *, as_of=PROMOTED_AT, **overri
         patch.object(ScientificRegistry, "get", autospec=True, side_effect=get),
     ):
         return load_champion_policy(registry, store, **arguments)
+
+
+def test_persist_policy_rejects_policy_subclass_before_virtual_dispatch(tmp_path):
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    hostile_calls: list[str] = []
+
+    class HostilePolicy(BanditPolicyState):
+        def __getattribute__(self, name):
+            hostile_calls.append(name)
+            raise AssertionError("hostile policy dispatch executed")
+
+    forged = object.__new__(HostilePolicy)
+    with pytest.raises(TypeError, match="exact BanditPolicyState"):
+        persist_policy_state(store, forged)
+
+    assert hostile_calls == []
+
+
+def test_persist_policy_rejects_store_subclass_before_write_dispatch(tmp_path):
+    _, successor, _ = _policy_successor()
+    hostile_calls: list[str] = []
+
+    class HostileStore(FactoryArtifactStore):
+        def write(self, *args, **kwargs):
+            hostile_calls.append("write")
+            raise AssertionError("hostile artifact-store write executed")
+
+    forged_store = object.__new__(HostileStore)
+    with pytest.raises(TypeError, match="exact FactoryArtifactStore"):
+        persist_policy_state(forged_store, successor)
+
+    assert hostile_calls == []
+
+
+def test_persist_policy_rejects_rebound_policy_type_root_before_dispatch(tmp_path):
+    _, successor, _ = _policy_successor()
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+
+    class ForgedPolicy:
+        pass
+
+    with patch.object(champion_policy_module, "BanditPolicyState", ForgedPolicy):
+        with pytest.raises(
+            ChampionPolicyError,
+            match="durable type authority changed",
+        ):
+            persist_policy_state(store, successor)
+
+
+def test_load_champion_rejects_registry_subclass_before_virtual_dispatch(tmp_path):
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    hostile_calls: list[str] = []
+
+    class HostileRegistry(ScientificRegistry):
+        def __getattribute__(self, name):
+            hostile_calls.append(name)
+            raise AssertionError("hostile registry dispatch executed")
+
+    forged_registry = object.__new__(HostileRegistry)
+    with pytest.raises(TypeError, match="exact ScientificRegistry"):
+        load_champion_policy(
+            forged_registry,
+            store,
+            as_of=PROMOTED_AT,
+            canonical_strategy_id=STRATEGY_ID,
+            environment_id=ENVIRONMENT_ID,
+            protocol_id=PROTOCOL_ID,
+            config_sha256=CONFIG_SHA256,
+            admissible_actions=frozenset({"PAPER_PROPOSAL", "WAIT"}),
+        )
+
+    assert hostile_calls == []
 
 
 def test_policy_payload_round_trip_preserves_exact_identity_and_decimal():

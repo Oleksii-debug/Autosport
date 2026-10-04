@@ -19,6 +19,9 @@ POLICY_ARTIFACT_KIND: Final = "transparent-bandit-policy"
 POLICY_ARTIFACT_SCHEMA: Final = "autosport.transparent_bandit_policy_artifact"
 POLICY_ARTIFACT_SCHEMA_VERSION: Final = 1
 _HEX: Final = frozenset("0123456789abcdef")
+_CANONICAL_REGISTRY_TYPE = ScientificRegistry
+_CANONICAL_ARTIFACT_STORE_TYPE = FactoryArtifactStore
+_CANONICAL_POLICY_TYPE = BanditPolicyState
 
 
 class ChampionPolicyError(RuntimeError):
@@ -54,10 +57,15 @@ def persist_policy_state(
 ) -> str:
     """Persist immutable policy evidence; this grants no activation authority."""
 
-    if not isinstance(artifact_store, FactoryArtifactStore):
-        raise TypeError("artifact_store must be FactoryArtifactStore")
-    if not isinstance(policy, BanditPolicyState):
-        raise TypeError("policy must be BanditPolicyState")
+    if (
+        FactoryArtifactStore is not _CANONICAL_ARTIFACT_STORE_TYPE
+        or BanditPolicyState is not _CANONICAL_POLICY_TYPE
+    ):
+        raise ChampionPolicyError("champion policy durable type authority changed")
+    if type(artifact_store) is not _CANONICAL_ARTIFACT_STORE_TYPE:
+        raise TypeError("artifact_store must be exact FactoryArtifactStore")
+    if type(policy) is not _CANONICAL_POLICY_TYPE:
+        raise TypeError("policy must be exact BanditPolicyState")
     return artifact_store.write(POLICY_ARTIFACT_KIND, policy.policy_id, _artifact(policy))
 
 
@@ -152,10 +160,16 @@ def load_champion_policy(
 ) -> BanditPolicyState:
     """Load the exact promoted policy for one compatible next episode."""
 
-    if not isinstance(registry, ScientificRegistry):
-        raise TypeError("registry must be ScientificRegistry")
-    if not isinstance(artifact_store, FactoryArtifactStore):
-        raise TypeError("artifact_store must be FactoryArtifactStore")
+    if (
+        ScientificRegistry is not _CANONICAL_REGISTRY_TYPE
+        or FactoryArtifactStore is not _CANONICAL_ARTIFACT_STORE_TYPE
+        or BanditPolicyState is not _CANONICAL_POLICY_TYPE
+    ):
+        raise ChampionPolicyError("champion policy durable type authority changed")
+    if type(registry) is not _CANONICAL_REGISTRY_TYPE:
+        raise TypeError("registry must be exact ScientificRegistry")
+    if type(artifact_store) is not _CANONICAL_ARTIFACT_STORE_TYPE:
+        raise TypeError("artifact_store must be exact FactoryArtifactStore")
     strategy_key = _text(canonical_strategy_id, "canonical_strategy_id")
     expected_environment = _sha256(environment_id, "environment_id")
     expected_protocol = _text(protocol_id, "protocol_id")

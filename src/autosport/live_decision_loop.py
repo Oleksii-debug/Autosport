@@ -847,8 +847,14 @@ class PersistentLiveDecisionLoop:
                         # One bounded-current reconciliation covers durable changes
                         # between construction and the first live poll. Subsequent
                         # cycles reuse this exact canonical store and rely on the bus.
-                        for persisted_event in store.current_by_source().values():
-                            updates.accept_persisted(persisted_event)
+                        for (
+                            persisted_event,
+                            append_generation,
+                        ) in store.current_by_source_with_append_generation().values():
+                            updates.reconcile_persisted(
+                                persisted_event,
+                                append_generation=append_generation,
+                            )
                     except BaseException:
                         store.close()
                         raise

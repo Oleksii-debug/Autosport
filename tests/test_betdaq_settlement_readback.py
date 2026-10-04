@@ -692,6 +692,37 @@ def test_economic_read_rejects_transient_protocol_rebind_from_call_lock(
     assert opener.calls == []
     assert settlement_module._CANONICAL_SECURE_ENDPOINT == canonical_endpoint
 
+def test_economic_read_rejects_protocol_rebind_on_call_lock_exit(monkeypatch):
+    foreign_ns = "urn:foreign:betdaq:credential-laundering"
+    payload = postings_by_id(posting(9001)).replace(
+        NS.encode(),
+        foreign_ns.encode(),
+    )
+    client, opener = economic_client(monkeypatch, payload)
+    canonical_ns = settlement_module._CANONICAL_EXTERNAL_NS
+
+    class ExitRebindingProtocolLock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            settlement_module._CANONICAL_EXTERNAL_NS = foreign_ns
+            return False
+
+    client._account_client._call_lock = ExitRebindingProtocolLock()
+
+    try:
+        with pytest.raises(
+            BetdaqEconomicReadbackError,
+            match="canonical BETDAQ economic protocol authority was replaced",
+        ):
+            client.read_account_postings_by_id(9000)
+    finally:
+        settlement_module._CANONICAL_EXTERNAL_NS = canonical_ns
+
+    assert len(opener.calls) == 1
+
+
 @pytest.mark.parametrize(
     ("local_alias", "replacement"),
     (

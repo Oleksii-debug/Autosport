@@ -801,6 +801,18 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_settlement_resolution_collection_deletion_is_sealed(self) -> None:
+        original = ContinuousSessionCoordinator._settlement_resolutions
+        with self.assertRaisesRegex(
+            TypeError,
+            "canonical settlement consumer entry binding is immutable",
+        ):
+            del ContinuousSessionCoordinator._settlement_resolutions
+        self.assertIs(
+            ContinuousSessionCoordinator._settlement_resolutions,
+            original,
+        )
+
     def test_continuous_session_authority_setattr_dispatch_is_sealed(self) -> None:
         original = ContinuousSessionCoordinator.__setattr__
         with self.assertRaisesRegex(

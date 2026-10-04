@@ -13,6 +13,13 @@ import autosport.betfair_execution_confirmation as confirmation
         "consumer_key_builder",
         "decision_id_domain",
         "hash_module",
+        "wire_hash",
+        "json_encoder",
+        "action_projection",
+        "bound_verifier",
+        "approval_clock",
+        "spec_constructor",
+        "witness_constructor",
         "witness_validator",
     ),
 )
@@ -42,6 +49,40 @@ def test_transitive_confirmation_authority_rebinding_fails_closed(
         )
     elif target == "hash_module":
         monkeypatch.setattr(confirmation, "hashlib", object())
+    elif target == "wire_hash":
+        monkeypatch.setattr(confirmation.hashlib, "sha256", lambda *args, **kwargs: None)
+    elif target == "json_encoder":
+        monkeypatch.setattr(confirmation.json, "dumps", lambda *args, **kwargs: "{}")
+    elif target == "action_projection":
+        monkeypatch.setattr(
+            confirmation.ExecutionAction,
+            "to_dict",
+            lambda self: {},
+        )
+    elif target == "bound_verifier":
+        monkeypatch.setattr(
+            confirmation.BoundSupervisedExecutionPlan,
+            "verify_binding",
+            lambda self: None,
+        )
+    elif target == "approval_clock":
+        monkeypatch.setattr(
+            confirmation.SupervisedApproval,
+            "require_active",
+            lambda self, now: None,
+        )
+    elif target == "spec_constructor":
+        monkeypatch.setattr(
+            confirmation.BetfairExecutionConfirmationSpec,
+            "__init__",
+            lambda self, *args, **kwargs: None,
+        )
+    elif target == "witness_constructor":
+        monkeypatch.setattr(
+            confirmation.BetfairExecutionConfirmationWitness,
+            "__init__",
+            lambda self, *args, **kwargs: None,
+        )
     else:
         monkeypatch.setattr(
             confirmation.BetfairExecutionConfirmationWitness,

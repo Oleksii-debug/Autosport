@@ -304,6 +304,46 @@ class ProphetXRestRestartIdempotenceTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_unknown_contract_is_rejected_before_first_market_insert(self) -> None:
+        provider = self._provider(self._authority(create=True), [_payload()])
+        _batch, events = self._normalized(provider)
+        metadata = deepcopy(events[0].metadata)
+        metadata["semantic_state_contract"] = (
+            "autosport.prophetx-rest-market-state.v999"
+        )
+        unsupported = replace(events[0], metadata=metadata)
+        store = SQLiteMarketStore(self.market_path)
+        try:
+            with self.assertRaisesRegex(
+                MarketStateIdentityError,
+                "unsupported",
+            ):
+                store.append(unsupported)
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.current_by_source(), {})
+        finally:
+            store.close()
+
+    def test_malformed_claimed_contract_is_rejected_before_first_market_insert(
+        self,
+    ) -> None:
+        provider = self._provider(self._authority(create=True), [_payload()])
+        _batch, events = self._normalized(provider)
+        metadata = deepcopy(events[0].metadata)
+        metadata["request_fingerprint_sha256"] = "not-a-sha256"
+        malformed = replace(events[0], metadata=metadata)
+        store = SQLiteMarketStore(self.market_path)
+        try:
+            with self.assertRaisesRegex(
+                MarketStateIdentityError,
+                "request fingerprint",
+            ):
+                store.append(malformed)
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.current_by_source(), {})
+        finally:
+            store.close()
+
     def test_unknown_future_contract_fails_closed_without_inheriting_watermark(
         self,
     ) -> None:

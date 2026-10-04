@@ -1301,6 +1301,13 @@ def cancel_superseded(
     def api_dispatch_current() -> bool:
         rebound_active = getattr(api, "active_runs", None)
         rebound_cancel = getattr(api, "cancel", None)
+        if type(api) is _production_api_type and (
+            active_runs_self is not api
+            or active_runs_func is not _production_active_runs
+            or cancel_self is not api
+            or cancel_func is not _production_cancel
+        ):
+            return False
         return (
             callable(active_runs)
             and active_runs_code is not None

@@ -34,10 +34,21 @@ _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
 
 
 def _ticket_opening_commitment(ticket: PaperTicket) -> tuple[object, ...]:
-    """Return the immutable opening facts that authorized PAPER economics."""
+    """Return detached immutable opening facts that authorized PAPER economics."""
+    leg_commitments = tuple(
+        (
+            leg.event_id,
+            leg.market_id,
+            leg.selection_id,
+            leg.locked_odds,
+            leg.sport,
+            leg.exchange_side,
+        )
+        for leg in ticket.legs
+    )
     return (
         ticket.stake,
-        ticket.legs,
+        leg_commitments,
         ticket.placed_at,
         ticket.strategy_reason,
         ticket.provider_source_ids,

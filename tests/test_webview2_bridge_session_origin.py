@@ -395,7 +395,7 @@ def test_bridge_rejects_controller_registry_record_downgrade(tmp_path) -> None:
         "request_id": raw.get("request_id", "forged"),
         "status": "forged",
     }
-    registry[bridge] = (controller, None, ())
+    registry[bridge] = (controller, None, (), None)
     try:
         with pytest.raises(
             WindowsWebBridgeTrustError,

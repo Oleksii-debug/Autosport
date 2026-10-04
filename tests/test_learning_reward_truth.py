@@ -35,10 +35,30 @@ def test_observed_plus_simulated_is_mixed() -> None:
     assert value.fully_observed is False
 
 
-def test_simulated_plus_observed_is_mixed() -> None:
-    value = compose(EvidenceTruth.SIMULATED, EvidenceTruth.OBSERVED)
-    assert value.composed_truth is ComposedLearningTruth.MIXED
-    assert value.fully_observed is False
+def test_simulated_plus_observed_is_rejected() -> None:
+    with pytest.raises(
+        LearningRewardTruthError,
+        match="observed reward cannot derive from simulated outcome",
+    ):
+        compose(EvidenceTruth.SIMULATED, EvidenceTruth.OBSERVED)
+
+
+def test_digest_valid_simulated_outcome_observed_reward_record_is_rejected() -> None:
+    record = {
+        "schema": "autosport.learning_reward_truth",
+        "schema_version": 1,
+        "outcome_truth": "simulated",
+        "reward_truth": "observed",
+        "composed_truth": "mixed",
+        "composition_sha256": (
+            "05b74bda3d9e9b0517791687578c2e5ba42d6192bc631f37d7d9a49979f2438e"
+        ),
+    }
+    with pytest.raises(
+        LearningRewardTruthError,
+        match="observed reward cannot derive from simulated outcome",
+    ):
+        LearningTruthComposition.from_record(record)
 
 
 @pytest.mark.parametrize(

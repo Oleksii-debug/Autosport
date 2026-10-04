@@ -102,6 +102,13 @@ class LearningTruthComposition:
     def __post_init__(self) -> None:
         _component(self.outcome_truth, "outcome_truth")
         _component(self.reward_truth, "reward_truth")
+        if (
+            self.outcome_truth is EvidenceTruth.SIMULATED
+            and self.reward_truth is EvidenceTruth.OBSERVED
+        ):
+            raise LearningRewardTruthError(
+                "observed reward cannot derive from simulated outcome"
+            )
 
     @property
     def composed_truth(self) -> ComposedLearningTruth:

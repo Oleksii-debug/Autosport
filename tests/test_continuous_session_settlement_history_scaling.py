@@ -3,11 +3,9 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from threading import RLock
 from unittest.mock import patch
 
 import autosport.continuous_session as continuous_session
-import autosport.product_runtime as product_runtime
 
 
 _AT = "2026-09-22T06:20:00+00:00"
@@ -1217,54 +1215,26 @@ def test_legacy_rollback_cannot_discard_newer_settlement_journal_tail() -> None:
                 "legacy rollback discarded a newer committed settlement journal tail"
             )
 
-def test_product_tick_uses_bounded_coherent_status_path() -> None:
-    status = continuous_session.ContinuousSessionStatus(
-        session_id="bounded-product-tick",
-        source_id="provider-a",
-        state=continuous_session.SessionState.RUNNING,
-        cycles_completed=0,
-        last_success_at=None,
-        last_error_code=None,
-        last_full_refresh_at=None,
-        settlement_evidence=(),
-    )
+def test_operational_status_remains_bounded_while_public_status_materializes_history() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        state = _state_with_history(Path(directory), _SMALL_HISTORY)
+        with patch.object(
+            state,
+            "_load_evidence_history",
+            side_effect=AssertionError(
+                "operational status must not materialize settlement history"
+            ),
+        ):
+            operational = state.operational_snapshot()
+            assert operational.settlement_evidence == ()
+            assert operational.settlement_evidence_count == _SMALL_HISTORY
+            assert operational.settlement_evidence_materialized is False
 
-    class Coordinator:
-        def status(self):
-            raise AssertionError(
-                "product tick must not request full settlement-history status"
-            )
+        public = state.snapshot()
+        assert len(public.settlement_evidence) == _SMALL_HISTORY
+        assert public.settlement_evidence_count == _SMALL_HISTORY
+        assert public.settlement_evidence_materialized is True
 
-        def operational_status(self):
-            return status
-
-        def tick(self):
-            return "bounded-tick-result"
-
-    class Collector:
-        def status(self):
-            return {
-                "stopped_at": None,
-                "stop_reason": None,
-            }
-
-    class Lease:
-        authority_active = True
-
-    class StartStore:
-        @staticmethod
-        def pending():
-            return None
-
-    runtime = object.__new__(product_runtime.AutonomousProductRuntime)
-    runtime.coordinator = Coordinator()
-    runtime.collector = Collector()
-    runtime._runtime_lease = Lease()
-    runtime._start_transition_store = StartStore()
-    runtime._closed = False
-    runtime._operation_fence = RLock()
-
-    assert runtime.tick() == "bounded-tick-result"
 
 def test_public_settlement_evidence_order_matches_v2_contract_after_append() -> None:
     with tempfile.TemporaryDirectory() as directory:

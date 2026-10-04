@@ -744,8 +744,8 @@ class SQLiteMarketStore:
 
     def __init__(self, path: str | Path = "autosport.db") -> None:
         # Freeze one filesystem-canonical database pathname before SQLite or any
-        # independent authority derives identity from it.  In particular, a file
-        # symlink alias must not create a second WAL/authority namespace for the
+        # independent authority derives identity from it. In particular, a file
+        # symlink alias must not derive a second independent authority key for the
         # same durable database.
         self.path = Path(path).resolve(strict=False)
         self._connection_lock = RLock()
@@ -757,10 +757,9 @@ class SQLiteMarketStore:
             self._ensure_market_append_baseline_authority()
             append_authority = self._market_append_authority()
             with self._market_append_issuance_lock(append_authority):
-                self._require_product_issued_positive_history(
-                    append_authority
+                self._rebuild_current_quotes(
+                    append_authority=append_authority,
                 )
-            self._rebuild_current_quotes()
         except Exception:
             self.connection.close()
             raise
@@ -1415,12 +1414,25 @@ class SQLiteMarketStore:
                 "causal replay cutoff lacks unique independent product issuance authority"
             )
 
-    def _rebuild_current_quotes(self) -> None:
-        """Repair provider-aware current projection from one write-locked history snapshot."""
+    def _rebuild_current_quotes(
+        self,
+        *,
+        append_authority: MonotonicWorkspaceAuthority,
+    ) -> None:
+        """Repair current projection from history proven in the same write snapshot."""
         latest: dict[tuple[str, str], tuple[tuple[int, str], MarketEvent]] = {}
         history_by_dedupe: dict[str, MarketEvent] = {}
         self.connection.execute("BEGIN IMMEDIATE")
         try:
+            # Startup repair is itself a trust-boundary write. Re-prove both mutable
+            # tables and the complete append chronology only after the SQLite write
+            # snapshot is established, so a direct writer cannot alter history or
+            # inject a projection trigger between authority proof and repair.
+            _validate_canonical_table(self.connection, "market_events")
+            _validate_canonical_table(self.connection, "current_quotes")
+            self._validate_causal_replay_state()
+            self._require_product_issued_positive_history(append_authority)
+
             rows = self.connection.execute(
                 f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
             ).fetchall()

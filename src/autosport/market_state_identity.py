@@ -14,6 +14,7 @@ _PROPHETX_SOURCE_ID = "prophetx:sandbox"
 _PROPHETX_PROVIDER = "prophetx"
 _PROPHETX_ENVIRONMENT = "sandbox"
 _PROPHETX_TRANSPORT_SURFACE = "v3_affiliate_get_markets"
+_PROPHETX_SEQUENCE_SOURCE_ID = "prophetx:sandbox:rest:v3-affiliate-get-markets"
 
 # These values prove one local acquisition/provenance instance rather than the
 # normalized provider market state. They intentionally remain durable on the
@@ -93,13 +94,9 @@ def _prophetx_rest_state_material(event: MarketEvent) -> dict[str, object]:
         raise MarketStateIdentityError(
             "ProphetX REST market-state contract requires sequence authority identity"
         )
-    if (
-        type(sequence_source_id) is not str
-        or not sequence_source_id
-        or sequence_source_id.strip() != sequence_source_id
-    ):
+    if sequence_source_id != _PROPHETX_SEQUENCE_SOURCE_ID:
         raise MarketStateIdentityError(
-            "ProphetX REST market-state contract requires sequence source identity"
+            "ProphetX REST market-state contract requires canonical sequence source identity"
         )
 
     # Product receipt clocks and acquisition ordering are deliberately excluded.

@@ -515,38 +515,44 @@ class ScenarioSearchEngine:
         mapping: dict[str, int],
         assignments: dict[int, str],
     ) -> tuple[Decimal, Decimal]:
-        lower = Decimal("0")
-        upper = Decimal("0")
-        for ticket in tickets:
-            lost = False
-            undecided = False
-            for leg in ticket.legs:
-                group_index = mapping[leg.quote_key]
-                selected = assignments.get(group_index)
-                if selected is None:
-                    undecided = True
-                elif selected != leg.quote_key:
-                    lost = True
-                    break
-            if lost:
-                lower -= ticket.stake
-                upper -= ticket.stake
-            elif undecided:
-                lower -= ticket.stake
-                upper += ticket.stake * ticket.combined_odds - ticket.stake
-            else:
-                profit = ticket.stake * ticket.combined_odds - ticket.stake
-                lower += profit
-                upper += profit
+        with localcontext(_SCENARIO_DECIMAL_CONTEXT):
+            lower = Decimal("0")
+            upper = Decimal("0")
+            for ticket in tickets:
+                lost = False
+                undecided = False
+                for leg in ticket.legs:
+                    group_index = mapping[leg.quote_key]
+                    selected = assignments.get(group_index)
+                    if selected is None:
+                        undecided = True
+                    elif selected != leg.quote_key:
+                        lost = True
+                        break
+                if lost:
+                    lower -= ticket.stake
+                    upper -= ticket.stake
+                elif undecided:
+                    lower -= ticket.stake
+                    upper += ticket.stake * ticket.combined_odds - ticket.stake
+                else:
+                    profit = ticket.stake * ticket.combined_odds - ticket.stake
+                    lower += profit
+                    upper += profit
+        if not lower.is_finite() or not upper.is_finite():
+            raise ValueError("scenario branch bounds must be finite")
         return lower, upper
 
     def _ordered_groups(self, tickets: list[PaperTicket], groups: list[ScenarioGroup], mapping: dict[str, int]) -> list[int]:
-        impact = [Decimal("0") for _ in groups]
-        for ticket in tickets:
-            potential = ticket.stake * ticket.combined_odds
-            touched = {mapping[leg.quote_key] for leg in ticket.legs}
-            for group_index in touched:
-                impact[group_index] += potential
+        with localcontext(_SCENARIO_DECIMAL_CONTEXT):
+            impact = [Decimal("0") for _ in groups]
+            for ticket in tickets:
+                potential = ticket.stake * ticket.combined_odds
+                touched = {mapping[leg.quote_key] for leg in ticket.legs}
+                for group_index in touched:
+                    impact[group_index] += potential
+        if any(not value.is_finite() for value in impact):
+            raise ValueError("scenario group impact must be finite")
         return sorted(range(len(groups)), key=lambda index: impact[index], reverse=True)
 
     def _branch_bound(self, tickets, groups, mapping, minimize: bool) -> tuple[Decimal, int, bool]:
@@ -590,9 +596,8 @@ class ScenarioSearchEngine:
 
     @staticmethod
     def _conservative_fallback(tickets: list[PaperTicket], minimize: bool) -> Decimal:
-        if minimize:
-            return -sum((ticket.stake for ticket in tickets), Decimal("0"))
-        return sum((ticket.stake * ticket.combined_odds - ticket.stake for ticket in tickets), Decimal("0"))
+        floor, ceiling = _scenario_conservative_bounds(tickets)
+        return floor if minimize else ceiling
 
     def _sample(self, tickets, groups) -> tuple[Decimal, Decimal, Decimal | None]:
         rng = random.Random(self.seed)

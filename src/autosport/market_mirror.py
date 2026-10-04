@@ -15,12 +15,12 @@ def _require_market_store(
     store: object,
     *,
     exact: bool,
+    error_message: str,
     _store_type: type[SQLiteMarketStore] = SQLiteMarketStore,
 ) -> SQLiteMarketStore:
     valid = type(store) is _store_type if exact else isinstance(store, _store_type)
     if not valid:
-        requirement = "an exact SQLiteMarketStore" if exact else "a SQLiteMarketStore"
-        raise TypeError(f"store must be {requirement}")
+        raise TypeError(error_message)
     return store
 
 
@@ -519,6 +519,11 @@ class MarketMirror:
         canonical_store = _require_market_store(
             store,
             exact=require_live_receipt_authority,
+            error_message=(
+                "trusted live replay requires an exact SQLiteMarketStore"
+                if require_live_receipt_authority
+                else "store must be a SQLiteMarketStore"
+            ),
         )
         boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
         mirror = cls()
@@ -554,7 +559,11 @@ class MarketMirror:
         every historical observation here would add unbounded startup cost without
         adding authority.
         """
-        canonical_store = _require_market_store(store, exact=False)
+        canonical_store = _require_market_store(
+            store,
+            exact=False,
+            error_message="store must be a SQLiteMarketStore",
+        )
         mirror = cls()
         current = canonical_store.current_by_source()
         for key in sorted(current):
@@ -570,7 +579,11 @@ class MarketMirror:
         restart. The receipt side table is intentionally prospective: rows written
         before that authority existed stay absent from this live projection.
         """
-        canonical_store = _require_market_store(store, exact=True)
+        canonical_store = _require_market_store(
+            store,
+            exact=True,
+            error_message="live store must be an exact SQLiteMarketStore",
+        )
         mirror = cls()
         current = _trusted_live_current_by_source(canonical_store)
         for key in sorted(current):

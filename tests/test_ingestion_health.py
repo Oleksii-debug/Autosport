@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -7,7 +8,12 @@ from pathlib import Path
 from autosport.ingestion import IngestionEngine, IngestionStats
 from autosport.ingestion_health import IngestionPolicy, SourceHealthStore
 from autosport.market_bus import MarketEventBus
-from autosport.providers import InMemoryProvider, ProviderBatch, ProviderQuote
+from autosport.providers import (
+    InMemoryProvider,
+    ProviderBatch,
+    ProviderQuote,
+    ProviderUnavailableError,
+)
 from autosport.storage import SQLiteMarketStore
 
 
@@ -16,6 +22,13 @@ class FailingProvider:
 
     def read_batch(self, max_items: int = 1000):
         raise RuntimeError("provider unavailable")
+
+
+class ProviderUnavailableFailingProvider:
+    source_id = "provider-unavailable-source"
+
+    def read_batch(self, max_items: int = 1000):
+        raise ProviderUnavailableError("provider unavailable")
 
 
 class StaticProvider:
@@ -262,8 +275,109 @@ class IngestionHealthTests(unittest.TestCase):
             self.assertEqual(state.status, "failed")
             self.assertEqual(state.total_failures, 1)
             self.assertEqual(state.consecutive_failures, 1)
+            self.assertEqual(state.last_failure_kind, "provider_or_validation")
+            self.assertEqual(state.consecutive_failure_kind_count, 1)
             self.assertIn("RuntimeError", state.last_error or "")
             store.close()
+
+    def test_provider_unavailable_is_typed_at_ingestion_failure_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, health = self._engine(tmp)
+            with self.assertRaises(ProviderUnavailableError):
+                engine.poll_once(ProviderUnavailableFailingProvider(), max_items=10)
+            state = health.get("provider-unavailable-source")
+            self.assertEqual(state.status, "failed")
+            self.assertEqual(state.consecutive_failures, 1)
+            self.assertEqual(state.last_failure_kind, "provider_unavailable")
+            self.assertEqual(state.consecutive_failure_kind_count, 1)
+            store.close()
+
+    def test_typed_failure_suffix_resets_on_kind_change_and_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "source-health.json"
+            health = SourceHealthStore(path)
+            source_id = "typed-source"
+
+            health.record_failure(
+                source_id,
+                now="2026-09-12T12:00:00+00:00",
+                error=ProviderUnavailableError("outage-1"),
+                failure_kind="provider_unavailable",
+            )
+            same_kind = health.record_failure(
+                source_id,
+                now="2026-09-12T12:00:01+00:00",
+                error=ProviderUnavailableError("outage-2"),
+                failure_kind="provider_unavailable",
+            )
+            self.assertEqual(same_kind.consecutive_failures, 2)
+            self.assertEqual(same_kind.consecutive_failure_kind_count, 2)
+
+            changed_kind = health.record_failure(
+                source_id,
+                now="2026-09-12T12:00:02+00:00",
+                error=ValueError("invalid payload"),
+                failure_kind="provider_or_validation",
+            )
+            self.assertEqual(changed_kind.consecutive_failures, 3)
+            self.assertEqual(changed_kind.last_failure_kind, "provider_or_validation")
+            self.assertEqual(changed_kind.consecutive_failure_kind_count, 1)
+
+            recovered = health.record_success(
+                source_id,
+                now="2026-09-12T12:00:03+00:00",
+                received=0,
+                accepted=0,
+                rejected=0,
+                cursor="recovered",
+                latest_source_ts=None,
+                quality_flags=(),
+            )
+            self.assertEqual(recovered.consecutive_failures, 0)
+            self.assertIsNone(recovered.last_failure_kind)
+            self.assertEqual(recovered.consecutive_failure_kind_count, 0)
+
+    def test_schema_v3_failure_remains_untyped_until_new_causal_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "source-health.json"
+            health = SourceHealthStore(path)
+            health.record_failure(
+                "legacy-source",
+                now="2026-09-12T12:00:00+00:00",
+                error=RuntimeError("legacy failure"),
+            )
+
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["schema_version"] = 3
+            for payload in raw["sources"].values():
+                payload.pop("last_failure_kind")
+                payload.pop("consecutive_failure_kind_count")
+            for entries in raw["history"].values():
+                for entry in entries:
+                    entry["state"].pop("last_failure_kind")
+                    entry["state"].pop("consecutive_failure_kind_count")
+            path.write_text(
+                json.dumps(raw, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            reopened = SourceHealthStore(path)
+            legacy = reopened.get("legacy-source")
+            self.assertEqual(legacy.status, "failed")
+            self.assertIsNone(legacy.last_failure_kind)
+            self.assertEqual(legacy.consecutive_failure_kind_count, 0)
+
+            typed = reopened.record_failure(
+                "legacy-source",
+                now="2026-09-12T12:00:01+00:00",
+                error=ProviderUnavailableError("new typed outage"),
+                failure_kind="provider_unavailable",
+            )
+            self.assertEqual(typed.consecutive_failures, 2)
+            self.assertEqual(typed.last_failure_kind, "provider_unavailable")
+            self.assertEqual(typed.consecutive_failure_kind_count, 1)
+            upgraded = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(upgraded["schema_version"], 4)
 
     def test_duplicate_batch_flags_fail_at_provider_contract_boundary(self):
         with self.assertRaisesRegex(ValueError, "duplicate provider batch quality flag"):

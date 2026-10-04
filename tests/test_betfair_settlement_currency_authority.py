@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 import json
+import urllib.request as _urllib_request
 
 import pytest
 
+from autosport.betfair_account_identity import build_betfair_authenticated_client
 from autosport.betfair_account_readonly import (
     BetfairAccountDetailsObservation,
     BetfairEvidence,
@@ -34,39 +36,55 @@ def _isolated_monotonic_authority(tmp_path, monkeypatch) -> None:
     )
 
 
-class _Clock:
-    def __init__(self) -> None:
-        self.value = datetime(2026, 9, 29, 0, 0, tzinfo=timezone.utc)
+class _Response:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
 
-    def __call__(self) -> datetime:
-        value = self.value
-        self.value += timedelta(seconds=1)
-        return value
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self, limit: int) -> bytes:
+        assert limit >= len(self._payload)
+        return self._payload
 
 
-class _Transport:
+class _ProviderResponses:
     def __init__(self) -> None:
         self.currency = "USD"
         self.customer_order_ref: str | None = None
+        self.account_details_reads = 0
+        self.mutate_client_on_details_read: int | None = None
+        self.client: BetfairReadOnlyClient | None = None
 
-    def post(self, url: str, *, headers, body: bytes, timeout_seconds: float) -> bytes:
-        request = json.loads(body.decode("utf-8"))
-        method = request["method"]
-        request_id = request["id"]
+    def response(self, request) -> _Response:
+        assert request.data is not None
+        rpc = json.loads(request.data.decode("utf-8"))
+        method = rpc["method"]
+        request_id = rpc["id"]
         if method.endswith("getAccountDetails"):
+            self.account_details_reads += 1
             result = {
                 "currencyCode": self.currency,
                 "localeCode": "en",
                 "region": "GBR",
                 "timezone": "UTC",
             }
+            if self.mutate_client_on_details_read == self.account_details_reads:
+                assert self.client is not None
+                self.client._credentials = BetfairSessionCredentials(
+                    "app-key-rotated",
+                    "session-token-rotated",
+                )
         elif method.endswith("listMarketCatalogue"):
             result = [{"marketId": "1.234", "event": {"id": "event-1"}}]
         elif method.endswith("listCurrentOrders"):
             result = {"currentOrders": [], "moreAvailable": False}
         elif method.endswith("listClearedOrders"):
             rows = []
-            if request["params"]["betStatus"] == "SETTLED":
+            if rpc["params"]["betStatus"] == "SETTLED":
                 rows.append(
                     {
                         "betId": "bet-777",
@@ -87,13 +105,24 @@ class _Transport:
             result = {"clearedOrders": rows, "moreAvailable": False}
         else:  # pragma: no cover
             raise AssertionError(method)
-        return json.dumps(
+        payload = json.dumps(
             {"jsonrpc": "2.0", "id": request_id, "result": result},
             separators=(",", ":"),
         ).encode("utf-8")
+        return _Response(payload)
 
 
-def _context(tmp_path):
+class _Opener:
+    def __init__(self, provider: _ProviderResponses) -> None:
+        self._provider = provider
+
+    def open(self, request, data=None, timeout: float = 0):
+        assert data is None
+        assert timeout > 0
+        return self._provider.response(request)
+
+
+def _context(tmp_path, monkeypatch):
     action = ExecutionAction(
         action_id="action-1",
         bookmaker_id="betfair",
@@ -142,16 +171,15 @@ def _context(tmp_path):
             accepted_stake=Decimal("5"),
         )
     )
-    transport = _Transport()
-    transport.customer_order_ref = provider_ref
-    client = BetfairReadOnlyClient(
+    provider = _ProviderResponses()
+    provider.customer_order_ref = provider_ref
+    monkeypatch.setattr(_urllib_request, "_opener", _Opener(provider))
+    client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token"),
-        transport=transport,
-        clock=_Clock(),
-        venue_id="betfair",
-        account_id="acct-1",
+        account_label="acct-1",
     )
-    return ledger, plan, action, provider_ref, transport, client
+    provider.client = client
+    return ledger, plan, action, provider_ref, provider, client
 
 
 def _ingest(store, ledger, plan, action, capture):
@@ -175,8 +203,11 @@ def _qualified_capture(client, provider_ref):
 
 def test_ordinary_readback_preserves_profit_only_as_unqualified_provider_number(
     tmp_path,
+    monkeypatch,
 ) -> None:
-    ledger, plan, action, provider_ref, _transport, client = _context(tmp_path)
+    ledger, plan, action, provider_ref, _provider, client = _context(
+        tmp_path, monkeypatch
+    )
     capture = client.read_execution_readback(
         action_id="action-1",
         market_id="1.234",
@@ -202,8 +233,11 @@ def test_ordinary_readback_preserves_profit_only_as_unqualified_provider_number(
 
 def test_same_client_authenticated_account_details_qualify_provider_profit_money(
     tmp_path,
+    monkeypatch,
 ) -> None:
-    ledger, plan, action, provider_ref, _transport, client = _context(tmp_path)
+    ledger, plan, action, provider_ref, _provider, client = _context(
+        tmp_path, monkeypatch
+    )
     path = tmp_path / "settlement.jsonl"
     capture = _qualified_capture(client, provider_ref)
     revision = _ingest(
@@ -226,8 +260,11 @@ def test_same_client_authenticated_account_details_qualify_provider_profit_money
 
 def test_caller_constructed_account_details_cannot_upgrade_ordinary_capture(
     tmp_path,
+    monkeypatch,
 ) -> None:
-    ledger, plan, action, provider_ref, _transport, client = _context(tmp_path)
+    ledger, plan, action, provider_ref, _provider, client = _context(
+        tmp_path, monkeypatch
+    )
     forged = BetfairAccountDetailsObservation(
         currency_code="EUR",
         locale_code=None,
@@ -258,8 +295,13 @@ def test_caller_constructed_account_details_cannot_upgrade_ordinary_capture(
         _ = revision.provider_profit_money
 
 
-def test_authenticated_currency_change_is_new_semantic_revision(tmp_path) -> None:
-    ledger, plan, action, provider_ref, transport, client = _context(tmp_path)
+def test_authenticated_currency_change_is_new_semantic_revision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, plan, action, provider_ref, provider, client = _context(
+        tmp_path, monkeypatch
+    )
     store = BetfairSettlementRevisionStore(tmp_path / "settlement.jsonl")
 
     first = _ingest(
@@ -271,7 +313,7 @@ def test_authenticated_currency_change_is_new_semantic_revision(tmp_path) -> Non
     ).revision
     assert first.provider_profit_currency == "USD"
 
-    transport.currency = "EUR"
+    provider.currency = "EUR"
     second = _ingest(
         store,
         ledger,
@@ -284,3 +326,65 @@ def test_authenticated_currency_change_is_new_semantic_revision(tmp_path) -> Non
     assert second.previous_revision_id == first.revision_id
     assert second.provider_profit_currency == "EUR"
     assert second.provider_profit == first.provider_profit
+
+
+def test_direct_client_cannot_mint_currency_qualified_profit(tmp_path, monkeypatch) -> None:
+    _ledger, _plan, _action, provider_ref, provider, _client = _context(
+        tmp_path, monkeypatch
+    )
+    direct = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-key", "session-token"),
+        venue_id="betfair",
+        account_id="acct-1",
+    )
+    provider.client = direct
+
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="lacks K07 authenticated client/session authority",
+    ):
+        _qualified_capture(direct, provider_ref)
+
+
+def test_credential_swap_between_currency_and_execution_invalidates_qualification(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _ledger, _plan, _action, provider_ref, provider, client = _context(
+        tmp_path, monkeypatch
+    )
+    # The guard's first K07 identity read is details read #1.  The legacy currency
+    # bridge then performs details read #2 immediately before execution readback.
+    provider.mutate_client_on_details_read = 2
+
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="authenticated session changed during execution readback",
+    ):
+        _qualified_capture(client, provider_ref)
+
+
+def test_credential_rotation_after_capture_blocks_currency_persistence(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, plan, action, provider_ref, _provider, client = _context(
+        tmp_path, monkeypatch
+    )
+    capture = _qualified_capture(client, provider_ref)
+    client._credentials = BetfairSessionCredentials(
+        "app-key-rotated",
+        "session-token-rotated",
+    )
+
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="authenticated session changed before persistence",
+    ):
+        _ingest(
+            BetfairSettlementRevisionStore(tmp_path / "settlement.jsonl"),
+            ledger,
+            plan,
+            action,
+            capture,
+        )

@@ -433,6 +433,53 @@ def _settlement_outcomes_sha256(evidence: SettlementResolution) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _bind_continuous_state_settlement_integrity(method):
+    """Bind durable outcome interpretation to module-load integrity roots."""
+
+    canonical_json_dumps = json.dumps
+    canonical_sha256 = hashlib.sha256
+    canonical_datetime_type = datetime
+    canonical_timezone_utc = timezone.utc
+
+    def canonical_instant(value: object, field: str) -> datetime:
+        if type(value) is not str or not value or value.strip() != value:
+            raise ValueError(f"{field} must be a non-empty trimmed string")
+        try:
+            parsed = canonical_datetime_type.fromisoformat(
+                value.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ValueError(f"{field} must be valid ISO-8601") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"{field} must be timezone-aware ISO-8601")
+        return parsed.astimezone(canonical_timezone_utc)
+
+    def outcomes_digest(evidence: SettlementResolution) -> str:
+        payload = canonical_json_dumps(
+            dict(sorted(evidence.quote_outcomes.items())),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return canonical_sha256(payload).hexdigest()
+
+    def guarded(self, raw, settlement_evidence):
+        return method(
+            self,
+            raw,
+            settlement_evidence,
+            _settlement_instant=canonical_instant,
+            _settlement_outcomes_digest=outcomes_digest,
+        )
+
+    guarded.__name__ = method.__name__
+    guarded.__qualname__ = method.__qualname__
+    guarded.__doc__ = method.__doc__
+    guarded.__annotations__ = method.__annotations__
+    return guarded
+
+
 class _ContinuousSessionState:
     _SCHEMA = "autosport.continuous_session"
     _VERSION = 3
@@ -755,10 +802,14 @@ class _ContinuousSessionState:
             ).isoformat(),
         }
 
+    @_bind_continuous_state_settlement_integrity
     def _merge_settlement_evidence(
         self,
         raw: dict[str, Any],
         settlement_evidence: tuple[SettlementResolution, ...],
+        *,
+        _settlement_instant: Callable[[object, str], datetime],
+        _settlement_outcomes_digest: Callable[[SettlementResolution], str],
     ) -> tuple[list[dict[str, str]], dict[str, str | None]]:
         known = {
             item["evidence_id"]: item
@@ -770,8 +821,17 @@ class _ContinuousSessionState:
         }
         outcome_digests = dict(raw["settlement_outcome_digests"])
         for evidence in settlement_evidence:
-            normalized = self._normalized_settlement_evidence(evidence)
-            outcomes_digest = _settlement_outcomes_sha256(evidence)
+            normalized = {
+                "event_identity": evidence.event_identity,
+                "settlement_ref": evidence.settlement_ref,
+                "evidence_id": evidence.evidence_id,
+                "evidence_sha256": evidence.evidence_sha256,
+                "available_at": _settlement_instant(
+                    evidence.available_at,
+                    "available_at",
+                ).isoformat(),
+            }
+            outcomes_digest = _settlement_outcomes_digest(evidence)
             existing = known.get(evidence.evidence_id)
             if existing is not None and existing != normalized:
                 raise ContinuousSessionError(

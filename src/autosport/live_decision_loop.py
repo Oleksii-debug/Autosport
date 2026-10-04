@@ -868,7 +868,7 @@ class PersistentLiveDecisionLoop:
                 self.workspace / "market.db"
             )
             try:
-                mirror = MarketMirror.from_proven_history(
+                mirror = MarketMirror._from_proven_history(
                     store.events_at_committed_append_boundary(
                         unfinished_generation
                     )

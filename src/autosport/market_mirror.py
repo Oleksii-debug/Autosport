@@ -675,7 +675,7 @@ class MarketMirror:
         )
 
     @classmethod
-    def from_proven_history(
+    def _from_proven_history(
         cls,
         events_with_generation: Iterable[tuple[MarketEvent, int]],
     ) -> "MarketMirror":
@@ -712,7 +712,7 @@ class MarketMirror:
         """
         if not isinstance(store, SQLiteMarketStore):
             raise TypeError("store must be a SQLiteMarketStore")
-        return cls.from_proven_history(
+        return cls._from_proven_history(
             store.events_with_append_generation()
         )
 

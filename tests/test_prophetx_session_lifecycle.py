@@ -48,6 +48,15 @@ def _lifecycle(tmp_path, **scope_kwargs) -> ProphetXSessionLifecycle:
     )
 
 
+def _dispatch(
+    lifecycle: ProphetXSessionLifecycle,
+    admission: ProphetXLoginAdmission,
+    *,
+    at: datetime,
+) -> None:
+    assert lifecycle.consume_effect_authority(admission, now=at) is True
+
+
 def _active(lifecycle: ProphetXSessionLifecycle, at: datetime = NOW):
     admission = lifecycle.begin_login(
         now=at,
@@ -55,6 +64,7 @@ def _active(lifecycle: ProphetXSessionLifecycle, at: datetime = NOW):
     )
     assert admission.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
     assert admission.attempt_id is not None
+    _dispatch(lifecycle, admission, at=at)
     snapshot = lifecycle.complete_login_success(
         attempt_id=admission.attempt_id,
         now=at,
@@ -141,6 +151,7 @@ def test_restart_without_local_token_waits_for_conservative_slot_horizon(tmp_pat
 def test_session_pool_exhaustion_is_distinct_and_not_tight_retry(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+    _dispatch(lifecycle, admission, at=NOW)
     failed = lifecycle.complete_login_failure(
         attempt_id=admission.attempt_id,
         now=NOW,
@@ -302,6 +313,7 @@ def test_restart_rejects_shortened_residual_wait_slot_hold(tmp_path):
 def test_ambiguous_provider_result_preserves_conservative_slot_horizon(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+    _dispatch(lifecycle, admission, at=NOW)
     failed = lifecycle.complete_login_failure(
         attempt_id=admission.attempt_id,
         now=NOW + timedelta(seconds=2),
@@ -324,6 +336,7 @@ def test_ambiguous_provider_result_preserves_conservative_slot_horizon(tmp_path)
 def test_pre_session_failure_uses_bounded_deterministic_backoff(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+    _dispatch(lifecycle, admission, at=NOW)
     failed = lifecycle.complete_login_failure(
         attempt_id=admission.attempt_id,
         now=NOW,
@@ -350,6 +363,7 @@ def test_pre_session_failure_uses_bounded_deterministic_backoff(tmp_path):
 def test_provider_unavailable_is_not_bad_credentials(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+    _dispatch(lifecycle, admission, at=NOW)
     failed = lifecycle.complete_login_failure(
         attempt_id=admission.attempt_id,
         now=NOW,
@@ -377,6 +391,7 @@ def test_credential_rotation_cannot_bypass_transient_auth_backoff(
 ):
     original = _lifecycle(tmp_path, revision="rev-1")
     admitted = original.begin_login(now=NOW, access_token_available=False)
+    _dispatch(original, admitted, at=NOW)
     degraded = original.complete_login_failure(
         attempt_id=admitted.attempt_id,
         now=NOW + timedelta(seconds=1),
@@ -415,6 +430,7 @@ def test_revocation_then_rotation_cannot_launder_transient_backoff(
 ):
     original = _lifecycle(tmp_path, revision="rev-1")
     admitted = original.begin_login(now=NOW, access_token_available=False)
+    _dispatch(original, admitted, at=NOW)
     degraded = original.complete_login_failure(
         attempt_id=admitted.attempt_id,
         now=NOW + timedelta(seconds=1),
@@ -534,6 +550,7 @@ def test_persisted_state_is_secret_free(tmp_path):
 def test_credential_rejection_blocks_same_revision_but_rotation_can_recover(tmp_path):
     rejected = _lifecycle(tmp_path, revision="rev-1")
     admission = rejected.begin_login(now=NOW, access_token_available=False)
+    _dispatch(rejected, admission, at=NOW)
     state = rejected.complete_login_failure(
         attempt_id=admission.attempt_id,
         now=NOW,
@@ -630,6 +647,7 @@ def test_provider_response_owns_access_expiry_but_not_shorter_slot_horizon(tmp_p
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)
 
     exact_expiry = NOW + timedelta(minutes=7)
+    _dispatch(lifecycle, admission, at=NOW)
     active = lifecycle.complete_login_success(
         attempt_id=admission.attempt_id,
         now=NOW,
@@ -654,6 +672,7 @@ def test_long_provider_expiry_extends_slot_hold_beyond_conservative_floor(tmp_pa
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)
 
     exact_expiry = NOW + timedelta(minutes=30)
+    _dispatch(lifecycle, admission, at=NOW)
     active = lifecycle.complete_login_success(
         attempt_id=admission.attempt_id,
         now=NOW,
@@ -672,6 +691,8 @@ def test_long_provider_expiry_extends_slot_hold_beyond_conservative_floor(tmp_pa
 def test_provider_expiry_must_be_future_of_login_completion(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+
+    _dispatch(lifecycle, admission, at=NOW)
 
     with pytest.raises(
         ProphetXSessionLifecycleError,
@@ -843,6 +864,7 @@ def test_restart_rejects_shortened_inflight_hold_before_new_login(tmp_path):
 def test_provider_slot_wait_requires_explicit_hold_horizon(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+    _dispatch(lifecycle, admission, at=NOW)
     lifecycle.complete_login_failure(
         attempt_id=admission.attempt_id,
         now=NOW,
@@ -994,6 +1016,7 @@ def test_refresh_success_without_slot_contract_enters_conservative_wait(tmp_path
 
     completed_at = due_at + timedelta(seconds=1)
     renewed_expiry = due_at + timedelta(minutes=10)
+    _dispatch(lifecycle, started, at=due_at)
     refreshed = lifecycle.complete_renewal_success(
         attempt_id=started.attempt_id,
         now=completed_at,
@@ -1031,6 +1054,7 @@ def test_retryable_renewal_failure_retries_refresh_not_login(tmp_path):
         now=due_at,
         refresh_token_lineage_id=active.session_lineage_id,
     )
+    _dispatch(lifecycle, started, at=due_at)
     failed = lifecycle.complete_renewal_failure(
         attempt_id=started.attempt_id,
         now=due_at + timedelta(seconds=1),
@@ -1069,6 +1093,7 @@ def test_pre_expiry_renewal_failure_cannot_launder_backoff_at_token_expiry(
 ):
     lifecycle = _lifecycle(tmp_path)
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+    _dispatch(lifecycle, admission, at=NOW)
     active = lifecycle.complete_login_success(
         attempt_id=admission.attempt_id,
         now=NOW,
@@ -1086,6 +1111,7 @@ def test_pre_expiry_renewal_failure_cannot_launder_backoff_at_token_expiry(
     )
 
     failed_at = active.access_expires_at - timedelta(seconds=1)
+    _dispatch(lifecycle, started, at=due_at)
     failed = lifecycle.complete_renewal_failure(
         attempt_id=started.attempt_id,
         now=failed_at,
@@ -1129,6 +1155,7 @@ def test_ambiguous_renewal_result_blocks_replacement_login_for_conservative_hold
         refresh_token_lineage_id=active.session_lineage_id,
     )
     failed_at = due_at + timedelta(seconds=1)
+    _dispatch(lifecycle, started, at=due_at)
     failed = lifecycle.complete_renewal_failure(
         attempt_id=started.attempt_id,
         now=failed_at,
@@ -1196,6 +1223,7 @@ def test_credential_rejected_during_renewal_stays_fail_closed(tmp_path):
         now=due_at,
         refresh_token_lineage_id=active.session_lineage_id,
     )
+    _dispatch(lifecycle, started, at=due_at)
     rejected = lifecycle.complete_renewal_failure(
         attempt_id=started.attempt_id,
         now=due_at + timedelta(seconds=1),
@@ -1245,6 +1273,7 @@ def test_late_renewal_failure_keeps_bounded_retry_before_replacement_login(
     )
 
     failed_at = active.slot_hold_until + timedelta(seconds=1)
+    _dispatch(lifecycle, started, at=due_at)
     failed = lifecycle.complete_renewal_failure(
         attempt_id=started.attempt_id,
         now=failed_at,
@@ -1291,6 +1320,7 @@ def test_expired_renewal_backoff_can_extend_conservative_no_login_horizon(tmp_pa
     )
 
     failed_at = active.slot_hold_until - timedelta(seconds=1)
+    _dispatch(lifecycle, started, at=due_at)
     failed = lifecycle.complete_renewal_failure(
         attempt_id=started.attempt_id,
         now=failed_at,
@@ -1323,6 +1353,7 @@ def test_renewal_failure_after_short_expiry_preserves_provider_slot_hold(tmp_pat
         now=due_at,
         refresh_token_lineage_id=active.session_lineage_id,
     )
+    _dispatch(lifecycle, started, at=due_at)
     failed = lifecycle.complete_renewal_failure(
         attempt_id=started.attempt_id,
         now=active.access_expires_at + timedelta(seconds=1),
@@ -1363,6 +1394,7 @@ def test_credential_rotation_during_renewal_preserves_uncertainty_horizon(tmp_pa
         refresh_token_lineage_id=active.session_lineage_id,
     )
     assert started.action is ProphetXLoginAdmissionAction.START_RENEWAL
+    _dispatch(original, started, at=due_at)
 
     renewal_uncertainty = due_at + CONSERVATIVE_SESSION_SLOT_HOLD
     assert active.slot_hold_until < renewal_uncertainty
@@ -1705,6 +1737,7 @@ def test_renewal_credential_rejection_does_not_increment_transient_count(tmp_pat
         now=due_at,
         refresh_token_lineage_id=active.session_lineage_id,
     )
+    _dispatch(lifecycle, first, at=due_at)
     failed = lifecycle.complete_renewal_failure(
         attempt_id=first.attempt_id,
         now=due_at + timedelta(seconds=1),
@@ -1716,6 +1749,7 @@ def test_renewal_credential_rejection_does_not_increment_transient_count(tmp_pat
         now=failed.retry_not_before,
         refresh_token_lineage_id=active.session_lineage_id,
     )
+    _dispatch(lifecycle, second, at=failed.retry_not_before)
     rejected = lifecycle.complete_renewal_failure(
         attempt_id=second.attempt_id,
         now=failed.retry_not_before + timedelta(seconds=1),
@@ -1837,6 +1871,7 @@ def test_refresh_success_clears_transient_backoff_without_minting_active(tmp_pat
         refresh_token_lineage_id=active.session_lineage_id,
     )
     first_failed_at = due_at + timedelta(seconds=1)
+    _dispatch(lifecycle, first_attempt, at=due_at)
     first_failure = lifecycle.complete_renewal_failure(
         attempt_id=first_attempt.attempt_id,
         now=first_failed_at,
@@ -1850,6 +1885,7 @@ def test_refresh_success_clears_transient_backoff_without_minting_active(tmp_pat
         refresh_token_lineage_id=active.session_lineage_id,
     )
     completed_at = retry_at + timedelta(seconds=1)
+    _dispatch(lifecycle, second_attempt, at=retry_at)
     refreshed = lifecycle.complete_renewal_success(
         attempt_id=second_attempt.attempt_id,
         now=completed_at,
@@ -1953,6 +1989,8 @@ def test_empty_terminal_state_cannot_hide_provider_slot_hold(tmp_path, state):
 def test_completion_clock_rollback_cannot_shorten_ambiguous_slot_hold(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+
+    _dispatch(lifecycle, admission, at=NOW)
 
     with pytest.raises(
         ProphetXSessionLifecycleError,
@@ -2351,6 +2389,7 @@ def test_credential_rejected_state_accepts_login_or_renewal_rejection():
 def test_provider_slot_wait_rejects_nonfuture_hold(tmp_path, state):
     lifecycle = _lifecycle(tmp_path)
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+    _dispatch(lifecycle, admission, at=NOW)
     lifecycle.complete_login_failure(
         attempt_id=admission.attempt_id,
         now=NOW + timedelta(seconds=1),
@@ -2395,6 +2434,7 @@ def test_retryable_state_rejects_nonfuture_retry_horizon(tmp_path, state):
         if state is ProphetXSessionState.AUTH_RETRYABLE_FAILURE
         else ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION
     )
+    _dispatch(lifecycle, admission, at=NOW)
     lifecycle.complete_login_failure(
         attempt_id=admission.attempt_id,
         now=NOW + timedelta(seconds=1),
@@ -2461,6 +2501,8 @@ def test_raw_provider_slot_bool_cannot_authorize_refresh_promotion(tmp_path):
         now=due_at,
         refresh_token_lineage_id=active.session_lineage_id,
     )
+
+    _dispatch(lifecycle, started, at=due_at)
 
     with pytest.raises(TypeError, match="unexpected keyword argument"):
         lifecycle.complete_renewal_success(
@@ -2647,6 +2689,52 @@ def test_reconstructed_login_admission_cannot_reuse_issued_attempt_authority(
     assert restarted.consume_effect_authority(issued, now=NOW) is False
 
 
+def test_login_completion_requires_consumed_effect_authority(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    issued = lifecycle.begin_login(now=NOW, access_token_available=False)
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="login effect authority was not consumed",
+    ):
+        lifecycle.complete_login_success(
+            attempt_id=issued.attempt_id,
+            now=NOW + timedelta(seconds=1),
+            access_expires_at=NOW + timedelta(minutes=10),
+        )
+
+    assert lifecycle.read_snapshot() == issued.snapshot
+    assert issued.attempt_id in lifecycle._issued_effect_admissions
+
+
+def test_renewal_completion_requires_consumed_effect_authority(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
+    issued = lifecycle.begin_renewal(
+        now=due_at,
+        refresh_token_lineage_id=active.session_lineage_id,
+    )
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="renewal effect authority was not consumed",
+    ):
+        lifecycle.complete_renewal_failure(
+            attempt_id=issued.attempt_id,
+            now=due_at + timedelta(seconds=1),
+            failure=ProphetXRenewalFailureClass.RETRYABLE,
+        )
+
+    assert lifecycle.read_snapshot() == issued.snapshot
+    assert issued.attempt_id in lifecycle._issued_effect_admissions
+
+
 def test_consumed_effect_authority_cannot_be_reused_after_login_completion(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     issued = lifecycle.begin_login(now=NOW, access_token_available=False)
@@ -2666,6 +2754,7 @@ def test_completed_login_attempt_is_removed_from_effect_registry(tmp_path):
     issued = lifecycle.begin_login(now=NOW, access_token_available=False)
     assert issued.attempt_id in lifecycle._issued_effect_admissions
 
+    _dispatch(lifecycle, issued, at=NOW)
     lifecycle.complete_login_success(
         attempt_id=issued.attempt_id,
         now=NOW + timedelta(seconds=1),
@@ -2690,6 +2779,7 @@ def test_completed_renewal_attempt_is_removed_from_effect_registry(tmp_path):
     )
     assert issued.attempt_id in lifecycle._issued_effect_admissions
 
+    _dispatch(lifecycle, issued, at=due_at)
     lifecycle.complete_renewal_failure(
         attempt_id=issued.attempt_id,
         now=due_at + timedelta(seconds=1),

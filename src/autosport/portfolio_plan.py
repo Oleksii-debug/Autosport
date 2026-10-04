@@ -1887,6 +1887,7 @@ class PortfolioPlan:
         verified_outcome_authorities: tuple[
             MarketSettlementOutcomeAuthority, ...
         ] = (),
+        verified_terminal_economics: VerifiedTerminalEconomics | None = None,
     ) -> "PortfolioPlan":
         legacy_expected = {
             "schema",
@@ -1959,6 +1960,7 @@ class PortfolioPlan:
                     terminal_raw,
                     verified_outcome_authorities=verified_outcome_authorities,
                     decision_as_of=decision_time,
+                    verified_terminal_economics=verified_terminal_economics,
                 )
             )
             dependency_evidence = None

@@ -1241,6 +1241,10 @@ class RunRegistry:
             "sealed_results_sha256": item.get("results_sha256"),
             "strategy_id": item.get("strategy_id"),
         }
+        if "sampling_draw_admission_receipt_sha256" in item:
+            expected_identity["sampling_draw_admission_receipt_sha256"] = item.get(
+                "sampling_draw_admission_receipt_sha256"
+            )
         for field, expected_value in expected_identity.items():
             if summary.get(field) != expected_value or manifest.get(field) != expected_value:
                 raise ReconciliationError(

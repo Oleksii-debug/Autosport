@@ -393,6 +393,7 @@ class ContinuousSessionStatus:
     last_error_code: str | None
     last_full_refresh_at: str | None
     settlement_evidence: tuple[dict[str, str], ...]
+    pending_settlement_evidence_ids: tuple[str, ...] = ()
     source_provider_unavailable: bool = False
     source_last_success_at: str | None = None
     source_last_error_code: str | None = None
@@ -885,6 +886,10 @@ class _ContinuousSessionState:
             last_error_code=raw["last_error_code"],
             last_full_refresh_at=raw["last_full_refresh_at"],
             settlement_evidence=tuple(raw["settlement_evidence"]),
+            pending_settlement_evidence_ids=tuple(
+                item["evidence_id"]
+                for item in raw["pending_settlement_resolutions"]
+            ),
             source_gap_state=raw["source_gap_state"],
             source_sync_state=raw["source_sync_state"],
             source_state_delta_id=raw["source_state_delta_id"],
@@ -1638,6 +1643,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             source_provider_unavailable=source_last_error == "ProviderUnavailableError",
             source_last_success_at=source_last_success,
             source_last_error_code=source_last_error,
+            pending_settlement_evidence_ids=(
+                snapshot.pending_settlement_evidence_ids
+            ),
             source_gap_state=snapshot.source_gap_state,
             source_sync_state=snapshot.source_sync_state,
             source_state_delta_id=snapshot.source_state_delta_id,

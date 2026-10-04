@@ -296,17 +296,7 @@ class PaperExecutionAdoptionRuntime:
                 raise PaperExecutionAdoptionError(
                     "risk quote bytes do not match canonical Opportunity quote reference"
                 )
-            if (
-                leg.event_id != event.event_id
-                or leg.market_id != event.market_id
-                or leg.selection_id != event.selection_id
-                or leg.sport != event.sport
-                or leg.exchange_side != event.exchange_side
-                or leg.market_semantics_id != event.market_semantics_id
-            ):
-                raise PaperExecutionAdoptionError(
-                    "ticket leg identity does not match canonical execution quote"
-                )
+            self._require_leg_quote_identity(leg, event)
             self._require_back_compatible_exchange_side(event.exchange_side)
 
             account_by_source = dict(context.provider_accounts)
@@ -388,6 +378,24 @@ class PaperExecutionAdoptionRuntime:
                 intent_evidence_json=intent_evidence_json,
             )
         )
+
+    @staticmethod
+    def _require_leg_quote_identity(leg: TicketLeg, event: MarketEvent) -> None:
+        if type(leg) is not TicketLeg or type(event) is not MarketEvent:
+            raise PaperExecutionAdoptionError(
+                "ticket leg and execution quote must be canonical values"
+            )
+        if (
+            leg.event_id != event.event_id
+            or leg.market_id != event.market_id
+            or leg.selection_id != event.selection_id
+            or leg.sport != event.sport
+            or leg.exchange_side != event.exchange_side
+            or leg.market_semantics_id != event.market_semantics_id
+        ):
+            raise PaperExecutionAdoptionError(
+                "ticket leg identity does not match canonical execution quote"
+            )
 
     @staticmethod
     def _require_back_compatible_exchange_side(exchange_side: str | None) -> None:

@@ -390,8 +390,11 @@ class _ProductStartTransitionStore:
         )
         if not self.path.exists():
             return None
+        path = object.__getattribute__(self, "path")
+        loads = object.__getattribute__(self, "_loads")
+        text_validator = object.__getattribute__(self, "_text_validator")
         try:
-            raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
+            raw = loads(path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:
             raise ProductCompositionError(
                 "cannot verify durable product START transition"
@@ -717,8 +720,34 @@ class _ManifestStore:
         }
     )
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        _loads=None,
+        _write=None,
+        _text_validator=None,
+        _read_raw_authority=None,
+        _manifest_type=None,
+    ) -> None:
         self.path = path
+        self._loads = strict_json_loads if _loads is None else _loads
+        self._write = atomic_write_json if _write is None else _write
+        self._text_validator = (
+            _ManifestStore._text
+            if _text_validator is None
+            else _text_validator
+        )
+        self._read_raw_authority = (
+            _ManifestStore._read_raw
+            if _read_raw_authority is None
+            else _read_raw_authority
+        )
+        self._manifest_type = (
+            ProductCompositionManifest
+            if _manifest_type is None
+            else _manifest_type
+        )
 
     @staticmethod
     def _text(value: object, field: str) -> str:
@@ -770,8 +799,8 @@ class _ManifestStore:
             raise ProductCompositionError("product composition manifest schema mismatch")
         version = raw.get("schema_version")
         if version == 1 and set(raw) == v1_fields:
-            self._text(raw.get("source_id"), "source_id")
-            self._text(raw.get("initial_bankroll"), "initial_bankroll")
+            text_validator(raw.get("source_id"), "source_id")
+            text_validator(raw.get("initial_bankroll"), "initial_bankroll")
             return {
                 **raw,
                 "source_resolver_identity": None,
@@ -779,27 +808,27 @@ class _ManifestStore:
                 "settlement_learning_handoff_identity": None,
             }
         if version == 2 and set(raw) == v2_fields:
-            self._text(raw.get("source_id"), "source_id")
-            self._text(raw.get("initial_bankroll"), "initial_bankroll")
+            text_validator(raw.get("source_id"), "source_id")
+            text_validator(raw.get("initial_bankroll"), "initial_bankroll")
             return {
                 **raw,
                 "source_resolver_identity": None,
                 "settlement_learning_handoff_identity": None,
             }
         if version == 3 and set(raw) == v3_fields:
-            self._text(raw.get("source_id"), "source_id")
-            self._text(raw.get("initial_bankroll"), "initial_bankroll")
+            text_validator(raw.get("source_id"), "source_id")
+            text_validator(raw.get("initial_bankroll"), "initial_bankroll")
             return {
                 **raw,
                 "settlement_learning_handoff_identity": None,
             }
         if version != current_version or set(raw) != current_fields:
             raise ProductCompositionError("product composition manifest schema mismatch")
-        self._text(raw.get("source_id"), "source_id")
-        self._text(raw.get("initial_bankroll"), "initial_bankroll")
+        text_validator(raw.get("source_id"), "source_id")
+        text_validator(raw.get("initial_bankroll"), "initial_bankroll")
         source_identity = raw.get("source_resolver_identity")
         if source_identity is not None:
-            source_identity = self._text(
+            source_identity = text_validator(
                 source_identity,
                 "source_resolver_identity",
             )
@@ -816,7 +845,7 @@ class _ManifestStore:
                 )
         authority_identity = raw.get("settlement_authority_identity")
         if authority_identity is not None:
-            identity = self._text(
+            identity = text_validator(
                 authority_identity,
                 "settlement_authority_identity",
             )
@@ -830,7 +859,7 @@ class _ManifestStore:
                 )
         learning_identity = raw.get("settlement_learning_handoff_identity")
         if learning_identity is not None:
-            identity = self._text(
+            identity = text_validator(
                 learning_identity,
                 "settlement_learning_handoff_identity",
             )
@@ -853,9 +882,14 @@ class _ManifestStore:
         settlement_authority_identity: str | None,
         settlement_learning_handoff_identity: str | None,
     ) -> ProductCompositionManifest:
-        source_id = self._text(source_id, "source_id")
-        initial_bankroll = self._text(initial_bankroll, "initial_bankroll")
-        source_resolver_identity = self._text(
+        path = object.__getattribute__(self, "path")
+        write = object.__getattribute__(self, "_write")
+        text_validator = object.__getattribute__(self, "_text_validator")
+        read_raw = object.__getattribute__(self, "_read_raw_authority")
+        manifest_type = object.__getattribute__(self, "_manifest_type")
+        source_id = text_validator(source_id, "source_id")
+        initial_bankroll = text_validator(initial_bankroll, "initial_bankroll")
+        source_resolver_identity = text_validator(
             source_resolver_identity,
             "source_resolver_identity",
         )
@@ -871,19 +905,19 @@ class _ManifestStore:
                 "source_resolver_identity must be lowercase SHA-256 hex"
             )
         if settlement_authority_identity is not None:
-            settlement_authority_identity = self._text(
+            settlement_authority_identity = text_validator(
                 settlement_authority_identity,
                 "settlement_authority_identity",
             )
         if settlement_learning_handoff_identity is not None:
-            settlement_learning_handoff_identity = self._text(
+            settlement_learning_handoff_identity = text_validator(
                 settlement_learning_handoff_identity,
                 "settlement_learning_handoff_identity",
             )
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            atomic_write_json(
-                self.path,
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            write(
+                path,
                 {
                     "schema": "autosport.autonomous_product_composition",
                     "schema_version": 4,
@@ -894,7 +928,7 @@ class _ManifestStore:
                     "settlement_learning_handoff_identity": settlement_learning_handoff_identity,
                 },
             )
-        raw = self._read_raw()
+        raw = read_raw(self)
         if raw["source_id"] != source_id:
             raise ProductCompositionError(
                 "configured source_id conflicts with durable product composition"
@@ -918,7 +952,7 @@ class _ManifestStore:
             raise ProductCompositionError(
                 "settlement learning handoff identity conflicts with durable product composition"
             )
-        return ProductCompositionManifest(
+        return manifest_type(
             source_id=source_id,
             initial_bankroll=initial_bankroll,
             source_resolver_identity=source_resolver_identity,

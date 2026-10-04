@@ -32,6 +32,7 @@ _STRUCTURE_TYPE = ResolvedFixedNIidSamplingStructure
 _PRECOMMIT_TYPE = ResolvedFixedNIidPrecommitAuthority
 _PATH_TYPE = ProductRunCapitalPathEvidence
 _BRIDGE_TYPE = PaperSettlementLearningBridge
+_OBSERVATION_TYPE = RiskPathObservation
 
 _STRUCTURE = inspect_fixed_n_iid_sampling_structure
 _STRUCTURE_CODE = getattr(_STRUCTURE, "__code__", None)
@@ -99,6 +100,10 @@ class ProductFixedNIidCohort:
     execution and product-owned run-capital observation ancestry under the frozen
     with-replacement design.  The IID claim is deliberately scoped to that frozen
     simulator distribution and does not itself authorize staking or real money.
+
+    Consumers must re-resolve this receipt through
+    resolve_product_fixed_n_iid_cohort rather than treating an in-memory Python
+    object as a bearer capability.
     """
 
     experiment_id: str
@@ -171,6 +176,7 @@ def _require_dispatch() -> None:
         or ResolvedFixedNIidPrecommitAuthority is not _PRECOMMIT_TYPE
         or ProductRunCapitalPathEvidence is not _PATH_TYPE
         or PaperSettlementLearningBridge is not _BRIDGE_TYPE
+        or RiskPathObservation is not _OBSERVATION_TYPE
         or ProductFixedNIidCohort is not _COHORT_TYPE
         or inspect_fixed_n_iid_sampling_structure is not _STRUCTURE
         or getattr(_STRUCTURE, "__code__", None) is not _STRUCTURE_CODE
@@ -184,16 +190,16 @@ def _require_dispatch() -> None:
         )
 
 
-def _compose_product_fixed_n_iid_cohort(
+def _validate_product_fixed_n_iid_cohort_inputs(
     structure: ResolvedFixedNIidSamplingStructure,
     precommit: ResolvedFixedNIidPrecommitAuthority,
     evidence: tuple[ProductRunCapitalPathEvidence, ...],
-) -> ProductFixedNIidCohort:
-    """Compose already re-resolved exact product receipts.
+) -> dict[str, object]:
+    """Validate already re-resolved exact receipts without issuing authority.
 
-    This helper is intentionally private.  Positive public authority is issued
-    only by resolve_product_fixed_n_iid_cohort, which re-resolves every receipt
-    from durable product state before entering this compositor.
+    This helper deliberately returns neutral material only.  The positive receipt
+    is constructed solely by resolve_product_fixed_n_iid_cohort after every member
+    has been re-resolved from durable product state.
     """
 
     if type(structure) is not _STRUCTURE_TYPE:
@@ -286,7 +292,7 @@ def _compose_product_fixed_n_iid_cohort(
         execution_ids.append(execution_id)
         available.append(when)
         observations.append(
-            RiskPathObservation(
+            _OBSERVATION_TYPE(
                 independent_unit_id=item.member_id,
                 dependence_group_id=streams[index],
                 minimum_equity=item.minimum_equity,
@@ -323,23 +329,20 @@ def _compose_product_fixed_n_iid_cohort(
         "risk_scope": "SIMULATOR_DISTRIBUTION_ONLY",
         "grants_real_money_authority": False,
     }
-    result = object.__new__(_COHORT_TYPE)
-    for field_name, value in (
-        ("experiment_id", structure.experiment_id),
-        (
+    return {
+        "experiment_id": structure.experiment_id,
+        "sampling_manifest_sha256": _sha(
+            structure.manifest_sha256,
             "sampling_manifest_sha256",
-            _sha(structure.manifest_sha256, "sampling_manifest_sha256"),
         ),
-        ("planned_member_ids", tuple(structure.planned_member_ids)),
-        ("member_stream_sha256", streams),
-        ("run_source_evidence_sha256", tuple(source_ids)),
-        ("run_execution_receipt_sha256", tuple(execution_ids)),
-        ("observations", tuple(observations)),
-        ("outcomes_available_at", outcomes_available_at),
-        ("cohort_sha256", hashlib.sha256(_canonical_json(payload)).hexdigest()),
-    ):
-        object.__setattr__(result, field_name, value)
-    return result
+        "planned_member_ids": tuple(structure.planned_member_ids),
+        "member_stream_sha256": streams,
+        "run_source_evidence_sha256": tuple(source_ids),
+        "run_execution_receipt_sha256": tuple(execution_ids),
+        "observations": tuple(observations),
+        "outcomes_available_at": outcomes_available_at,
+        "cohort_sha256": hashlib.sha256(_canonical_json(payload)).hexdigest(),
+    }
 
 
 def resolve_product_fixed_n_iid_cohort(
@@ -409,11 +412,25 @@ def resolve_product_fixed_n_iid_cohort(
         _require_dispatch()
         resolved.append(item)
 
-    result = _compose_product_fixed_n_iid_cohort(
+    material = _validate_product_fixed_n_iid_cohort_inputs(
         structure,
         precommit,
         tuple(resolved),
     )
+    _require_dispatch()
+    result = object.__new__(_COHORT_TYPE)
+    for field_name in (
+        "experiment_id",
+        "sampling_manifest_sha256",
+        "planned_member_ids",
+        "member_stream_sha256",
+        "run_source_evidence_sha256",
+        "run_execution_receipt_sha256",
+        "observations",
+        "outcomes_available_at",
+        "cohort_sha256",
+    ):
+        object.__setattr__(result, field_name, material[field_name])
     _require_dispatch()
     return result
 

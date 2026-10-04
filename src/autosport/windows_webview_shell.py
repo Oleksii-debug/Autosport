@@ -505,7 +505,7 @@ class AutosportWebController:
                 }
                 for candidate in list_product_source_entries()
             ],
-            "can_configure": not self._closing and not self._busy(),
+            "can_configure": not getattr(self, "_closing", False) and not self._busy(),
         }
 
     def _selected_configuration(self) -> tuple[str, ResearchStrategyPlan | None]:
@@ -517,7 +517,7 @@ class AutosportWebController:
         return Path(workspace_for_strategy(self.workspace, strategy_id, plan))
 
     def _product_runtime_can_start(self, *, source_ready: bool | None = None) -> bool:
-        if self._closing or self._busy():
+        if getattr(self, "_closing", False) or self._busy():
             return False
         if source_ready is None:
             _selection, entry = self._resolve_operator_source()
@@ -1275,7 +1275,7 @@ class AutosportWebController:
             return {
                 "status": self.status,
                 "last_error": self._bridge_validation_error or self.last_error,
-                "closing": self._closing,
+                "closing": getattr(self, "_closing", False),
                 "workspace": str(self.workspace),
                 "active_workspace": str(self._active_workspace),
                 "bank": self.bank,
@@ -2003,6 +2003,7 @@ class AutosportWebController:
             if self._closing:
                 raise RuntimeError("Autosport close is already in progress")
             self._closing = True
+            self._bridge_validation_error = ""
             self.last_error = ""
             self.status = (
                 "Автоспорт завершує роботу. "

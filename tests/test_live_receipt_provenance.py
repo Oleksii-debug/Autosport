@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.storage as storage_module
 from autosport.domain import MarketEvent
 from autosport.ingestion import IngestionEngine
 from autosport.market_bus import MarketEventBus
@@ -96,6 +97,68 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(accepted, [event])
             self.assertFalse(store.has_trusted_live_receipt(event))
             self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
+    def test_live_retry_keeps_canonical_market_event_type_after_module_rebind(self) -> None:
+        class PoisonMarketEvent(MarketEvent):
+            @classmethod
+            def from_dict(cls, raw):
+                raise AssertionError("mutable module-global MarketEvent must not be consulted")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+            canonical_append = store.append_batch_accepted
+
+            def retry_hook(events):
+                with patch.object(storage_module, "MarketEvent", PoisonMarketEvent):
+                    return canonical_append(events)
+
+            with patch.object(store, "append_batch_accepted", side_effect=retry_hook):
+                accepted = store._append_live_batch_accepted([event])
+
+            self.assertEqual(len(accepted), 1)
+            trusted = store.trusted_live_events()
+            self.assertEqual(len(trusted), 1)
+            self.assertEqual(trusted[0].to_dict(), event.to_dict())
+            self.assertTrue(store.has_trusted_live_receipt(trusted[0]))
+            store.close()
+
+    def test_live_receipt_self_type_authority_survives_module_class_rebind(self) -> None:
+        class PoisonStore(SQLiteMarketStore):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+
+            with patch.object(storage_module, "SQLiteMarketStore", PoisonStore):
+                accepted = SQLiteMarketStore._append_live_batch_accepted(
+                    store,
+                    [event],
+                )
+
+            self.assertEqual(accepted, [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_trusted_receipt_query_rejects_market_event_subclass(self) -> None:
+        class ForgingEvent(MarketEvent):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            self._ingest(store)
+            trusted = store.trusted_live_events()[0]
+            forged = ForgingEvent.from_dict(trusted.to_dict())
+
+            with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+                store.has_trusted_live_receipt(forged)
+
+            self.assertTrue(store.has_trusted_live_receipt(trusted))
             store.close()
 
     def test_live_receipt_authority_does_not_leak_into_reentrant_generic_batch(self) -> None:

@@ -285,6 +285,7 @@ class BetfairProviderConstraintObservation(
         _utc_fn=_utc,
         _canonical_sha256_fn=_canonical_sha256,
         _decimal_text_fn=_decimal_text,
+        _schema_version=SCHEMA_VERSION,
         _error_type=BetfairProviderConstraintError,
     ):
         if provider_id != _provider_id:
@@ -527,7 +528,7 @@ class BetfairProviderConstraintResolution(
         expected_resolution_sha256 = _canonical_sha256_fn(
             {
                 "schema": "autosport.betfair_standard_limit_constraint_resolution",
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": _schema_version,
                 "state": state.value,
                 "provider_id": provider_id,
                 "jurisdiction_scope": jurisdiction_scope,
@@ -627,7 +628,9 @@ def _build_constraint_resolver():
     currency_getter = observation_type.__dict__["currency_code"].fget
     min_size_getter = observation_type.__dict__["min_standard_size"].fget
     min_payout_getter = observation_type.__dict__["min_payout"].fget
-    lower_enabled_getter = observation_type.__dict__["lower_minimum_payout_enabled"].fget
+    lower_enabled_getter = observation_type.__dict__[
+        "lower_minimum_payout_enabled"
+    ].fget
     available_getter = observation_type.__dict__["available_at"].fget
     effective_from_getter = observation_type.__dict__["effective_from"].fget
     effective_until_getter = observation_type.__dict__["effective_until"].fget

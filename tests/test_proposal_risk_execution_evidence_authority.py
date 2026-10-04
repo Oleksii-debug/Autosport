@@ -1149,5 +1149,89 @@ class ProductProposalRiskScenarioPopulationTests(unittest.TestCase):
         finally:
             method.__code__ = original_code
 
+
+    def test_result_capability_getter_defaults_rebind_is_rejected(self) -> None:
+        getter = ProductProposalRiskScenarioPopulation.__dict__[
+            "population_identity_proven"
+        ].fget
+        self.assertIsNotNone(getter)
+        original_defaults = getter.__defaults__
+
+        def forged_proof(_instance):
+            return True
+
+        try:
+            getter.__defaults__ = (forged_proof,)
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            getter.__defaults__ = original_defaults
+
+    def test_result_capability_proof_code_mutation_is_rejected(self) -> None:
+        getter = ProductProposalRiskScenarioPopulation.__dict__[
+            "population_identity_proven"
+        ].fget
+        self.assertIsNotNone(getter)
+        proof = getter.__defaults__[0]
+        original_code = proof.__code__
+
+        def forged_proof(_instance):
+            return True
+
+        try:
+            proof.__code__ = forged_proof.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            proof.__code__ = original_code
+
+    def test_precommit_parent_capability_proof_code_mutation_is_rejected(self) -> None:
+        getter = ProductProposalRiskEvaluationPrecommit.__dict__[
+            "binding_identity_proven"
+        ].fget
+        self.assertIsNotNone(getter)
+        proof = getter.__defaults__[0]
+        original_code = proof.__code__
+
+        def forged_proof(_instance):
+            return True
+
+        try:
+            proof.__code__ = forged_proof.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            proof.__code__ = original_code
+
+    def test_terminal_parent_capability_proof_code_mutation_is_rejected(self) -> None:
+        getter = ProductProposalTargetTerminalPopulation.__dict__[
+            "population_identity_proven"
+        ].fget
+        self.assertIsNotNone(getter)
+        proof = getter.__defaults__[0]
+        original_code = proof.__code__
+
+        def forged_proof(_instance):
+            return True
+
+        try:
+            proof.__code__ = forged_proof.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            proof.__code__ = original_code
+
 if __name__ == "__main__":
     unittest.main()

@@ -677,6 +677,113 @@ def test_commit_association_page_bound_cannot_hide_second_pr(monkeypatch) -> Non
     ]
 
 
+def test_base_active_run_scan_rejects_encoder_default_rebase(monkeypatch) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    encoder = controller_module.urlencode
+    defaults = encoder.__defaults__
+    assert defaults is not None and defaults
+    requested: list[str] = []
+
+    def forged_quote_via(string, safe, encoding=None, errors=None):
+        del string, safe, encoding, errors
+        return "forged"
+
+    def forbidden_request(path: str, **_kwargs):
+        requested.append(path)
+        raise AssertionError("rebased active-run encoder must not reach transport")
+
+    monkeypatch.setattr(
+        encoder,
+        "__defaults__",
+        defaults[:-1] + (forged_quote_via,),
+    )
+    monkeypatch.setattr(api, "_request", forbidden_request)
+
+    with pytest.raises(
+        CancellationError,
+        match="workflow-runs pagination authority is unavailable",
+    ):
+        api._active_runs_for_status("queued")
+    assert requested == []
+
+
+def test_base_active_run_scan_rejects_parser_kwdefault_rebase(monkeypatch) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    parser = controller_module.parse_run
+    defaults = parser.__kwdefaults__
+    assert defaults is not None
+    requested: list[str] = []
+
+    def forged_positive_int(_value, *, field: str) -> int:
+        del field
+        return 999
+
+    def forbidden_request(path: str, **_kwargs):
+        requested.append(path)
+        raise AssertionError("rebased active-run parser must not reach transport")
+
+    monkeypatch.setitem(defaults, "_positive_int", forged_positive_int)
+    monkeypatch.setitem(defaults, "_positive_int_code", forged_positive_int.__code__)
+    monkeypatch.setattr(api, "_request", forbidden_request)
+
+    with pytest.raises(
+        CancellationError,
+        match="workflow-runs pagination authority is unavailable",
+    ):
+        api._active_runs_for_status("queued")
+    assert requested == []
+
+
+def test_base_active_runs_rejects_status_reader_kwdefault_rebase(monkeypatch) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    reader = controller_module.GitHubApi._active_runs_for_status
+    defaults = reader.__kwdefaults__
+    assert defaults is not None
+
+    def forged_parser(_payload):
+        raise AssertionError("rebased status reader must not execute")
+
+    monkeypatch.setitem(defaults, "_run_parser", forged_parser)
+    monkeypatch.setitem(defaults, "_run_parser_code", forged_parser.__code__)
+
+    with pytest.raises(
+        CancellationError,
+        match="active workflow reader authority changed",
+    ):
+        api.active_runs()
+
+
+def test_base_cancel_rejects_active_runs_default_rebase(monkeypatch) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    defaults = controller_module.GitHubApi.active_runs.__kwdefaults__
+    assert defaults is not None
+    monkeypatch.setitem(defaults, "_active_statuses", ("queued",))
+
+    with pytest.raises(
+        CancellationError,
+        match="superseded-run cancellation authority changed",
+    ):
+        cancel_superseded(
+            api=api,
+            pr_number=2008,
+            event_head_sha=HEAD_A,
+            workflow_name="CI",
+            current_run_id=1,
+        )
+
+
 def test_base_active_run_page_bound_and_parser_are_frozen(monkeypatch) -> None:
     api = controller_module.GitHubApi(
         repository="owner/repo",

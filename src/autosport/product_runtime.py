@@ -123,7 +123,7 @@ def _build_product_desktop_consumer_type(
         _product_authority_sealed = True
 
         def __init__(self, *args, **kwargs) -> None:
-            super().__init__(*args, **kwargs)
+            base_init(self, *args, **kwargs)
             snapshots[self] = tuple(
                 (name, object.__getattribute__(self, name))
                 for name in snapshot_fields
@@ -205,6 +205,7 @@ def _build_product_coordinator_type(
         name: getattr(base_type, name)
         for name in entry_methods
     }
+    base_init = base_type.__init__
     missing = object()
 
     def require_snapshot(self) -> tuple[tuple[str, object], ...]:
@@ -228,7 +229,7 @@ def _build_product_coordinator_type(
         """Product-only coordinator with immutable composed authority references."""
 
         def __init__(self, *args, **kwargs) -> None:
-            super().__init__(*args, **kwargs)
+            base_init(self, *args, **kwargs)
             snapshots[self] = tuple(
                 (name, object.__getattribute__(self, name))
                 for name in snapshot_fields
@@ -2150,6 +2151,7 @@ def _build_product_runtime_type(
         {"_state_value", "_note_secondary_failure"}
     )
     base_methods = {name: getattr(base_type, name) for name in dispatch_methods}
+    base_init = base_type.__init__
 
     class ProductRuntimeClassIdentity:
         __slots__ = ()
@@ -2781,6 +2783,7 @@ def _build_autonomous_product_runtime_impl(
             "_adapter",
             "_state",
         )
+        base_collector_init = _collector_service_type.__init__
         base_collector_status = _collector_service_type.status
         base_collector_resume = _collector_service_type.resume
         base_collector_stop = _collector_service_type.stop
@@ -2904,7 +2907,7 @@ def _build_autonomous_product_runtime_impl(
         ):
             __class__ = ProductCollectorClassIdentity()
             def __init__(self, *args, **kwargs) -> None:
-                super().__init__(*args, **kwargs)
+                base_collector_init(self, *args, **kwargs)
                 collector_snapshots[self] = tuple(
                     (name, object.__getattribute__(self, name))
                     for name in collector_snapshot_fields

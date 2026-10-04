@@ -1639,6 +1639,64 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_events_authority_proof_and_rows_share_one_sqlite_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            external = sqlite3.connect(path)
+            original_require = SQLiteMarketStore._require_product_issued_positive_history
+            try:
+                event = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(event))
+                forged = self.event(
+                    sequence=1,
+                    odds="9.99",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                tampered = False
+
+                def prove_then_tamper(instance, authority):
+                    nonlocal tampered
+                    result = original_require(instance, authority)
+                    if instance is store and not tampered:
+                        tampered = True
+                        external.execute(
+                            """UPDATE market_events
+                               SET decimal_odds=?, payload_json=?
+                               WHERE dedupe_key=?""",
+                            (
+                                str(forged.decimal_odds),
+                                storage_module._canonical_payload(forged),
+                                event.dedupe_key,
+                            ),
+                        )
+                        external.commit()
+                    return result
+
+                with patch.object(
+                    SQLiteMarketStore,
+                    "_require_product_issued_positive_history",
+                    new=prove_then_tamper,
+                ):
+                    snapshot = store.events()
+
+                self.assertTrue(tampered)
+                self.assertEqual(len(snapshot), 1)
+                self.assertEqual(snapshot[0].decimal_odds, Decimal("2.00"))
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "positive market append chronology is missing, forged, or unproven",
+                ):
+                    store.events()
+            finally:
+                external.close()
+                store.close()
+
     def test_current_read_rejects_deleted_projection_row(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

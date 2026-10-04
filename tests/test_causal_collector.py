@@ -1623,6 +1623,77 @@ class CollectorDeltaTests(unittest.TestCase):
                     acknowledged_at="2026-01-01T00:00:05+00:00",
                 )
 
+    def test_direct_ack_rejects_existing_receipt_timestamp_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = DesktopDeltaCheckpointStore(Path(tmp) / "desktop.json")
+            delta = self.make_delta()
+            receipt = DesktopApplicationReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                receipt_id="receipt-d1",
+                applied_at="2026-01-01T00:00:05+00:00",
+            )
+            checkpoint._write(
+                {
+                    "schema_version": 1,
+                    "acks": [
+                        {
+                            "delta_id": delta.delta_id,
+                            "canonical_event_digest": delta.canonical_event_digest,
+                            "acknowledged_at": "2026-01-01T00:00:06+00:00",
+                            "application_receipt_id": receipt.receipt_id,
+                            "applied_at": "2026-01-01T00:00:04+00:00",
+                        }
+                    ],
+                    "streams": {},
+                }
+            )
+
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "receipt timestamp disagrees with applied effect",
+            ):
+                checkpoint.ack(
+                    delta,
+                    application_receipt=receipt,
+                    acknowledged_at="2026-01-01T00:00:06+00:00",
+                )
+
+    def test_direct_ack_rejects_duplicate_existing_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = DesktopDeltaCheckpointStore(Path(tmp) / "desktop.json")
+            delta = self.make_delta()
+            receipt = DesktopApplicationReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                receipt_id="receipt-d1",
+                applied_at="2026-01-01T00:00:05+00:00",
+            )
+            item = {
+                "delta_id": delta.delta_id,
+                "canonical_event_digest": delta.canonical_event_digest,
+                "acknowledged_at": "2026-01-01T00:00:06+00:00",
+                "application_receipt_id": receipt.receipt_id,
+                "applied_at": receipt.applied_at,
+            }
+            checkpoint._write(
+                {
+                    "schema_version": 1,
+                    "acks": [dict(item), dict(item)],
+                    "streams": {},
+                }
+            )
+
+            with self.assertRaisesRegex(
+                AckConflictError,
+                "multiple desktop acknowledgements exist for delta d1",
+            ):
+                checkpoint.ack(
+                    delta,
+                    application_receipt=receipt,
+                    acknowledged_at="2026-01-01T00:00:06+00:00",
+                )
+
     def test_callback_failure_happens_before_ack(self):
         with tempfile.TemporaryDirectory() as tmp:
             collector = CollectorDeltaStore(Path(tmp) / "collector.json")

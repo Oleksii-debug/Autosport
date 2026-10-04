@@ -125,9 +125,25 @@ class WorkspaceEconomicLock:
 
     FILE_NAME = ".economic-run.lock"
 
-    def __init__(self, workspace: str | Path) -> None:
+    def __init__(
+        self,
+        workspace: str | Path,
+        *,
+        file_name: str | None = None,
+    ) -> None:
         self.workspace = Path(workspace)
-        self.path = self.workspace / self.FILE_NAME
+        selected_name = self.FILE_NAME if file_name is None else file_name
+        if (
+            type(selected_name) is not str
+            or not selected_name
+            or "\x00" in selected_name
+            or selected_name in {".", ".."}
+            or Path(selected_name).name != selected_name
+        ):
+            raise WorkspaceEconomicLockError(
+                "workspace economic lock file_name must be one canonical basename"
+            )
+        self.path = self.workspace / selected_name
         self._handle: BinaryIO | None = None
 
     def acquire(self) -> None:

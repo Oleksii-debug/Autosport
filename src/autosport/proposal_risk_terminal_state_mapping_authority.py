@@ -39,6 +39,12 @@ _HEX = frozenset("0123456789abcdef")
 _PATH_TYPE = type(Path("."))
 _MAX_SCENARIO_ID_LENGTH = 96
 
+_SCENARIO_ID_SCHEMA_EXPECTED = _SCENARIO_ID_SCHEMA
+_MAPPING_SCHEMA_EXPECTED = _MAPPING_SCHEMA
+_RESULT_SCHEMA_EXPECTED = _RESULT_SCHEMA
+_SCENARIO_ID_PREFIX_EXPECTED = _SCENARIO_ID_PREFIX
+_MAX_SCENARIO_ID_LENGTH_EXPECTED = _MAX_SCENARIO_ID_LENGTH
+
 _PRECOMMIT_TYPE = ProductProposalRiskEvaluationPrecommit
 _TARGET_TYPE = ProductProposalRiskTarget
 _TERMINAL_POPULATION_TYPE = ProductProposalTargetTerminalPopulation
@@ -63,6 +69,8 @@ _AUTHORITY_TERMINAL_STATES_GETTER_CODE = getattr(
 )
 _AUTHORITY_TO_DICT = MarketSettlementOutcomeAuthority.to_dict
 _AUTHORITY_TO_DICT_CODE = getattr(_AUTHORITY_TO_DICT, "__code__", None)
+_TERMINAL_STATE_TO_DICT = MarketTerminalState.to_dict
+_TERMINAL_STATE_TO_DICT_CODE = getattr(_TERMINAL_STATE_TO_DICT, "__code__", None)
 
 _JSON_DUMPS = json.dumps
 _JSON_DUMPS_EXPECTED = _JSON_DUMPS
@@ -543,6 +551,7 @@ _RESULT_FIELDS = (
     "member_state_vector_sha256s",
     "resolution_sha256",
 )
+_RESULT_FIELDS_EXPECTED = _RESULT_FIELDS
 
 
 _RESULT_AUTHORITY_PROPERTY_NAMES = (
@@ -563,6 +572,7 @@ _RESULT_AUTHORITY_PROPERTY_NAMES = (
     "grants_real_money_authority",
     "grants_state_mutation_authority",
 )
+_RESULT_AUTHORITY_PROPERTY_NAMES_EXPECTED = _RESULT_AUTHORITY_PROPERTY_NAMES
 _RESULT_AUTHORITY_PROPERTY_WITNESSES = tuple(
     (
         name,
@@ -704,14 +714,18 @@ def _terminal_groups(
             raise ProductProposalRiskTerminalStateMappingError(
                 "verified market authority produced no terminal states"
             )
-        baseline_payload = tuple(state.to_dict() for state in baseline_states)
+        baseline_payload = tuple(
+            _TERMINAL_STATE_TO_DICT(state) for state in baseline_states
+        )
         if len(baseline_states) != parsed["terminal_state_count"]:
             raise ProductProposalRiskTerminalStateMappingError(
                 "terminal market-group state count changed"
             )
         for provider in providers[1:]:
             states = _AUTHORITY_TERMINAL_STATES_GETTER(provider)
-            if tuple(state.to_dict() for state in states) != baseline_payload:
+            if tuple(
+                _TERMINAL_STATE_TO_DICT(state) for state in states
+            ) != baseline_payload:
                 raise ProductProposalRiskTerminalStateMappingError(
                     "provider authorities disagree on terminal state vectors"
                 )
@@ -1278,7 +1292,15 @@ _MINT_BINDER_CODE = getattr(_MINT_BINDER, "__code__", None)
 
 def _require_dispatch() -> None:
     if (
-        ProductProposalRiskTerminalStateMapping is not _RESULT_TYPE
+        _SCENARIO_ID_SCHEMA != _SCENARIO_ID_SCHEMA_EXPECTED
+        or _MAPPING_SCHEMA != _MAPPING_SCHEMA_EXPECTED
+        or _RESULT_SCHEMA != _RESULT_SCHEMA_EXPECTED
+        or _SCENARIO_ID_PREFIX != _SCENARIO_ID_PREFIX_EXPECTED
+        or _MAX_SCENARIO_ID_LENGTH != _MAX_SCENARIO_ID_LENGTH_EXPECTED
+        or _RESULT_FIELDS is not _RESULT_FIELDS_EXPECTED
+        or _RESULT_AUTHORITY_PROPERTY_NAMES
+        is not _RESULT_AUTHORITY_PROPERTY_NAMES_EXPECTED
+        or ProductProposalRiskTerminalStateMapping is not _RESULT_TYPE
         or ProductProposalRiskEvaluationPrecommit is not _PRECOMMIT_TYPE
         or ProductProposalRiskTarget is not _TARGET_TYPE
         or ProductProposalTargetTerminalPopulation is not _TERMINAL_POPULATION_TYPE
@@ -1306,6 +1328,9 @@ def _require_dispatch() -> None:
         or MarketSettlementOutcomeAuthority.to_dict is not _AUTHORITY_TO_DICT
         or getattr(_AUTHORITY_TO_DICT, "__code__", None)
         is not _AUTHORITY_TO_DICT_CODE
+        or MarketTerminalState.to_dict is not _TERMINAL_STATE_TO_DICT
+        or getattr(_TERMINAL_STATE_TO_DICT, "__code__", None)
+        is not _TERMINAL_STATE_TO_DICT_CODE
         or _JSON_DUMPS is not _JSON_DUMPS_EXPECTED
         or json.dumps is not _JSON_DUMPS_EXPECTED
         or _JSON_LOADS is not _JSON_LOADS_EXPECTED

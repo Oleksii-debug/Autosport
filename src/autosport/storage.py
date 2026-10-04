@@ -851,7 +851,10 @@ class SQLiteMarketStore:
             raise TypeError(
                 "live receipt authority requires an exact SQLiteMarketStore"
             )
-        batch = _LiveReceiptBatch(tuple(events))
+        materialized = tuple(events)
+        if any(type(event) is not MarketEvent for event in materialized):
+            raise TypeError("live receipt authority requires exact MarketEvent values")
+        batch = _LiveReceiptBatch(materialized)
         canonical_events = tuple(batch)
         with self._connection_lock:
             if self.connection.in_transaction:

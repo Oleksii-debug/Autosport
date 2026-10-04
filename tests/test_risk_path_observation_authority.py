@@ -1726,6 +1726,58 @@ def test_object_new_forgery_cannot_pass_canonical_evidence_verifier(
         )
 
 
+def test_nested_changed_ticket_equality_cannot_pass_canonical_evidence_verifier(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(tmp_path, monkeypatch)
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
+    canonical = resolve_product_run_capital_path_evidence(
+        workspace=workspace,
+        run_id=RUN_ID,
+        member_index=0,
+        membership=membership,
+        registry_path=registry_path,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridge=bridge,
+        authority_root=authority_root,
+    )
+    forged = object.__new__(ProductRunCapitalPathEvidence)
+    for field_name in ProductRunCapitalPathEvidence.__dataclass_fields__:
+        object.__setattr__(forged, field_name, getattr(canonical, field_name))
+
+    class AlwaysEqual:
+        def __eq__(self, _other):
+            return True
+
+        def __ne__(self, _other):
+            return False
+
+    object.__setattr__(forged, "changed_ticket_ids", (AlwaysEqual(),))
+
+    with pytest.raises(
+        ProductRunCapitalPathError,
+        match="changed_ticket_ids must be an exact text tuple",
+    ):
+        verify_product_run_capital_path_evidence(
+            forged,
+            workspace=workspace,
+            run_id=RUN_ID,
+            member_index=0,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridge=bridge,
+            authority_root=authority_root,
+        )
+
+
 def test_saved_resolver_rejects_result_type_rebinding_before_attacker_executes(
     tmp_path,
     monkeypatch,

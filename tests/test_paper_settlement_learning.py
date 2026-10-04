@@ -275,6 +275,125 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
             )
             self.assertIsNotNone(runtime.snapshot().state_sha256)
 
+    def test_canonical_learning_identity_survives_agent_loop_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            goal, risk, ticket, decision, environment, baseline, runtime, observation, action, bridge = _fixture(
+                root,
+                legs=(leg,),
+            )
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            resolution = SettlementResolution(
+                event_identity=f"provider-a:{leg.event_id}",
+                settlement_ref="result:0",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="evidence:0",
+                evidence_sha256="1" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            bridge.prepare_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=(resolution,),
+                at="2026-09-19T21:19:30+00:00",
+            )
+            _book, settled_resolutions = _settle(
+                root,
+                outcomes={leg.quote_key: "win"},
+            )
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=settled_resolutions,
+                settled_ticket_ids=(ticket.ticket_id,),
+                at="2026-09-19T21:19:30+00:00",
+            )
+            self.assertIs(runtime.snapshot().phase, AgentLoopPhase.EVALUATE)
+
+            reopened = PaperSettlementLearningBridge(
+                root / "paper_learning_bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            self.assertEqual(
+                reopened.settlement_learning_configuration_sha256,
+                bridge.settlement_learning_configuration_sha256,
+            )
+            self.assertEqual(
+                _settlement_learning_handoff_identity(handoff=reopened),
+                _settlement_learning_handoff_identity(handoff=bridge),
+            )
+
+    def test_canonical_learning_identity_changes_for_same_path_loop_identity_swap(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            goal, risk, _ticket, _decision, _environment, baseline, _runtime, _observation, _action, bridge = _fixture(
+                root,
+                legs=(leg,),
+            )
+            first_config = bridge.settlement_learning_configuration_sha256
+
+            alternate = AgentLoopRuntime.initialize_pristine(
+                root / "alternate-agent-loop.json",
+                loop_id="bridge-loop-alternate",
+                environment_checkpoint=baseline,
+                policy_id=baseline.policy_id,
+                economic_goal_fingerprint=provenance_for(goal).contract_sha256,
+                risk_fingerprint=risk.provenance_sha256,
+                source_sha256="d" * 64,
+                config_sha256="b" * 64,
+                at="2026-09-19T21:18:59+00:00",
+            )
+            self.assertNotEqual(
+                alternate.snapshot().loop_id,
+                bridge.agent_loop.snapshot().loop_id,
+            )
+            (root / "agent-loop.json").write_text(
+                (root / "alternate-agent-loop.json").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+
+            swapped = PaperSettlementLearningBridge(
+                root / "paper_learning_bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            self.assertNotEqual(
+                swapped.settlement_learning_configuration_sha256,
+                first_config,
+            )
+            self.assertNotEqual(
+                _settlement_learning_handoff_identity(handoff=swapped),
+                _settlement_learning_handoff_identity(handoff=bridge),
+            )
+
     def test_canonical_bridge_authority_roots_are_immutable_after_construction(
         self,
     ) -> None:

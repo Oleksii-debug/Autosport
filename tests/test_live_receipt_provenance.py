@@ -1064,5 +1064,335 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertFalse(store.connection.in_transaction)
             store.close()
 
+    def test_live_receipt_transaction_updates_bounded_trusted_current_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                self._ingest(store, sequence=1)
+                rows = store.connection.execute(
+                    """SELECT source_id,quote_key,sequence,dedupe_key
+                       FROM trusted_live_current_quotes"""
+                ).fetchall()
+                self.assertEqual(len(rows), 1)
+                current = store.trusted_live_current_by_source()
+                event = next(iter(current.values()))
+                self.assertEqual(
+                    rows,
+                    [
+                        (
+                            event.source_id,
+                            event.quote_key,
+                            event.sequence,
+                            event.dedupe_key,
+                        )
+                    ],
+                )
+
+                self._ingest(store, sequence=2)
+                latest = next(iter(store.trusted_live_current_by_source().values()))
+                rows = store.connection.execute(
+                    """SELECT source_id,quote_key,sequence,dedupe_key
+                       FROM trusted_live_current_quotes"""
+                ).fetchall()
+                self.assertEqual(
+                    rows,
+                    [
+                        (
+                            latest.source_id,
+                            latest.quote_key,
+                            latest.sequence,
+                            latest.dedupe_key,
+                        )
+                    ],
+                )
+                self.assertEqual(latest.sequence, 2)
+            finally:
+                store.close()
+
+    def test_late_stale_trusted_receipt_does_not_regress_trusted_current_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                newer = self._direct_event(sequence=2, odds="2.40")
+                stale = self._direct_event(sequence=1, odds="2.00")
+                self.assertEqual(
+                    store._append_live_batch_accepted([newer, stale]),
+                    [newer, stale],
+                )
+
+                current = store.trusted_live_current_by_source()
+                latest = current[(newer.source_id, newer.quote_key)]
+                self.assertEqual(latest.sequence, 2)
+                self.assertEqual(latest.decimal_odds, Decimal("2.40"))
+                self.assertEqual(
+                    store.connection.execute(
+                        """SELECT sequence,dedupe_key
+                           FROM trusted_live_current_quotes
+                           WHERE source_id=? AND quote_key=?""",
+                        (newer.source_id, newer.quote_key),
+                    ).fetchone(),
+                    (newer.sequence, newer.dedupe_key),
+                )
+                self.assertEqual(len(store.trusted_live_events()), 2)
+            finally:
+                store.close()
+
+    def test_generic_newer_history_does_not_advance_trusted_current_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                self._ingest(store, sequence=1)
+                trusted = next(iter(store.trusted_live_current_by_source().values()))
+                generic = self._direct_event(sequence=2, odds="2.40")
+                self.assertTrue(store.append(generic))
+
+                current = store.trusted_live_current_by_source()
+                self.assertEqual(current[(trusted.source_id, trusted.quote_key)], trusted)
+                self.assertEqual(
+                    store.connection.execute(
+                        """SELECT sequence,dedupe_key
+                           FROM trusted_live_current_quotes
+                           WHERE source_id=? AND quote_key=?""",
+                        (trusted.source_id, trusted.quote_key),
+                    ).fetchone(),
+                    (trusted.sequence, trusted.dedupe_key),
+                )
+            finally:
+                store.close()
+
+    def test_reopen_migrates_missing_trusted_current_projection_from_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            self._ingest(store, sequence=1)
+            trusted = next(iter(store.trusted_live_current_by_source().values()))
+            store.close()
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("DROP TABLE trusted_live_current_quotes")
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = SQLiteMarketStore(path)
+            try:
+                self.assertEqual(
+                    reopened.trusted_live_current_by_source()[
+                        (trusted.source_id, trusted.quote_key)
+                    ],
+                    trusted,
+                )
+            finally:
+                reopened.close()
+
+    def test_trusted_current_projection_cannot_mint_authority_without_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                event = self._direct_event(sequence=1)
+                self.assertTrue(store.append(event))
+                store.connection.execute(
+                    """INSERT INTO trusted_live_current_quotes
+                       (source_id,quote_key,sequence,dedupe_key)
+                       VALUES (?,?,?,?)""",
+                    (
+                        event.source_id,
+                        event.quote_key,
+                        event.sequence,
+                        event.dedupe_key,
+                    ),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "missing receipt authority",
+                ):
+                    store.trusted_live_current_by_source()
+            finally:
+                store.close()
+
+    def test_trusted_current_projection_identity_drift_fails_closed_until_reopen(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            try:
+                self._ingest(store, sequence=1)
+                store.connection.execute(
+                    "UPDATE trusted_live_current_quotes SET sequence=99"
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "projection identity mismatch: sequence",
+                ):
+                    store.trusted_live_current_by_source()
+            finally:
+                store.close()
+
+    def test_reopen_repairs_tampered_trusted_current_projection_from_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            self._ingest(store, sequence=1)
+            trusted = next(iter(store.trusted_live_current_by_source().values()))
+            store.close()
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """UPDATE trusted_live_current_quotes
+                       SET sequence=?,dedupe_key=?
+                       WHERE source_id=? AND quote_key=?""",
+                    (
+                        99,
+                        "tampered-dedupe",
+                        trusted.source_id,
+                        trusted.quote_key,
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = SQLiteMarketStore(path)
+            try:
+                current = reopened.trusted_live_current_by_source()
+                self.assertEqual(
+                    current[(trusted.source_id, trusted.quote_key)],
+                    trusted,
+                )
+                self.assertEqual(
+                    reopened.connection.execute(
+                        """SELECT sequence,dedupe_key
+                           FROM trusted_live_current_quotes
+                           WHERE source_id=? AND quote_key=?""",
+                        (trusted.source_id, trusted.quote_key),
+                    ).fetchone(),
+                    (trusted.sequence, trusted.dedupe_key),
+                )
+            finally:
+                reopened.close()
+
+    def test_projection_write_failure_rolls_back_live_history_and_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                store.connection.execute("DROP TABLE trusted_live_current_quotes")
+                store.connection.commit()
+
+                with self.assertRaises(sqlite3.OperationalError):
+                    self._ingest(store, sequence=1)
+
+                self.assertEqual(store.events(), [])
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_event_live_receipts"
+                    ).fetchone(),
+                    (0,),
+                )
+            finally:
+                store.close()
+
+    def test_trusted_current_projects_latest_trusted_row_without_full_history_reader(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                trusted = self._direct_event(sequence=1)
+                untrusted_newer = self._direct_event(sequence=2)
+                self.assertEqual(store._append_live_batch_accepted([trusted]), [trusted])
+                self.assertTrue(store.append(untrusted_newer))
+
+                with patch.object(
+                    storage_module,
+                    "_trusted_live_events_from_connection",
+                    side_effect=AssertionError(
+                        "trusted current must not materialize full trusted history"
+                    ),
+                ):
+                    current = store.trusted_live_current_by_source()
+
+                key = (trusted.source_id, trusted.quote_key)
+                self.assertEqual(current, {key: trusted})
+                self.assertEqual(store.current_by_source()[key], untrusted_newer)
+            finally:
+                store.close()
+
+    def test_trusted_current_reader_binding_survives_runtime_helper_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                self._ingest(store)
+                with patch.object(
+                    storage_module,
+                    "_trusted_live_current_from_connection",
+                    side_effect=AssertionError(
+                        "mutable trusted-current helper must not be consulted"
+                    ),
+                ):
+                    current = store.trusted_live_current_by_source()
+
+                self.assertEqual(len(current), 1)
+            finally:
+                store.close()
+
+    def test_trusted_current_fails_closed_on_runtime_receipt_authority_tamper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                self._ingest(store)
+                store.connection.execute(
+                    "UPDATE market_event_live_receipts SET authority=?",
+                    ("forged-authority",),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "authority kind is not canonical",
+                ):
+                    store.trusted_live_current_by_source()
+            finally:
+                store.close()
+
+    def test_trusted_current_fails_closed_on_selected_receipt_time_tamper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                self._ingest(store)
+                store.connection.execute(
+                    "UPDATE market_event_live_receipts SET ingest_ts=?",
+                    ("2026-10-04T03:00:09+00:00",),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "conflicts with market history",
+                ):
+                    store.trusted_live_current_by_source()
+            finally:
+                store.close()
+
+    def test_live_bootstrap_current_projection_does_not_dispatch_through_trusted_events_method(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store)
+
+            with patch.object(
+                SQLiteMarketStore,
+                "trusted_live_events",
+                side_effect=AssertionError("mutable trusted history method must not control current projection"),
+            ):
+                current = store.trusted_live_current_by_source()
+                live = MarketMirror.from_live_store(store)
+
+            self.assertEqual(len(current), 1)
+            self.assertEqual(len(live.snapshot()), 1)
+            store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,8 @@ import pytest
 import autosport.risk_membership_publication as publication
 import autosport.risk_randomization_precommit as randomization
 import autosport.risk_sampling_occurrence_authority as draw_authority
+import autosport.session as session_module
+from autosport.dataset import ReplayDataset, load_dataset
 from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
@@ -20,6 +22,7 @@ from autosport.risk_sampling_occurrence_authority import (
     ProductIidRunAdmissionReceipt,
     ProductIidRunExecutionReceipt,
     issue_product_iid_run_admission,
+    materialize_product_iid_member_market_events,
     resolve_product_iid_expected_draw_plan,
     resolve_product_iid_run_execution,
     verify_product_iid_expected_draw_plan,
@@ -28,6 +31,7 @@ from autosport.risk_sampling_occurrence_authority import (
 )
 from autosport.run_registry import RunRegistry
 from autosport.run_transaction import RunTransaction
+from autosport.session import AutosportSession, IidMemberSessionResult
 
 
 RUN_ID = "run-001"
@@ -85,13 +89,18 @@ def _horizon(draw_count: int = 4) -> str:
     )
 
 
-def _membership(*, frame_json: str, horizon_json: str) -> ResolvedFixedNRiskMembership:
+def _membership(
+    *,
+    frame_json: str,
+    horizon_json: str,
+    dataset_manifest_sha256: str = "3" * 64,
+) -> ResolvedFixedNRiskMembership:
     return ResolvedFixedNRiskMembership(
         research_protocol_id="risk-fixed-n-protocol",
         protocol_sha256="2" * 64,
         protocol_record_sha256="9" * 64,
         dataset_snapshot_id="risk-fixed-n-dataset",
-        dataset_manifest_sha256="3" * 64,
+        dataset_manifest_sha256=dataset_manifest_sha256,
         dataset_record_sha256="c" * 64,
         causal_cutoff="2026-09-01T00:00:00+00:00",
         outcome_reveal_after="2026-09-10T00:00:00+00:00",
@@ -150,10 +159,15 @@ def _product_precommit(
     horizon_json: str | None = None,
     rng_algorithm: str = "AUTOSPORT_SHA256_REJECTION_V1",
     rng_version: str = "1",
+    dataset_manifest_sha256: str = "3" * 64,
 ):
     frame_json = frame_json or _frame()
     horizon_json = horizon_json or _horizon()
-    membership = _membership(frame_json=frame_json, horizon_json=horizon_json)
+    membership = _membership(
+        frame_json=frame_json,
+        horizon_json=horizon_json,
+        dataset_manifest_sha256=dataset_manifest_sha256,
+    )
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     registry_path = workspace / "scientific-registry.json"
@@ -967,6 +981,678 @@ def _frame_for_payload(payload_sha256: str) -> str:
             ],
         }
     )
+
+
+def test_iid_member_materializer_resolves_frozen_payload_to_exact_event(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(2),
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    plan = resolve_product_iid_expected_draw_plan(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        authority_root=authority_root,
+    )
+
+    materialized = materialize_product_iid_member_market_events(
+        plan,
+        member_index=0,
+        market_events=[event],
+    )
+
+    assert len(materialized) == 2
+    assert all(type(item) is MarketEvent for item in materialized)
+    assert tuple(
+        market_event_payload_sha256(item) for item in materialized
+    ) == plan.member_draws[0].draw_payload_sha256
+    assert materialized[0] is not event
+    assert materialized[0] is not materialized[1]
+
+
+def test_iid_member_materializer_rejects_missing_frame_payload(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    plan = resolve_product_iid_expected_draw_plan(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        authority_root=authority_root,
+    )
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="cannot be resolved from the product dataset",
+    ):
+        materialize_product_iid_member_market_events(
+            plan,
+            member_index=0,
+            market_events=[_market_event(event_id="other")],
+        )
+
+
+def test_iid_member_materializer_rejects_ambiguous_payload_corpus(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    plan = resolve_product_iid_expected_draw_plan(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        authority_root=authority_root,
+    )
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="payload identity is ambiguous",
+    ):
+        materialize_product_iid_member_market_events(
+            plan,
+            member_index=0,
+            market_events=[event, MarketEvent.from_dict(event.to_dict())],
+        )
+
+
+def test_iid_member_materializer_rejects_payload_digest_dispatch_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    plan = resolve_product_iid_expected_draw_plan(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        authority_root=authority_root,
+    )
+    attacker_called = False
+
+    def forged_digest(_event):
+        nonlocal attacker_called
+        attacker_called = True
+        return "0" * 64
+
+    monkeypatch.setattr(
+        draw_authority,
+        "market_event_payload_sha256",
+        forged_digest,
+    )
+
+    with pytest.raises(ProductIidDrawPlanError, match="authority dispatch changed"):
+        materialize_product_iid_member_market_events(
+            plan,
+            member_index=0,
+            market_events=[event],
+        )
+    assert attacker_called is False
+
+
+def test_iid_member_materializer_rejects_market_event_codec_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    plan = resolve_product_iid_expected_draw_plan(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        authority_root=authority_root,
+    )
+    attacker_called = False
+
+    def forged_to_dict(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        return event.to_dict()
+
+    monkeypatch.setattr(MarketEvent, "to_dict", forged_to_dict)
+
+    with pytest.raises(ProductIidDrawPlanError, match="authority dispatch changed"):
+        materialize_product_iid_member_market_events(
+            plan,
+            member_index=0,
+            market_events=[event],
+        )
+    assert attacker_called is False
+
+
+def _iid_replay_dataset(
+    root,
+    event: MarketEvent,
+) -> tuple[ReplayDataset, str]:
+    root.mkdir()
+    market_path = root / "iid-market.jsonl"
+    market_bytes = (_canonical(event.to_dict()) + "\n").encode("utf-8")
+    market_path.write_bytes(market_bytes)
+    results_path = root / "iid-results.json"
+    results_bytes = _canonical(
+        {
+            "quote_outcomes": {},
+            "schema_version": 1,
+        }
+    ).encode("utf-8")
+    results_path.write_bytes(results_bytes)
+    manifest_bytes = _canonical(
+        {
+            "market_file": market_path.name,
+            "market_sha256": hashlib.sha256(market_bytes).hexdigest(),
+            "name": "iid-member-fixture",
+            "results_file": results_path.name,
+            "results_sha256": hashlib.sha256(results_bytes).hexdigest(),
+            "schema_version": 1,
+            "sport": "unknown",
+        }
+    ).encode("utf-8")
+    (root / "manifest.json").write_bytes(manifest_bytes)
+    return load_dataset(root), hashlib.sha256(manifest_bytes).hexdigest()
+
+def test_session_executes_single_admitted_iid_member_and_returns_execution_proof(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    dataset, dataset_manifest_sha256 = _iid_replay_dataset(
+        tmp_path / "iid-dataset",
+        event,
+    )
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+        dataset_manifest_sha256=dataset_manifest_sha256,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    session = AutosportSession(
+        workspace,
+        initial_bankroll="100",
+        strategy_id="observe-only-v1",
+    )
+    try:
+        result = session.run_iid_member_dataset(
+            dataset,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=frame_json,
+            horizon_json=horizon_json,
+            member_index=0,
+            authority_root=authority_root,
+        )
+    finally:
+        session.close()
+
+    assert type(result) is IidMemberSessionResult
+    assert result.session.replay.run_id == RUN_ID
+    assert result.session.replay.event_count == 1
+    assert result.execution.member_id == RUN_ID
+    assert result.execution.execution_consumption_proven is True
+    assert result.execution.occurrence_ancestry_proven is True
+    completed = RunRegistry(workspace / "run_registry.json").verified_completed_summary_for_run(
+        RUN_ID
+    )[0]
+    assert (
+        completed["sampling_draw_admission_receipt_sha256"]
+        == result.execution.run_admission_receipt_sha256
+    )
+
+
+def test_session_rejects_duplicate_iid_occurrence_before_registry_mutation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    dataset, dataset_manifest_sha256 = _iid_replay_dataset(
+        tmp_path / "iid-dataset",
+        event,
+    )
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(2),
+        dataset_manifest_sha256=dataset_manifest_sha256,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    session = AutosportSession(
+        workspace,
+        initial_bankroll="100",
+        strategy_id="observe-only-v1",
+    )
+    try:
+        with pytest.raises(
+            ProductIidDrawPlanError,
+            match="not replay-compatible",
+        ):
+            session.run_iid_member_dataset(
+                dataset,
+                membership=membership,
+                registry_path=registry_path,
+                sampling_manifest_json=manifest,
+                sampling_frame_json=frame_json,
+                horizon_json=horizon_json,
+                member_index=0,
+                authority_root=authority_root,
+            )
+    finally:
+        session.close()
+
+    assert RunRegistry(workspace / "run_registry.json")._read()["runs"] == {}
+
+
+def test_session_rejects_non_path_iid_dataset_root_before_authority_dispatch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    dataset, dataset_manifest_sha256 = _iid_replay_dataset(
+        tmp_path / "iid-dataset",
+        event,
+    )
+    poisoned = ReplayDataset(
+        root=str(dataset.root),
+        name=dataset.name,
+        sport=dataset.sport,
+        market_path=dataset.market_path,
+        results_path=dataset.results_path,
+        market_sha256=dataset.market_sha256,
+        results_sha256=dataset.results_sha256,
+        schema_version=dataset.schema_version,
+        governance=dataset.governance,
+        import_identity=dataset.import_identity,
+    )
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+        dataset_manifest_sha256=dataset_manifest_sha256,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    session = AutosportSession(
+        workspace,
+        initial_bankroll="100",
+        strategy_id="observe-only-v1",
+    )
+    try:
+        with pytest.raises(TypeError, match="dataset.root must be an exact"):
+            session.run_iid_member_dataset(
+                poisoned,
+                membership=membership,
+                registry_path=registry_path,
+                sampling_manifest_json=manifest,
+                sampling_frame_json=frame_json,
+                horizon_json=horizon_json,
+                member_index=0,
+                authority_root=authority_root,
+            )
+    finally:
+        session.close()
+
+    assert RunRegistry(workspace / "run_registry.json")._read()["runs"] == {}
+
+
+def test_session_rejects_runtime_dataset_manifest_outside_frozen_snapshot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    dataset, _dataset_manifest_sha256 = _iid_replay_dataset(
+        tmp_path / "iid-dataset",
+        event,
+    )
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+        dataset_manifest_sha256="0" * 64,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    session = AutosportSession(
+        workspace,
+        initial_bankroll="100",
+        strategy_id="observe-only-v1",
+    )
+    try:
+        with pytest.raises(
+            ProductIidDrawPlanError,
+            match="differs from the frozen DatasetSnapshot",
+        ):
+            session.run_iid_member_dataset(
+                dataset,
+                membership=membership,
+                registry_path=registry_path,
+                sampling_manifest_json=manifest,
+                sampling_frame_json=frame_json,
+                horizon_json=horizon_json,
+                member_index=0,
+                authority_root=authority_root,
+            )
+    finally:
+        session.close()
+
+    assert RunRegistry(workspace / "run_registry.json")._read()["runs"] == {}
+
+
+def test_session_iid_runner_rejects_dataset_loader_rebinding_before_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    dataset, dataset_manifest_sha256 = _iid_replay_dataset(
+        tmp_path / "iid-dataset",
+        event,
+    )
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+        dataset_manifest_sha256=dataset_manifest_sha256,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    session = AutosportSession(
+        workspace,
+        initial_bankroll="100",
+        strategy_id="observe-only-v1",
+    )
+    attacker_called = False
+
+    def forged_loader(_root):
+        nonlocal attacker_called
+        attacker_called = True
+        return dataset
+
+    monkeypatch.setattr(session_module, "load_dataset", forged_loader)
+    try:
+        with pytest.raises(
+            ProductIidDrawPlanError,
+            match="session execution authority dispatch changed",
+        ):
+            session.run_iid_member_dataset(
+                dataset,
+                membership=membership,
+                registry_path=registry_path,
+                sampling_manifest_json=manifest,
+                sampling_frame_json=frame_json,
+                horizon_json=horizon_json,
+                member_index=0,
+                authority_root=authority_root,
+            )
+    finally:
+        session.close()
+
+    assert attacker_called is False
+    assert RunRegistry(workspace / "run_registry.json")._read()["runs"] == {}
+
+
+def test_session_iid_runner_rejects_plan_resolver_rebinding_before_dataset_read(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    dataset, dataset_manifest_sha256 = _iid_replay_dataset(
+        tmp_path / "iid-dataset",
+        event,
+    )
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+        dataset_manifest_sha256=dataset_manifest_sha256,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    session = AutosportSession(
+        workspace,
+        initial_bankroll="100",
+        strategy_id="observe-only-v1",
+    )
+    attacker_called = False
+
+    def forged_resolver(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("forged IID resolver executed")
+
+    monkeypatch.setattr(
+        session_module,
+        "resolve_product_iid_expected_draw_plan",
+        forged_resolver,
+    )
+    try:
+        with pytest.raises(
+            ProductIidDrawPlanError,
+            match="session execution authority dispatch changed",
+        ):
+            session.run_iid_member_dataset(
+                dataset,
+                membership=membership,
+                registry_path=registry_path,
+                sampling_manifest_json=manifest,
+                sampling_frame_json=frame_json,
+                horizon_json=horizon_json,
+                member_index=0,
+                authority_root=authority_root,
+            )
+    finally:
+        session.close()
+
+    assert attacker_called is False
+    assert RunRegistry(workspace / "run_registry.json")._read()["runs"] == {}
+
+
+def test_session_iid_runner_rejects_replay_engine_rebinding_before_admission(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    dataset, dataset_manifest_sha256 = _iid_replay_dataset(
+        tmp_path / "iid-dataset",
+        event,
+    )
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+        dataset_manifest_sha256=dataset_manifest_sha256,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    session = AutosportSession(
+        workspace,
+        initial_bankroll="100",
+        strategy_id="observe-only-v1",
+    )
+    attacker_called = False
+
+    class ForgedReplayEngine:
+        def __init__(self, *_args, **_kwargs) -> None:
+            nonlocal attacker_called
+            attacker_called = True
+
+    monkeypatch.setattr(session_module, "ReplayEngine", ForgedReplayEngine)
+    try:
+        with pytest.raises(
+            ProductIidDrawPlanError,
+            match="session execution authority dispatch changed",
+        ):
+            session.run_iid_member_dataset(
+                dataset,
+                membership=membership,
+                registry_path=registry_path,
+                sampling_manifest_json=manifest,
+                sampling_frame_json=frame_json,
+                horizon_json=horizon_json,
+                member_index=0,
+                authority_root=authority_root,
+            )
+    finally:
+        session.close()
+
+    assert attacker_called is False
+    assert RunRegistry(workspace / "run_registry.json")._read()["runs"] == {}
 
 
 def _completed_iid_execution(

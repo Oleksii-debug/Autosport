@@ -923,7 +923,7 @@ class PersistentLiveDecisionLoop:
 
         store = SQLiteMarketStore(self.workspace / "market.db")
         try:
-            mirror = MarketMirror.from_store(store)
+            mirror = MarketMirror.from_live_store(store)
         finally:
             store.close()
         self.mirror_updates = BoundedMirrorInvalidationBuffer(
@@ -971,7 +971,9 @@ class PersistentLiveDecisionLoop:
                         # One bounded-current reconciliation covers durable changes
                         # between construction and the first live poll. Subsequent
                         # cycles reuse this exact canonical store and rely on the bus.
-                        for persisted_event in store.current_by_source().values():
+                        for persisted_event in (
+                            store.trusted_live_current_by_source().values()
+                        ):
                             updates.accept_persisted(persisted_event)
                     except BaseException:
                         store.close()

@@ -176,6 +176,7 @@ class _IssuedResolutionWitness:
     reader_method_witnesses: object
     writer_lock_type: object
     writer_lock_method_witnesses: object
+    reader_global_witnesses: object
     events_reader: object
     events_reader_code: object
 
@@ -198,6 +199,7 @@ def _make_resolution_witness_registry():
         reader_method_witnesses: object,
         writer_lock_type: object,
         writer_lock_method_witnesses: object,
+        reader_global_witnesses: object,
         events_reader: object,
         events_reader_code: object,
     ) -> None:
@@ -215,6 +217,7 @@ def _make_resolution_witness_registry():
             reader_method_witnesses=reader_method_witnesses,
             writer_lock_type=writer_lock_type,
             writer_lock_method_witnesses=writer_lock_method_witnesses,
+            reader_global_witnesses=reader_global_witnesses,
             events_reader=events_reader,
             events_reader_code=events_reader_code,
         )
@@ -736,6 +739,20 @@ def _make_resolution_verifier(lookup_witness):
                 ):
                     raise NvdaManualAcceptanceStateError(
                         "manual NVDA resolution ledger reader changed after issuance: "
+                        + name
+                    )
+            for name, expected_value, expected_code in issued.reader_global_witnesses:
+                current_value = issued.events_reader.__globals__.get(name)
+                if (
+                    current_value is not expected_value
+                    or (
+                        expected_code is not None
+                        and getattr(current_value, "__code__", None)
+                        is not expected_code
+                    )
+                ):
+                    raise NvdaManualAcceptanceStateError(
+                        "manual NVDA resolution reader dependency changed after issuance: "
                         + name
                     )
             for (
@@ -1419,6 +1436,43 @@ def _seal_resolution_issuance(register_witness) -> None:
     )
     events_reader = ledger_type.events
     events_reader_code = events_reader.__code__
+    reader_global_names = (
+        "_parse_json_object",
+        "_record_from_event",
+        "_digest",
+        "_canonical",
+        "_require_text",
+        "_require_sha256",
+        "_require_git_commit_sha",
+        "_require_canonical_utc",
+        "_require_protocol",
+        "ManualNvdaDecision",
+        "ManualNvdaDecisionRecord",
+        "SCHEMA_VERSION",
+        "ANCHOR_SCHEMA_VERSION",
+        "_PENDING_SCHEMA_VERSION",
+        "PROTOCOL_VERSION",
+        "EVENT_TYPE",
+        "STATUS_STRUCTURALLY_COMPLETE",
+        "_SHA256_RE",
+        "_EVENT_KEYS",
+        "_PAYLOAD_KEYS",
+        "_ANCHOR_KEYS",
+        "_PENDING_KEYS",
+        "datetime",
+        "timezone",
+        "hashlib",
+        "json",
+        "os",
+    )
+    reader_global_witnesses = tuple(
+        (
+            name,
+            events_reader.__globals__.get(name),
+            getattr(events_reader.__globals__.get(name), "__code__", None),
+        )
+        for name in reader_global_names
+    )
     writer_lock_type = _ManualNvdaWriterLock
     writer_lock_method_names = (
         "__init__",
@@ -1445,6 +1499,20 @@ def _seal_resolution_issuance(register_witness) -> None:
             raise NvdaManualAcceptanceStateError(
                 "manual NVDA resolution durable-reader authority changed"
             )
+        for name, expected_value, expected_code in reader_global_witnesses:
+            current_value = events_reader.__globals__.get(name)
+            if (
+                current_value is not expected_value
+                or (
+                    expected_code is not None
+                    and getattr(current_value, "__code__", None)
+                    is not expected_code
+                )
+            ):
+                raise NvdaManualAcceptanceStateError(
+                    "manual NVDA resolution durable-reader dependency changed: "
+                    + name
+                )
         for (
             name,
             expected_descriptor,
@@ -1535,6 +1603,7 @@ def _seal_resolution_issuance(register_witness) -> None:
             reader_method_witnesses=reader_method_witnesses,
             writer_lock_type=writer_lock_type,
             writer_lock_method_witnesses=writer_lock_method_witnesses,
+            reader_global_witnesses=reader_global_witnesses,
             events_reader=events_reader,
             events_reader_code=events_reader_code,
         )

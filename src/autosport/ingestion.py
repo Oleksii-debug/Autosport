@@ -6,6 +6,7 @@ from math import isfinite
 from time import perf_counter
 from typing import Callable
 
+from .domain import MarketEvent
 from .ingestion_health import (
     IngestionPolicy,
     SourceHealthState,
@@ -304,6 +305,8 @@ class IngestionEngine:
                     continue
             try:
                 event = self.normalizer.normalize(batch.source_id, quote)
+                if type(event) is not MarketEvent:
+                    raise TypeError("normalizer must return exact MarketEvent")
                 # Provider/adaptor observation clocks remain evidence fields.
                 # Durable ingestion time is owned by this post-acquisition
                 # product clock, never by provider-controlled quote payloads.

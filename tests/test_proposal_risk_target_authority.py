@@ -554,16 +554,26 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
         self.assertEqual(issued.bankroll_id, self.goal.bankroll_id)
         self.assertEqual(issued.currency, self.goal.currency)
         self.assertEqual(len(issued.candidate_sha256s), 2)
-        self.assertEqual(issued.candidate_contexts, self._contexts())
-        self.assertEqual(len(issued.evaluated_stakes), 2)
-        self.assertTrue(any(stake > 0 for stake in issued.evaluated_stakes))
+        expected_context_payloads = tuple(
+            proposal_target_authority._context_payload(context)
+            for context in self._contexts()
+        )
+        self.assertEqual(
+            tuple(json.loads(value) for value in issued.candidate_context_json),
+            expected_context_payloads,
+        )
+        self.assertTrue(
+            all(type(value) is str for value in issued.candidate_context_json)
+        )
         self.assertTrue(
             all(
-                context.risk_of_ruin_upper_bound is None
-                and context.risk_of_ruin_evidence is None
-                for context in issued.candidate_contexts
+                "risk_of_ruin_upper_bound" not in payload
+                and "risk_of_ruin_evidence" not in payload
+                for payload in expected_context_payloads
             )
         )
+        self.assertEqual(len(issued.evaluated_stakes), 2)
+        self.assertTrue(any(stake > 0 for stake in issued.evaluated_stakes))
 
         resolved = resolve_product_proposal_risk_target(
             self.workspace, issued.target_sha256

@@ -298,6 +298,90 @@ class ParlayApiProductSourceTests(unittest.TestCase):
 
             self.assertEqual(hostile.calls, 0)
 
+    def test_pending_snapshot_rejects_provider_read_code_mutation_during_io(self) -> None:
+        class _SelfMutatingProvider:
+            source_id = _SOURCE_ID
+
+            def __init__(self) -> None:
+                self.mutate = None
+                self.batches = [_batch(cursor="snapshot-1")]
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                if max_items <= 0 or not self.batches:
+                    raise AssertionError("unexpected provider read")
+                result = self.batches.pop(0)
+                if self.mutate is not None:
+                    self.mutate()
+                return result
+
+        provider = _SelfMutatingProvider()
+        read_func = provider.read_batch.__func__
+        original_code = read_func.__code__
+
+        def forged_read_batch(self, max_items: int = 1000) -> ProviderBatch:
+            raise AssertionError("mutated provider executable must never gain authority")
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                provider,
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            provider.mutate = lambda: setattr(
+                read_func,
+                "__code__",
+                forged_read_batch.__code__,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ProductSourcePayloadError,
+                    "provider read executable changed during acquisition",
+                ):
+                    source.fetch_catalog_page(None)
+            finally:
+                read_func.__code__ = original_code
+
+    def test_pending_snapshot_rejects_normalizer_code_mutation_during_provider_io(self) -> None:
+        class _MutatingProvider(_Provider):
+            mutate = None
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                result = super().read_batch(max_items)
+                if self.mutate is not None:
+                    self.mutate()
+                return result
+
+        with tempfile.TemporaryDirectory() as directory:
+            provider = _MutatingProvider([_batch(cursor="snapshot-1")])
+            source = ParlayApiProductSource(
+                provider,
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            normalize_func = source.normalizer.normalize.__func__
+            original_code = normalize_func.__code__
+
+            def forged_normalize(self, source_id, quote):
+                raise AssertionError("mutated normalizer executable must never gain authority")
+
+            provider.mutate = lambda: setattr(
+                normalize_func,
+                "__code__",
+                forged_normalize.__code__,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "normalizer executable changed during acquisition",
+                ):
+                    source.fetch_catalog_page(None)
+            finally:
+                normalize_func.__code__ = original_code
+
     def test_legacy_unassigned_pending_without_provenance_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = ParlayApiProductSource(

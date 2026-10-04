@@ -12,6 +12,7 @@ from .candidate_search import (
     ParlayCandidate,
 )
 from .domain import PaperTicket, TicketLeg, TicketStatus
+from .portfolio import _snapshot_open_tickets_for_analysis
 from .scenario_search import ScenarioGroup, ScenarioSearchEngine, ScenarioSearchReport
 
 
@@ -108,7 +109,7 @@ class PortfolioAwareCandidateOptimizer:
             raise ValueError("scenario groups required for portfolio-aware candidate evaluation")
 
         quote_to_group = _quote_group_map(groups)
-        open_existing = [ticket for ticket in existing_tickets if ticket.status is TicketStatus.OPEN]
+        open_existing = _snapshot_open_tickets_for_analysis(existing_tickets)
         base_report = self.scenario_engine.analyse(open_existing, groups)
         ranked: list[CandidatePortfolioImpact] = []
         seen_candidate_identities: set[

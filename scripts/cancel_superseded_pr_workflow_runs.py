@@ -847,6 +847,10 @@ class GitHubApi:
             raise CancellationError("workflow-runs request dispatch changed")
 
         runs: list[WorkflowRun] = []
+        # total_count is a run count. Offset pagination can overlap when the active
+        # queue grows ahead of the current page, so raw observation count is not a
+        # completeness proof.
+        seen_run_ids: set[int] = set()
         page = 1
         while True:
             query = _encode_query(
@@ -868,14 +872,22 @@ class GitHubApi:
             ):
                 raise CancellationError("invalid workflow-runs response")
             page_runs = payload["workflow_runs"]
-            runs.extend(_run_parser(item) for item in page_runs)
+            if len(page_runs) > _runs_per_page:
+                raise CancellationError("invalid workflow-runs page size")
+            for item in page_runs:
+                run = _run_parser(item)
+                runs.append(run)
+                seen_run_ids.add(run.run_id)
             total_count = payload["total_count"]
-            if not page_runs or len(runs) >= total_count:
+            # Queue shrinkage can make a later page short even though an earlier
+            # total_count was larger. Treat that as a safe terminal moving snapshot:
+            # missed runs only defer cleanup, while forged extra rows fail closed above.
+            if (
+                not page_runs
+                or len(page_runs) < _runs_per_page
+                or len(seen_run_ids) >= total_count
+            ):
                 break
-            if len(page_runs) < _runs_per_page:
-                raise CancellationError(
-                    "workflow-runs pagination ended before reported total_count"
-                )
             page += 1
         return tuple(runs)
 

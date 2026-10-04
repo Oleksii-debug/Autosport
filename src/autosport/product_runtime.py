@@ -597,10 +597,6 @@ def _source_resolver_identity_impl(
         raise _error_type(
             "source resolver identity conflicts with configured source_id"
         )
-    stream_epoch = _text(
-        getattr(source, "stream_epoch", None),
-        "source.stream_epoch",
-    )
     instance_dict = getattr(source, "__dict__", None)
     if type(instance_dict) is dict and "resolve_event" in instance_dict:
         raise _error_type(
@@ -669,7 +665,6 @@ def _source_resolver_identity_impl(
 
     payload = {
         "source_id": source_id,
-        "stream_epoch": stream_epoch,
         "implementation": f"{type(source).__module__}.{type(source).__qualname__}",
         "resolver_owner": f"{resolver.__module__}.{resolver.__qualname__}",
         "resolver_semantic_sha256": resolver_semantic_sha256,

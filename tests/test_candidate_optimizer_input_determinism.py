@@ -107,6 +107,23 @@ class _RecordingScenarioEngine(ScenarioSearchEngine):
         return super().analyse(tickets, groups)
 
 
+class _ExternalCollectionMutationEngine(ScenarioSearchEngine):
+    def __init__(self, candidates, groups, extra_candidate) -> None:
+        super().__init__()
+        self.candidates = candidates
+        self.groups = groups
+        self.extra_candidate = extra_candidate
+        self.calls = 0
+
+    def analyse(self, tickets, groups):
+        report = super().analyse(tickets, groups)
+        self.calls += 1
+        if self.calls == 1:
+            self.candidates.append(self.extra_candidate)
+            self.groups.clear()
+        return report
+
+
 class CandidateOptimizerInputDeterminismTests(unittest.TestCase):
     def test_result_limit_requires_positive_non_boolean_integer(self) -> None:
         for invalid in (True, False, 1.5, Decimal("2"), "2", None):
@@ -214,6 +231,27 @@ class CandidateOptimizerInputDeterminismTests(unittest.TestCase):
         self.assertEqual(hostile[0].candidate.legs[0].probability, Decimal("0.10"))
         self.assertEqual(normal[0].standalone_expected_profit, Decimal("-0.80"))
         self.assertEqual(hostile[0].standalone_expected_profit, Decimal("-0.80"))
+
+    def test_top_level_candidate_and_group_mutation_cannot_change_inflight_evaluation(self) -> None:
+        candidates = [_candidate("e1")]
+        groups = _groups()
+        extra = _candidate("e2")
+        engine = _ExternalCollectionMutationEngine(candidates, groups, extra)
+
+        impacts = PortfolioAwareCandidateOptimizer(
+            scenario_engine=engine,
+            result_limit=5,
+        ).evaluate_candidates(
+            [],
+            candidates,
+            groups,
+            stake="1",
+        )
+
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(groups, [])
+        self.assertEqual(len(impacts), 1)
+        self.assertEqual(impacts[0].candidate.legs[0].quote_key, "e1|winner|a")
 
     def test_equal_rank_candidates_have_input_order_independent_limit_selection(self) -> None:
         first = _candidate("e1")

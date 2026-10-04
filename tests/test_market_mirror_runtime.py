@@ -85,11 +85,94 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
 
         self.assertEqual(result.status, MirrorUpdate.SEMANTIC_REFRESH)
         self.assertEqual(runtime.pending_count, 1)
+        batch = runtime.drain()
+        expected_key = ("prophetx:sandbox", refresh.quote_key)
+        self.assertEqual(batch.changed_keys, (expected_key,))
+        self.assertEqual(batch.semantic_refresh_keys, (expected_key,))
+        self.assertEqual(mirror.snapshot(), (refresh,))
+
+    def test_material_update_is_not_classified_as_semantic_refresh(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        material = self.prophetx_refresh_event(sequence=1)
+
+        self.assertEqual(runtime.accept_persisted(material).status, MirrorUpdate.APPLIED)
+
+        batch = runtime.drain()
         self.assertEqual(
-            runtime.drain().changed_keys,
+            batch.changed_keys,
+            (("prophetx:sandbox", material.quote_key),),
+        )
+        self.assertEqual(batch.semantic_refresh_keys, ())
+
+    def test_material_update_dominates_earlier_coalesced_refresh(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+        material = self.prophetx_refresh_event(sequence=3, odds="2.20")
+
+        runtime.accept_persisted(first)
+        runtime.drain()
+        self.assertEqual(
+            runtime.accept_persisted(refresh).status,
+            MirrorUpdate.SEMANTIC_REFRESH,
+        )
+        self.assertEqual(runtime.accept_persisted(material).status, MirrorUpdate.APPLIED)
+
+        batch = runtime.drain()
+        self.assertEqual(
+            batch.changed_keys,
+            (("prophetx:sandbox", material.quote_key),),
+        )
+        self.assertEqual(batch.semantic_refresh_keys, ())
+
+    def test_later_refresh_cannot_downgrade_coalesced_material_update(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        first = self.prophetx_refresh_event(sequence=1)
+        material = self.prophetx_refresh_event(sequence=2, odds="2.20")
+        refresh = self.prophetx_refresh_event(sequence=3, odds="2.20")
+
+        runtime.accept_persisted(first)
+        runtime.drain()
+        self.assertEqual(runtime.accept_persisted(material).status, MirrorUpdate.APPLIED)
+        self.assertEqual(
+            runtime.accept_persisted(refresh).status,
+            MirrorUpdate.SEMANTIC_REFRESH,
+        )
+
+        batch = runtime.drain()
+        self.assertEqual(
+            batch.changed_keys,
             (("prophetx:sandbox", refresh.quote_key),),
         )
-        self.assertEqual(mirror.snapshot(), (refresh,))
+        self.assertEqual(batch.semantic_refresh_keys, ())
+
+    def test_overflow_discards_incomplete_semantic_refresh_classification(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=1)
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+
+        runtime.accept_persisted(first)
+        runtime.drain()
+        self.assertEqual(
+            runtime.accept_persisted(refresh).status,
+            MirrorUpdate.SEMANTIC_REFRESH,
+        )
+        runtime.accept_persisted(
+            self.event(
+                source_id="provider-b",
+                selection="selection-b",
+                sequence=1,
+            )
+        )
+
+        batch = runtime.drain()
+        self.assertTrue(batch.full_refresh_required)
+        self.assertEqual(batch.changed_keys, ())
+        self.assertEqual(batch.semantic_refresh_keys, ())
 
     def test_market_bus_persists_before_mirror_subscriber_runs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -61,6 +61,26 @@ def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def test_source_health_authority_key_matches_windows_filename_identity() -> None:
+    lower = Path("source_health.json")
+    upper = Path("SOURCE_HEALTH.JSON")
+
+    assert health_module._source_health_authority_key(
+        lower,
+        windows=True,
+    ) == health_module._source_health_authority_key(
+        upper,
+        windows=True,
+    )
+    assert health_module._source_health_authority_key(
+        lower,
+        windows=False,
+    ) != health_module._source_health_authority_key(
+        upper,
+        windows=False,
+    )
+
+
 def test_valid_old_source_health_image_is_rejected_after_newer_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -889,6 +889,40 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
     """
 
     _settlement_consumer_bindings_sealed = False
+    _authority_fields_sealed = False
+    _AUTHORITY_FIELDS = frozenset(
+        {
+            "_authority_fields_sealed",
+            "workspace",
+            "collector",
+            "lifecycle",
+            "market_store",
+            "desktop_consumer",
+            "invalidation_buffer",
+            "dependency_index",
+            "paper_book_path",
+            "outcome_authority",
+            "settlement_learning_handoff",
+            "clock",
+            "required_history",
+            "max_invalidation_batches_per_tick",
+            "max_invalidation_items_per_batch",
+            "causal_view",
+            "initial_bankroll",
+            "_state",
+        }
+    )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        try:
+            sealed = object.__getattribute__(self, "_authority_fields_sealed")
+        except AttributeError:
+            sealed = False
+        if sealed and name in type(self)._AUTHORITY_FIELDS:
+            raise ContinuousSessionError(
+                f"continuous session authority field {name} is immutable after construction"
+            )
+        object.__setattr__(self, name, value)
 
     def __init__(
         self,
@@ -911,6 +945,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         causal_view: CausalView = CausalView.AS_KNOWN_AT_DECISION,
         initial_bankroll: str = "10000",
     ) -> None:
+        self._authority_fields_sealed = False
         if not isinstance(workspace, (str, Path)):
             raise TypeError("workspace must be a path-like value")
         if not isinstance(collector, HeadlessCollectorService):
@@ -993,6 +1028,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             source_id=collector.source_id,
             clock=self.clock,
         )
+        self._authority_fields_sealed = True
 
     @property
     def session_id(self) -> str:

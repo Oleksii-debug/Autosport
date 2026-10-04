@@ -360,6 +360,177 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             ):
                 self._issue()
 
+    def test_dispatch_guard_root_rebinding_fails_closed(self) -> None:
+        with patch.object(
+            proposal_target_authority,
+            "_require_dispatch",
+            lambda: None,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "dispatch guard root changed",
+            ):
+                self._issue()
+
+    def test_internal_helper_witness_table_substitution_fails_closed(self) -> None:
+        original = proposal_target_authority._derive
+
+        def fake(policy: object, book: object, signals: object, contexts: object) -> object:
+            return original(policy, book, signals, contexts)
+
+        substituted = tuple(
+            (
+                name,
+                fake if name == "_derive" else expected,
+                getattr(fake, "__code__", None) if name == "_derive" else code,
+            )
+            for name, expected, code in (
+                proposal_target_authority._PROPOSAL_TARGET_HELPER_WITNESSES
+            )
+        )
+        with (
+            patch.object(proposal_target_authority, "_derive", fake),
+            patch.object(
+                proposal_target_authority,
+                "_PROPOSAL_TARGET_HELPER_WITNESSES",
+                substituted,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "helper witness root changed",
+            ):
+                self._issue()
+
+    def test_monotonic_witness_table_substitution_fails_closed(self) -> None:
+        original = MonotonicWorkspaceAuthority.prepare
+
+        def fake(instance: object, *args: object, **kwargs: object) -> object:
+            return original(instance, *args, **kwargs)
+
+        substituted = tuple(
+            (
+                name,
+                fake if name == "prepare" else expected,
+                getattr(fake, "__code__", None) if name == "prepare" else code,
+            )
+            for name, expected, code in (
+                proposal_target_authority._AUTHORITY_METHOD_WITNESSES
+            )
+        )
+        with (
+            patch.object(MonotonicWorkspaceAuthority, "prepare", fake),
+            patch.object(
+                proposal_target_authority,
+                "_AUTHORITY_METHOD_WITNESSES",
+                substituted,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "witness root changed",
+            ):
+                self._issue()
+
+    def test_decision_ledger_integrity_dispatch_rebinding_fails_closed(self) -> None:
+        original = JsonlDecisionLedger.verify_integrity
+
+        def fake(instance: JsonlDecisionLedger) -> object:
+            return original(instance)
+
+        with patch.object(JsonlDecisionLedger, "verify_integrity", fake):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "Decision Ledger verify_integrity",
+            ):
+                self._issue()
+
+    def test_market_event_serializer_rebinding_fails_closed(self) -> None:
+        original = MarketEvent.to_dict
+
+        def fake(instance: MarketEvent) -> object:
+            return original(instance)
+
+        with patch.object(MarketEvent, "to_dict", fake):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "MarketEvent to_dict",
+            ):
+                self._issue()
+
+    def test_market_event_parser_rebinding_fails_closed(self) -> None:
+        issued = self._issue()
+        descriptor = MarketEvent.__dict__["from_dict"]
+        if isinstance(descriptor, classmethod):
+            original = descriptor.__func__
+
+            def fake(cls: type[MarketEvent], *args: object, **kwargs: object) -> object:
+                return original(cls, *args, **kwargs)
+
+            replacement = classmethod(fake)
+        elif isinstance(descriptor, staticmethod):
+            original = descriptor.__func__
+
+            def fake(*args: object, **kwargs: object) -> object:
+                return original(*args, **kwargs)
+
+            replacement = staticmethod(fake)
+        else:
+            original = descriptor
+
+            def fake(*args: object, **kwargs: object) -> object:
+                return original(*args, **kwargs)
+
+            replacement = fake
+
+        with patch.object(MarketEvent, "from_dict", replacement):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "MarketEvent from_dict",
+            ):
+                resolve_product_proposal_risk_target(
+                    self.workspace, issued.target_sha256
+                )
+
+    def test_decision_record_constructor_rebinding_fails_closed(self) -> None:
+        original = proposal_target_authority.DecisionRecord
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        with patch.object(proposal_target_authority, "DecisionRecord", fake):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "DecisionRecord type",
+            ):
+                self._issue()
+
+    def test_sha256_dispatch_rebinding_fails_closed(self) -> None:
+        original = proposal_target_authority.hashlib.sha256
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        with patch.object(proposal_target_authority.hashlib, "sha256", fake):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "SHA-256 implementation",
+            ):
+                self._issue()
+
+    def test_canonical_json_dispatch_rebinding_fails_closed(self) -> None:
+        original = proposal_target_authority.json.dumps
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        with patch.object(proposal_target_authority.json, "dumps", fake):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "canonical JSON serializer",
+            ):
+                self._issue()
+
     def test_nested_decision_ledger_snapshot_rebinding_fails_closed(self) -> None:
         original = JsonlDecisionLedger.verified_snapshot
 

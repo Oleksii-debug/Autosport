@@ -434,6 +434,47 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 reopened.close()
 
+    def test_restart_does_not_parse_untrusted_old_projection_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            event = self.event(
+                sequence=1,
+                odds="2.00",
+                observed_ts="2026-09-16T19:00:00+00:00",
+            )
+            store = SQLiteMarketStore(path)
+            try:
+                self.assertTrue(store.append(event))
+            finally:
+                store.close()
+
+            pathological_json = "[" * 2000 + "0" + "]" * 2000
+            external = sqlite3.connect(path)
+            try:
+                external.execute(
+                    """UPDATE current_quotes
+                       SET payload_json=?
+                       WHERE source_id=? AND quote_key=?""",
+                    (
+                        pathological_json,
+                        event.source_id,
+                        event.quote_key,
+                    ),
+                )
+                external.commit()
+            finally:
+                external.close()
+
+            reopened = SQLiteMarketStore(path)
+            try:
+                current = reopened.current_by_source()
+                self.assertEqual(
+                    current[(event.source_id, event.quote_key)],
+                    event,
+                )
+            finally:
+                reopened.close()
+
     def test_late_backdated_append_cannot_rewrite_frozen_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

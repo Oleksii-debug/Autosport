@@ -131,6 +131,17 @@ def _build_session_authority_surface_meta():
     sealed_classes: set[type] = set()
     protected_names = frozenset(
         {
+            "venue_id",
+            "login_method",
+            "jurisdiction",
+            "login_endpoint",
+            "issued_at",
+            "response_sha256",
+            "origin_id",
+            "session_context_id",
+            "account_identity_id",
+            "session_origin_id",
+            "authority_id",
             "remote_provider_origin_proven",
             "remote_provider_jurisdiction_proven",
             "execution_authorized",
@@ -815,16 +826,22 @@ def _build_origin_authority_runtime():
                     record.origin_id,
                     origin_fingerprint(value),
                 ):
+                    issued.pop(id(value), None)
                     return False
             except Exception:
+                issued.pop(id(value), None)
                 return False
             if credentials is not None and record.credentials is not credentials:
                 return False
             try:
                 current = credential_binding(record.credentials)
             except Exception:
+                issued.pop(id(value), None)
                 return False
-            return hmac_compare_digest(record.credential_binding, current)
+            if not hmac_compare_digest(record.credential_binding, current):
+                issued.pop(id(value), None)
+                return False
+            return True
 
     def require(
         value: object,
@@ -1126,26 +1143,31 @@ def _build_bound_authority_runtime(require_origin):
                     record.authority_id,
                     bound_fingerprint(value),
                 ):
+                    issued.pop(id(value), None)
                     return False
             except Exception:
+                issued.pop(id(value), None)
                 return False
             origin = record.origin_ref()
             identity = record.identity_ref()
             issued_client = record.client_ref()
             if origin is None or identity is None or issued_client is None:
+                issued.pop(id(value), None)
                 return False
             if client is not None and issued_client is not client:
                 return False
             credentials = getattr(issued_client, "_credentials", None)
             if type(credentials) is not credentials_type:
+                issued.pop(id(value), None)
                 return False
             try:
                 require_origin(origin, credentials=credentials)
                 identity_require(identity, client=issued_client)
                 origin_id = canonical_origin_id(origin)
             except Exception:
+                issued.pop(id(value), None)
                 return False
-            return (
+            valid = (
                 value.session_context_id == identity.session_context_id
                 and value.account_identity_id == identity.identity_id
                 and value.session_origin_id == origin_id
@@ -1154,6 +1176,9 @@ def _build_bound_authority_runtime(require_origin):
                 and value.remote_provider_jurisdiction_proven is False
                 and value.execution_authorized is False
             )
+            if not valid:
+                issued.pop(id(value), None)
+            return valid
 
     def require(
         value: object,

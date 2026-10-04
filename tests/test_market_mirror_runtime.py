@@ -219,6 +219,48 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
                 semantic_refresh_keys=(("provider-b", "quote-b"),),
             )
 
+    def test_invalidation_batch_rejects_duplicate_key_metadata(self) -> None:
+        duplicate = ("provider-a", "quote-a")
+        with self.assertRaisesRegex(
+            ValueError,
+            "changed invalidation keys must be unique",
+        ):
+            MirrorInvalidationBatch(
+                changed_keys=(duplicate, duplicate),
+                full_refresh_required=False,
+                has_more=False,
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "semantic refresh keys must be unique",
+        ):
+            MirrorInvalidationBatch(
+                changed_keys=(duplicate,),
+                full_refresh_required=False,
+                has_more=False,
+                semantic_refresh_keys=(duplicate, duplicate),
+            )
+
+    def test_invalidation_batch_rejects_non_boolean_flags(self) -> None:
+        with self.assertRaisesRegex(
+            TypeError,
+            "invalidation batch flags must be booleans",
+        ):
+            MirrorInvalidationBatch(
+                changed_keys=(),
+                full_refresh_required=1,
+                has_more=False,
+            )
+        with self.assertRaisesRegex(
+            TypeError,
+            "invalidation batch flags must be booleans",
+        ):
+            MirrorInvalidationBatch(
+                changed_keys=(),
+                full_refresh_required=False,
+                has_more=0,
+            )
+
     def test_full_refresh_batch_rejects_bounded_key_state(self) -> None:
         contradictory = (
             {

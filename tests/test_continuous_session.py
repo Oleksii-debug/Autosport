@@ -3832,6 +3832,66 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 restarted_store.close()
 
+    def test_settlement_completion_cannot_drop_unprocessed_pending_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-state-completion",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            first = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:completion-first",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="completion-first-evidence",
+                evidence_sha256="e" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            second = SettlementResolution(
+                event_identity="provider-a:event-2",
+                settlement_ref="result:completion-second",
+                quote_outcomes={"event-2|winner|away": "win"},
+                evidence_id="completion-second-evidence",
+                evidence_sha256="f" * 64,
+                available_at="2026-09-19T21:19:31+00:00",
+            )
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(first, second),
+                )
+                coordinator._state.complete_pending_settlement_commit(
+                    settlement_evidence=(first,),
+                    retain_pending_evidence_ids=(),
+                )
+                self.assertEqual(
+                    coordinator.status().pending_settlement_evidence_ids,
+                    (second.evidence_id,),
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "retained pending settlement identity was not processed",
+                ):
+                    coordinator._state.complete_pending_settlement_commit(
+                        settlement_evidence=(second,),
+                        retain_pending_evidence_ids=("foreign-evidence",),
+                    )
+                self.assertEqual(
+                    coordinator.status().pending_settlement_evidence_ids,
+                    (second.evidence_id,),
+                )
+            finally:
+                store.close()
+
     def test_pending_settlement_outcomes_tamper_fails_digest_reproof(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -1,9 +1,11 @@
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 import sqlite3
 from threading import Event, Lock, Thread
 import tempfile
 
+import autosport.storage as storage_module
 from autosport.domain import MarketEvent
 from autosport.market_mirror import MarketMirror, MirrorUpdate
 from autosport.market_mirror_updates import BufferSubmit, MarketMirrorUpdateBuffer
@@ -110,6 +112,139 @@ def test_persist_first_buffer_writes_durable_history_before_live_state() -> None
             assert len(drained.applied) == 1
             assert store.events() == [event]
             assert mirror.get("provider-a", "event-1", "winner", "home") == event
+        finally:
+            store.close()
+
+
+def test_persisted_duplicate_uses_canonical_durable_local_clocks() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        store = SQLiteMarketStore(Path(directory) / "market.db")
+        original = MarketEvent(
+            event_id="event-1",
+            market_id="winner",
+            selection_id="home",
+            decimal_odds=Decimal("2.00"),
+            observed_ts="2026-09-17T02:00:00+00:00",
+            ingest_ts="2026-09-17T02:00:00+00:00",
+            source_id="provider-a",
+            sequence=1,
+            status="open",
+        )
+        retry = MarketEvent(
+            event_id=original.event_id,
+            market_id=original.market_id,
+            selection_id=original.selection_id,
+            decimal_odds=original.decimal_odds,
+            observed_ts="2026-09-17T02:00:02+00:00",
+            ingest_ts="2026-09-17T02:00:02+00:00",
+            source_id=original.source_id,
+            sequence=original.sequence,
+            status=original.status,
+        )
+        try:
+            assert original.dedupe_key == retry.dedupe_key
+            assert store.append(original)
+
+            mirror = MarketMirror()
+            buffer = MarketMirrorUpdateBuffer(mirror, store=store)
+            buffer.submit(retry)
+            drained = buffer.drain_provider("provider-a")
+
+            assert len(drained.applied) == 1
+            assert drained.applied[0].status is MirrorUpdate.APPLIED
+            live = mirror.get("provider-a", "event-1", "winner", "home")
+            assert live == original
+            assert live != retry
+        finally:
+            store.close()
+
+
+def test_persisted_generation_zero_duplicate_stays_noncausal() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "market.db"
+        legacy = _event("provider-a", 2, "2.20")
+        payload = storage_module._canonical_payload(legacy)
+
+        raw = sqlite3.connect(path)
+        try:
+            raw.execute(
+                """CREATE TABLE market_events (
+                    dedupe_key TEXT PRIMARY KEY,
+                    quote_key TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    market_id TEXT NOT NULL,
+                    selection_id TEXT NOT NULL,
+                    decimal_odds TEXT NOT NULL,
+                    observed_ts TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL
+                )"""
+            )
+            raw.execute(
+                """CREATE TABLE current_quotes (
+                    source_id TEXT NOT NULL,
+                    quote_key TEXT NOT NULL,
+                    observed_ts TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY (source_id, quote_key)
+                )"""
+            )
+            raw.execute(
+                """INSERT INTO market_events
+                   (dedupe_key,quote_key,event_id,market_id,selection_id,
+                    decimal_odds,observed_ts,source_id,sequence,payload_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    legacy.dedupe_key,
+                    legacy.quote_key,
+                    legacy.event_id,
+                    legacy.market_id,
+                    legacy.selection_id,
+                    str(legacy.decimal_odds),
+                    legacy.observed_ts,
+                    legacy.source_id,
+                    legacy.sequence,
+                    payload,
+                ),
+            )
+            raw.execute(
+                """INSERT INTO current_quotes
+                   (source_id,quote_key,observed_ts,sequence,payload_json)
+                   VALUES (?,?,?,?,?)""",
+                (
+                    legacy.source_id,
+                    legacy.quote_key,
+                    legacy.observed_ts,
+                    legacy.sequence,
+                    payload,
+                ),
+            )
+            raw.commit()
+        finally:
+            raw.close()
+
+        store = SQLiteMarketStore(path)
+        try:
+            assert store.connection.execute(
+                """SELECT append_generation
+                   FROM market_event_commit_order
+                   WHERE dedupe_key=?""",
+                (legacy.dedupe_key,),
+            ).fetchone() == (0,)
+
+            mirror = MarketMirror()
+            buffer = MarketMirrorUpdateBuffer(mirror, store=store)
+            buffer.submit(legacy)
+            drained = buffer.drain_provider("provider-a")
+
+            assert len(drained.applied) == 1
+            assert mirror.get("provider-a", "event-1", "winner", "home") == legacy
+            assert mirror.active_snapshot(
+                as_of=datetime(2026, 9, 17, 2, 0, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=2),
+            ) == ()
         finally:
             store.close()
 

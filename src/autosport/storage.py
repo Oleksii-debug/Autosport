@@ -863,9 +863,6 @@ class SQLiteMarketStore:
                 )
             self.connection.execute("BEGIN IMMEDIATE")
             try:
-                history_count_before = self.connection.execute(
-                    "SELECT COUNT(*) FROM market_events"
-                ).fetchone()[0]
                 preexisting: set[str] = set()
                 canonical_by_dedupe: dict[str, MarketEvent] = {}
                 for event in canonical_events:
@@ -877,6 +874,8 @@ class SQLiteMarketStore:
                             "conflicting duplicate live market event identity: "
                             f"{event.dedupe_key}"
                         )
+
+                for event in canonical_by_dedupe.values():
                     row = self.connection.execute(
                         f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE dedupe_key=?",
                         (event.dedupe_key,),
@@ -884,6 +883,30 @@ class SQLiteMarketStore:
                     if row is not None:
                         preexisting.add(event.dedupe_key)
 
+                expected_append_changes = 0
+                projection_state: dict[tuple[str, str], MarketEvent | None] = {}
+                for event in canonical_by_dedupe.values():
+                    if event.dedupe_key in preexisting:
+                        continue
+                    expected_append_changes += 1
+                    projection_key = (event.source_id, event.quote_key)
+                    if projection_key not in projection_state:
+                        row = self.connection.execute(
+                            f"""SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes
+                                WHERE source_id=? AND quote_key=?""",
+                            projection_key,
+                        ).fetchone()
+                        projection_state[projection_key] = (
+                            _event_from_current_row(row) if row is not None else None
+                        )
+                    previous = projection_state[projection_key]
+                    if previous is None or _projection_order_key(event) > _projection_order_key(
+                        previous
+                    ):
+                        expected_append_changes += 1
+                        projection_state[projection_key] = event
+
+                changes_before = self.connection.total_changes
                 accepted = self.append_batch_accepted(batch)
                 if not self.connection.in_transaction:
                     raise RuntimeError(
@@ -911,12 +934,9 @@ class SQLiteMarketStore:
                         )
                     expected.append(stored)
 
-                history_count_after = self.connection.execute(
-                    "SELECT COUNT(*) FROM market_events"
-                ).fetchone()[0]
-                if history_count_after - history_count_before != len(expected):
+                if self.connection.total_changes - changes_before != expected_append_changes:
                     raise RuntimeError(
-                        "live append hook changed market history outside the canonical batch"
+                        "live append hook changed storage outside the canonical batch"
                     )
 
                 if any(type(event) is not MarketEvent for event in accepted):

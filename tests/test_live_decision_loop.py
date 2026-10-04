@@ -1011,6 +1011,123 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             self.assertEqual(health_store.get("provider-a").status, "healthy")
 
+    def test_custom_observer_provider_gap_without_provider_cannot_borrow_failure_from_another_source(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=400)).isoformat(),
+                received=0,
+                accepted=0,
+                rejected=0,
+                cursor=None,
+                latest_source_ts=None,
+                quality_flags=(),
+            )
+            health_store.record_failure(
+                "provider-b",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                error=ProviderUnavailableError("provider-b offline"),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [ProviderUnavailableError("observation unavailable")],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            loop.register_input(
+                "input-b",
+                source_ids="provider-b",
+                selection_ids="selection-b",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("durable failed provider health evidence", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            self.assertEqual(health_store.get("provider-a").status, "healthy")
+            self.assertEqual(health_store.get("provider-b").status, "failed")
+            loop.close()
+
+    def test_custom_observer_provider_gap_without_provider_accepts_only_all_bound_failed_sources(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_failure(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=400)).isoformat(),
+                error=ProviderUnavailableError("provider-a offline"),
+            )
+            health_store.record_failure(
+                "provider-b",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                error=ProviderUnavailableError("provider-b offline"),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [ProviderUnavailableError("observation unavailable")],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            loop.register_input(
+                "input-b",
+                source_ids="provider-b",
+                selection_ids="selection-b",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.PROVIDER_GAP)
+            progress = loop._load_progress()
+            self.assertIsNotNone(progress)
+            self.assertEqual(progress.gate, "provider_gap")
+            self.assertEqual(
+                tuple(
+                    boundary.source_id
+                    for boundary in progress.provider_health_boundaries
+                ),
+                ("provider-a", "provider-b"),
+            )
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertEqual(record.payload["gate"], "provider_gap")
+            self.assertEqual(
+                tuple(
+                    boundary["source_id"]
+                    for boundary in record.payload["provider_health_boundaries"]
+                ),
+                ("provider-a", "provider-b"),
+            )
+            loop.close()
+
     def test_provider_gap_cannot_borrow_failure_from_another_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -877,6 +877,7 @@ def _amount(value: Decimal, label: str) -> None:
         )
 
 
+
 def _exact_decimal_sum_is_one(values: tuple[Decimal, ...]) -> bool:
     """Test exact positive-Decimal conservation without exponent-gap expansion.
 
@@ -925,7 +926,6 @@ def _exact_decimal_sum_is_one(values: tuple[Decimal, ...]) -> bool:
 
     return saw_unit
 
-
 def _sorted_text(values: tuple[str, ...], label: str) -> None:
     for value in values:
         _text(value, label)
@@ -944,6 +944,7 @@ def _utc(value: datetime, label: str) -> None:
         raise MonetaryAuthorityError(f"{label} must be UTC")
 
 
+
 def _fixed_decimal_text_size_upper_bound(value: Decimal) -> int:
     """Return fixed-point text size without materializing exponent-distance zeros."""
 
@@ -957,7 +958,6 @@ def _fixed_decimal_text_size_upper_bound(value: Decimal) -> int:
     if integer_digit_count > 0:
         return digit_count + 1
     return 2 - exponent
-
 
 def _decimal(value: Decimal) -> str:
     _amount(value, "decimal")

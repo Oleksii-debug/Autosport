@@ -263,6 +263,52 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 bridge.agent_loop = AgentLoopRuntime(root / "agent-loop.json")
             self.assertIs(bridge.agent_loop, original_loop)
 
+    def test_bridge_seal_survives_authority_field_declaration_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            *_prefix, bridge = _fixture(root, legs=(leg,))
+            original_fields = PaperSettlementLearningBridge._AUTHORITY_FIELDS
+            try:
+                PaperSettlementLearningBridge._AUTHORITY_FIELDS = frozenset()
+                with self.assertRaisesRegex(
+                    PaperSettlementLearningBridgeError,
+                    "settlement learning authority field agent_loop is immutable",
+                ):
+                    bridge.agent_loop = AgentLoopRuntime(root / "agent-loop.json")
+            finally:
+                PaperSettlementLearningBridge._AUTHORITY_FIELDS = original_fields
+
+    def test_learning_identity_changes_if_authority_field_declaration_changes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            *_prefix, bridge = _fixture(root, legs=(leg,))
+            baseline = _settlement_learning_handoff_identity(handoff=bridge)
+            original_fields = PaperSettlementLearningBridge._AUTHORITY_FIELDS
+            try:
+                PaperSettlementLearningBridge._AUTHORITY_FIELDS = frozenset(
+                    {"agent_loop"}
+                )
+                changed = _settlement_learning_handoff_identity(handoff=bridge)
+                self.assertNotEqual(changed, baseline)
+            finally:
+                PaperSettlementLearningBridge._AUTHORITY_FIELDS = original_fields
+
     def test_outbox_survives_failure_before_agent_loop_ack(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -205,6 +205,88 @@ def test_product_runtime_rejects_low_level_parlay_authority_root_replacement(
         runtime.close()
 
 
+def test_parlay_source_seal_survives_authority_field_declaration_rebind(
+    tmp_path,
+) -> None:
+    class _Provider:
+        source_id = "parlayapi:table_tennis"
+
+        def read_batch(self, _max_items=1000):
+            raise AssertionError("seal test must not perform provider I/O")
+
+    source = ParlayApiProductSource(
+        _Provider(),
+        workspace=tmp_path / "source-workspace",
+        authority_root=tmp_path / "authority",
+        lawful_terms_ref="terms:parlayapi:test",
+        retention_ref="retention:parlayapi:test",
+        clock=lambda: NOW,
+    )
+    original_fields = ParlayApiProductSource._AUTHORITY_FIELDS
+    try:
+        ParlayApiProductSource._AUTHORITY_FIELDS = frozenset()
+        with pytest.raises(
+            ProductSourceStateError,
+            match="product source authority field provider is immutable",
+        ):
+            source.provider = _Provider()
+    finally:
+        ParlayApiProductSource._AUTHORITY_FIELDS = original_fields
+
+
+def test_restart_rejects_parlay_authority_field_declaration_drift(
+    tmp_path,
+) -> None:
+    class _Provider:
+        source_id = "parlayapi:table_tennis"
+
+        def read_batch(self, _max_items=1000):
+            raise AssertionError("declaration identity test must not perform provider I/O")
+
+    source_workspace = tmp_path / "source-workspace"
+    authority_root = tmp_path / "authority"
+    runtime_workspace = tmp_path / "runtime-workspace"
+    first_source = ParlayApiProductSource(
+        _Provider(),
+        workspace=source_workspace,
+        authority_root=authority_root,
+        lawful_terms_ref="terms:parlayapi:test",
+        retention_ref="retention:parlayapi:test",
+        clock=lambda: NOW,
+    )
+    runtime = build_autonomous_product_runtime(
+        workspace=runtime_workspace,
+        source=first_source,
+        clock=lambda: NOW,
+        initial_bankroll="100",
+    )
+    runtime.close()
+
+    original_fields = ParlayApiProductSource._AUTHORITY_FIELDS
+    try:
+        ParlayApiProductSource._AUTHORITY_FIELDS = frozenset({"provider"})
+        restarted_source = ParlayApiProductSource(
+            _Provider(),
+            workspace=source_workspace,
+            authority_root=authority_root,
+            lawful_terms_ref="terms:parlayapi:test",
+            retention_ref="retention:parlayapi:test",
+            clock=lambda: NOW,
+        )
+        with pytest.raises(
+            ProductCompositionError,
+            match="source resolver identity conflicts with durable product composition",
+        ):
+            build_autonomous_product_runtime(
+                workspace=runtime_workspace,
+                source=restarted_source,
+                clock=lambda: NOW,
+                initial_bankroll="100",
+            )
+    finally:
+        ParlayApiProductSource._AUTHORITY_FIELDS = original_fields
+
+
 def test_live_settlement_resolution_is_routed_through_product_authority_proxy(
     tmp_path,
 ) -> None:

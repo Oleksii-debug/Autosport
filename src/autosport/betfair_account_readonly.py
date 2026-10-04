@@ -1688,34 +1688,6 @@ def _install_market_book_depth_authority():
             and urlopen is canonical_urlopen
         )
 
-    def ladder_read_dispatch_intact() -> bool:
-        return (
-            raw_read.__code__ is raw_read_code
-            and _market_price_ladder_fingerprint is fingerprint
-            and fingerprint.__code__ is fingerprint_code
-            and _required_text is canonical_required_text
-            and canonical_required_text.__code__ is canonical_required_text_code
-            and _sequence is canonical_sequence
-            and canonical_sequence.__code__ is canonical_sequence_code
-            and _mapping is canonical_mapping
-            and canonical_mapping.__code__ is canonical_mapping_code
-            and _provider_text is canonical_provider_text
-            and canonical_provider_text.__code__ is canonical_provider_text_code
-            and _number is canonical_number
-            and canonical_number.__code__ is canonical_number_code
-            and _decimal is canonical_decimal
-            and canonical_decimal.__code__ is canonical_decimal_code
-            and _canonical_sha256 is canonical_hash
-            and canonical_hash.__code__ is canonical_hash_code
-            and Mapping is canonical_mapping_type
-            and Decimal is canonical_decimal_type
-            and json is canonical_json_module
-            and sha256 is canonical_sha256_function
-            and BetfairReadOnlyError is canonical_error_type
-            and BetfairMarketPriceLadderObservation is canonical_observation_type
-            and _LIST_MARKET_CATALOGUE == canonical_catalogue_method
-        )
-
     def canonical_now(label: str) -> datetime:
         value = canonical_clock()
         if (
@@ -1918,6 +1890,34 @@ def _install_market_price_ladder_authority():
             and (canonical_post.__kwdefaults__ or {}).get("_urlopen")
             is canonical_urlopen
             and urlopen is canonical_urlopen
+        )
+
+    def ladder_read_dispatch_intact() -> bool:
+        return (
+            raw_read.__code__ is raw_read_code
+            and _market_price_ladder_fingerprint is fingerprint
+            and fingerprint.__code__ is fingerprint_code
+            and _required_text is canonical_required_text
+            and canonical_required_text.__code__ is canonical_required_text_code
+            and _sequence is canonical_sequence
+            and canonical_sequence.__code__ is canonical_sequence_code
+            and _mapping is canonical_mapping
+            and canonical_mapping.__code__ is canonical_mapping_code
+            and _provider_text is canonical_provider_text
+            and canonical_provider_text.__code__ is canonical_provider_text_code
+            and _number is canonical_number
+            and canonical_number.__code__ is canonical_number_code
+            and _decimal is canonical_decimal
+            and canonical_decimal.__code__ is canonical_decimal_code
+            and _canonical_sha256 is canonical_hash
+            and canonical_hash.__code__ is canonical_hash_code
+            and Mapping is canonical_mapping_type
+            and Decimal is canonical_decimal_type
+            and json is canonical_json_module
+            and sha256 is canonical_sha256_function
+            and BetfairReadOnlyError is canonical_error_type
+            and BetfairMarketPriceLadderObservation is canonical_observation_type
+            and _LIST_MARKET_CATALOGUE == canonical_catalogue_method
         )
 
     def canonical_now(label: str) -> datetime:

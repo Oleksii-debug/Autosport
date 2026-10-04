@@ -1624,6 +1624,60 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertIsNone(loop._availability_deadlines["input-a"])
             loop.close()
 
+    def test_future_local_availability_is_rebuilt_across_clean_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            future_ingest = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.00"),
+                observed_ts=self.START.isoformat(),
+                source_id="provider-a",
+                sequence=1,
+                status="open",
+                source_ts=self.START.isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=3)).isoformat(),
+            )
+            first_clock = _ManualClock(self.START + timedelta(seconds=1))
+            first_factory = _EmptyIntentFactory()
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(future_ingest,)]),
+                factory=first_factory,
+                clock=first_clock,
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                first._availability_deadlines["input-a"],
+                self.START + timedelta(seconds=3),
+            )
+            first.close()
+
+            resumed_clock = _ManualClock(self.START + timedelta(seconds=2))
+            resumed_factory = _EmptyIntentFactory()
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(), ()]),
+                factory=resumed_factory,
+                clock=resumed_clock,
+            )
+            self.assertEqual(resumed.run_cycle().status, LiveCycleStatus.NO_CHANGE)
+            self.assertEqual(
+                resumed._availability_deadlines["input-a"],
+                self.START + timedelta(seconds=3),
+            )
+
+            resumed_factory.calls.clear()
+            resumed_clock.value = self.START + timedelta(seconds=3)
+            self.assertEqual(resumed.run_cycle().status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                resumed_factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+            resumed.close()
+
     def test_future_local_availability_after_quote_expiry_does_not_schedule_false_activation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -2061,16 +2115,27 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             loop._freshness_generations["input-a"] = 7
             loop._freshness_deadlines["input-a"] = old_deadline
             loop._freshness_heap.append((old_deadline, "input-a", 7))
+            loop._availability_generations["input-a"] = 11
+            loop._availability_deadlines["input-a"] = old_deadline
+            loop._availability_heap.append((old_deadline, "input-a", 11))
 
             self.assertTrue(loop.unregister_input("input-a"))
             self.assertEqual(loop._freshness_generations["input-a"], 8)
             self.assertNotIn("input-a", loop._freshness_deadlines)
+            self.assertEqual(loop._availability_generations["input-a"], 12)
+            self.assertNotIn("input-a", loop._availability_deadlines)
 
             loop.register_input("input-a", selection_ids="selection-a")
             expired = loop._expire_freshness_inputs(old_deadline + timedelta(seconds=1))
+            activated = loop._activate_available_inputs(
+                old_deadline + timedelta(seconds=1)
+            )
             self.assertEqual(expired, ())
+            self.assertEqual(activated, ())
             self.assertEqual(loop._freshness_generations["input-a"], 8)
             self.assertNotIn("input-a", loop._freshness_deadlines)
+            self.assertEqual(loop._availability_generations["input-a"], 12)
+            self.assertNotIn("input-a", loop._availability_deadlines)
             loop.close()
 
     def test_corrupted_dependency_registry_fails_closed_on_restart(self) -> None:

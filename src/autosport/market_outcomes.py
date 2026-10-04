@@ -552,10 +552,10 @@ class MarketOutcomeAuthorityAssessment:
     refusal_reason: str | None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.identity, MarketOutcomeIdentity):
-            raise TypeError("assessment identity must be MarketOutcomeIdentity")
-        if not isinstance(self.status, OutcomeAuthorityStatus):
-            raise ValueError("assessment status must be OutcomeAuthorityStatus")
+        if type(self.identity) is not MarketOutcomeIdentity:
+            raise TypeError("assessment identity must be exact MarketOutcomeIdentity")
+        if type(self.status) is not OutcomeAuthorityStatus:
+            raise ValueError("assessment status must be exact OutcomeAuthorityStatus")
         if self.status is OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE:
             if (
                 type(self.authority) is not MarketSettlementOutcomeAuthority
@@ -585,10 +585,10 @@ def assess_market_outcome_authority(
 ) -> MarketOutcomeAuthorityAssessment:
     """Refuse raw caller assertions; exhaustive authority needs verified source evidence."""
 
-    if not isinstance(identity, MarketOutcomeIdentity):
-        raise TypeError("identity must be MarketOutcomeIdentity")
-    if not isinstance(roster_basis, OutcomeRosterBasis):
-        raise ValueError("roster_basis must be OutcomeRosterBasis")
+    if type(identity) is not MarketOutcomeIdentity:
+        raise TypeError("identity must be exact MarketOutcomeIdentity")
+    if type(roster_basis) is not OutcomeRosterBasis:
+        raise ValueError("roster_basis must be exact OutcomeRosterBasis")
     if roster_basis is OutcomeRosterBasis.OBSERVED_ROWS_ONLY:
         reason = "observed_rows_do_not_prove_exhaustive_selection_roster"
     elif identity.market_type is not MarketType.WINNER:

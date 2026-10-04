@@ -8,8 +8,8 @@ from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
-from typing import BinaryIO
 from types import FunctionType
+from typing import BinaryIO
 
 from .monotonic_workspace_authority import (
     AuthorityPhase,
@@ -61,6 +61,7 @@ def _build_durable_failure_renderer():
 
     canonical_renderer = safe_exception_text
     canonical_globals = canonical_renderer.__globals__
+    fallback = _DURABLE_FAILURE_FALLBACK
 
     function_witness = tuple(
         (name, value, value.__code__)
@@ -93,13 +94,13 @@ def _build_durable_failure_renderer():
 
     def render(exc: BaseException) -> str:
         if not authority_current():
-            return _DURABLE_FAILURE_FALLBACK
+            return fallback
         try:
             rendered = canonical_renderer(exc)
         except BaseException:
-            return _DURABLE_FAILURE_FALLBACK
+            return fallback
         if not authority_current() or type(rendered) is not str or not rendered:
-            return _DURABLE_FAILURE_FALLBACK
+            return fallback
         return rendered
 
     return render

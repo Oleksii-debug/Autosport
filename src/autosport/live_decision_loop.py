@@ -1075,6 +1075,32 @@ class PersistentLiveDecisionLoop:
     def stop(self) -> None:
         self._persist_control(LiveControlState.STOPPED)
 
+    def _refresh_cycle_authorities(self) -> None:
+        """Fence stale loop instances before catalog/provider observation."""
+
+        with WorkspaceEconomicLock(self.workspace):
+            durable_progress = self._load_progress()
+            if durable_progress != self._progress:
+                raise LiveDecisionProgressError(
+                    "live decision progress changed concurrently before cycle"
+                )
+
+            durable_input_specs = self._load_input_registry() or ()
+            if durable_input_specs != tuple(self._input_specs.values()):
+                raise LiveDecisionProgressError(
+                    "live dependency registry changed concurrently before cycle"
+                )
+
+            durable_control = self._load_control()
+            if durable_control is None:
+                durable_control = _Control(self.loop_id, LiveControlState.RUNNING)
+            elif durable_control.loop_id != self.loop_id:
+                raise LiveDecisionProgressError(
+                    "persisted live control belongs to a different loop_id"
+                )
+
+        self._control = durable_control
+
     def _sample_clock(self) -> datetime:
         """Return UTC wall time without allowing causal decision chronology to regress."""
 
@@ -1113,6 +1139,8 @@ class PersistentLiveDecisionLoop:
         return tuple(results)
 
     def run_cycle(self) -> LiveCycleResult:
+        self._refresh_cycle_authorities()
+
         # PENDING/APPEND_PENDING is an already-started durable transaction. Finish
         # or fail closed on that exact identity before honoring a later PAUSE/STOP;
         # otherwise an operator control written after publication can strand an

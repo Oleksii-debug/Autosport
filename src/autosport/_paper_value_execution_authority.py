@@ -1001,13 +1001,14 @@ def _authorize_descriptor(
         trigger_id=trigger_id,
         started_at=started_at,
     )
-    return self._mint_prepared(
+    prepared = self._mint_prepared(
         PreparedPaperExecution(
             execution_plan=descriptor.execution_plan,
             exposure_bindings=descriptor.exposure_bindings,
             intent_evidence_json=descriptor.intent_evidence_json,
         )
     )
+    return prepared
 
 
 def _execute(

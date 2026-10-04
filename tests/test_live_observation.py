@@ -128,6 +128,40 @@ class LiveObservationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_long_lived_reconciliation_invalidates_preexisting_positive_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = self._observe(tmp)
+            self.assertEqual(first.stats.accepted, 2)
+
+            mirror = MarketMirror()
+            updates = BoundedMirrorInvalidationBuffer(mirror)
+            repeated = observe_workspace_once(
+                tmp,
+                self._provider(),
+                max_items=10,
+                clock=lambda: _RECEIVE_TIME,
+                mirror_updates=updates,
+            )
+
+            self.assertEqual(repeated.stats.accepted, 0)
+            active = mirror.active_view(
+                as_of=datetime.fromisoformat(_RECEIVE_TIME),
+                max_age=timedelta(minutes=2),
+                source_ids="live-fixture",
+            )
+            self.assertEqual(len(active.events), 2)
+
+            batch = updates.drain(max_items=10)
+            self.assertFalse(batch.full_refresh_required)
+            self.assertFalse(batch.has_more)
+            self.assertEqual(
+                set(batch.changed_keys),
+                {
+                    (event.source_id, event.quote_key)
+                    for event in active.events
+                },
+            )
+
     def test_long_lived_reconciliation_preserves_generation_zero_as_noncausal(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

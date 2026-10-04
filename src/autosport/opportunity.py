@@ -261,7 +261,10 @@ class QuoteRef:
     market_snapshot_hash: str | None = None
     sport: str | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _finite_decimal_fn=_finite_decimal,
+    ) -> None:
         for name in (
             "event_id",
             "market_id",
@@ -277,7 +280,7 @@ class QuoteRef:
             raise OpportunityContractError(
                 "quote sequence must be a non-negative non-boolean int"
             )
-        odds = _finite_decimal(self.decimal_odds, "quote decimal_odds")
+        odds = _finite_decimal_fn(self.decimal_odds, "quote decimal_odds")
         if odds <= 1:
             raise OpportunityContractError(
                 "quote decimal_odds must be greater than 1"
@@ -286,8 +289,8 @@ class QuoteRef:
         _optional_hash(self.market_snapshot_hash, "market_snapshot_hash")
 
     @property
-    def quote_key(self) -> str:
-        return _quote_key(
+    def quote_key(self, _quote_key_fn=_quote_key) -> str:
+        return _quote_key_fn(
             self.event_id,
             self.market_id,
             self.selection_id,
@@ -311,8 +314,10 @@ class QuoteRef:
         event: MarketEvent,
         *,
         market_snapshot_hash: str | None = None,
+        _canonical_market_event_copy_fn=_canonical_market_event_copy,
+        _canonical_json_hash_fn=_canonical_json_hash,
     ) -> "QuoteRef":
-        canonical = _canonical_market_event_copy(event)
+        canonical = _canonical_market_event_copy_fn(event)
         payload = canonical.to_dict()
         return cls(
             event_id=canonical.event_id,
@@ -324,7 +329,7 @@ class QuoteRef:
             observed_ts=canonical.observed_ts,
             source_ts=canonical.source_ts,
             ingest_ts=canonical.ingest_ts,
-            market_event_hash=_canonical_json_hash(payload),
+            market_event_hash=_canonical_json_hash_fn(payload),
             market_snapshot_hash=_optional_hash(
                 market_snapshot_hash,
                 "market_snapshot_hash",
@@ -432,6 +437,7 @@ class PredictiveEligibilityEvidence:
     def __post_init__(
         self,
         _parse_iso_timestamp=parse_iso_timestamp,
+        _finite_decimal_fn=_finite_decimal,
     ) -> None:
         _canonical_text(self.evaluation_id, "predictive evaluation_id")
         _canonical_hash(self.evaluation_sha256, "predictive evaluation_sha256")
@@ -458,7 +464,7 @@ class PredictiveEligibilityEvidence:
             raise OpportunityContractError(
                 "predictive minimum_sample_size must be a positive non-boolean int"
             )
-        maximum = _finite_decimal(
+        maximum = _finite_decimal_fn(
             self.maximum_uncertainty,
             "predictive maximum_uncertainty",
             nonnegative=True,
@@ -614,11 +620,12 @@ class ForecastRef:
             PredictiveEligibilityEvidence
         ),
         _parse_iso_timestamp=parse_iso_timestamp,
+        _finite_decimal_fn=_finite_decimal,
     ) -> None:
         _canonical_text(self.forecast_id, "forecast_id")
         _canonical_hash(self.forecast_hash, "forecast_hash")
         _canonical_text(self.quote_key, "forecast quote_key")
-        probability = _finite_decimal(
+        probability = _finite_decimal_fn(
             self.probability, "forecast probability"
         )
         if probability < 0 or probability > 1:
@@ -649,7 +656,7 @@ class ForecastRef:
             _canonical_text(self.model_id, "forecast model_id")
             _canonical_text(self.model_version, "forecast model_version")
             _canonical_text(self.strategy_version, "forecast strategy_version")
-            uncertainty = _finite_decimal(
+            uncertainty = _finite_decimal_fn(
                 self.uncertainty,
                 "forecast uncertainty",
                 nonnegative=True,
@@ -684,8 +691,9 @@ class ForecastRef:
         quote: QuoteRef,
         *,
         predictive_eligibility: PredictiveEligibilityEvidence | None = None,
+        _require_exact_forecast_binding_fn=_require_exact_forecast_binding,
     ) -> "ForecastRef":
-        forecast, quote = _require_exact_forecast_binding(forecast, quote)
+        forecast, quote = _require_exact_forecast_binding_fn(forecast, quote)
         if forecast.quote_key != quote.quote_key:
             raise OpportunityContractError(
                 "forecast quote_key does not match bound QuoteRef"
@@ -900,6 +908,7 @@ class Opportunity:
         _hybrid: StrategyClass = StrategyClass.HYBRID,
         _quote_ref_type: type[QuoteRef] = QuoteRef,
         _forecast_ref_type: type[ForecastRef] = ForecastRef,
+        _sorted_unique_evidence_fn=_sorted_unique_evidence,
     ) -> None:
         if type(self.strategy_class) is not _strategy_type:
             raise OpportunityContractError(
@@ -1004,7 +1013,7 @@ class Opportunity:
         object.__setattr__(
             self,
             "evidence_refs",
-            _sorted_unique_evidence(
+            _sorted_unique_evidence_fn(
                 self.evidence_refs,
                 "opportunity evidence_refs",
             ),
@@ -1053,14 +1062,20 @@ class Opportunity:
         }
 
     @property
-    def conflict_key(self) -> str:
+    def conflict_key(
+        self,
+        _canonical_json_hash_fn=_canonical_json_hash,
+    ) -> str:
         """Stable identity for one evidence-defined opportunity before decision state."""
 
-        return _canonical_json_hash(self._decision_independent_payload())
+        return _canonical_json_hash_fn(self._decision_independent_payload())
 
     @property
-    def opportunity_id(self) -> str:
-        return _canonical_json_hash(self._identity_payload())
+    def opportunity_id(
+        self,
+        _canonical_json_hash_fn=_canonical_json_hash,
+    ) -> str:
+        return _canonical_json_hash_fn(self._identity_payload())
 
     def _identity_payload(self) -> dict[str, Any]:
         return {
@@ -1176,8 +1191,11 @@ class OpportunitySet:
         object.__setattr__(self, "opportunities", ordered)
 
     @property
-    def opportunity_set_id(self) -> str:
-        return _canonical_json_hash(
+    def opportunity_set_id(
+        self,
+        _canonical_json_hash_fn=_canonical_json_hash,
+    ) -> str:
+        return _canonical_json_hash_fn(
             {
                 "opportunity_ids": [
                     item.opportunity_id for item in self.opportunities
@@ -1235,12 +1253,15 @@ class PlanAllocation:
     opportunity_id: str
     stake: Decimal
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _finite_decimal_fn=_finite_decimal,
+    ) -> None:
         _canonical_hash(
             self.opportunity_id,
             "allocation opportunity_id",
         )
-        _finite_decimal(
+        _finite_decimal_fn(
             self.stake,
             "allocation stake",
             nonnegative=True,
@@ -1302,6 +1323,7 @@ class PortfolioPlan:
         _opportunity_set_type: type[OpportunitySet] = OpportunitySet,
         _allocation_type: type[PlanAllocation] = PlanAllocation,
         _actionable_decision: OpportunityDecision = OpportunityDecision.ACTIONABLE,
+        _sorted_unique_evidence_fn=_sorted_unique_evidence,
     ) -> None:
         if type(self.opportunity_set) is not _opportunity_set_type:
             raise OpportunityContractError(
@@ -1344,15 +1366,15 @@ class PortfolioPlan:
                 )
         object.__setattr__(self, "allocations", allocations)
 
-        portfolio_refs = _sorted_unique_evidence(
+        portfolio_refs = _sorted_unique_evidence_fn(
             self.portfolio_evidence_refs,
             "portfolio_evidence_refs",
         )
-        risk_refs = _sorted_unique_evidence(
+        risk_refs = _sorted_unique_evidence_fn(
             self.risk_evidence_refs,
             "risk_evidence_refs",
         )
-        ledger_refs = _sorted_unique_evidence(
+        ledger_refs = _sorted_unique_evidence_fn(
             self.ledger_state_refs,
             "ledger_state_refs",
         )
@@ -1370,8 +1392,11 @@ class PortfolioPlan:
         object.__setattr__(self, "ledger_state_refs", ledger_refs)
 
     @property
-    def plan_id(self) -> str:
-        return _canonical_json_hash(self._identity_payload())
+    def plan_id(
+        self,
+        _canonical_json_hash_fn=_canonical_json_hash,
+    ) -> str:
+        return _canonical_json_hash_fn(self._identity_payload())
 
     def _identity_payload(self) -> dict[str, Any]:
         return {

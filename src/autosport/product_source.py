@@ -166,7 +166,7 @@ class ParlayApiProductSource:
             raise ProductSourcePayloadError(f"{field} must be valid ISO-8601") from exc
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             raise ProductSourcePayloadError(f"{field} must be timezone-aware ISO-8601")
-        fractional = re.search(r"\\d{2}:?\\d{2}:?\\d{2}[.,](\\d+)", raw)
+        fractional = re.search(r"\d{2}:?\d{2}:?\d{2}[.,](\d+)", raw)
         if fractional is not None:
             digits = fractional.group(1)
             if len(digits) > 6 and any(digit != "0" for digit in digits[6:]):

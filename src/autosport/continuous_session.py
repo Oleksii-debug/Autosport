@@ -1467,8 +1467,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
     def session_id(self) -> str:
         return self._state.session_id
 
-    def status(self) -> ContinuousSessionStatus:
-        snapshot = self._state.snapshot()
+    def _status_from_snapshot(
+        self,
+        snapshot: ContinuousSessionStatus,
+    ) -> ContinuousSessionStatus:
+        if not isinstance(snapshot, ContinuousSessionStatus):
+            raise TypeError("snapshot must be ContinuousSessionStatus")
         source_status = self.collector.status()
         source_last_success = source_status.get("last_success_at")
         source_last_error = source_status.get("last_error_code")
@@ -1492,6 +1496,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 self.invalidation_buffer.full_refresh_required
             ),
         )
+
+    def status(self) -> ContinuousSessionStatus:
+        """Return full audit status, including verified settlement history."""
+        return self._status_from_snapshot(self._state.snapshot())
+
+    def operational_status(self) -> ContinuousSessionStatus:
+        """Return bounded lifecycle/source status without scanning settlement history."""
+        return self._status_from_snapshot(self._state.operational_snapshot())
 
     def pause(self) -> None:
         self._state.set_state(SessionState.PAUSED)

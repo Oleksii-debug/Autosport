@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -294,3 +295,99 @@ def test_post_publish_ack_failure_is_restart_resolvable_and_retry_idempotent(
     retried = restarted.write_source_id("paper-fixture")
     assert retried == committed
     assert OperatorSourceConfigStore(path).read() == committed
+
+def test_symlinked_operator_source_config_is_rejected_without_following_target(
+    tmp_path: Path,
+) -> None:
+    external = tmp_path / "external"
+    external.mkdir()
+    target = external / "operator-source.json"
+    OperatorSourceConfigStore(target).write_source_id("paper-fixture")
+
+    path = tmp_path / "operator-source.json"
+    try:
+        path.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable on this runner: {exc}")
+
+    store = OperatorSourceConfigStore(path)
+    with pytest.raises(OperatorSourceStoreError, match="cannot be read"):
+        store.read()
+    result = store.resolve(admin_override_source_id=None)
+    assert result.state is OperatorSourceSelectionState.INVALID
+    assert result.source_id is None
+    assert path.is_symlink()
+    assert OperatorSourceConfigStore(target).read().source_id == "paper-fixture"
+
+
+def test_hard_linked_operator_source_config_is_rejected(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "external-operator-source.json"
+    OperatorSourceConfigStore(target).write_source_id("paper-fixture")
+    path = tmp_path / "operator-source.json"
+    try:
+        os.link(target, path)
+    except OSError as exc:
+        pytest.skip(f"hard links unavailable on this runner: {exc}")
+
+    store = OperatorSourceConfigStore(path)
+    with pytest.raises(OperatorSourceStoreError, match="cannot be read"):
+        store.read()
+    result = store.resolve(admin_override_source_id=None)
+    assert result.state is OperatorSourceSelectionState.INVALID
+    assert result.source_id is None
+
+
+def test_operator_source_config_path_replacement_during_read_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "operator-source.json"
+    replacement = tmp_path / "replacement.json"
+    original = OperatorSourceConfigStore(path).write_source_id("betfair-exchange")
+    OperatorSourceConfigStore(replacement).write_source_id("paper-fixture")
+
+    real_open = integrity._open_read_only_no_follow_descriptor
+    calls = 0
+
+    def redirect_verification_open(candidate: Path) -> int:
+        nonlocal calls
+        if Path(candidate) == path:
+            calls += 1
+            if calls == 2:
+                return real_open(replacement)
+        return real_open(candidate)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            integrity,
+            "_open_read_only_no_follow_descriptor",
+            redirect_verification_open,
+        )
+        with pytest.raises(OperatorSourceStoreError, match="cannot be read"):
+            OperatorSourceConfigStore(path).read()
+
+    assert OperatorSourceConfigStore(path).read() == original
+
+
+def test_oversized_operator_source_config_read_is_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "operator-source.json"
+    path.write_bytes(b"x" * (1024 * 1024))
+    requested_sizes: list[int] = []
+    real_read = integrity.os.read
+
+    def bounded_read(descriptor: int, size: int) -> bytes:
+        requested_sizes.append(size)
+        return real_read(descriptor, size)
+
+    monkeypatch.setattr(integrity.os, "read", bounded_read)
+
+    with pytest.raises(OperatorSourceStoreError, match="size"):
+        OperatorSourceConfigStore(path).read()
+
+    assert requested_sizes
+    assert max(requested_sizes) <= 4097

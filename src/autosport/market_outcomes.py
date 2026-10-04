@@ -366,8 +366,8 @@ class MarketSettlementOutcomeAuthority:
         return tuple(states)
 
     def assert_available_as_of(self, decision_as_of: datetime) -> None:
-        if not isinstance(decision_as_of, datetime):
-            raise TypeError("decision_as_of must be a datetime")
+        if type(decision_as_of) is not datetime:
+            raise TypeError("decision_as_of must be an exact datetime")
         if (
             decision_as_of.tzinfo is None
             or decision_as_of.utcoffset() is None

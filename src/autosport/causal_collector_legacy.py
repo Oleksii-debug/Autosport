@@ -1783,9 +1783,20 @@ class DesktopDeltaConsumer:
         _acknowledged_at,
         _instant_parser,
         _validated_ack_receipt,
+        _available_deltas,
+        _workspace_lock,
+        _ack_locked,
     ) -> tuple[str, ...]:
+        collector = self.collector
+        checkpoint = self.checkpoint
+        resolve_event = self.resolve_event
+        apply_event = self.apply_event
+        lookup_application_receipt = self.lookup_application_receipt
+        acknowledgement_clock = self._acknowledgement_clock
+        on_application_receipt = self._on_application_receipt
+
         now = _instant_parser(as_of, "as_of")
-        available = self.collector.deltas_available_through(as_of=as_of, view=view)
+        available = _available_deltas(collector, as_of=as_of, view=view)
         delivered: list[str] = []
         for delta in available:
             if delta.gap_state is GapState.DETECTED:
@@ -1809,11 +1820,11 @@ class DesktopDeltaConsumer:
             # re-reads acknowledgement and durable receipt state after acquisition,
             # then either adopts that completed evidence or owns apply+ack atomically
             # with respect to all cooperating Autosport desktop consumers.
-            with self.checkpoint._workspace_lock():
-                if _validated_ack_receipt(self.checkpoint, delta) is not None:
+            with _workspace_lock(checkpoint):
+                if _validated_ack_receipt(checkpoint, delta) is not None:
                     continue
 
-                durable_receipt = self.lookup_application_receipt(delta)
+                durable_receipt = lookup_application_receipt(delta)
                 if durable_receipt is not None:
                     if type(durable_receipt) is not _receipt_type:
                         raise ApplicationReceiptError(
@@ -1828,8 +1839,6 @@ class DesktopDeltaConsumer:
                         raise ApplicationReceiptError(
                             f"durable application receipt is not bound to delta {delta.delta_id}"
                         )
-                    acknowledgement_clock = self._acknowledgement_clock
-                    on_application_receipt = self._on_application_receipt
                     acknowledged_at = _acknowledged_at(
                         self,
                         delta,
@@ -1851,7 +1860,8 @@ class DesktopDeltaConsumer:
                                     "pre_delivery_acknowledged_at",
                                 ),
                             )
-                    self.checkpoint._ack_locked(
+                    _ack_locked(
+                        checkpoint,
                         delta,
                         application_receipt=durable_receipt,
                         acknowledged_at=acknowledged_at,
@@ -1859,7 +1869,7 @@ class DesktopDeltaConsumer:
                     delivered.append(delta.delta_id)
                     continue
 
-                event = self.resolve_event(delta)
+                event = resolve_event(delta)
                 if type(event) is not _market_event_type:
                     raise DeltaConflictError(
                         "desktop delta resolver must return an exact MarketEvent"
@@ -1867,14 +1877,12 @@ class DesktopDeltaConsumer:
                 digest = _canonical_digest(event)
                 if digest != delta.canonical_event_digest:
                     raise DeltaConflictError(f"canonical event digest mismatch for delta {delta.delta_id}")
-                receipt = self.apply_event(delta, event)
+                receipt = apply_event(delta, event)
                 if type(receipt) is not _receipt_type:
                     raise ApplicationReceiptError("apply_event must return a durable DesktopApplicationReceipt")
                 _validate_receipt(receipt)
                 if receipt.delta_id != delta.delta_id or receipt.canonical_event_digest != digest:
                     raise ApplicationReceiptError("application receipt is not bound to this delta/digest")
-                acknowledgement_clock = self._acknowledgement_clock
-                on_application_receipt = self._on_application_receipt
                 acknowledged_at = _acknowledged_at(
                     self,
                     delta,
@@ -1896,7 +1904,8 @@ class DesktopDeltaConsumer:
                                 "pre_delivery_acknowledged_at",
                             ),
                         )
-                self.checkpoint._ack_locked(
+                _ack_locked(
+                    checkpoint,
                     delta,
                     application_receipt=receipt,
                     acknowledged_at=acknowledged_at,
@@ -1951,6 +1960,9 @@ def _bind_desktop_delta_consumer_drain(implementation):
     acknowledged_at = DesktopDeltaConsumer._acknowledged_at
     instant_parser = _instant
     validated_ack_receipt = DesktopDeltaCheckpointStore.validated_ack_receipt
+    available_deltas = CollectorDeltaStore.deltas_available_through
+    workspace_lock = DesktopDeltaCheckpointStore._workspace_lock
+    ack_locked = DesktopDeltaCheckpointStore._ack_locked
     default_view = CausalView.AS_KNOWN_AT_DECISION
 
     def drain(
@@ -1974,6 +1986,9 @@ def _bind_desktop_delta_consumer_drain(implementation):
             _acknowledged_at=acknowledged_at,
             _instant_parser=instant_parser,
             _validated_ack_receipt=validated_ack_receipt,
+            _available_deltas=available_deltas,
+            _workspace_lock=workspace_lock,
+            _ack_locked=ack_locked,
         )
 
     return drain

@@ -1639,6 +1639,108 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_coherent_positive_history_rewrite_blocks_duplicate_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                original = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(original))
+                forged = self.event(
+                    sequence=1,
+                    odds="9.99",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertEqual(forged.dedupe_key, original.dedupe_key)
+                store.connection.execute(
+                    """UPDATE market_events
+                       SET decimal_odds=?, payload_json=?
+                       WHERE dedupe_key=?""",
+                    (
+                        str(forged.decimal_odds),
+                        storage_module._canonical_payload(forged),
+                        original.dedupe_key,
+                    ),
+                )
+                store.connection.commit()
+
+                before = store._market_append_authority().read_history()
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "positive market append chronology is missing, forged, or unproven",
+                ):
+                    store.append(forged)
+                after = store._market_append_authority().read_history()
+                self.assertEqual(after, before)
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_event_commit_order"
+                    ).fetchone(),
+                    (1,),
+                )
+            finally:
+                store.close()
+
+    def test_coherent_positive_history_rewrite_blocks_new_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                original = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T18:59:59+00:00",
+                )
+                self.assertTrue(store.append(original))
+                forged = self.event(
+                    sequence=1,
+                    odds="9.99",
+                    observed_ts="2026-09-16T18:59:59+00:00",
+                )
+                store.connection.execute(
+                    """UPDATE market_events
+                       SET decimal_odds=?, payload_json=?
+                       WHERE dedupe_key=?""",
+                    (
+                        str(forged.decimal_odds),
+                        storage_module._canonical_payload(forged),
+                        original.dedupe_key,
+                    ),
+                )
+                store.connection.commit()
+                before = store._market_append_authority().read_history()
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "positive market append chronology is missing, forged, or unproven",
+                ):
+                    store.append(
+                        self.event(
+                            sequence=2,
+                            odds="2.10",
+                            observed_ts="2026-09-16T19:00:00+00:00",
+                        )
+                    )
+
+                after = store._market_append_authority().read_history()
+                self.assertEqual(after, before)
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_events"
+                    ).fetchone(),
+                    (1,),
+                )
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT MAX(append_generation) FROM market_event_commit_order"
+                    ).fetchone(),
+                    (1,),
+                )
+            finally:
+                store.close()
+
     def test_cutoff_issuance_recovers_after_sqlite_commit_before_authority_commit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

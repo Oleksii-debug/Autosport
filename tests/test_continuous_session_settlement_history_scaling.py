@@ -323,3 +323,125 @@ def test_legacy_v2_migration_preserves_session_truth_and_evidence() -> None:
         snapshot = state.snapshot()
         assert len(snapshot.settlement_evidence) == _SMALL_HISTORY
         assert snapshot.cycles_completed == _SMALL_HISTORY
+
+def test_empty_success_does_not_scan_settlement_history() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        state = _state_with_history(Path(directory), _LARGE_HISTORY)
+
+        with patch.object(
+            state,
+            "_load_evidence_history",
+            side_effect=AssertionError(
+                "history scan is forbidden for no-settlement success"
+            ),
+        ):
+            state.record_success(
+                at=_AT,
+                full_refresh=False,
+                settlement_evidence=(),
+            )
+
+
+def test_legacy_migration_recovers_from_partial_journal_publication() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        path.write_text(
+            json.dumps(_checkpoint_payload(_SMALL_HISTORY), sort_keys=True),
+            encoding="utf-8",
+        )
+        state_type = continuous_session._ContinuousSessionState
+        original_write = state_type._write_evidence_record
+        calls = 0
+
+        def crash_during_migration(self, record):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise OSError("synthetic migration crash")
+            return original_write(self, record)
+
+        with patch.object(
+            state_type,
+            "_write_evidence_record",
+            crash_during_migration,
+        ):
+            try:
+                state_type(
+                    path,
+                    session_id="session-history-scaling",
+                    source_id="provider-a",
+                    clock=lambda: _AT,
+                )
+            except OSError:
+                pass
+            else:
+                raise AssertionError("synthetic migration crash did not interrupt")
+
+        interrupted = json.loads(path.read_text(encoding="utf-8"))
+        assert interrupted["schema_version"] == 2
+        assert 0 < len(_journal_snapshot(root)) < _SMALL_HISTORY
+
+        restarted = state_type(
+            path,
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        checkpoint = json.loads(path.read_text(encoding="utf-8"))
+        assert checkpoint["schema_version"] == 3
+        assert checkpoint["settlement_evidence_count"] == _SMALL_HISTORY
+        assert len(restarted.snapshot().settlement_evidence) == _SMALL_HISTORY
+
+
+def test_legacy_rollback_cannot_discard_newer_settlement_journal_tail() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        legacy = json.dumps(
+            _checkpoint_payload(_SMALL_HISTORY),
+            sort_keys=True,
+        )
+        path.write_text(legacy, encoding="utf-8")
+        state = continuous_session._ContinuousSessionState(
+            path,
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        state.record_success(
+            at=_AT,
+            full_refresh=False,
+            settlement_evidence=(
+                continuous_session.SettlementResolution(
+                    event_identity="provider-a:event-new",
+                    settlement_ref="provider-result:new",
+                    quote_outcomes={
+                        "provider-a:event-new:winner:home": "win"
+                    },
+                    evidence_id="receipt-newer-than-legacy",
+                    evidence_sha256="e" * 64,
+                    available_at=_AT,
+                ),
+            ),
+        )
+        assert (
+            state.operational_snapshot().cycles_completed
+            == _SMALL_HISTORY + 1
+        )
+
+        path.write_text(legacy, encoding="utf-8")
+        try:
+            continuous_session._ContinuousSessionState(
+                path,
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "legacy rollback discarded a newer committed settlement journal tail"
+            )
+

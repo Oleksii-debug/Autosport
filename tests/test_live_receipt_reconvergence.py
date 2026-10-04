@@ -263,6 +263,35 @@ class LiveReceiptReconvergenceTests(unittest.TestCase):
             store.close()
 
 
+    def test_provider_reentry_cannot_swap_poll_authorities(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            engine = IngestionEngine(
+                MarketEventBus(store),
+                clock=lambda: self.RECEIVE_TIME,
+            )
+
+            class ReentrantProvider(InMemoryProvider):
+                def read_batch(self, max_items=1000):
+                    engine.bus = object()
+                    engine.normalizer = object()
+                    engine.policy = object()
+                    engine.health_store = object()
+                    engine.clock = lambda: "2099-01-01T00:00:00+00:00"
+                    return super().read_batch(max_items=max_items)
+
+            stats = engine.poll_once(
+                ReentrantProvider("provider-a", [self._quote()]),
+                max_items=10,
+            )
+            trusted = store.trusted_live_events()
+
+            self.assertEqual(stats.accepted, 1)
+            self.assertEqual(len(trusted), 1)
+            self.assertEqual(trusted[0].ingest_ts, self.RECEIVE_TIME)
+            self.assertEqual(trusted[0].source_id, "provider-a")
+            store.close()
+
     def test_live_receipt_authority_ignores_transitive_runtime_helper_rebind(self) -> None:
         def poisoned(*_args, **_kwargs):
             raise AssertionError("runtime helper rebind must not control live receipt authority")

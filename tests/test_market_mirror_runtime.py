@@ -166,6 +166,29 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertEqual(runtime.pending_count, 0)
         self.assertEqual(runtime.drain().changed_keys, ())
 
+    def test_restart_reconciliation_does_not_promote_noncausal_sequence_fence(self) -> None:
+        mirror = MarketMirror()
+        baseline = self.event(sequence=3, odds="2.30")
+        mirror._apply_with_causal_authority(
+            baseline,
+            decision_causal=False,
+        )
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+
+        duplicate = runtime.accept_persisted(baseline)
+        stale = runtime.accept_persisted(self.event(sequence=2, odds="2.10"))
+
+        self.assertEqual(duplicate.status, MirrorUpdate.DUPLICATE)
+        self.assertEqual(stale.status, MirrorUpdate.STALE)
+        self.assertEqual(runtime.pending_count, 0)
+        self.assertEqual(
+            mirror.active_snapshot(
+                as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=1),
+            ),
+            (),
+        )
+
     def test_focused_dependencies_route_only_affected_provider_and_selection(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror)

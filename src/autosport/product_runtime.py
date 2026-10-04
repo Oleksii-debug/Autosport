@@ -521,19 +521,19 @@ def _settlement_authority_identity(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _desktop_applied_current_for_source(
+def _desktop_applied_current_for_source_impl(
     *,
     source_id: str,
     market_store: SQLiteMarketStore,
     canonical_application: CanonicalDesktopApplication,
-    _event_type=MarketEvent,
-    _receipt_type=DesktopApplicationReceipt,
-    _completed_receipts=CanonicalDesktopApplication.completed_receipts_for_source,
-    _validate_receipt=DesktopApplicationReceipt.validate,
-    _market_events=SQLiteMarketStore.events,
-    _canonical_digest=canonical_event_digest,
-    _dedupe_getter=MarketEvent.dedupe_key.fget,
-    _quote_getter=MarketEvent.quote_key.fget,
+    _event_type,
+    _receipt_type,
+    _completed_receipts,
+    _validate_receipt,
+    _market_events,
+    _canonical_digest,
+    _dedupe_getter,
+    _quote_getter,
 ) -> tuple[MarketEvent, ...]:
     """Rebuild restart state only from completed canonical desktop applications.
 
@@ -614,6 +614,48 @@ def _desktop_applied_current_for_source(
             "desktop application receipt references missing canonical market history"
         )
     return tuple(latest[key] for key in sorted(latest))
+
+
+def _bind_desktop_applied_current_for_source(implementation):
+    """Closure-bind restart authority dependencies outside mutable module dispatch."""
+
+    event_type = MarketEvent
+    receipt_type = DesktopApplicationReceipt
+    completed_receipts = CanonicalDesktopApplication.completed_receipts_for_source
+    validate_receipt = DesktopApplicationReceipt.validate
+    market_events = SQLiteMarketStore.events
+    canonical_digest = canonical_event_digest
+    dedupe_getter = MarketEvent.dedupe_key.fget
+    quote_getter = MarketEvent.quote_key.fget
+
+    def bound(
+        *,
+        source_id: str,
+        market_store: SQLiteMarketStore,
+        canonical_application: CanonicalDesktopApplication,
+    ) -> tuple[MarketEvent, ...]:
+        return implementation(
+            source_id=source_id,
+            market_store=market_store,
+            canonical_application=canonical_application,
+            _event_type=event_type,
+            _receipt_type=receipt_type,
+            _completed_receipts=completed_receipts,
+            _validate_receipt=validate_receipt,
+            _market_events=market_events,
+            _canonical_digest=canonical_digest,
+            _dedupe_getter=dedupe_getter,
+            _quote_getter=quote_getter,
+        )
+
+    return bound
+
+
+_desktop_applied_current_for_source = _bind_desktop_applied_current_for_source(
+    _desktop_applied_current_for_source_impl
+)
+del _desktop_applied_current_for_source_impl
+del _bind_desktop_applied_current_for_source
 
 
 @dataclass(slots=True)
@@ -921,7 +963,7 @@ class AutonomousProductRuntime:
         self._runtime_lease.release()
 
 
-def build_autonomous_product_runtime(
+def _build_autonomous_product_runtime_impl(
     *,
     workspace: str | Path,
     source: ProductCollectorSource,
@@ -930,6 +972,7 @@ def build_autonomous_product_runtime(
     initial_bankroll: str = "10000",
     outcome_authority: SettlementOutcomeAuthority | None = None,
     settlement_learning_handoff: SettlementLearningHandoff | None = None,
+    _desktop_restart_reader,
 ) -> AutonomousProductRuntime:
     """Construct or restore one canonical headless PAPER product runtime.
 
@@ -1000,7 +1043,7 @@ def build_autonomous_product_runtime(
         # another source nor an unreceipted row from this source may seed the
         # autonomous decision mirror. A newer generic row also cannot hide an older,
         # exact desktop-applied row for the same quote.
-        for event in _desktop_applied_current_for_source(
+        for event in _desktop_restart_reader(
             source_id=source_id,
             market_store=market_store,
             canonical_application=canonical_application,
@@ -1058,3 +1101,44 @@ def build_autonomous_product_runtime(
         runtime._recover_interrupted_start()
         lease_stack.pop_all()
         return runtime
+
+
+
+def _bind_autonomous_product_runtime_builder(
+    implementation,
+    desktop_restart_reader,
+):
+    """Expose the product builder without mutable restart-authority dispatch."""
+
+    def build_autonomous_product_runtime(
+        *,
+        workspace: str | Path,
+        source: ProductCollectorSource,
+        clock: Callable[[], str] | None = None,
+        sleep: Callable[[float], None] | None = None,
+        initial_bankroll: str = "10000",
+        outcome_authority: SettlementOutcomeAuthority | None = None,
+        settlement_learning_handoff: SettlementLearningHandoff | None = None,
+    ) -> AutonomousProductRuntime:
+        return implementation(
+            workspace=workspace,
+            source=source,
+            clock=clock,
+            sleep=sleep,
+            initial_bankroll=initial_bankroll,
+            outcome_authority=outcome_authority,
+            settlement_learning_handoff=settlement_learning_handoff,
+            _desktop_restart_reader=desktop_restart_reader,
+        )
+
+    build_autonomous_product_runtime.__doc__ = implementation.__doc__
+    return build_autonomous_product_runtime
+
+
+build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
+    _build_autonomous_product_runtime_impl,
+    _desktop_applied_current_for_source,
+)
+del _build_autonomous_product_runtime_impl
+del _desktop_applied_current_for_source
+del _bind_autonomous_product_runtime_builder

@@ -104,6 +104,7 @@ class ReplayRun:
     input_event_payload_sequence_sha256: str | None = None
     consumed_event_payload_sequence_sha256: str | None = None
     applied_event_payload_sequence_sha256: str | None = None
+    consumed_event_payload_multiset_sha256: str | None = None
 
 
 def _snapshot_replay_event(event: MarketEvent) -> MarketEvent:
@@ -161,6 +162,24 @@ def market_event_payload_sequence_sha256(
     return digest.hexdigest()
 
 
+def market_event_payload_multiset_sha256(
+    payload_sha256: Iterable[str],
+) -> str:
+    """Digest event payload membership with multiplicity but without order."""
+
+    values = tuple(payload_sha256)
+    for value in values:
+        if (
+            type(value) is not str
+            or len(value) != 64
+            or any(ch not in _HEX for ch in value)
+        ):
+            raise ValueError(
+                "event payload multiset requires lowercase SHA-256 digests"
+            )
+    return market_event_payload_sequence_sha256(tuple(sorted(values)))
+
+
 class ReplayEngine:
     def __init__(self, events: Iterable[MarketEvent], firewall: ReplayLeakageFirewall | None = None) -> None:
         # Snapshot each yielded value immediately. MarketEvent is frozen but nested
@@ -174,10 +193,14 @@ class ReplayEngine:
             market_event_payload_sequence_sha256(input_payloads)
         )
         self._events = tuple(sorted(raw_events, key=_replay_order_key))
+        consumed_payloads = tuple(
+            market_event_payload_sha256(event) for event in self._events
+        )
         self._consumed_event_payload_sequence_sha256 = (
-            market_event_payload_sequence_sha256(
-                tuple(market_event_payload_sha256(event) for event in self._events)
-            )
+            market_event_payload_sequence_sha256(consumed_payloads)
+        )
+        self._consumed_event_payload_multiset_sha256 = (
+            market_event_payload_multiset_sha256(consumed_payloads)
         )
         self.firewall = firewall or ReplayLeakageFirewall()
         # Dataset identity preserves the pre-causal-delivery ordering contract.
@@ -268,6 +291,9 @@ class ReplayEngine:
             ),
             applied_event_payload_sequence_sha256=(
                 market_event_payload_sequence_sha256(tuple(applied_payloads))
+            ),
+            consumed_event_payload_multiset_sha256=(
+                self._consumed_event_payload_multiset_sha256
             ),
         )
 

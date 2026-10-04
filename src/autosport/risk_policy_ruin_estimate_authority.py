@@ -15,6 +15,7 @@ from .risk_evaluation_precommit_authority import (
 )
 from .risk_of_ruin_evaluator import (
     RiskOfRuinEvaluationError,
+    RiskOfRuinIssuanceError,
     RiskPathObservation,
     clopper_pearson_upper_bound,
     evaluator_source_sha256,
@@ -288,7 +289,13 @@ def _derive_policy_estimate_material(
             confidence_level=precommit.confidence_level,
         )
         source_sha = _SOURCE_DIGEST()
-    except (RiskOfRuinEvaluationError, OSError, ArithmeticError, ValueError) as exc:
+    except (
+        RiskOfRuinEvaluationError,
+        RiskOfRuinIssuanceError,
+        OSError,
+        ArithmeticError,
+        ValueError,
+    ) as exc:
         raise ProductFixedNRiskPolicyEstimateError(
             "risk policy estimator could not derive canonical result"
         ) from exc

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
@@ -731,6 +732,8 @@ class ForecastRef:
         *,
         expected_model_id: str | None,
         _parse_iso_timestamp=parse_iso_timestamp,
+        _datetime_type=datetime,
+        _utc_zone=timezone.utc,
     ) -> str | None:
         if (
             self.model_id is None
@@ -745,15 +748,20 @@ class ForecastRef:
             )
         if expected_model_id is None or self.model_id != expected_model_id:
             return "predictive forecast model identity does not match intent model"
-        if not hasattr(decision_time, "tzinfo") or decision_time.tzinfo is None:
+        if (
+            type(decision_time) is not _datetime_type
+            or decision_time.tzinfo is None
+            or decision_time.utcoffset() is None
+        ):
             return "predictive decision time must be timezone-aware"
+        decision_cut = decision_time.astimezone(_utc_zone)
         cutoff = _parse_iso_timestamp(self.input_cutoff_ts)
-        if cutoff > decision_time:
+        if cutoff > decision_cut:
             return "predictive forecast input cutoff is from the future"
         witness = self.predictive_eligibility
         as_of = _parse_iso_timestamp(witness.as_of)
         valid_until = _parse_iso_timestamp(witness.valid_until)
-        if decision_time < as_of or decision_time > valid_until:
+        if decision_cut < as_of or decision_cut > valid_until:
             return "predictive calibration eligibility evidence is stale"
         if not witness.support_qualified:
             return "predictive calibration evidence has insufficient sample support"

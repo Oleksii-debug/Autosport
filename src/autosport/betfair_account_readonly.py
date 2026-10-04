@@ -1801,9 +1801,14 @@ def _install_market_price_ladder_authority():
     ] = {}
     latest_definitions: dict[
         tuple[str, str],
-        tuple[int, tuple[object, object, object, object, object]],
+        tuple[
+            int,
+            tuple[object, object, object, object, object] | None,
+            int,
+        ],
     ] = {}
     generation_lock = Lock()
+    read_sequence = 0
     raw_read = BetfairReadOnlyClient.read_market_price_ladder
     fingerprint = _market_price_ladder_fingerprint
 
@@ -1879,6 +1884,10 @@ def _install_market_price_ladder_authority():
                 "canonical price-ladder RPC dispatch changed"
             )
         origin_at_read_start = source_origin_authoritative(self)
+        with generation_lock:
+            nonlocal read_sequence
+            read_sequence += 1
+            acquisition_sequence = read_sequence
         acquisition_started_at = canonical_now("acquisition-start instant")
         observation = raw_read(self, market_id)
         if not origin_at_read_start or not source_origin_authoritative(self):
@@ -1901,20 +1910,42 @@ def _install_market_price_ladder_authority():
                     issued.pop(key, None)
 
         # listMarketCatalogue does not expose a monotonic MarketDescription
-        # version. Preserve the stronger fact we do have: once this process has
-        # observed an incompatible definition for the same exact Betfair market,
-        # older definition evidence can never become current again. Re-observing
-        # the same definition keeps the generation; A->B->A increments twice and
-        # therefore cannot re-authorize the original A receipt.
+        # version. Preserve the stronger process fact we do have. Sequential
+        # incompatible observations advance the generation. If an older request
+        # completes after a newer request with an incompatible definition, neither
+        # response is allowed to win by network timing: mark the market definition
+        # ambiguous and require one fresh post-conflict read. Same-definition
+        # overlap is harmless and keeps the existing generation.
         with generation_lock:
             previous = latest_definitions.get(market_key)
             if previous is None:
                 generation = 0
+                latest_definitions[market_key] = (
+                    generation,
+                    definition,
+                    acquisition_sequence,
+                )
             elif previous[1] == definition:
                 generation = previous[0]
+                latest_definitions[market_key] = (
+                    generation,
+                    definition,
+                    max(previous[2], acquisition_sequence),
+                )
+            elif acquisition_sequence < previous[2]:
+                generation = -1
+                latest_definitions[market_key] = (
+                    previous[0] + 1,
+                    None,
+                    previous[2],
+                )
             else:
                 generation = previous[0] + 1
-            latest_definitions[market_key] = (generation, definition)
+                latest_definitions[market_key] = (
+                    generation,
+                    definition,
+                    acquisition_sequence,
+                )
             issued[observation_id] = (
                 ref(observation, forget),
                 fingerprint(observation),

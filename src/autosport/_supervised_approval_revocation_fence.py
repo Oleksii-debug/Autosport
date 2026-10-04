@@ -1,0 +1,124 @@
+"""Linearize supervised-approval revocation with canonical economic writes.
+
+Betfair supervised execution already holds ``WorkspaceEconomicLock`` from current
+admission through the irreversible provider call.  A durable approval revocation
+must participate in that same existing serialization authority; otherwise a
+separate ledger writer can append SUPERVISED_APPROVAL_REVOKED after admission but
+before placeOrders transport.
+
+This module does not create another execution or revocation authority.  It wraps
+the existing ``RealExecutionLedger.revoke_supervised_approval`` transition with
+the canonical workspace economic lock.  Therefore exactly one ordering wins:
+
+* revocation commits first -> later supervised admission sees it and fails closed;
+* the provider-write critical section wins first -> revocation cannot interleave
+  with that already-authorized effect and may be retried after the critical
+  section exits.
+
+The latter is intentionally not retroactive cancellation.  Emergency in-flight
+stopping remains the responsibility of the existing ExecutionStopAuthority.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from .real_execution_ledger import (
+    ExecutionLedgerBusyError,
+    ExecutionLedgerIntegrityError,
+    RealExecutionLedger,
+)
+from .workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockBusyError,
+    WorkspaceEconomicLockError,
+)
+
+
+_LEDGER_TYPE = RealExecutionLedger
+_LOCK_TYPE = WorkspaceEconomicLock
+_LOCK_ACQUIRE = WorkspaceEconomicLock.acquire
+_LOCK_ACQUIRE_CODE = _LOCK_ACQUIRE.__code__
+_LOCK_RELEASE = WorkspaceEconomicLock.release
+_LOCK_RELEASE_CODE = _LOCK_RELEASE.__code__
+
+
+def _build_fenced_revoke(raw_revoke, raw_revoke_code):
+    def revoke_supervised_approval_with_workspace_fence(
+        self: RealExecutionLedger,
+        *,
+        plan_id: str,
+        approval_id: str,
+        approval_fingerprint: str,
+        revoked_at: str,
+        revocation_evidence_sha256: str,
+    ) -> None:
+        if type(self) is not _LEDGER_TYPE:
+            raise ExecutionLedgerIntegrityError(
+                "supervised approval revocation requires canonical execution ledger"
+            )
+        if (
+            getattr(raw_revoke, "__code__", None) is not raw_revoke_code
+            or WorkspaceEconomicLock is not _LOCK_TYPE
+            or _LOCK_TYPE.acquire is not _LOCK_ACQUIRE
+            or getattr(_LOCK_ACQUIRE, "__code__", None) is not _LOCK_ACQUIRE_CODE
+            or _LOCK_TYPE.release is not _LOCK_RELEASE
+            or getattr(_LOCK_RELEASE, "__code__", None) is not _LOCK_RELEASE_CODE
+        ):
+            raise ExecutionLedgerIntegrityError(
+                "supervised approval revocation serialization authority changed"
+            )
+
+        try:
+            workspace = Path(self.path).parent.resolve()
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise ExecutionLedgerIntegrityError(
+                "supervised approval revocation workspace is not canonical"
+            ) from exc
+
+        try:
+            with _LOCK_TYPE(workspace):
+                if (
+                    getattr(raw_revoke, "__code__", None) is not raw_revoke_code
+                    or _LOCK_TYPE.acquire is not _LOCK_ACQUIRE
+                    or _LOCK_TYPE.release is not _LOCK_RELEASE
+                ):
+                    raise ExecutionLedgerIntegrityError(
+                        "supervised approval revocation authority changed while fenced"
+                    )
+                raw_revoke(
+                    self,
+                    plan_id=plan_id,
+                    approval_id=approval_id,
+                    approval_fingerprint=approval_fingerprint,
+                    revoked_at=revoked_at,
+                    revocation_evidence_sha256=revocation_evidence_sha256,
+                )
+                if getattr(raw_revoke, "__code__", None) is not raw_revoke_code:
+                    raise ExecutionLedgerIntegrityError(
+                        "supervised approval revocation implementation changed while fenced"
+                    )
+        except WorkspaceEconomicLockBusyError as exc:
+            raise ExecutionLedgerBusyError(
+                "supervised approval revocation is fenced by active economic execution"
+            ) from exc
+        except WorkspaceEconomicLockError as exc:
+            raise ExecutionLedgerIntegrityError(
+                "supervised approval revocation economic fence failed"
+            ) from exc
+
+    return revoke_supervised_approval_with_workspace_fence
+
+
+_RAW_REVOKE = _LEDGER_TYPE.__dict__.get("revoke_supervised_approval")
+_RAW_REVOKE_CODE = getattr(_RAW_REVOKE, "__code__", None)
+if not callable(_RAW_REVOKE) or _RAW_REVOKE_CODE is None:
+    raise RuntimeError("canonical supervised approval revocation is unavailable")
+
+_FENCED_REVOKE = _build_fenced_revoke(_RAW_REVOKE, _RAW_REVOKE_CODE)
+_FENCED_REVOKE.__name__ = "revoke_supervised_approval"
+_FENCED_REVOKE.__qualname__ = f"{_LEDGER_TYPE.__name__}.revoke_supervised_approval"
+_FENCED_REVOKE.__module__ = _LEDGER_TYPE.__module__
+_LEDGER_TYPE.revoke_supervised_approval = _FENCED_REVOKE
+
+del _RAW_REVOKE, _RAW_REVOKE_CODE

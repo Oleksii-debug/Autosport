@@ -988,6 +988,97 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 before,
             )
 
+
+    def test_source_projection_rejects_unannounced_stream_epoch_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = _ContinuousSessionState(
+                root / "continuous_session.json",
+                session_id="session-source-transition",
+                source_id="provider-a",
+                clock=lambda: "2026-09-19T21:20:00+00:00",
+            )
+            first = _collector_delta(
+                delta_id="delta-epoch-1",
+                gap_state=GapState.NONE,
+                sync_state=SyncState.READY,
+            )
+            state.record_source_projection(deltas=(first,), backlog=False)
+            before = (root / "continuous_session.json").read_bytes()
+
+            prototype = _collector_delta(
+                delta_id="delta-epoch-2",
+                gap_state=GapState.NONE,
+                sync_state=SyncState.READY,
+            )
+            second = CollectorDelta(
+                **{
+                    field: (
+                        "epoch-2"
+                        if field == "stream_epoch"
+                        else getattr(prototype, field)
+                    )
+                    for field in prototype.__dataclass_fields__
+                }
+            )
+            second.validate()
+
+            with self.assertRaisesRegex(
+                ContinuousSessionError,
+                "epoch change lacks an explicit reset state",
+            ):
+                state.record_source_projection(
+                    deltas=(second,),
+                    backlog=False,
+                )
+
+            self.assertEqual(
+                (root / "continuous_session.json").read_bytes(),
+                before,
+            )
+
+    def test_source_projection_recovery_requires_durable_unresolved_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = _ContinuousSessionState(
+                root / "continuous_session.json",
+                session_id="session-source-transition",
+                source_id="provider-a",
+                clock=lambda: "2026-09-19T21:20:00+00:00",
+            )
+            detected = _collector_delta(
+                delta_id="gap-detected",
+                gap_state=GapState.DETECTED,
+                sync_state=SyncState.GAP_DETECTED,
+            )
+            state.record_source_projection(
+                deltas=(detected,),
+                backlog=False,
+            )
+            before = (root / "continuous_session.json").read_bytes()
+            wrong_recovery = _collector_delta(
+                delta_id="gap-recovered-wrong-target",
+                gap_state=GapState.RECOVERED,
+                sync_state=SyncState.RECOVERED,
+                revision_of="another-gap",
+                revision_number=1,
+            )
+            wrong_recovery.validate()
+
+            with self.assertRaisesRegex(
+                ContinuousSessionError,
+                "does not target a durable unresolved gap",
+            ):
+                state.record_source_projection(
+                    deltas=(wrong_recovery,),
+                    backlog=False,
+                )
+
+            self.assertEqual(
+                (root / "continuous_session.json").read_bytes(),
+                before,
+            )
+
     def test_unresolved_gap_is_durable_in_status_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

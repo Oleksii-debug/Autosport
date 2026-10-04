@@ -2209,6 +2209,15 @@ class _ContinuousSessionState:
             unresolved = set(raw["source_unresolved_gap_delta_ids"])
             projection_epoch = raw["source_projection_stream_epoch"]
             for delta in deltas:
+                if (
+                    projection_epoch is not None
+                    and projection_epoch != delta.stream_epoch
+                    and delta.sync_state
+                    not in {SyncState.EPOCH_CHANGED, SyncState.CURSOR_RESET}
+                ):
+                    raise ContinuousSessionError(
+                        "source projection epoch change lacks an explicit reset state"
+                    )
                 if projection_epoch != delta.stream_epoch:
                     unresolved.clear()
                     projection_epoch = delta.stream_epoch
@@ -2219,7 +2228,11 @@ class _ContinuousSessionState:
                         raise ContinuousSessionError(
                             "recovered gap projection requires revision_of"
                         )
-                    unresolved.discard(delta.revision_of)
+                    if delta.revision_of not in unresolved:
+                        raise ContinuousSessionError(
+                            "recovered gap projection does not target a durable unresolved gap"
+                        )
+                    unresolved.remove(delta.revision_of)
                 elif delta.gap_state is GapState.CURSOR_RESET:
                     unresolved.clear()
 

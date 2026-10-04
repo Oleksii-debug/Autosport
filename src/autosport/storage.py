@@ -2308,7 +2308,11 @@ class SQLiteMarketStore:
                 try:
                     _validate_canonical_table(self.connection, "market_events")
                     self._validate_causal_replay_state()
-                    self._require_product_issued_positive_history(authority)
+                    # This API proves the caller's already-sampled immutable prefix.
+                    # Do not require the later current tail to be product-issued: a
+                    # post-frontier direct/unissued tail must not revoke an older
+                    # independently committed boundary. The exact prefix proof below
+                    # still rejects asking for any unissued or split-batch generation.
                     current_head = self._positive_append_generation_head()
                     if max_generation > current_head:
                         raise MonotonicAuthorityRollbackError(
@@ -2345,7 +2349,11 @@ class SQLiteMarketStore:
                 try:
                     _validate_canonical_table(self.connection, "market_events")
                     self._validate_causal_replay_state()
-                    self._require_product_issued_positive_history(authority)
+                    # This API proves the caller's already-sampled immutable prefix.
+                    # Do not require the later current tail to be product-issued: a
+                    # post-frontier direct/unissued tail must not revoke an older
+                    # independently committed boundary. The exact prefix proof below
+                    # still rejects asking for any unissued or split-batch generation.
                     current_head = self._positive_append_generation_head()
                     if max_generation > current_head:
                         raise MonotonicAuthorityRollbackError(

@@ -4780,6 +4780,50 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_committed_append_prefix_ignores_later_unissued_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                second = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:00.500000+00:00",
+                )
+                self.assertTrue(store.append(first))
+                self.direct_insert_positive_generation(
+                    store,
+                    second,
+                    generation=2,
+                )
+
+                self.assertEqual(store.append_generation_hint(), 2)
+
+                # Generation 1 was independently product-committed before the
+                # unissued tail appeared, so recovery may still consume that exact
+                # immutable prefix.
+                store.require_committed_append_generation(1)
+                prefix = store.events_at_committed_append_boundary(1)
+                self.assertEqual(
+                    [(event.sequence, generation) for event, generation in prefix],
+                    [(1, 1)],
+                )
+
+                # The direct generation-2 tail is not machine-authorized and cannot
+                # be promoted merely because its SQLite numbering is contiguous.
+                with self.assertRaises(MonotonicAuthorityRollbackError):
+                    store.require_committed_append_generation(2)
+                with self.assertRaises(MonotonicAuthorityRollbackError):
+                    store.events_at_committed_append_boundary(2)
+                with self.assertRaises(MonotonicAuthorityRollbackError):
+                    store.events_with_append_generation()
+            finally:
+                store.close()
+
     def test_committed_append_boundary_rejects_split_batch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

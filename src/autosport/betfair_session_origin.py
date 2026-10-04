@@ -19,6 +19,7 @@ from hashlib import sha256
 import hmac
 import json
 from pathlib import Path
+from operator import attrgetter
 from secrets import token_bytes
 import ssl
 from threading import RLock
@@ -124,8 +125,49 @@ class BetfairNonInteractiveLoginResponse:
     __str__ = __repr__
 
 
+def _build_session_authority_surface_meta():
+    """Seal public hard-false authority claims against class rebinding."""
+
+    sealed_classes: set[type] = set()
+    protected_names = frozenset(
+        {
+            "remote_provider_origin_proven",
+            "remote_provider_jurisdiction_proven",
+            "execution_authorized",
+            "_remote_provider_origin_proven_constant",
+            "_remote_provider_jurisdiction_proven_constant",
+            "_execution_authorized_constant",
+        }
+    )
+
+    class _BetfairSessionAuthoritySurfaceMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "Betfair session authority surface is sealed: " + name
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name: str) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "Betfair session authority surface is sealed: " + name
+                )
+            super().__delattr__(name)
+
+        @classmethod
+        def seal(mcls, cls: type) -> None:
+            sealed_classes.add(cls)
+
+    return _BetfairSessionAuthoritySurfaceMeta
+
+
+_BetfairSessionAuthoritySurfaceMeta = _build_session_authority_surface_meta()
+del _build_session_authority_surface_meta
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True)
-class BetfairSessionOrigin:
+class BetfairSessionOrigin(metaclass=_BetfairSessionAuthoritySurfaceMeta):
     """Secret-free process-local observation of one selected login route/session."""
 
     venue_id: str
@@ -167,20 +209,22 @@ class BetfairSessionOrigin:
         }
         return sha256(_canonical_json(payload)).hexdigest()
 
-    @property
-    def remote_provider_origin_proven(self) -> bool:
-        """This process-local observation is not remote transport attestation."""
-        return False
+    _remote_provider_origin_proven_constant = False
+    _remote_provider_jurisdiction_proven_constant = False
+    _execution_authorized_constant = False
 
-    @property
-    def remote_provider_jurisdiction_proven(self) -> bool:
-        """The selected login route is not provider-attested jurisdiction truth."""
-        return False
+    remote_provider_origin_proven = property(
+        attrgetter("_remote_provider_origin_proven_constant")
+    )
+    remote_provider_jurisdiction_proven = property(
+        attrgetter("_remote_provider_jurisdiction_proven_constant")
+    )
+    execution_authorized = property(
+        attrgetter("_execution_authorized_constant")
+    )
 
-    @property
-    def execution_authorized(self) -> bool:
-        return False
 
+_BetfairSessionAuthoritySurfaceMeta.seal(BetfairSessionOrigin)
 
 @dataclass(frozen=True, slots=True, repr=False)
 class BetfairLoginSession:
@@ -208,7 +252,7 @@ class BetfairLoginSession:
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
-class BetfairAuthenticatedJurisdiction:
+class BetfairAuthenticatedJurisdiction(metaclass=_BetfairSessionAuthoritySurfaceMeta):
     """Product-selected login-route label bound to one exact current K07 context."""
 
     venue_id: str
@@ -243,20 +287,22 @@ class BetfairAuthenticatedJurisdiction:
         }
         return sha256(_canonical_json(payload)).hexdigest()
 
-    @property
-    def remote_provider_origin_proven(self) -> bool:
-        """K07 + login-route binding is not remote transport attestation."""
-        return False
+    _remote_provider_origin_proven_constant = False
+    _remote_provider_jurisdiction_proven_constant = False
+    _execution_authorized_constant = False
 
-    @property
-    def remote_provider_jurisdiction_proven(self) -> bool:
-        """The bound route label is not provider-attested jurisdiction truth."""
-        return False
+    remote_provider_origin_proven = property(
+        attrgetter("_remote_provider_origin_proven_constant")
+    )
+    remote_provider_jurisdiction_proven = property(
+        attrgetter("_remote_provider_jurisdiction_proven_constant")
+    )
+    execution_authorized = property(
+        attrgetter("_execution_authorized_constant")
+    )
 
-    @property
-    def execution_authorized(self) -> bool:
-        return False
 
+_BetfairSessionAuthoritySurfaceMeta.seal(BetfairAuthenticatedJurisdiction)
 
 @dataclass(frozen=True, slots=True)
 class _IssuedOriginRecord:

@@ -203,6 +203,28 @@ def test_bridge_rejects_canonical_controller_class_method_rebind(tmp_path) -> No
     bridge._close_from_host()
 
 
+def test_bridge_rejects_canonical_controller_module_class_rebind(tmp_path) -> None:
+    controller = AutosportWebController(tmp_path / "workspace")
+    bridge = AutosportWebBridge(controller)
+    window = _Window()
+    bridge._bind_trusted_window(window)
+    module = sys.modules["autosport.windows_webview_shell"]
+    original_controller_class = module.AutosportWebController
+
+    try:
+        module.AutosportWebController = _Controller
+        with pytest.raises(
+            WindowsWebBridgeTrustError,
+            match="non-canonical controller surface",
+        ):
+            bridge.get_state()
+    finally:
+        module.AutosportWebController = original_controller_class
+
+    assert bridge._trust_revoked is True
+    bridge._close_from_host()
+
+
 def test_bridge_rechecks_controller_surface_after_document_trust_proof(tmp_path) -> None:
     controller = AutosportWebController(tmp_path / "workspace")
     bridge = AutosportWebBridge(controller)

@@ -61,6 +61,13 @@ class ProductFixedNRiskObservationSet:
     """Product-owned fixed-N observation cohort for risk-of-ruin evaluation."""
 
     experiment_id: str
+    research_protocol_sha256: str
+    dataset_snapshot_id: str
+    dataset_manifest_sha256: str
+    risk_method: str
+    sampling_manifest_sha256: str
+    initial_capital_state_sha256: str
+    stake_policy_sha256: str
     planned_member_ids: tuple[str, ...]
     qualification_sha256: str
     occurrence_root_sha256: str
@@ -321,6 +328,13 @@ def resolve_product_fixed_n_risk_observations(
     payload = {
         "schema": _SCHEMA,
         "experiment_id": structure.experiment_id,
+        "research_protocol_sha256": membership.protocol_sha256,
+        "dataset_snapshot_id": membership.dataset_snapshot_id,
+        "dataset_manifest_sha256": membership.dataset_manifest_sha256,
+        "risk_method": membership.risk_method,
+        "sampling_manifest_sha256": structure.manifest_sha256,
+        "initial_capital_state_sha256": qualification.initial_capital_state_sha256,
+        "stake_policy_sha256": qualification.stake_policy_sha256,
         "planned_member_ids": list(structure.planned_member_ids),
         "qualification_sha256": qualification.qualification_sha256,
         "occurrence_root_sha256": qualification.occurrence_root_sha256,
@@ -333,6 +347,31 @@ def resolve_product_fixed_n_risk_observations(
     result = object.__new__(_SET_TYPE)
     for field_name, value in (
         ("experiment_id", structure.experiment_id),
+        (
+            "research_protocol_sha256",
+            _sha(membership.protocol_sha256, "research_protocol_sha256"),
+        ),
+        ("dataset_snapshot_id", membership.dataset_snapshot_id),
+        (
+            "dataset_manifest_sha256",
+            _sha(membership.dataset_manifest_sha256, "dataset_manifest_sha256"),
+        ),
+        ("risk_method", membership.risk_method),
+        (
+            "sampling_manifest_sha256",
+            _sha(structure.manifest_sha256, "sampling_manifest_sha256"),
+        ),
+        (
+            "initial_capital_state_sha256",
+            _sha(
+                qualification.initial_capital_state_sha256,
+                "initial_capital_state_sha256",
+            ),
+        ),
+        (
+            "stake_policy_sha256",
+            _sha(qualification.stake_policy_sha256, "stake_policy_sha256"),
+        ),
         ("planned_member_ids", structure.planned_member_ids),
         (
             "qualification_sha256",
@@ -359,6 +398,13 @@ def resolve_product_fixed_n_risk_observations(
 
 _OBSERVATION_SET_FIELDS = (
     "experiment_id",
+    "research_protocol_sha256",
+    "dataset_snapshot_id",
+    "dataset_manifest_sha256",
+    "risk_method",
+    "sampling_manifest_sha256",
+    "initial_capital_state_sha256",
+    "stake_policy_sha256",
     "planned_member_ids",
     "qualification_sha256",
     "occurrence_root_sha256",
@@ -386,6 +432,13 @@ def _build_observation_set_verifier(
 
     set_field_names = (
         "experiment_id",
+        "research_protocol_sha256",
+        "dataset_snapshot_id",
+        "dataset_manifest_sha256",
+        "risk_method",
+        "sampling_manifest_sha256",
+        "initial_capital_state_sha256",
+        "stake_policy_sha256",
         "planned_member_ids",
         "qualification_sha256",
         "occurrence_root_sha256",
@@ -508,6 +561,25 @@ def _build_observation_set_verifier(
             )
         return (
             exact_text(values["experiment_id"], "experiment_id"),
+            exact_text(
+                values["research_protocol_sha256"],
+                "research_protocol_sha256",
+            ),
+            exact_text(values["dataset_snapshot_id"], "dataset_snapshot_id"),
+            exact_text(
+                values["dataset_manifest_sha256"],
+                "dataset_manifest_sha256",
+            ),
+            exact_text(values["risk_method"], "risk_method"),
+            exact_text(
+                values["sampling_manifest_sha256"],
+                "sampling_manifest_sha256",
+            ),
+            exact_text(
+                values["initial_capital_state_sha256"],
+                "initial_capital_state_sha256",
+            ),
+            exact_text(values["stake_policy_sha256"], "stake_policy_sha256"),
             exact_text_tuple(values["planned_member_ids"], "planned_member_ids"),
             exact_text(values["qualification_sha256"], "qualification_sha256"),
             exact_text(values["occurrence_root_sha256"], "occurrence_root_sha256"),

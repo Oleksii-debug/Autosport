@@ -454,8 +454,105 @@ def resolve_product_fixed_n_iid_cohort(
     return result
 
 
+def _build_product_fixed_n_iid_cohort_verifier(
+    resolver,
+    cohort_type: type[ProductFixedNIidCohort],
+):
+    """Capture the only resolver/type graph trusted for downstream re-verification."""
+
+    module_globals = globals()
+    resolver_code = getattr(resolver, "__code__", None)
+    field_names = (
+        "experiment_id",
+        "sampling_manifest_sha256",
+        "planned_member_ids",
+        "member_stream_sha256",
+        "run_source_evidence_sha256",
+        "run_execution_receipt_sha256",
+        "initial_capital_state_sha256",
+        "stake_policy_sha256",
+        "observations",
+        "outcomes_available_at",
+        "cohort_sha256",
+    )
+
+    def verifier(
+        candidate: ProductFixedNIidCohort,
+        membership: ResolvedFixedNRiskMembership,
+        *,
+        workspace: str | Path,
+        registry_path: str | Path,
+        sampling_manifest_json: str,
+        sampling_frame_json: str,
+        horizon_json: str,
+        settlement_bridges: tuple[PaperSettlementLearningBridge, ...],
+        authority_root: str | Path | None = None,
+    ) -> ProductFixedNIidCohort:
+        if (
+            module_globals.get("resolve_product_fixed_n_iid_cohort") is not resolver
+            or getattr(resolver, "__code__", None) is not resolver_code
+            or module_globals.get("ProductFixedNIidCohort") is not cohort_type
+        ):
+            raise ProductFixedNIidCohortError(
+                "fixed-N IID cohort verifier authority dispatch changed"
+            )
+        if type(candidate) is not cohort_type:
+            raise TypeError("candidate must be an exact ProductFixedNIidCohort")
+        canonical = resolver(
+            membership,
+            workspace=workspace,
+            registry_path=registry_path,
+            sampling_manifest_json=sampling_manifest_json,
+            sampling_frame_json=sampling_frame_json,
+            horizon_json=horizon_json,
+            settlement_bridges=settlement_bridges,
+            authority_root=authority_root,
+        )
+        if (
+            module_globals.get("resolve_product_fixed_n_iid_cohort") is not resolver
+            or getattr(resolver, "__code__", None) is not resolver_code
+            or module_globals.get("ProductFixedNIidCohort") is not cohort_type
+        ):
+            raise ProductFixedNIidCohortError(
+                "fixed-N IID cohort verifier authority dispatch changed"
+            )
+        for field_name in field_names:
+            supplied = getattr(candidate, field_name)
+            expected = getattr(canonical, field_name)
+            if type(supplied) is not type(expected) or supplied != expected:
+                raise ProductFixedNIidCohortError(
+                    "fixed-N IID cohort does not match canonical durable roots"
+                )
+        if (
+            canonical.product_precommit_bound is not True
+            or canonical.execution_consumption_proven is not True
+            or canonical.occurrence_ancestry_proven is not True
+            or canonical.run_path_ancestry_proven is not True
+            or canonical.fixed_n_complete is not True
+            or canonical.iid_qualified is not True
+            or canonical.risk_scope != "SIMULATOR_DISTRIBUTION_ONLY"
+            or canonical.grants_real_money_authority is not False
+        ):
+            raise ProductFixedNIidCohortError(
+                "fixed-N IID cohort truth flags are inconsistent"
+            )
+        return canonical
+
+    verifier.__name__ = "verify_product_fixed_n_iid_cohort"
+    verifier.__qualname__ = "verify_product_fixed_n_iid_cohort"
+    return verifier
+
+
+verify_product_fixed_n_iid_cohort = _build_product_fixed_n_iid_cohort_verifier(
+    resolve_product_fixed_n_iid_cohort,
+    ProductFixedNIidCohort,
+)
+del _build_product_fixed_n_iid_cohort_verifier
+
+
 __all__ = [
     "ProductFixedNIidCohort",
     "ProductFixedNIidCohortError",
     "resolve_product_fixed_n_iid_cohort",
+    "verify_product_fixed_n_iid_cohort",
 ]

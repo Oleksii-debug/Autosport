@@ -2140,6 +2140,11 @@ class PersistentLiveDecisionLoop:
                 raise LiveDecisionProgressError(
                     "live decision progress changed concurrently before pending publication"
                 )
+            durable_input_specs = self._load_input_registry() or ()
+            if durable_input_specs != tuple(self._input_specs.values()):
+                raise LiveDecisionProgressError(
+                    "live dependency registry changed concurrently before pending publication"
+                )
 
             # The snapshot is written before the cursor: a crash before cursor
             # publication leaves only ignorable stale snapshot bytes, while every

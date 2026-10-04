@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from autosport.decision_ledger import (
     DecisionLedgerIntegrityError,
+    DecisionRecord,
     EconomicDecisionAuthority,
     JsonlDecisionLedger,
 )
@@ -1467,6 +1468,54 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             self.assertEqual(progress["phase"], "committed")
             self.assertEqual(progress["decision_id"], records[0].decision_id)
+            loop.close()
+
+    def test_same_time_live_duplicate_skips_unrelated_trailing_ledger_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace,
+                [
+                    ProviderUnavailableError("provider unavailable"),
+                    ProviderUnavailableError("provider unavailable"),
+                ],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            first = loop.run_cycle()
+            self.assertEqual(first.status, LiveCycleStatus.PROVIDER_GAP)
+
+            ledger = JsonlDecisionLedger(workspace / "decisions.jsonl")
+            ledger.append(
+                DecisionRecord(
+                    replay_run_id="diagnostic:test",
+                    agent="test",
+                    observed_ts=clock.value.isoformat(),
+                    action="DIAGNOSTIC",
+                    payload={"kind": "unrelated"},
+                    context_hash="diagnostic-context",
+                    decision_id="diagnostic-unrelated-record",
+                )
+            )
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.PROVIDER_GAP)
+            records = ledger.verified_records()
+            self.assertEqual(len(records), 2)
+            self.assertEqual(
+                sum(
+                    record.replay_run_id == "live:live-test-loop"
+                    for record in records
+                ),
+                1,
+            )
+            self.assertEqual(records[-1].decision_id, "diagnostic-unrelated-record")
             loop.close()
 
     def test_catalog_provider_gap_preserves_checkpoint_and_recovers_once(self) -> None:

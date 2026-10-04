@@ -1557,6 +1557,44 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
             self.assertEqual([item[0] for item in factory.calls], ["input-a"])
 
+    def test_distinct_same_time_market_states_append_distinct_live_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace,
+                [
+                    (self._event(sequence=1, observed=self.START),),
+                    (
+                        self._event(
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START,
+                        ),
+                    ),
+                ],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+            second = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            records = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()
+            self.assertEqual(len(records), 2)
+            self.assertEqual(records[0].observed_ts, records[1].observed_ts)
+            self.assertNotEqual(records[0].decision_id, records[1].decision_id)
+            loop.close()
+
     def test_identical_same_time_provider_gap_reuses_last_durable_decision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

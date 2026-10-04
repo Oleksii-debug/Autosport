@@ -1553,6 +1553,20 @@ def _install_canonical_store_dispatch_seal(
     stable_reader_code = getattr(stable_reader, "__code__", None)
 
     write_lock = _write_lock
+    write_lock_code = getattr(write_lock, "__code__", None)
+    write_lock_defaults = getattr(write_lock, "__defaults__", None)
+    write_lock_kwdefaults = dict(getattr(write_lock, "__kwdefaults__", None) or {})
+    write_lock_wrapped = getattr(write_lock, "__wrapped__", None)
+    write_lock_wrapped_code = getattr(write_lock_wrapped, "__code__", None)
+    write_lock_wrapped_defaults = getattr(write_lock_wrapped, "__defaults__", None)
+    write_lock_wrapped_kwdefaults = dict(
+        getattr(write_lock_wrapped, "__kwdefaults__", None) or {}
+    )
+    write_lock_closure_cells = tuple(getattr(write_lock, "__closure__", None) or ())
+    write_lock_closure_values = tuple(
+        cell.cell_contents for cell in write_lock_closure_cells
+    )
+    local_write_lock = _LOCAL_WRITE_LOCK
     require_snapshot = _require_canonical_snapshot_graph
     fingerprint = snapshot_fingerprint
     parse_time = _time
@@ -1794,6 +1808,56 @@ def _install_canonical_store_dispatch_seal(
                     raise integrity_error(
                         "account reconciliation canonical DTO field descriptor changed"
                     )
+        live_write_lock = module_namespace.get("_write_lock", missing_module_binding)
+        live_local_write_lock = module_namespace.get(
+            "_LOCAL_WRITE_LOCK", missing_module_binding
+        )
+        live_write_lock_wrapped = getattr(write_lock, "__wrapped__", None)
+        live_write_lock_closure_cells = tuple(
+            getattr(write_lock, "__closure__", None) or ()
+        )
+        try:
+            live_write_lock_closure_values = tuple(
+                cell.cell_contents for cell in live_write_lock_closure_cells
+            )
+        except ValueError as exc:
+            raise integrity_error(
+                "account reconciliation write lock dispatch changed"
+            ) from exc
+        if (
+            live_write_lock is not write_lock
+            or live_local_write_lock is not local_write_lock
+            or getattr(write_lock, "__code__", None) is not write_lock_code
+            or getattr(write_lock, "__defaults__", None) != write_lock_defaults
+            or dict(getattr(write_lock, "__kwdefaults__", None) or {})
+            != write_lock_kwdefaults
+            or live_write_lock_wrapped is not write_lock_wrapped
+            or getattr(live_write_lock_wrapped, "__code__", None)
+            is not write_lock_wrapped_code
+            or getattr(live_write_lock_wrapped, "__defaults__", None)
+            != write_lock_wrapped_defaults
+            or dict(getattr(live_write_lock_wrapped, "__kwdefaults__", None) or {})
+            != write_lock_wrapped_kwdefaults
+            or len(live_write_lock_closure_cells) != len(write_lock_closure_cells)
+            or any(
+                live_cell is not expected_cell
+                for live_cell, expected_cell in zip(
+                    live_write_lock_closure_cells,
+                    write_lock_closure_cells,
+                )
+            )
+            or len(live_write_lock_closure_values) != len(write_lock_closure_values)
+            or any(
+                live_value is not expected_value
+                for live_value, expected_value in zip(
+                    live_write_lock_closure_values,
+                    write_lock_closure_values,
+                )
+            )
+        ):
+            raise integrity_error(
+                "account reconciliation write lock dispatch changed"
+            )
         if (
             _read_stable_reconciliation_bytes is not stable_reader
             or getattr(_read_stable_reconciliation_bytes, "__code__", None)

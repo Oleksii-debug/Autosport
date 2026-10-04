@@ -141,6 +141,34 @@ def test_reconciliation_delta_treats_zero_exponent_as_scale_neutral(
     assert state.unexplained_balance_delta.current_observation_id == "balance-2"
 
 
+def test_write_lock_wrapped_code_mutation_is_rejected_before_publication(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "workspace" / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=_authority_root(tmp_path, "authority"),
+    )
+    canonical_wrapped = reconciliation_module._write_lock.__wrapped__
+
+    def no_lock(_path):
+        yield
+
+    # contextlib.contextmanager keeps the original generator in the wrapper closure.
+    # Mutating that exact function's code therefore changes the already-captured
+    # write_lock callable without rebinding the module global.
+    monkeypatch.setattr(canonical_wrapped, "__code__", no_lock.__code__)
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="write lock dispatch changed",
+    ):
+        store.append_snapshot(_snapshot(Decimal("1")))
+
+    assert not path.exists()
+
+
 def test_authority_class_rebind_cannot_redirect_requested_root(
     monkeypatch,
     tmp_path,

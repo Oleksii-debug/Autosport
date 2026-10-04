@@ -2209,6 +2209,17 @@ class AutosportWebController:
             self._close_complete = True
 
 
+_WEB_CONTROLLER_AUTHORITY_METHOD_NAMES = ("close", "dispatch", "state")
+_WEB_CONTROLLER_AUTHORITY_METHOD_WITNESSES = tuple(
+    (
+        name,
+        AutosportWebController.__dict__[name],
+        getattr(AutosportWebController.__dict__[name], "__code__", None),
+    )
+    for name in _WEB_CONTROLLER_AUTHORITY_METHOD_NAMES
+)
+
+
 class AutosportWebBridge:
     """Minimal pywebview API bound to one trusted launch document."""
 
@@ -2231,6 +2242,62 @@ class AutosportWebBridge:
             )
         object.__setattr__(self, name, value)
 
+    def _assert_canonical_controller_surface_locked(
+        self,
+        controller: object,
+        *,
+        _names=_WEB_CONTROLLER_AUTHORITY_METHOD_NAMES,
+        _witnesses=_WEB_CONTROLLER_AUTHORITY_METHOD_WITNESSES,
+    ) -> None:
+        """Seal canonical controller behavior when the product controller is in use."""
+
+        if not isinstance(controller, AutosportWebController):
+            # Minimal test doubles are intentionally supported by bridge unit tests.
+            # Product launches that use AutosportWebController must satisfy the
+            # stronger exact-class/code witness below.
+            return
+        if (
+            type(controller) is not AutosportWebController
+            or _WEB_CONTROLLER_AUTHORITY_METHOD_NAMES is not _names
+            or _WEB_CONTROLLER_AUTHORITY_METHOD_WITNESSES is not _witnesses
+        ):
+            self._trust_revoked = True
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge refused a non-canonical controller surface"
+            )
+        for name, expected, expected_code in _witnesses:
+            current = AutosportWebController.__dict__.get(name)
+            bound = getattr(controller, name, None)
+            if (
+                current is not expected
+                or getattr(current, "__code__", None) is not expected_code
+                or getattr(bound, "__func__", None) is not expected
+            ):
+                self._trust_revoked = True
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge refused a rebound canonical controller method"
+                )
+
+    def _controller_operation_locked(self, controller: object, name: str):
+        """Capture one exact controller operation before releasing the trust lock."""
+
+        self._assert_canonical_controller_surface_locked(controller)
+        if type(controller) is AutosportWebController:
+            for method_name, expected, _expected_code in _WEB_CONTROLLER_AUTHORITY_METHOD_WITNESSES:
+                if method_name == name:
+                    return expected.__get__(controller, AutosportWebController)
+            self._trust_revoked = True
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge requested an unknown canonical controller method"
+            )
+        operation = getattr(controller, name, None)
+        if not callable(operation):
+            self._trust_revoked = True
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge controller does not expose the required operation"
+            )
+        return operation
+
     def _trusted_controller_locked(self) -> AutosportWebController:
         controller = self._controller_witness
         if self._controller is not controller:
@@ -2238,13 +2305,19 @@ class AutosportWebBridge:
             raise WindowsWebBridgeTrustError(
                 "The WebView bridge controller authority changed"
             )
+        self._assert_canonical_controller_surface_locked(controller)
         self._assert_trusted_session_locked()
         if self._controller is not controller:
             self._trust_revoked = True
             raise WindowsWebBridgeTrustError(
                 "The WebView bridge controller authority changed during trust proof"
             )
+        self._assert_canonical_controller_surface_locked(controller)
         return controller
+
+    def _trusted_controller_operation_locked(self, name: str):
+        controller = self._trusted_controller_locked()
+        return controller, self._controller_operation_locked(controller, name)
     @staticmethod
     def _current_window_url(window: object) -> str:
         getter = getattr(window, "get_current_url", None)
@@ -2279,6 +2352,7 @@ class AutosportWebBridge:
                 raise WindowsWebBridgeTrustError(
                     "The WebView bridge controller authority changed before runtime witness binding"
                 )
+            self._assert_canonical_controller_surface_locked(controller)
             if not isinstance(controller, AutosportWebController):
                 return None
             workspace = getattr(controller, "workspace", None)
@@ -2287,6 +2361,7 @@ class AutosportWebBridge:
                 raise WindowsWebBridgeTrustError(
                     "The WebView bridge controller authority changed during runtime witness binding"
                 )
+            self._assert_canonical_controller_surface_locked(controller)
             if not isinstance(workspace, Path) or not workspace.is_absolute():
                 raise WindowsWebBridgeTrustError(
                     "The canonical WebView controller has no absolute workspace identity"
@@ -2357,16 +2432,16 @@ class AutosportWebBridge:
         # by AutosportWebController._lock; releasing this outer lock also keeps a
         # trusted emergency STOP from queueing behind an unrelated slow command.
         with self._trust_lock:
-            controller = self._trusted_controller_locked()
-        return controller.dispatch(raw)
+            _controller, dispatch = self._trusted_controller_operation_locked("dispatch")
+        return dispatch(raw)
 
     def get_state(self) -> dict[str, Any]:
         # State reads may wait for the ordinary controller lock. They must not
         # monopolize the document-trust lock while doing so, otherwise a trusted
         # emergency STOP call could be delayed behind a polling request.
         with self._trust_lock:
-            controller = self._trusted_controller_locked()
-        return {"ok": True, "state": controller.state()}
+            _controller, state = self._trusted_controller_operation_locked("state")
+        return {"ok": True, "state": state()}
 
     def close(self) -> None:
         # Validate the initiating document under the trust lock, then release it
@@ -2374,14 +2449,15 @@ class AutosportWebBridge:
         # backend operation must not monopolize the document-trust lane or delay
         # safety/state traffic from the still-visible trusted window.
         with self._trust_lock:
-            controller = self._trusted_controller_locked()
-        controller.close()
+            controller, close = self._trusted_controller_operation_locked("close")
+        close()
         with self._trust_lock:
             if self._controller is not controller:
                 self._trust_revoked = True
                 raise WindowsWebBridgeTrustError(
                     "The WebView bridge controller authority changed during close"
                 )
+            self._assert_canonical_controller_surface_locked(controller)
             self._host_shutdown = True
             self._trust_revoked = True
 
@@ -2397,13 +2473,15 @@ class AutosportWebBridge:
                 raise WindowsWebBridgeTrustError(
                     "The WebView bridge controller authority changed"
                 )
-        controller.close()
+            close = self._controller_operation_locked(controller, "close")
+        close()
         with self._trust_lock:
             if self._controller is not controller:
                 self._trust_revoked = True
                 raise WindowsWebBridgeTrustError(
                     "The WebView bridge controller authority changed during host close"
                 )
+            self._assert_canonical_controller_surface_locked(controller)
             self._host_shutdown = True
             self._trust_revoked = True
 

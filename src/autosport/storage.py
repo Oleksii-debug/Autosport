@@ -59,10 +59,17 @@ class _LiveReceiptBatch:
         self._issued_generations.append(generation)
         return iter(generation)
 
-    def authorizes(self, events: Iterable[MarketEvent]) -> bool:
+    def authorizes(
+        self,
+        events: Iterable[MarketEvent],
+        *,
+        _market_event_type: type[MarketEvent] = MarketEvent,
+    ) -> bool:
         if events is self:
             return True
         if type(events) is not tuple:
+            return False
+        if any(type(event) is not _market_event_type for event in events):
             return False
         for generation in self._issued_generations:
             if len(events) != len(generation):

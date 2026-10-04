@@ -1658,6 +1658,20 @@ class PortfolioPlanTests(unittest.TestCase):
                 len(JsonlDecisionLedger(ledger_path).verified_records()),
                 1,
             )
+            with self.assertRaisesRegex(
+                PortfolioPlanReconciliationRequired,
+                "cannot be reconstructed",
+            ):
+                persist_portfolio_plan_decision(
+                    JsonlDecisionLedger(ledger_path),
+                    plan,
+                    intents,
+                    policy,
+                    initialize_ledger=False,
+                    replay_run_id="replay-authoritative-terminal-plan",
+                    material_action_id="authoritative-terminal-plan",
+                    verified_outcome_authorities=(),
+                )
 
     def test_verified_terminal_model_with_nonpositive_minimum_fails_closed(self) -> None:
         goal = self._goal()

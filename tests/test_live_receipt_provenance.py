@@ -212,6 +212,41 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertTrue(has_receipt)
             store.close()
 
+    def test_live_receipt_and_restart_use_sealed_identity_descriptors(self) -> None:
+        def poisoned_identity(_event):
+            raise AssertionError("mutable MarketEvent identity descriptor must not be consulted")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+
+            with (
+                patch.object(MarketEvent, "quote_key", new=property(poisoned_identity)),
+                patch.object(MarketEvent, "dedupe_key", new=property(poisoned_identity)),
+            ):
+                accepted = store._append_live_batch_accepted([event])
+                trusted = store.trusted_live_events()
+                current = store.trusted_live_current_by_source()
+                has_receipt = store.has_trusted_live_receipt(event)
+                store.close()
+
+                reopened = SQLiteMarketStore(path)
+                try:
+                    trusted_after_restart = reopened.trusted_live_events()
+                    current_after_restart = reopened.trusted_live_current_by_source()
+                    has_receipt_after_restart = reopened.has_trusted_live_receipt(event)
+                finally:
+                    reopened.close()
+
+            self.assertEqual(accepted, [event])
+            self.assertEqual(trusted, [event])
+            self.assertEqual(len(current), 1)
+            self.assertTrue(has_receipt)
+            self.assertEqual(trusted_after_restart, [event])
+            self.assertEqual(len(current_after_restart), 1)
+            self.assertTrue(has_receipt_after_restart)
+
     def test_live_receipt_self_type_authority_survives_module_class_rebind(self) -> None:
         class PoisonStore(SQLiteMarketStore):
             pass
@@ -771,6 +806,44 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(len(replay.events), 1)
             self.assertIs(type(snapshot[0]), MarketEvent)
             self.assertIs(type(replay.events[0]), MarketEvent)
+            store.close()
+
+    def test_trusted_live_mirror_uses_sealed_event_identity_and_codec_descriptors(self) -> None:
+        def poisoned_identity(_event):
+            raise AssertionError("mutable MarketEvent identity descriptor must not be consulted")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store)
+            trusted = store.trusted_live_events()[0]
+
+            with (
+                patch.object(MarketEvent, "quote_key", new=property(poisoned_identity)),
+                patch.object(MarketEvent, "dedupe_key", new=property(poisoned_identity)),
+                patch.object(
+                    MarketEvent,
+                    "from_dict",
+                    side_effect=AssertionError("mutable from_dict descriptor must not be consulted"),
+                ),
+                patch.object(
+                    MarketEvent,
+                    "to_dict",
+                    side_effect=AssertionError("mutable to_dict descriptor must not be consulted"),
+                ),
+            ):
+                mirror = MarketMirror.from_live_store(store)
+                duplicate = mirror.apply(trusted)
+                snapshot = mirror.snapshot()
+                replay = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(2026, 10, 4, 3, 0, 3, tzinfo=timezone.utc),
+                    max_age=timedelta(seconds=30),
+                    require_live_receipt_authority=True,
+                )
+
+            self.assertEqual(len(snapshot), 1)
+            self.assertEqual(duplicate.status.value, "duplicate")
+            self.assertEqual(len(replay.events), 1)
             store.close()
 
     def test_canonical_mirror_rejects_market_event_subclass(self) -> None:

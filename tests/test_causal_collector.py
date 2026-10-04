@@ -1983,6 +1983,51 @@ class CollectorDeltaTests(unittest.TestCase):
                 reopened.apply(delta, event)
             market_store.close()
 
+    def test_canonical_application_revalidates_journal_after_completion_clock_callback(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "canonical-application.json"
+            market_store = SQLiteMarketStore(root / "market.db")
+            clock_calls = []
+
+            def tampering_clock():
+                clock_calls.append(True)
+                if len(clock_calls) == 2:
+                    corrupted = json.loads(state_path.read_text(encoding="utf-8"))
+                    corrupted["applications"][delta.delta_id]["receipt_id"] = (
+                        "forged-receipt"
+                    )
+                    state_path.write_text(
+                        json.dumps(corrupted, sort_keys=True, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    return "2026-01-01T00:00:06+00:00"
+                return "2026-01-01T00:00:05+00:00"
+
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                SourceHealthStore(root / "health.json"),
+                state_path,
+                clock=tampering_clock,
+            )
+
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "progress conflicts on receipt_id",
+            ):
+                application.apply(delta, event)
+
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            item = persisted["applications"][delta.delta_id]
+            self.assertEqual(clock_calls, [True, True])
+            self.assertEqual(item["receipt_id"], "forged-receipt")
+            self.assertIsNone(item["completed_at"])
+            self.assertTrue(item["market_applied"])
+            self.assertTrue(item["health_applied"])
+            market_store.close()
+
     def test_canonical_application_receipt_time_is_after_durable_completion(self):
         event = MarketEvent.from_dict(event_payload())
         payload = event.to_dict()

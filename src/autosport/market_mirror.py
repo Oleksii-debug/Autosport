@@ -492,7 +492,7 @@ class MarketMirror:
         boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
         mirror = cls()
         history = (
-            store.trusted_live_events()
+            SQLiteMarketStore.trusted_live_events(store)
             if require_live_receipt_authority
             else store.events()
         )
@@ -543,7 +543,7 @@ class MarketMirror:
         if not isinstance(store, SQLiteMarketStore):
             raise TypeError("store must be a SQLiteMarketStore")
         mirror = cls()
-        current = store.trusted_live_current_by_source()
+        current = SQLiteMarketStore.trusted_live_current_by_source(store)
         for key in sorted(current):
             mirror.apply(current[key])
         return mirror

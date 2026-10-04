@@ -2209,6 +2209,7 @@ class AutosportWebController:
             self._close_complete = True
 
 
+_WEB_CONTROLLER_AUTHORITY_CLASS = AutosportWebController
 _WEB_CONTROLLER_AUTHORITY_METHOD_NAMES = ("close", "dispatch", "state")
 _WEB_CONTROLLER_AUTHORITY_METHOD_WITNESSES = tuple(
     (
@@ -2246,46 +2247,66 @@ class AutosportWebBridge:
         self,
         controller: object,
         *,
+        _controller_type=_WEB_CONTROLLER_AUTHORITY_CLASS,
         _names=_WEB_CONTROLLER_AUTHORITY_METHOD_NAMES,
         _witnesses=_WEB_CONTROLLER_AUTHORITY_METHOD_WITNESSES,
     ) -> None:
         """Seal canonical controller behavior when the product controller is in use."""
 
-        if not isinstance(controller, AutosportWebController):
-            # Minimal test doubles are intentionally supported by bridge unit tests.
-            # Product launches that use AutosportWebController must satisfy the
-            # stronger exact-class/code witness below.
+        if isinstance(controller, _controller_type):
+            if (
+                AutosportWebController is not _controller_type
+                or _WEB_CONTROLLER_AUTHORITY_CLASS is not _controller_type
+                or type(controller) is not _controller_type
+                or _WEB_CONTROLLER_AUTHORITY_METHOD_NAMES is not _names
+                or _WEB_CONTROLLER_AUTHORITY_METHOD_WITNESSES is not _witnesses
+            ):
+                self._trust_revoked = True
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge refused a non-canonical controller surface"
+                )
+            for name, expected, expected_code in _witnesses:
+                current = _controller_type.__dict__.get(name)
+                bound = getattr(controller, name, None)
+                if (
+                    current is not expected
+                    or getattr(current, "__code__", None) is not expected_code
+                    or getattr(bound, "__func__", None) is not expected
+                ):
+                    self._trust_revoked = True
+                    raise WindowsWebBridgeTrustError(
+                        "The WebView bridge refused a rebound canonical controller method"
+                    )
             return
+
+        # Minimal test doubles are intentionally supported by bridge unit tests, but
+        # rebinding the canonical class name must not turn a real product controller
+        # into an unchecked generic object.
         if (
-            type(controller) is not AutosportWebController
-            or _WEB_CONTROLLER_AUTHORITY_METHOD_NAMES is not _names
-            or _WEB_CONTROLLER_AUTHORITY_METHOD_WITNESSES is not _witnesses
+            type(controller) is _controller_type
+            or AutosportWebController is not _controller_type
+            or _WEB_CONTROLLER_AUTHORITY_CLASS is not _controller_type
         ):
             self._trust_revoked = True
             raise WindowsWebBridgeTrustError(
                 "The WebView bridge refused a non-canonical controller surface"
             )
-        for name, expected, expected_code in _witnesses:
-            current = AutosportWebController.__dict__.get(name)
-            bound = getattr(controller, name, None)
-            if (
-                current is not expected
-                or getattr(current, "__code__", None) is not expected_code
-                or getattr(bound, "__func__", None) is not expected
-            ):
-                self._trust_revoked = True
-                raise WindowsWebBridgeTrustError(
-                    "The WebView bridge refused a rebound canonical controller method"
-                )
 
-    def _controller_operation_locked(self, controller: object, name: str):
+    def _controller_operation_locked(
+        self,
+        controller: object,
+        name: str,
+        *,
+        _controller_type=_WEB_CONTROLLER_AUTHORITY_CLASS,
+        _witnesses=_WEB_CONTROLLER_AUTHORITY_METHOD_WITNESSES,
+    ):
         """Capture one exact controller operation before releasing the trust lock."""
 
         self._assert_canonical_controller_surface_locked(controller)
-        if type(controller) is AutosportWebController:
-            for method_name, expected, _expected_code in _WEB_CONTROLLER_AUTHORITY_METHOD_WITNESSES:
+        if type(controller) is _controller_type:
+            for method_name, expected, _expected_code in _witnesses:
                 if method_name == name:
-                    return expected.__get__(controller, AutosportWebController)
+                    return expected.__get__(controller, _controller_type)
             self._trust_revoked = True
             raise WindowsWebBridgeTrustError(
                 "The WebView bridge requested an unknown canonical controller method"

@@ -789,6 +789,92 @@ def test_assessment_helper_rebind_cannot_mint_authoritative_result(
             )
 
 
+def test_instance_plan_view_substitution_cannot_choose_decision_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+
+        def forged_view(plan_id: str):
+            raise AssertionError("instance-substituted plan view must not execute")
+
+        monkeypatch.setattr(ledger, "verified_execution_view", forged_view)
+        result = assess_authoritative_betfair_execution_feasibility(
+            ledger,
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+        )
+
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+    assert "LIMIT_AUTHORITY_REJECTED" in result.reasons
+
+
+def test_class_plan_view_rebind_revokes_feasibility_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+
+    def forged_view(self, plan_id: str):
+        raise AssertionError("class-substituted plan view must not execute")
+
+    monkeypatch.setattr(
+        RealExecutionLedger,
+        "verified_execution_view",
+        forged_view,
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        with pytest.raises(
+            RuntimeError,
+            match="canonical execution ledger verified plan view changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+def test_plan_view_code_mutation_revokes_feasibility_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+    canonical_view = RealExecutionLedger.verified_execution_view
+
+    def forged_view(self, plan_id: str):
+        raise AssertionError("mutated plan view must not execute")
+
+    monkeypatch.setattr(canonical_view, "__code__", forged_view.__code__)
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        with pytest.raises(
+            RuntimeError,
+            match="canonical execution ledger verified plan view changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
 def test_authoritative_decision_epoch_is_durable_plan_reservation() -> None:
     receipt, canonical_source = _synthetic_authoritative_receipt(
         MarketBookTransport()

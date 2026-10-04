@@ -72,6 +72,13 @@ _VECTOR_SHA_DESCRIPTOR = PaperRiskPolicy.__dict__["risk_of_ruin_candidate_vector
 _VECTOR_SHA = _VECTOR_SHA_DESCRIPTOR.__func__
 _VECTOR_SHA_CODE = getattr(_VECTOR_SHA, "__code__", None)
 
+_POLICY_PROVENANCE_PAYLOAD_DESCRIPTOR = PaperRiskPolicy.__dict__["provenance_payload"]
+_POLICY_PROVENANCE_PAYLOAD = _POLICY_PROVENANCE_PAYLOAD_DESCRIPTOR
+_POLICY_PROVENANCE_PAYLOAD_CODE = getattr(_POLICY_PROVENANCE_PAYLOAD, "__code__", None)
+_POLICY_PROVENANCE_SHA_DESCRIPTOR = PaperRiskPolicy.__dict__["provenance_sha256"]
+_POLICY_PROVENANCE_SHA_GETTER = _POLICY_PROVENANCE_SHA_DESCRIPTOR.fget
+_POLICY_PROVENANCE_SHA_CODE = getattr(_POLICY_PROVENANCE_SHA_GETTER, "__code__", None)
+
 _GOAL_LOAD = EconomicGoalStore.load
 _GOAL_LOAD_CODE = getattr(_GOAL_LOAD, "__code__", None)
 _BOOK_LOAD_DESCRIPTOR = PaperBook.__dict__["load"]
@@ -361,6 +368,32 @@ def _require_dispatch() -> None:
             raise ProductProposalRiskTargetError(
                 f"proposal-risk target dispatch authority changed: {name}"
             )
+
+    current_policy_provenance_payload = PaperRiskPolicy.__dict__.get(
+        "provenance_payload"
+    )
+    if (
+        current_policy_provenance_payload is not _POLICY_PROVENANCE_PAYLOAD_DESCRIPTOR
+        or current_policy_provenance_payload is not _POLICY_PROVENANCE_PAYLOAD
+        or getattr(current_policy_provenance_payload, "__code__", None)
+        is not _POLICY_PROVENANCE_PAYLOAD_CODE
+    ):
+        raise ProductProposalRiskTargetError(
+            "proposal-risk target dispatch authority changed: risk-policy provenance payload"
+        )
+    current_policy_provenance_sha = PaperRiskPolicy.__dict__.get(
+        "provenance_sha256"
+    )
+    if (
+        current_policy_provenance_sha is not _POLICY_PROVENANCE_SHA_DESCRIPTOR
+        or getattr(current_policy_provenance_sha, "fget", None)
+        is not _POLICY_PROVENANCE_SHA_GETTER
+        or getattr(_POLICY_PROVENANCE_SHA_GETTER, "__code__", None)
+        is not _POLICY_PROVENANCE_SHA_CODE
+    ):
+        raise ProductProposalRiskTargetError(
+            "proposal-risk target dispatch authority changed: risk-policy provenance digest"
+        )
 
     current_book_load_descriptor = PaperBook.__dict__.get("load")
     if (

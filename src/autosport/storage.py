@@ -1589,6 +1589,12 @@ class SQLiteMarketStore:
                 prepared: tuple[str, str, str | None] | None = None
                 accepted: list[MarketEvent] = []
                 try:
+                    # Re-prove the mutable live-storage schema at the write
+                    # boundary.  A direct SQLite writer must not be able to add a
+                    # trigger after startup and have product append bless trigger
+                    # side effects into canonical history/current projection.
+                    _validate_canonical_table(self.connection, "market_events")
+                    _validate_canonical_table(self.connection, "current_quotes")
                     self._validate_causal_replay_state()
                     committed_head, committed_state_sha256 = (
                         self._recover_positive_append_authority(authority)

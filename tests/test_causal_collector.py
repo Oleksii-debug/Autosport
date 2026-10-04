@@ -1880,6 +1880,81 @@ class CollectorDeltaTests(unittest.TestCase):
             market_store.close()
 
 
+    def test_canonical_application_rechecks_event_after_market_publish_callback(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            market_store = SQLiteMarketStore(root / "market.db")
+
+            class MutatingAfterPersistBus(MarketEventBus):
+                def publish(self, current):
+                    accepted = super().publish(current)
+                    current.metadata["after_persist_mutation"] = "forged"
+                    return accepted
+
+            application = CanonicalDesktopApplication(
+                MutatingAfterPersistBus(market_store),
+                SourceHealthStore(root / "health.json"),
+                root / "canonical-application.json",
+                clock=lambda: "2026-01-01T00:00:05+00:00",
+            )
+            with self.assertRaisesRegex(
+                DeltaConflictError,
+                "changed during market persistence",
+            ):
+                application.apply(delta, event)
+
+            self.assertEqual(len(market_store.events(event.event_id)), 1)
+            self.assertEqual(
+                SourceHealthStore(root / "health.json").get(event.source_id).poll_count,
+                0,
+            )
+            progress = application._state.progress(delta)
+            self.assertIsNotNone(progress)
+            self.assertFalse(progress["market_applied"])
+            self.assertFalse(progress["health_applied"])
+            self.assertIsNone(progress["completed_at"])
+            market_store.close()
+
+    def test_canonical_application_refuses_unprovable_market_publication(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            market_store = SQLiteMarketStore(root / "market.db")
+
+            class NoopMarketBus:
+                def __init__(self, store):
+                    self.store = store
+
+                def publish(self, _event):
+                    return True
+
+            application = CanonicalDesktopApplication(
+                NoopMarketBus(market_store),
+                SourceHealthStore(root / "health.json"),
+                root / "canonical-application.json",
+                clock=lambda: "2026-01-01T00:00:05+00:00",
+            )
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "market effect is not durably provable",
+            ):
+                application.apply(delta, event)
+
+            self.assertEqual(market_store.events(event.event_id), [])
+            self.assertEqual(
+                SourceHealthStore(root / "health.json").get(event.source_id).poll_count,
+                0,
+            )
+            progress = application._state.progress(delta)
+            self.assertIsNotNone(progress)
+            self.assertFalse(progress["market_applied"])
+            self.assertFalse(progress["health_applied"])
+            self.assertIsNone(progress["completed_at"])
+            market_store.close()
+
     def test_canonical_application_rejects_tampered_active_progress_identity(self):
         event = MarketEvent.from_dict(event_payload())
         delta = self.make_delta(payload=event.to_dict())
@@ -2113,6 +2188,7 @@ class CollectorDeltaTests(unittest.TestCase):
             class CrashBeforeMarketBus:
                 def __init__(self):
                     self.crashed = False
+                    self.store = real_bus.store
 
                 def publish(self, current):
                     if not self.crashed:

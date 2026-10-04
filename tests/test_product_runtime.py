@@ -154,6 +154,53 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 restored.close()
 
+    def test_runtime_preload_excludes_other_source_market_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                own = _event()
+                other = MarketEvent.from_dict(
+                    {
+                        **own.to_dict(),
+                        "source_id": "provider-b",
+                        "sequence": 2,
+                    }
+                )
+                self.assertTrue(store.append(own))
+                self.assertTrue(store.append(other))
+                self.assertEqual(len(store.current_by_source()), 2)
+            finally:
+                store.close()
+
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source("provider-a"),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                snapshot = runtime.mirror.snapshot()
+                self.assertEqual(len(snapshot), 1)
+                self.assertEqual(snapshot[0].source_id, "provider-a")
+                self.assertEqual(snapshot[0].sequence, 1)
+                self.assertEqual(runtime.invalidations.pending_count, 1)
+                self.assertIsNone(
+                    runtime.mirror.get(
+                        "provider-b",
+                        "event-1",
+                        "winner",
+                        "player-a",
+                    )
+                )
+                self.assertEqual(
+                    len(runtime.market_store.current_by_source()),
+                    2,
+                )
+            finally:
+                runtime.close()
+
     def test_restart_with_different_source_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

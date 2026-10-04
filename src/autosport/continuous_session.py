@@ -346,6 +346,13 @@ class SettlementLearningHandoff(Protocol):
     ) -> tuple[str, ...]:
         ...
 
+    def prepared_settlement_resolutions(
+        self,
+        *,
+        paper_book_path: Path,
+    ) -> tuple[SettlementResolution, ...]:
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class ContinuousTickResult:
@@ -817,6 +824,46 @@ class _ContinuousSessionState:
 
         self._update(mutate)
 
+    def validate_recovered_settlement_evidence(
+        self,
+        *,
+        settlement_evidence: tuple[SettlementResolution, ...],
+    ) -> None:
+        """Prove recovery is replaying pre-P&L durable truth, never minting new truth."""
+
+        raw = self._read()
+        known = {
+            item["evidence_id"]: item
+            for item in raw["settlement_evidence"]
+        }
+        known_pairs = {
+            (item["event_identity"], item["settlement_ref"]): item["evidence_id"]
+            for item in raw["settlement_evidence"]
+        }
+        outcome_digests = raw["settlement_outcome_digests"]
+        for evidence in settlement_evidence:
+            normalized = self._normalized_settlement_evidence(evidence)
+            existing = known.get(evidence.evidence_id)
+            if existing is None:
+                raise ContinuousSessionError(
+                    "recovered settlement evidence was not durably staged before P&L"
+                )
+            if existing != normalized:
+                raise ContinuousSessionError(
+                    "recovered settlement evidence conflicts with durable evidence"
+                )
+            event_ref = (evidence.event_identity, evidence.settlement_ref)
+            if known_pairs.get(event_ref) != evidence.evidence_id:
+                raise ContinuousSessionError(
+                    "recovered settlement event/reference conflicts with durable evidence"
+                )
+            if outcome_digests.get(evidence.evidence_id) != _settlement_outcomes_sha256(
+                evidence
+            ):
+                raise ContinuousSessionError(
+                    "recovered settlement outcome interpretation conflicts with durable evidence"
+                )
+
     def record_source_projection(
         self,
         *,
@@ -1097,6 +1144,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             "settlement_learning_handoff",
             "_settlement_prepare",
             "_settlement_reconcile",
+            "_settlement_prepared_resolutions",
             "_settlement_source_id",
             "clock",
             "required_history",
@@ -1131,6 +1179,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             "settlement_learning_handoff",
             "_settlement_prepare",
             "_settlement_reconcile",
+            "_settlement_prepared_resolutions",
             "_settlement_source_id",
             "clock",
             "required_history",
@@ -1195,6 +1244,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         settlement_prepare = None
         settlement_reconcile = None
+        settlement_prepared_resolutions = None
         if settlement_learning_handoff is not None:
             settlement_reconcile = getattr(
                 settlement_learning_handoff,
@@ -1213,6 +1263,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if settlement_prepare is not None and not callable(settlement_prepare):
                 raise TypeError(
                     "settlement_learning_handoff.prepare_settlement must be callable"
+                )
+            settlement_prepared_resolutions = getattr(
+                settlement_learning_handoff,
+                "prepared_settlement_resolutions",
+                None,
+            )
+            if (
+                settlement_prepared_resolutions is not None
+                and not callable(settlement_prepared_resolutions)
+            ):
+                raise TypeError(
+                    "settlement_learning_handoff.prepared_settlement_resolutions must be callable"
                 )
 
         self.workspace = Path(workspace)
@@ -1233,6 +1295,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         self.settlement_learning_handoff = settlement_learning_handoff
         self._settlement_prepare = settlement_prepare
         self._settlement_reconcile = settlement_reconcile
+        self._settlement_prepared_resolutions = settlement_prepared_resolutions
         self._settlement_source_id = _text(
             collector.source_id,
             "collector source_id",
@@ -1436,6 +1499,43 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             resolutions.append(resolution)
         return tuple(resolutions)
 
+    @_seal_settlement_consumer_entry
+    @_bind_canonical_settlement_resolution_collection
+    def _recovered_settlement_resolutions(
+        self,
+        *,
+        as_of: str,
+        _settlement_resolution_type: type[SettlementResolution],
+        _settlement_resolution_validate: Callable[..., None],
+        _lifecycle_records: Callable[[ContinuousEventLifecycle], tuple[EventLifecycleRecord, ...]],
+        _collector_source_id_get: Callable[[HeadlessCollectorService], str],
+        _settlement_instant: Callable[[object, str], datetime],
+    ) -> tuple[SettlementResolution, ...]:
+        if self._settlement_prepared_resolutions is None:
+            return ()
+        recovered = self._settlement_prepared_resolutions(
+            paper_book_path=self.paper_book_path,
+        )
+        if type(recovered) is not tuple:
+            raise ContinuousSessionError(
+                "prepared settlement recovery must return a tuple"
+            )
+        for resolution in recovered:
+            if type(resolution) is not _settlement_resolution_type:
+                raise ContinuousSessionError(
+                    "prepared settlement recovery returned non-canonical evidence"
+                )
+            try:
+                _settlement_resolution_validate(resolution, as_of=as_of)
+            except (TypeError, ValueError) as exc:
+                raise ContinuousSessionError(
+                    "prepared settlement recovery failed canonical validation"
+                ) from exc
+        self._state.validate_recovered_settlement_evidence(
+            settlement_evidence=recovered,
+        )
+        return recovered
+
     def _load_book(self) -> PaperBook:
         if self.paper_book_path.exists():
             return PaperBook.load(self.paper_book_path)
@@ -1631,20 +1731,24 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 if input_id not in newly_registered:
                     newly_registered.append(input_id)
 
-            resolutions = self._settlement_resolutions(as_of=now)
+            current_resolutions = self._settlement_resolutions(as_of=now)
             # Settlement identity and quote-outcome interpretation are part of the
-            # economic commit protocol. Persist them before any learner side effect or
-            # PaperBook mutation so a crash cannot leave committed P&L whose causal
-            # settlement interpretation is absent on restart.
+            # economic commit protocol. Persist newly observed truth before any learner
+            # side effect or PaperBook mutation. A later recovery handoff may replay
+            # only evidence already proven by this durable pre-P&L checkpoint.
             self._state.record_settlement_evidence(
-                settlement_evidence=resolutions
+                settlement_evidence=current_resolutions
             )
             if self._settlement_prepare is not None:
                 self._settlement_prepare(
                     paper_book_path=self.paper_book_path,
-                    resolutions=resolutions,
+                    resolutions=current_resolutions,
                     at=now,
                 )
+            recovered_resolutions = self._recovered_settlement_resolutions(
+                as_of=now,
+            )
+            resolutions = current_resolutions + recovered_resolutions
             settled, evidence_ids = self._settle(
                 resolutions=resolutions,
                 settled_at=now,
@@ -1703,5 +1807,8 @@ _ContinuousSessionCoordinatorMeta._settle = _build_settlement_consumer_class_gua
 )
 _ContinuousSessionCoordinatorMeta._settlement_resolutions = (
     _build_settlement_consumer_class_guard("_settlement_resolutions")
+)
+_ContinuousSessionCoordinatorMeta._recovered_settlement_resolutions = (
+    _build_settlement_consumer_class_guard("_recovered_settlement_resolutions")
 )
 ContinuousSessionCoordinator._settlement_consumer_bindings_sealed = True

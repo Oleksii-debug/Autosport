@@ -541,6 +541,7 @@ def test_resolution_type_rejects_subclass_authority_laundering() -> None:
         class ForgedResolution(resolution_type):
             execution_authorized = property(lambda _self: True)
 
+
 class _MutableOffsetTz(tzinfo):
     def __init__(self, offset: timedelta) -> None:
         self.offset = offset

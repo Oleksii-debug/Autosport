@@ -629,6 +629,53 @@ def _build_trusted_private_place_action(private_place_action, private_place_acti
                 raise _impl.BetfairSupervisedExecutionError(
                     "trusted Betfair final-send clock moved backwards after confirmation"
                 )
+
+            # Confirmation lifetime is an independent final-send authority. The
+            # receipt was intentionally consumed at the durable SUBMITTED instant,
+            # so re-read its exact durable binding using the fresh post-I/O clock
+            # and reject if the review TTL elapsed before the actual POST seam.
+            try:
+                final_confirmation_authority = _CONFIRMATION_INNER_AUTHORITY_TYPE(
+                    Path(workspace) / _CONFIRMATION_FILENAME,
+                    clock=lambda: final_send_instant,
+                )
+                final_confirmation = _CONFIRMATION_INNER_RESOLVE_BINDING(
+                    final_confirmation_authority,
+                    receipt_id=confirmation_context.receipt_id,
+                    expected_review_sha256=confirmation_context.review_sha256,
+                    require_unconsumed=False,
+                )
+                _CONFIRMATION_REQUIRE_BINDING(
+                    final_confirmation,
+                    bound=bound,
+                    approval=confirmation_context.approval,
+                    action=action,
+                    attempt_id=confirmation_context.attempt_id,
+                    submitted_at=final_send_at,
+                )
+            except (_CONFIRMATION_INNER_ERROR, _CONFIRMATION_ERROR) as exc:
+                raise _impl.BetfairSupervisedExecutionError(
+                    "durable Betfair operator confirmation changed after consumption"
+                ) from exc
+            if type(final_confirmation) is not _CONFIRMATION_INNER_BINDING_TYPE:
+                raise _impl.BetfairSupervisedExecutionError(
+                    "durable Betfair operator confirmation binding changed"
+                )
+            if (
+                final_confirmation.receipt.consumed_at != submitted_at
+                or final_confirmation.receipt.consumed_by is None
+            ):
+                raise _impl.BetfairSupervisedExecutionError(
+                    "durable Betfair operator confirmation consumption changed"
+                )
+            if final_send_instant >= _CONFIRMATION_INSTANT(
+                final_confirmation.review.expires_at,
+                "review.expires_at",
+            ):
+                raise _impl.BetfairSupervisedExecutionError(
+                    "durable Betfair operator confirmation expired before provider send"
+                )
+
             _FINAL_REQUIRE_APPROVAL(
                 bound,
                 confirmation_context.approval,

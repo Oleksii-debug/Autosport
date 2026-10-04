@@ -343,10 +343,9 @@ class IngestionEngine:
         # acquisition/validation/normalization already succeeded.
         ordered_flags = tuple(sorted(flags))
         try:
-            publish_live = getattr(self.bus, "_publish_many_live_ingestion", None)
             accepted = (
-                publish_live(normalized)
-                if callable(publish_live)
+                self.bus._publish_many_live_ingestion(normalized)
+                if isinstance(self.bus, MarketEventBus)
                 else self.bus.publish_many(normalized)
             )
         except MarketEventDeliveryError as delivery_error:

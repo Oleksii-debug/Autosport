@@ -489,6 +489,10 @@ class MarketMirror:
             raise TypeError("store must be a SQLiteMarketStore")
         if type(require_live_receipt_authority) is not bool:
             raise TypeError("require_live_receipt_authority must be bool")
+        if require_live_receipt_authority and type(store) is not SQLiteMarketStore:
+            raise TypeError(
+                "trusted live replay requires an exact SQLiteMarketStore"
+            )
         boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
         mirror = cls()
         history = (
@@ -540,8 +544,8 @@ class MarketMirror:
         restart. The receipt side table is intentionally prospective: rows written
         before that authority existed stay absent from this live projection.
         """
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("live store must be an exact SQLiteMarketStore")
         mirror = cls()
         current = SQLiteMarketStore.trusted_live_current_by_source(store)
         for key in sorted(current):

@@ -176,6 +176,15 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 receipt = application.apply(delta, own)
                 self.assertEqual(receipt.canonical_event_digest, canonical_event_digest(own))
 
+                newer_untrusted = MarketEvent.from_dict(
+                    {
+                        **own.to_dict(),
+                        "decimal_odds": "1.95",
+                        "sequence": 2,
+                    }
+                )
+                self.assertTrue(store.append(newer_untrusted))
+
                 other = MarketEvent.from_dict(
                     {
                         **own.to_dict(),
@@ -200,6 +209,7 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 self.assertEqual(len(snapshot), 1)
                 self.assertEqual(snapshot[0].source_id, "provider-a")
                 self.assertEqual(snapshot[0].sequence, 1)
+                self.assertEqual(snapshot[0].decimal_odds, own.decimal_odds)
                 self.assertEqual(runtime.invalidations.pending_count, 1)
                 self.assertIsNone(
                     runtime.mirror.get(

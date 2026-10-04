@@ -832,9 +832,9 @@ def _desktop_receipt_backed_current_events(
     canonical_application: CanonicalDesktopApplication,
     source_id: str,
 ) -> tuple[MarketEvent, ...]:
-    """Return only current quotes proven by completed desktop application receipts."""
+    """Reconstruct product market state from completed desktop receipts only."""
 
-    receipt_digests: set[str] = set()
+    receipt_backed: list[MarketEvent] = []
     after_delta_id: str | None = None
     while True:
         deltas = collector_store.deltas_after_commit(
@@ -856,20 +856,25 @@ def _desktop_receipt_backed_current_events(
                 raise ProductCompositionError(
                     "desktop application receipt conflicts with collector delta"
                 )
-            receipt_digests.add(receipt.canonical_event_digest)
+
+            matches = tuple(
+                event
+                for event in market_store.events(delta.event_id)
+                if event.source_id == source_id
+                and event.dedupe_key == delta.event_dedupe_key
+                and canonical_event_digest(event) == receipt.canonical_event_digest
+            )
+            if len(matches) != 1:
+                raise ProductCompositionError(
+                    "desktop application receipt cannot be resolved to one durable event"
+                )
+            receipt_backed.append(matches[0])
+
         after_delta_id = deltas[-1].delta_id
         if len(deltas) < 1000:
             break
 
-    current: list[MarketEvent] = []
-    for (stored_source_id, _quote_key), event in (
-        market_store.current_by_source().items()
-    ):
-        if stored_source_id != source_id:
-            continue
-        if canonical_event_digest(event) in receipt_digests:
-            current.append(event)
-    return tuple(current)
+    return tuple(receipt_backed)
 
 
 def build_autonomous_product_runtime(

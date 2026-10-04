@@ -270,3 +270,53 @@ def test_final_send_ledger_projection_surface_rebinding_fails_closed(
 
     assert not boundary._confirmation_graph_unchanged()
 
+@pytest.mark.parametrize(
+    ("type_name", "member_name"),
+    (
+        ("SupervisedApproval", "expires_at"),
+        ("SupervisedApproval", "evidence_sha256"),
+        ("BoundSupervisedExecutionPlan", "execution_plan"),
+        ("BoundSupervisedExecutionPlan", "approval_fingerprint"),
+    ),
+)
+def test_final_send_supervised_slot_rebinding_fails_closed(
+    monkeypatch,
+    type_name: str,
+    member_name: str,
+) -> None:
+    assert boundary._confirmation_graph_unchanged()
+    projection_type = getattr(confirmation, type_name)
+    monkeypatch.setattr(
+        projection_type,
+        member_name,
+        property(lambda self: None),
+    )
+    assert not boundary._confirmation_graph_unchanged()
+
+
+@pytest.mark.parametrize(
+    ("owner", "member_name"),
+    (
+        ("approval", "fingerprint"),
+        ("approval", "ledger_identity"),
+        ("execution_plan", "fingerprint"),
+    ),
+)
+def test_final_send_identity_property_rebinding_fails_closed(
+    monkeypatch,
+    owner: str,
+    member_name: str,
+) -> None:
+    assert boundary._confirmation_graph_unchanged()
+    owner_type = (
+        boundary._CONFIRMATION_APPROVAL
+        if owner == "approval"
+        else boundary._ledger_runtime.ExecutionPlan
+    )
+    monkeypatch.setattr(
+        owner_type,
+        member_name,
+        property(lambda self: "0" * 64),
+    )
+    assert not boundary._confirmation_graph_unchanged()
+

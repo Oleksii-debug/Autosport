@@ -224,6 +224,60 @@ _CONFIRMATION_BOUND_VERIFY = _CONFIRMATION_BOUND_PLAN.verify_binding
 _CONFIRMATION_BOUND_ACTION_FOR = _CONFIRMATION_BOUND_PLAN.action_for
 _CONFIRMATION_APPROVAL = _confirmation.SupervisedApproval
 _CONFIRMATION_APPROVAL_REQUIRE_ACTIVE = _CONFIRMATION_APPROVAL.require_active
+_FINAL_SUPERVISED_PROJECTION_TYPES = (
+    _CONFIRMATION_BOUND_PLAN,
+    _CONFIRMATION_APPROVAL,
+)
+_FINAL_SUPERVISED_INIT_GRAPH = tuple(
+    (
+        projection_type,
+        projection_type.__init__,
+        getattr(projection_type.__init__, "__code__", None),
+    )
+    for projection_type in _FINAL_SUPERVISED_PROJECTION_TYPES
+)
+_FINAL_SUPERVISED_SLOT_DESCRIPTOR_GRAPH = tuple(
+    (
+        projection_type,
+        slot_name,
+        getattr(projection_type, slot_name),
+    )
+    for projection_type in _FINAL_SUPERVISED_PROJECTION_TYPES
+    for slot_name in getattr(projection_type, "__slots__", ())
+    if type(slot_name) is str
+)
+_APPROVAL_FINGERPRINT_PROPERTY = vars(_CONFIRMATION_APPROVAL).get("fingerprint")
+_APPROVAL_LEDGER_IDENTITY_PROPERTY = vars(_CONFIRMATION_APPROVAL).get("ledger_identity")
+_EXECUTION_PLAN_FINGERPRINT_PROPERTY = vars(_ledger_runtime.ExecutionPlan).get(
+    "fingerprint"
+)
+if (
+    type(_APPROVAL_FINGERPRINT_PROPERTY) is not property
+    or _APPROVAL_FINGERPRINT_PROPERTY.fget is None
+    or type(_APPROVAL_LEDGER_IDENTITY_PROPERTY) is not property
+    or _APPROVAL_LEDGER_IDENTITY_PROPERTY.fget is None
+    or type(_EXECUTION_PLAN_FINGERPRINT_PROPERTY) is not property
+    or _EXECUTION_PLAN_FINGERPRINT_PROPERTY.fget is None
+):
+    raise RuntimeError("canonical final-send identity properties are unavailable")
+_APPROVAL_FINGERPRINT_GETTER = _APPROVAL_FINGERPRINT_PROPERTY.fget
+_APPROVAL_FINGERPRINT_GETTER_CODE = getattr(
+    _APPROVAL_FINGERPRINT_GETTER,
+    "__code__",
+    None,
+)
+_APPROVAL_LEDGER_IDENTITY_GETTER = _APPROVAL_LEDGER_IDENTITY_PROPERTY.fget
+_APPROVAL_LEDGER_IDENTITY_GETTER_CODE = getattr(
+    _APPROVAL_LEDGER_IDENTITY_GETTER,
+    "__code__",
+    None,
+)
+_EXECUTION_PLAN_FINGERPRINT_GETTER = _EXECUTION_PLAN_FINGERPRINT_PROPERTY.fget
+_EXECUTION_PLAN_FINGERPRINT_GETTER_CODE = getattr(
+    _EXECUTION_PLAN_FINGERPRINT_GETTER,
+    "__code__",
+    None,
+)
 _CONFIRMATION_EXECUTION_ERROR = _confirmation.SupervisedExecutionError
 _CONFIRMATION_FILENAME = _confirmation.CONFIRMATION_FILENAME
 _CONFIRMATION_REVIEW_PAYLOAD_DOMAIN = _confirmation._REVIEW_PAYLOAD_DOMAIN
@@ -251,6 +305,9 @@ _CONFIRMATION_TRANSITIVE_FUNCTIONS = (
     (_CONFIRMATION_BOUND_VERIFY, _CONFIRMATION_BOUND_VERIFY.__code__),
     (_CONFIRMATION_BOUND_ACTION_FOR, _CONFIRMATION_BOUND_ACTION_FOR.__code__),
     (_CONFIRMATION_APPROVAL_REQUIRE_ACTIVE, _CONFIRMATION_APPROVAL_REQUIRE_ACTIVE.__code__),
+    (_APPROVAL_FINGERPRINT_GETTER, _APPROVAL_FINGERPRINT_GETTER_CODE),
+    (_APPROVAL_LEDGER_IDENTITY_GETTER, _APPROVAL_LEDGER_IDENTITY_GETTER_CODE),
+    (_EXECUTION_PLAN_FINGERPRINT_GETTER, _EXECUTION_PLAN_FINGERPRINT_GETTER_CODE),
 )
 
 # Reuse the exact canonical #1891 process-local authority graph. These are not new
@@ -461,6 +518,34 @@ def _confirmation_graph_unchanged() -> bool:
         and _CONFIRMATION_BOUND_PLAN.action_for is _CONFIRMATION_BOUND_ACTION_FOR
         and _confirmation.SupervisedApproval is _CONFIRMATION_APPROVAL
         and _CONFIRMATION_APPROVAL.require_active is _CONFIRMATION_APPROVAL_REQUIRE_ACTIVE
+        and all(
+            projection_type.__init__ is init
+            and getattr(init, "__code__", None) is code
+            for projection_type, init, code in _FINAL_SUPERVISED_INIT_GRAPH
+        )
+        and all(
+            getattr(projection_type, slot_name, None) is descriptor
+            for projection_type, slot_name, descriptor in (
+                _FINAL_SUPERVISED_SLOT_DESCRIPTOR_GRAPH
+            )
+        )
+        and vars(_CONFIRMATION_APPROVAL).get("fingerprint")
+        is _APPROVAL_FINGERPRINT_PROPERTY
+        and _APPROVAL_FINGERPRINT_PROPERTY.fget is _APPROVAL_FINGERPRINT_GETTER
+        and getattr(_APPROVAL_FINGERPRINT_GETTER, "__code__", None)
+        is _APPROVAL_FINGERPRINT_GETTER_CODE
+        and vars(_CONFIRMATION_APPROVAL).get("ledger_identity")
+        is _APPROVAL_LEDGER_IDENTITY_PROPERTY
+        and _APPROVAL_LEDGER_IDENTITY_PROPERTY.fget
+        is _APPROVAL_LEDGER_IDENTITY_GETTER
+        and getattr(_APPROVAL_LEDGER_IDENTITY_GETTER, "__code__", None)
+        is _APPROVAL_LEDGER_IDENTITY_GETTER_CODE
+        and vars(_ledger_runtime.ExecutionPlan).get("fingerprint")
+        is _EXECUTION_PLAN_FINGERPRINT_PROPERTY
+        and _EXECUTION_PLAN_FINGERPRINT_PROPERTY.fget
+        is _EXECUTION_PLAN_FINGERPRINT_GETTER
+        and getattr(_EXECUTION_PLAN_FINGERPRINT_GETTER, "__code__", None)
+        is _EXECUTION_PLAN_FINGERPRINT_GETTER_CODE
         and _confirmation.SupervisedExecutionError is _CONFIRMATION_EXECUTION_ERROR
         and _confirmation.CONFIRMATION_FILENAME == _CONFIRMATION_FILENAME
         and _confirmation._REVIEW_PAYLOAD_DOMAIN == _CONFIRMATION_REVIEW_PAYLOAD_DOMAIN

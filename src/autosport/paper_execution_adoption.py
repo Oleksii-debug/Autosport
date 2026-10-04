@@ -822,8 +822,11 @@ class PaperExecutionAdoptionRuntime:
             # particular, DecisionLedger-origin composition wraps execute(), so
             # bypassing that surface via _execute_unlocked would mint an origin-less
             # live PAPER reservation.
-            resolve_execution_started_at = self.resolve_execution_started_at
-            execute = self.execute
+            runtime_type = type(self)
+            resolve_execution_started_at = (
+                runtime_type.resolve_execution_started_at.__get__(self, runtime_type)
+            )
+            execute = runtime_type.execute.__get__(self, runtime_type)
             now = clock()
             if not isinstance(now, datetime):
                 raise TypeError("PAPER execution clock must return datetime")

@@ -400,6 +400,64 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 actual_execution_time.isoformat(),
             )
 
+    def test_execute_with_clock_ignores_instance_shadowed_start_resolver(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            runtime.resolve_execution_started_at = (
+                lambda **_kwargs: STARTED_AT
+            )
+            actual_execution_time = datetime.fromisoformat(
+                "2026-09-20T06:01:00+00:00"
+            )
+
+            result = runtime.execute_with_clock(
+                prepared=current_prepared,
+                trigger_id="trigger-shadowed-start-resolver",
+                clock=lambda: actual_execution_time,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(
+                result.run.started_at,
+                actual_execution_time.isoformat(),
+            )
+            self.assertEqual(
+                result.run.attempts[0].outcome,
+                PaperAttemptOutcome.REJECTED,
+            )
+            self.assertIn("expired", result.run.attempts[0].reason)
+            self.assertEqual(book.tickets, {})
+            reservations = [
+                event
+                for event in ledger.events()
+                if event["event_type"] == "RUN_RESERVED"
+            ]
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(
+                reservations[0]["payload"]["started_at"],
+                actual_execution_time.isoformat(),
+            )
+
+    def test_execute_with_clock_ignores_instance_shadowed_execute(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            forged_result = object()
+            runtime.execute = lambda **_kwargs: forged_result
+            actual_execution_time = datetime.fromisoformat(STARTED_AT)
+
+            result = runtime.execute_with_clock(
+                prepared=current_prepared,
+                trigger_id="trigger-shadowed-execute",
+                clock=lambda: actual_execution_time,
+                materialize_exposure=False,
+            )
+
+            self.assertIsNot(result, forged_result)
+            self.assertEqual(result.run.started_at, STARTED_AT)
+            self.assertTrue(result.run.completed)
+
     def test_execute_with_clock_samples_after_execution_lock_entry(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

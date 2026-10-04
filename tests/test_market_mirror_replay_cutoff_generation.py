@@ -686,7 +686,8 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 return original_require()
 
             try:
-                before = store._market_append_authority().read_history()
+                authority = store._market_append_authority()
+                before = authority.read_history()
                 calls = 0
                 with patch.object(
                     store,
@@ -705,7 +706,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                             )
                         )
 
-                after = store._market_append_authority().read_history()
+                after = authority.read_history()
                 before_commits = [
                     record for record in before if record.phase.value == "COMMIT"
                 ]

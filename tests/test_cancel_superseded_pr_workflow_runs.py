@@ -1059,6 +1059,36 @@ def test_base_active_run_reader_rejects_oversized_provider_page(monkeypatch) -> 
         api._active_runs_for_status("queued")
 
 
+def test_base_active_run_reader_rejects_total_count_smaller_than_page(
+    monkeypatch,
+) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+
+    def run_payload(run_id: int) -> dict[str, object]:
+        return {
+            "id": run_id,
+            "head_sha": HEAD_A,
+            "name": "CI",
+            "status": "queued",
+            "pull_requests": [{"number": 2008}],
+        }
+
+    def fake_request(path: str, **_kwargs):
+        assert "per_page=100&page=1" in path
+        return {
+            "total_count": 1,
+            "workflow_runs": [run_payload(1), run_payload(2)],
+        }
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    with pytest.raises(CancellationError, match="invalid workflow-runs total_count"):
+        api._active_runs_for_status("queued")
+
+
 def test_selector_ignores_rebound_coordinate_validators(monkeypatch) -> None:
     monkeypatch.setattr(
         controller_module,

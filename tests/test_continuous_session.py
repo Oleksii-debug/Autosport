@@ -900,6 +900,107 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_settlement_evidence_is_durable_before_post_pnl_crash_and_blocks_reinterpretation(
+        self,
+    ) -> None:
+        class _FailAfterSettlement:
+            def prepare_settlement(self, **_kwargs):
+                return ()
+
+            def reconcile_after_settlement(self, **_kwargs):
+                raise RuntimeError("post-settlement crash")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:crash-bound",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+            )
+            book.save(root / "paper_book.json")
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="provider-result:crash-bound",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="crash-bound-outcome",
+                evidence_sha256="0" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            authority = _OutcomeAuthority(resolution)
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+                settlement_learning_handoff=_FailAfterSettlement(),
+            )
+            try:
+                with self.assertRaisesRegex(RuntimeError, "post-settlement crash"):
+                    coordinator.tick()
+
+                self.assertEqual(
+                    PaperBook.load(root / "paper_book.json").balance,
+                    Decimal("110"),
+                )
+                status = coordinator.status()
+                self.assertEqual(status.cycles_completed, 0)
+                self.assertEqual(
+                    tuple(item["evidence_id"] for item in status.settlement_evidence),
+                    ("crash-bound-outcome",),
+                )
+            finally:
+                store.close()
+
+            authority.resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="provider-result:crash-bound",
+                quote_outcomes={leg.quote_key: "loss"},
+                evidence_id="crash-bound-outcome",
+                evidence_sha256="0" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            restarted, restarted_store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "settlement outcome interpretation conflicts with durable evidence",
+                ):
+                    restarted.tick()
+                self.assertEqual(
+                    PaperBook.load(root / "paper_book.json").balance,
+                    Decimal("110"),
+                )
+                self.assertEqual(restarted.status().cycles_completed, 0)
+            finally:
+                restarted_store.close()
+
     def test_settlement_event_reference_cannot_change_evidence_identity_after_pnl_commit(
         self,
     ) -> None:

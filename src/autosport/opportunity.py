@@ -1489,3 +1489,206 @@ class PortfolioPlan:
                 "plan_id does not match canonical contents"
             )
         return result
+
+def _seal_public_dependency_boundaries() -> None:
+    """Keep canonical dependencies closure-owned on public contract surfaces."""
+
+    finite_decimal_fn = _finite_decimal
+    quote_key_fn = _quote_key
+    canonical_market_event_copy_fn = _canonical_market_event_copy
+    canonical_json_hash_fn = _canonical_json_hash
+    parse_iso_timestamp_fn = parse_iso_timestamp
+    predictive_evidence_type = PredictiveEligibilityEvidence
+    require_exact_forecast_binding_fn = _require_exact_forecast_binding
+    datetime_type = datetime
+    utc_zone = timezone.utc
+    strategy_type = StrategyClass
+    decision_type = OpportunityDecision
+    predictive_edge = StrategyClass.PREDICTIVE_EDGE
+    hybrid = StrategyClass.HYBRID
+    quote_ref_type = QuoteRef
+    forecast_ref_type = ForecastRef
+    sorted_unique_evidence_fn = _sorted_unique_evidence
+    decimal_type = Decimal
+    opportunity_type = Opportunity
+    opportunity_set_type = OpportunitySet
+    allocation_type = PlanAllocation
+    actionable_decision = OpportunityDecision.ACTIONABLE
+
+    quote_post_init_impl = QuoteRef.__post_init__
+    quote_key_impl = QuoteRef.__dict__["quote_key"].fget
+    quote_from_event_impl = QuoteRef.__dict__["from_market_event"].__func__
+    predictive_post_init_impl = PredictiveEligibilityEvidence.__post_init__
+    forecast_post_init_impl = ForecastRef.__post_init__
+    forecast_from_forecast_impl = ForecastRef.__dict__["from_forecast"].__func__
+    forecast_eligibility_impl = ForecastRef.predictive_eligibility_reason
+    opportunity_post_init_impl = Opportunity.__post_init__
+    uncertainty_haircut_impl = Opportunity.__dict__[
+        "predictive_uncertainty_haircut"
+    ].fget
+    conflict_key_impl = Opportunity.__dict__["conflict_key"].fget
+    opportunity_id_impl = Opportunity.__dict__["opportunity_id"].fget
+    opportunity_set_post_init_impl = OpportunitySet.__post_init__
+    opportunity_set_id_impl = OpportunitySet.__dict__["opportunity_set_id"].fget
+    allocation_post_init_impl = PlanAllocation.__post_init__
+    portfolio_post_init_impl = PortfolioPlan.__post_init__
+    plan_id_impl = PortfolioPlan.__dict__["plan_id"].fget
+
+    def quote_post_init(self) -> None:
+        quote_post_init_impl(
+            self,
+            _finite_decimal_fn=finite_decimal_fn,
+        )
+
+    def quote_key(self) -> str:
+        return quote_key_impl(
+            self,
+            _quote_key_fn=quote_key_fn,
+        )
+
+    def quote_from_market_event(
+        cls,
+        event: MarketEvent,
+        *,
+        market_snapshot_hash: str | None = None,
+    ) -> "QuoteRef":
+        return quote_from_event_impl(
+            cls,
+            event,
+            market_snapshot_hash=market_snapshot_hash,
+            _canonical_market_event_copy_fn=canonical_market_event_copy_fn,
+            _canonical_json_hash_fn=canonical_json_hash_fn,
+        )
+
+    def predictive_post_init(self) -> None:
+        predictive_post_init_impl(
+            self,
+            _parse_iso_timestamp=parse_iso_timestamp_fn,
+            _finite_decimal_fn=finite_decimal_fn,
+        )
+
+    def forecast_post_init(self) -> None:
+        forecast_post_init_impl(
+            self,
+            _predictive_evidence_type=predictive_evidence_type,
+            _parse_iso_timestamp=parse_iso_timestamp_fn,
+            _finite_decimal_fn=finite_decimal_fn,
+        )
+
+    def forecast_from_forecast(
+        cls,
+        forecast: ForecastRecord,
+        quote: QuoteRef,
+        *,
+        predictive_eligibility: PredictiveEligibilityEvidence | None = None,
+    ) -> "ForecastRef":
+        return forecast_from_forecast_impl(
+            cls,
+            forecast,
+            quote,
+            predictive_eligibility=predictive_eligibility,
+            _require_exact_forecast_binding_fn=require_exact_forecast_binding_fn,
+        )
+
+    def forecast_predictive_eligibility_reason(
+        self,
+        decision_time: object,
+        *,
+        expected_model_id: str | None,
+    ) -> str | None:
+        return forecast_eligibility_impl(
+            self,
+            decision_time,
+            expected_model_id=expected_model_id,
+            _parse_iso_timestamp=parse_iso_timestamp_fn,
+            _datetime_type=datetime_type,
+            _utc_zone=utc_zone,
+        )
+
+    def opportunity_post_init(self) -> None:
+        opportunity_post_init_impl(
+            self,
+            _strategy_type=strategy_type,
+            _decision_type=decision_type,
+            _predictive_edge=predictive_edge,
+            _hybrid=hybrid,
+            _quote_ref_type=quote_ref_type,
+            _forecast_ref_type=forecast_ref_type,
+            _sorted_unique_evidence_fn=sorted_unique_evidence_fn,
+        )
+
+    def predictive_uncertainty_haircut(self) -> Decimal | None:
+        return uncertainty_haircut_impl(
+            self,
+            _decimal_type=decimal_type,
+        )
+
+    def conflict_key(self) -> str:
+        return conflict_key_impl(
+            self,
+            _canonical_json_hash_fn=canonical_json_hash_fn,
+        )
+
+    def opportunity_id(self) -> str:
+        return opportunity_id_impl(
+            self,
+            _canonical_json_hash_fn=canonical_json_hash_fn,
+        )
+
+    def opportunity_set_post_init(self) -> None:
+        opportunity_set_post_init_impl(
+            self,
+            _opportunity_type=opportunity_type,
+        )
+
+    def opportunity_set_id(self) -> str:
+        return opportunity_set_id_impl(
+            self,
+            _canonical_json_hash_fn=canonical_json_hash_fn,
+        )
+
+    def allocation_post_init(self) -> None:
+        allocation_post_init_impl(
+            self,
+            _finite_decimal_fn=finite_decimal_fn,
+        )
+
+    def portfolio_post_init(self) -> None:
+        portfolio_post_init_impl(
+            self,
+            _opportunity_set_type=opportunity_set_type,
+            _allocation_type=allocation_type,
+            _actionable_decision=actionable_decision,
+            _sorted_unique_evidence_fn=sorted_unique_evidence_fn,
+        )
+
+    def plan_id(self) -> str:
+        return plan_id_impl(
+            self,
+            _canonical_json_hash_fn=canonical_json_hash_fn,
+        )
+
+    QuoteRef.__post_init__ = quote_post_init
+    QuoteRef.quote_key = property(quote_key)
+    QuoteRef.from_market_event = classmethod(quote_from_market_event)
+    PredictiveEligibilityEvidence.__post_init__ = predictive_post_init
+    ForecastRef.__post_init__ = forecast_post_init
+    ForecastRef.from_forecast = classmethod(forecast_from_forecast)
+    ForecastRef.predictive_eligibility_reason = (
+        forecast_predictive_eligibility_reason
+    )
+    Opportunity.__post_init__ = opportunity_post_init
+    Opportunity.predictive_uncertainty_haircut = property(
+        predictive_uncertainty_haircut
+    )
+    Opportunity.conflict_key = property(conflict_key)
+    Opportunity.opportunity_id = property(opportunity_id)
+    OpportunitySet.__post_init__ = opportunity_set_post_init
+    OpportunitySet.opportunity_set_id = property(opportunity_set_id)
+    PlanAllocation.__post_init__ = allocation_post_init
+    PortfolioPlan.__post_init__ = portfolio_post_init
+    PortfolioPlan.plan_id = property(plan_id)
+
+
+_seal_public_dependency_boundaries()
+del _seal_public_dependency_boundaries

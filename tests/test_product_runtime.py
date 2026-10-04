@@ -102,6 +102,13 @@ class _MutatingDeltaSource(_Source):
         return ()
 
 
+class _MutatingResolverSource(_Source):
+    def resolve_event(self, delta):
+        event = _Source.resolve_event(self, delta)
+        self.product_source_configuration_sha256 = "2" * 64
+        return event
+
+
 def _replacement_source_resolve_event(self, delta):
     if delta.event_id == "never":
         raise AssertionError("replacement resolver executable semantics")
@@ -1055,6 +1062,48 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                         source_id=source.source_id,
                     ),
                     (),
+                )
+            finally:
+                runtime.close()
+
+    def test_resolver_result_is_not_released_if_source_authority_changes_during_resolution(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event()
+            delta = _delta(event)
+            source = _MutatingResolverSource(
+                resolved_event=event,
+                configuration_sha256="1" * 64,
+            )
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "source resolver authority changed after product composition",
+                ):
+                    runtime.coordinator.desktop_consumer.drain(as_of=clock.value)
+
+                self.assertFalse(
+                    DesktopDeltaCheckpointStore(
+                        root / "desktop_acks.json"
+                    ).has_ack(delta.delta_id)
+                )
+                self.assertEqual(runtime.market_store.events(event.event_id), [])
+                self.assertEqual(
+                    SourceHealthStore(root / "source_health.json")
+                    .get(event.source_id)
+                    .poll_count,
+                    0,
                 )
             finally:
                 runtime.close()

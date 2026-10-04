@@ -1388,6 +1388,10 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 initial_bankroll="100",
             )
             original_publish = product_runtime_module.MarketEventBus.publish
+            original_notify = product_runtime_module.MarketEventBus._notify
+            original_append = (
+                product_runtime_module.SQLiteMarketStore.append_batch_accepted
+            )
             original_get = product_runtime_module.SourceHealthStore.get
             forged_calls = []
 
@@ -1399,6 +1403,8 @@ class AutonomousProductCompositionTests(unittest.TestCase):
 
             try:
                 product_runtime_module.MarketEventBus.publish = forged
+                product_runtime_module.MarketEventBus._notify = forged
+                product_runtime_module.SQLiteMarketStore.append_batch_accepted = forged
                 product_runtime_module.SourceHealthStore.get = forged
                 self.assertTrue(runtime.collector.delta_store.append(delta))
                 self.assertEqual(
@@ -1414,6 +1420,10 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 self.assertEqual(runtime.market_store.events(event.event_id), [event])
             finally:
                 product_runtime_module.MarketEventBus.publish = original_publish
+                product_runtime_module.MarketEventBus._notify = original_notify
+                product_runtime_module.SQLiteMarketStore.append_batch_accepted = (
+                    original_append
+                )
                 product_runtime_module.SourceHealthStore.get = original_get
                 runtime.close()
 

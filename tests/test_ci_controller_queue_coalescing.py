@@ -1829,6 +1829,9 @@ def test_controller_scheduler_coalesces_all_prs_per_source_workflow() -> None:
     assert "github.event.workflow_run.id" not in concurrency
     assert "'non-pr'" in concurrency
     assert "cancel-in-progress: false" in concurrency
+    job = text.split("jobs:", 1)[1]
+    assert "if: github.event.workflow_run.event == 'pull_request'" not in job
+    assert "deterministic backlog" in text
     assert "--event-pr-reference-mode" in text
     assert "pull_requests[1].number && 'ambiguous'" in text
     assert "pull_requests[0].number && 'singleton' || 'empty'" in text

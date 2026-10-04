@@ -113,7 +113,7 @@ def test_controller_does_not_skip_close_merge_run_when_pr_identity_is_unresolved
     workflow = _text()
     job = workflow.split("jobs:", 1)[1]
 
-    assert "if: github.event.workflow_run.event == 'pull_request'" in job
+    assert "if: github.event.workflow_run.event == 'pull_request'" not in job
     assert "pull_requests[0].number != null" not in job
     assert '--pr-number "${{' in job
     assert "github.event.workflow_run.pull_requests[1].number" in job
@@ -635,9 +635,26 @@ def test_non_pr_source_events_cannot_evict_pending_pr_cleanup_controller() -> No
     assert "format('non-pr-{0}', github.event.workflow_run.id)" not in concurrency
     assert "github.event.workflow_run.id" not in concurrency
     assert "'non-pr'" in concurrency
-    assert "concurrency is evaluated before the job-level pull_request guard" in workflow
-    assert "coalesces skipped non-PR controllers" in workflow
-    assert "non-PR lane is scheduler isolation only" in workflow
+    job = workflow.split("jobs:", 1)[1]
+    assert "if: github.event.workflow_run.event == 'pull_request'" not in job
+    assert "execute the same workflow-wide PR snapshot sweep" in workflow
+    assert "empty event PR identity" in workflow
+    assert "can neither enter the cancellation candidate set" in workflow
+    assert "deterministic backlog" in workflow
+
+def test_non_pr_source_event_bootstraps_cleanup_without_event_pr_authority() -> None:
+    workflow = _text()
+    job = workflow.split("jobs:", 1)[1]
+    source = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "if: github.event.workflow_run.event == 'pull_request'" not in job
+    assert "|| 0 }}" in job
+    assert "pull_requests[0].number && 'singleton' || 'empty'" in job
+    assert '"event": "pull_request"' in source
+    assert "if trigger_pr_number is not None:" in source
+
 
 def test_main_captures_sweep_before_snapshot_callback_global_rebind(
     monkeypatch,

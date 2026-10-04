@@ -38,18 +38,19 @@ permissions:
 # cancel-in-progress stays false so a newer requested PR event cannot kill a controller
 # that is already making trusted decisions. Pull-request source events share one lane per
 # exact source workflow, so at most one running and one pending trusted sweep are needed.
-# CI/Windows also emit push or workflow_dispatch runs and Endurance emits manual runs;
-# concurrency is evaluated before the job-level pull_request guard, so those non-PR
-# events therefore share a fixed non-PR lane per exact source workflow. That lane
-# coalesces skipped non-PR controllers without evicting the separate useful PR sweep.
-# The non-PR lane is scheduler isolation only and grants no cancellation authority.
+# CI/Windows also emit push or workflow_dispatch runs and Endurance emits manual runs.
+# Those non-PR events share a fixed non-PR lane per exact source workflow and execute
+# the same workflow-wide PR snapshot sweep. They enter with empty event PR identity;
+# the Python reader enumerates only event=pull_request runs, so the triggering non-PR
+# source run can neither enter the cancellation candidate set nor gain trigger-run
+# cancellation authority. This gives a newly merged controller a deterministic backlog
+# bootstrap from main/push activity without treating scheduler state as PR authority.
 concurrency:
   group: pr-qualification-supersession-${{ github.event.workflow_run.workflow_id }}-${{ github.event.workflow_run.event == 'pull_request' && 'pr' || 'non-pr' }}
   cancel-in-progress: false
 
 jobs:
   cancel_superseded_head_runs:
-    if: github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-slim
     timeout-minutes: 10
     steps:

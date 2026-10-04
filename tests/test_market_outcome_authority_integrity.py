@@ -679,6 +679,29 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
 
         authority.assert_issued_integrity()
 
+    def test_settlement_rejects_inplace_terminal_state_dispatch_rebind(self) -> None:
+        authority = self._authority()
+        state = authority.terminal_states[0]
+        hostile_calls: list[str] = []
+
+        def hostile_getattribute(instance, name: str):
+            hostile_calls.append(name)
+            return object.__getattribute__(instance, name)
+
+        with patch.object(
+            MarketTerminalState,
+            "__getattribute__",
+            hostile_getattribute,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "terminal state class dispatch was replaced",
+            ):
+                authority.settlement_by_quote(state)
+
+        self.assertEqual(hostile_calls, [])
+        authority.assert_issued_integrity()
+
 
 if __name__ == "__main__":
     unittest.main()

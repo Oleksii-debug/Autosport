@@ -309,6 +309,79 @@ class MarketTerminalState:
 
 _CANONICAL_SETTLEMENT_RESULT_TYPE = SettlementResult
 _CANONICAL_MARKET_TERMINAL_STATE_TYPE = MarketTerminalState
+_MISSING_TERMINAL_STATE_CLASS_SLOT = object()
+
+
+def _terminal_state_descriptor_code_identity(member: object) -> tuple[object, ...]:
+    if isinstance(member, property):
+        return tuple(
+            None if accessor is None else getattr(accessor, "__code__", None)
+            for accessor in (member.fget, member.fset, member.fdel)
+        )
+    if isinstance(member, (classmethod, staticmethod)):
+        return (getattr(member.__func__, "__code__", None),)
+    return (getattr(member, "__code__", None),)
+
+
+_CANONICAL_MARKET_TERMINAL_STATE_CLASS_SURFACE = tuple(
+    (
+        name,
+        member,
+        _terminal_state_descriptor_code_identity(member),
+    )
+    for name in (
+        "state_id",
+        "settlements",
+        "__post_init__",
+        "__getattribute__",
+        "__setattr__",
+        "__delattr__",
+        "to_dict",
+    )
+    for member in (
+        vars(_CANONICAL_MARKET_TERMINAL_STATE_TYPE).get(
+            name,
+            _MISSING_TERMINAL_STATE_CLASS_SLOT,
+        ),
+    )
+)
+
+
+def _assert_canonical_market_terminal_state_dispatch() -> None:
+    class_dict = vars(_CANONICAL_MARKET_TERMINAL_STATE_TYPE)
+    for name, expected, expected_code in (
+        _CANONICAL_MARKET_TERMINAL_STATE_CLASS_SURFACE
+    ):
+        current = class_dict.get(name, _MISSING_TERMINAL_STATE_CLASS_SLOT)
+        if current is not expected:
+            raise ValueError(
+                "canonical market terminal state class dispatch was replaced"
+            )
+        if isinstance(current, property):
+            current_code = tuple(
+                None if accessor is None else getattr(accessor, "__code__", None)
+                for accessor in (current.fget, current.fset, current.fdel)
+            )
+        elif isinstance(current, (classmethod, staticmethod)):
+            current_code = (getattr(current.__func__, "__code__", None),)
+        else:
+            current_code = (getattr(current, "__code__", None),)
+        if current_code != expected_code:
+            raise ValueError(
+                "canonical market terminal state class dispatch was replaced"
+            )
+
+
+_CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD = (
+    _assert_canonical_market_terminal_state_dispatch
+)
+_CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD_CODE = getattr(
+    _CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD,
+    "__code__",
+    None,
+)
+
+
 _CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS = (
     ("datetime", _CANONICAL_DATETIME_TYPE),
     ("timezone", _CANONICAL_TIMEZONE_TYPE),
@@ -322,6 +395,14 @@ _CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS = (
         _CANONICAL_MARKET_TERMINAL_STATE_TYPE,
     ),
     ("_CANONICAL_SETTLEMENT_RESULT_TYPE", _CANONICAL_SETTLEMENT_RESULT_TYPE),
+    (
+        "_assert_canonical_market_terminal_state_dispatch",
+        _CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD,
+    ),
+    (
+        "_CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD",
+        _CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD,
+    ),
 )
 
 
@@ -800,6 +881,18 @@ def _assert_canonical_market_outcome_authority_dispatch() -> None:
             raise ValueError(
                 "canonical market outcome authority module root was replaced"
             )
+    if (
+        getattr(
+            _CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD_CODE
+    ):
+        raise ValueError(
+            "canonical market terminal state class dispatch was replaced"
+        )
+    _CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD()
 
     class_dict = vars(_CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE)
     for name, expected, expected_code in (

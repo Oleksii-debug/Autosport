@@ -803,6 +803,12 @@ class SQLiteMarketStore:
                 "market database pathname no longer identifies the opened database"
             )
 
+    def _commit_stable_database_path(self) -> None:
+        """Commit only while the canonical pathname still identifies this database."""
+        self._require_database_path_identity()
+        self.connection.commit()
+        self._require_database_path_identity()
+
     def _create_current_quotes(self) -> None:
         self.connection.execute(
             """CREATE TABLE IF NOT EXISTS current_quotes (
@@ -854,7 +860,7 @@ class SQLiteMarketStore:
             self.connection.rollback()
             raise
         else:
-            self.connection.commit()
+            self._commit_stable_database_path()
 
     def _init_schema(self) -> None:
         # Validate any pre-existing tables before creating anything else. Exact
@@ -943,7 +949,7 @@ class SQLiteMarketStore:
             self.connection.rollback()
             raise
         else:
-            self.connection.commit()
+            self._commit_stable_database_path()
 
     def _validate_causal_replay_state(self) -> None:
         """Fail closed if durable append-generation/cutoff evidence is inconsistent."""
@@ -1507,7 +1513,7 @@ class SQLiteMarketStore:
             self.connection.rollback()
             raise
         else:
-            self.connection.commit()
+            self._commit_stable_database_path()
 
     def _repair_current_projection_for_key(
         self,
@@ -1646,7 +1652,7 @@ class SQLiteMarketStore:
                             accepted.append(event)
 
                     if not accepted:
-                        self.connection.commit()
+                        self._commit_stable_database_path()
                         return accepted
 
                     qualified_columns = ",".join(
@@ -1718,7 +1724,7 @@ class SQLiteMarketStore:
                         binding_sha256,
                         committed_state_sha256,
                     )
-                    self.connection.commit()
+                    self._commit_stable_database_path()
                 except Exception as exc:
                     self.connection.rollback()
                     if prepared is not None:
@@ -1773,7 +1779,7 @@ class SQLiteMarketStore:
                             (event_id,),
                         ).fetchall()
                     events = [_event_from_history_row(row) for row in rows]
-                    self.connection.commit()
+                    self._commit_stable_database_path()
                 except Exception:
                     self.connection.rollback()
                     raise
@@ -1917,7 +1923,7 @@ class SQLiteMarketStore:
                                    VALUES (?, ?, ?)""",
                                 (cutoff_id, canonical_as_of, max_generation),
                             )
-                        self.connection.commit()
+                        self._commit_stable_database_path()
                     except Exception as exc:
                         self.connection.rollback()
                         if prepared is not None:
@@ -2002,7 +2008,7 @@ class SQLiteMarketStore:
                             WHERE c.append_generation <= ?""",
                         (max_generation,),
                     ).fetchall()
-                    self.connection.commit()
+                    self._commit_stable_database_path()
                 except Exception:
                     self.connection.rollback()
                     raise
@@ -2059,7 +2065,7 @@ class SQLiteMarketStore:
                         raise ValueError(
                             "current quote projection diverges from canonical market history"
                         )
-                    self.connection.commit()
+                    self._commit_stable_database_path()
                 except Exception:
                     self.connection.rollback()
                     raise

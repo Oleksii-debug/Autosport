@@ -215,6 +215,29 @@ def test_rebinding_public_renderer_holder_cannot_redirect_method_closure(
     assert secret not in store.path.read_text(encoding="utf-8")
 
 
+def test_rebinding_public_fallback_holder_cannot_change_fail_closed_literal(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path, monkeypatch, "fallback-holder-rebind")
+    secret = "AS-DURABLE-FALLBACK-HOLDER-SENTINEL-b80a"
+
+    monkeypatch.setattr(health_module, "_DURABLE_FAILURE_FALLBACK", secret)
+    monkeypatch.setattr(
+        health_module,
+        "safe_exception_text",
+        lambda exc: str(exc),
+    )
+    state = store.record_failure(
+        "fixture-source",
+        now=_NOW,
+        error=RuntimeError(f"Authorization: Bearer {secret}"),
+    )
+
+    assert state.last_error == _FALLBACK
+    assert secret not in store.path.read_text(encoding="utf-8")
+
+
 def test_ordinary_failure_detail_remains_diagnostic(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

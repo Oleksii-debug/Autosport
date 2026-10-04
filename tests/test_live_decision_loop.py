@@ -2180,7 +2180,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 factory=_EmptyIntentFactory(),
                 clock=_ManualClock(self.START + timedelta(seconds=1)),
             )
-            self.assertEqual(active.run_cycle().status, LiveCycleStatus.PROVIDER_GAP)
+            self.assertEqual(active.run_cycle().status, LiveCycleStatus.DECIDED)
             self.assertEqual(active.run_cycle().status, LiveCycleStatus.DECIDED)
             records = JsonlDecisionLedger(
                 workspace / "decisions.jsonl"

@@ -501,7 +501,10 @@ class ProphetXRestRestartIdempotenceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "cannot prove"):
                 outcome.record_health(health)
 
-            self.assertIs(health.record_success, real_record_success)
+            self.assertIs(
+                health.record_success.__func__,
+                real_record_success.__func__,
+            )
         finally:
             store.close()
 

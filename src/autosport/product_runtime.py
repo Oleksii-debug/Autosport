@@ -1512,6 +1512,32 @@ def _build_autonomous_product_runtime_impl(
                     "source resolver authority changed after product composition"
                 )
 
+        product_outcome_authority: SettlementOutcomeAuthority | None = None
+        if outcome_authority is not None:
+            source_settlement_resolve = source.resolve
+
+            def require_settlement_authority() -> None:
+                current_identity = _settlement_authority_identity_fn(
+                    source=source,
+                    source_id=source_id,
+                    outcome_authority=source,
+                )
+                if current_identity != manifest.settlement_authority_identity:
+                    raise ProductCompositionError(
+                        "settlement authority changed after product composition"
+                    )
+
+            class ProductSettlementOutcomeAuthorityProxy:
+                __slots__ = ()
+
+                def resolve(self, record, *, as_of: str):
+                    require_settlement_authority()
+                    resolution = source_settlement_resolve(record, as_of=as_of)
+                    require_settlement_authority()
+                    return resolution
+
+            product_outcome_authority = ProductSettlementOutcomeAuthorityProxy()
+
         source_fetch_catalog_page = source.fetch_catalog_page
         source_fetch_deltas = source.fetch_deltas
 
@@ -1678,7 +1704,7 @@ def _build_autonomous_product_runtime_impl(
             desktop_consumer=desktop,
             invalidation_buffer=invalidations,
             dependency_index=dependencies,
-            outcome_authority=outcome_authority,
+            outcome_authority=product_outcome_authority,
             settlement_learning_handoff=settlement_learning_handoff,
             clock=resolved_clock,
             initial_bankroll=manifest.initial_bankroll,

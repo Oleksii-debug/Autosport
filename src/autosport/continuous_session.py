@@ -675,7 +675,84 @@ def _bind_continuous_state_read_settlement_integrity(method):
     return guarded
 
 
-class _ContinuousSessionState:
+_CONTINUOUS_STATE_PROTECTED_ENTRIES = frozenset(
+    {
+        "_read",
+        "_update",
+        "_merge_settlement_evidence",
+        "_validate_settlement_evidence",
+        "_validate_pending_settlement_resolutions",
+        "snapshot",
+        "session_id",
+        "set_state",
+        "pending_settlement_resolutions",
+        "record_settlement_evidence",
+        "validate_recovered_settlement_evidence",
+        "complete_pending_settlement_commit",
+        "record_source_projection",
+        "record_success",
+        "record_failure",
+        "_state_authority_bindings_sealed",
+    }
+)
+
+
+def _seal_continuous_state_entry(method):
+    """Install a non-shadowable instance binding for canonical state authority."""
+
+    def resolve(instance):
+        return method.__get__(instance, type(instance))
+
+    def reject_set(_instance, _value) -> None:
+        raise TypeError("continuous session state authority binding is immutable")
+
+    def reject_delete(_instance) -> None:
+        raise TypeError("continuous session state authority binding is immutable")
+
+    return property(resolve, reject_set, reject_delete, method.__doc__)
+
+
+class _ContinuousSessionStateMeta(type):
+    """Prevent class/subclass replacement of canonical durable-state entrypoints."""
+
+    def __new__(mcls, name, bases, namespace, **kwargs):
+        inherits_sealed_state = any(
+            any(
+                ancestor.__dict__.get(
+                    "_state_authority_bindings_sealed",
+                    False,
+                )
+                for ancestor in base.__mro__
+            )
+            for base in bases
+        )
+        if inherits_sealed_state and _CONTINUOUS_STATE_PROTECTED_ENTRIES.intersection(
+            namespace
+        ):
+            raise TypeError("continuous session state authority binding is immutable")
+        return super().__new__(mcls, name, bases, namespace, **kwargs)
+
+    def __setattr__(cls, name: str, value: object) -> None:
+        sealed = any(
+            ancestor.__dict__.get("_state_authority_bindings_sealed", False)
+            for ancestor in cls.__mro__
+        )
+        if sealed and name in _CONTINUOUS_STATE_PROTECTED_ENTRIES:
+            raise TypeError("continuous session state authority binding is immutable")
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name: str) -> None:
+        sealed = any(
+            ancestor.__dict__.get("_state_authority_bindings_sealed", False)
+            for ancestor in cls.__mro__
+        )
+        if sealed and name in _CONTINUOUS_STATE_PROTECTED_ENTRIES:
+            raise TypeError("continuous session state authority binding is immutable")
+        super().__delattr__(name)
+
+
+class _ContinuousSessionState(metaclass=_ContinuousSessionStateMeta):
+    _state_authority_bindings_sealed = True
     _SCHEMA = "autosport.continuous_session"
     _VERSION = 4
     _V2_FIELDS = frozenset(
@@ -922,6 +999,7 @@ class _ContinuousSessionState:
             values.append(normalized)
         return tuple(values)
 
+    @_seal_continuous_state_entry
     @_bind_continuous_state_read_settlement_integrity
     def _read(
         self,
@@ -1087,6 +1165,7 @@ class _ContinuousSessionState:
         ]
         return raw
 
+    @_seal_continuous_state_entry
     def snapshot(self) -> ContinuousSessionStatus:
         raw = self._read()
         return ContinuousSessionStatus(
@@ -1118,6 +1197,7 @@ class _ContinuousSessionState:
     def session_id(self) -> str:
         return self._read()["session_id"]
 
+    @_seal_continuous_state_entry
     def _update(self, mutate: Callable[[dict[str, Any]], None]) -> None:
         # Keep read/validate/mutate/publish under the same cross-process economic
         # writer authority. atomic_write_json makes replacement durable, but by
@@ -1129,6 +1209,7 @@ class _ContinuousSessionState:
             atomic_write_json(self.path, raw)
             self._read()
 
+    @_seal_continuous_state_entry
     def set_state(self, state: SessionState, *, reason: str | None = None) -> None:
         if not isinstance(state, SessionState):
             raise TypeError("state must be SessionState")
@@ -1155,6 +1236,7 @@ class _ContinuousSessionState:
             ).isoformat(),
         }
 
+    @_seal_continuous_state_entry
     @_bind_continuous_state_settlement_integrity
     def _merge_settlement_evidence(
         self,
@@ -1265,6 +1347,7 @@ class _ContinuousSessionState:
     ) -> None:
         self._merge_settlement_evidence(self._read(), settlement_evidence)
 
+    @_seal_continuous_state_entry
     def pending_settlement_resolutions(
         self,
     ) -> tuple[SettlementResolution, ...]:
@@ -1285,6 +1368,7 @@ class _ContinuousSessionState:
         self._merge_settlement_evidence(raw, pending)
         return pending
 
+    @_seal_continuous_state_entry
     def record_settlement_evidence(
         self,
         *,
@@ -1303,6 +1387,7 @@ class _ContinuousSessionState:
 
         self._update(mutate)
 
+    @_seal_continuous_state_entry
     def validate_recovered_settlement_evidence(
         self,
         *,
@@ -1337,6 +1422,7 @@ class _ContinuousSessionState:
                     "recovered settlement evidence is no longer pending for recovery"
                 )
 
+    @_seal_continuous_state_entry
     def complete_pending_settlement_commit(
         self,
         *,
@@ -1390,6 +1476,7 @@ class _ContinuousSessionState:
 
         self._update(mutate)
 
+    @_seal_continuous_state_entry
     def record_source_projection(
         self,
         *,
@@ -1439,6 +1526,7 @@ class _ContinuousSessionState:
 
         self._update(mutate)
 
+    @_seal_continuous_state_entry
     def record_success(
         self,
         *,
@@ -1500,6 +1588,7 @@ class _ContinuousSessionState:
 
         self._update(mutate)
 
+    @_seal_continuous_state_entry
     def record_failure(self, *, code: str) -> None:
         code = _text(code, "code")
         self._update(lambda raw: raw.__setitem__("last_error_code", code))

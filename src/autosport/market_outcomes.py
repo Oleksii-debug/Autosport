@@ -12,6 +12,11 @@ from enum import Enum
 from .domain import MarketType, _canonical_sport_value, _quote_identity
 
 
+_CANONICAL_DATETIME_TYPE = datetime
+_CANONICAL_TIMEZONE_TYPE = timezone
+_CANONICAL_TIMEZONE_UTC = timezone.utc
+
+
 _SHA256_HEX = frozenset("0123456789abcdef")
 _VERIFIED_AUTHORITY_TOKEN = object()
 _VERIFIED_AUTHORITY_ISSUANCE = contextvars.ContextVar(
@@ -157,7 +162,7 @@ def _canonical_betfair_runner_id(name: str, value: object) -> str:
 def _canonical_timestamp(name: str, value: object) -> tuple[str, datetime]:
     raw = _canonical_text(name, value)
     try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = _CANONICAL_DATETIME_TYPE.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(f"{name} must be valid ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -300,6 +305,24 @@ class MarketTerminalState:
                 for selection_id, result in self.settlements
             ],
         }
+
+
+_CANONICAL_SETTLEMENT_RESULT_TYPE = SettlementResult
+_CANONICAL_MARKET_TERMINAL_STATE_TYPE = MarketTerminalState
+_CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS = (
+    ("datetime", _CANONICAL_DATETIME_TYPE),
+    ("timezone", _CANONICAL_TIMEZONE_TYPE),
+    ("MarketTerminalState", _CANONICAL_MARKET_TERMINAL_STATE_TYPE),
+    ("SettlementResult", _CANONICAL_SETTLEMENT_RESULT_TYPE),
+    ("_CANONICAL_DATETIME_TYPE", _CANONICAL_DATETIME_TYPE),
+    ("_CANONICAL_TIMEZONE_TYPE", _CANONICAL_TIMEZONE_TYPE),
+    ("_CANONICAL_TIMEZONE_UTC", _CANONICAL_TIMEZONE_UTC),
+    (
+        "_CANONICAL_MARKET_TERMINAL_STATE_TYPE",
+        _CANONICAL_MARKET_TERMINAL_STATE_TYPE,
+    ),
+    ("_CANONICAL_SETTLEMENT_RESULT_TYPE", _CANONICAL_SETTLEMENT_RESULT_TYPE),
+)
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
@@ -494,7 +517,7 @@ class MarketSettlementOutcomeAuthority:
                     result.value for result in combination
                 )
                 states.append(
-                    MarketTerminalState(
+                    _CANONICAL_MARKET_TERMINAL_STATE_TYPE(
                         state_id=state_id,
                         settlements=tuple(
                             zip(self.selection_ids, combination)
@@ -504,7 +527,7 @@ class MarketSettlementOutcomeAuthority:
             return tuple(states)
 
         states = [
-            MarketTerminalState(
+            _CANONICAL_MARKET_TERMINAL_STATE_TYPE(
                 state_id=f"winner:{winner}",
                 settlements=tuple(
                     (
@@ -525,7 +548,7 @@ class MarketSettlementOutcomeAuthority:
             is SettlementSemantics.EXCLUSIVE_SINGLE_WINNER_OR_ALL_VOID
         ):
             states.append(
-                MarketTerminalState(
+                _CANONICAL_MARKET_TERMINAL_STATE_TYPE(
                     state_id="all_void",
                     settlements=tuple(
                         (selection_id, SettlementResult.VOID)
@@ -537,26 +560,26 @@ class MarketSettlementOutcomeAuthority:
 
     def assert_available_as_of(self, decision_as_of: datetime) -> None:
         self.assert_issued_integrity()
-        if type(decision_as_of) is not datetime:
+        if type(decision_as_of) is not _CANONICAL_DATETIME_TYPE:
             raise TypeError("decision_as_of must be an exact datetime")
         if (
             decision_as_of.tzinfo is None
             or decision_as_of.utcoffset() is None
         ):
             raise ValueError("decision_as_of must be timezone-aware")
-        boundary = decision_as_of.astimezone(timezone.utc)
+        boundary = decision_as_of.astimezone(_CANONICAL_TIMEZONE_UTC)
         _, cutoff = _canonical_timestamp("causal_cutoff", self.causal_cutoff)
         _, observed = _canonical_timestamp("observed_at", self.observed_at)
         if (
-            cutoff.astimezone(timezone.utc) > boundary
-            or observed.astimezone(timezone.utc) > boundary
+            cutoff.astimezone(_CANONICAL_TIMEZONE_UTC) > boundary
+            or observed.astimezone(_CANONICAL_TIMEZONE_UTC) > boundary
         ):
             raise ValueError(
                 "market outcome authority is not causally available at decision_as_of"
             )
 
     def _state_is_derived(self, state: MarketTerminalState) -> bool:
-        if type(state) is not MarketTerminalState:
+        if type(state) is not _CANONICAL_MARKET_TERMINAL_STATE_TYPE:
             return False
         actual_ids = tuple(
             selection_id for selection_id, _ in state.settlements
@@ -605,7 +628,7 @@ class MarketSettlementOutcomeAuthority:
         self, state: MarketTerminalState
     ) -> dict[str, str]:
         self.assert_issued_integrity()
-        if type(state) is not MarketTerminalState:
+        if type(state) is not _CANONICAL_MARKET_TERMINAL_STATE_TYPE:
             raise TypeError("state must be exact MarketTerminalState")
         if not self._state_is_derived(state):
             raise ValueError(
@@ -770,7 +793,13 @@ _CANONICAL_MARKET_OUTCOME_AUTHORITY_CLASS_SURFACE = tuple(
 
 
 def _assert_canonical_market_outcome_authority_dispatch() -> None:
-    """Fail closed if authority-bearing class dispatch changed after import."""
+    """Fail closed if authority-bearing class dispatch or trusted roots changed."""
+
+    for name, expected in _CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS:
+        if globals().get(name) is not expected:
+            raise ValueError(
+                "canonical market outcome authority module root was replaced"
+            )
 
     class_dict = vars(_CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE)
     for name, expected, expected_code in (

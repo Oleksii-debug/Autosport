@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import unittest
+from unittest.mock import patch
 
 import autosport.market_outcomes as market_outcomes_module
 from dataclasses import replace
@@ -608,6 +609,74 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
             authority.settlement_by_quote(forged)
 
         self.assertEqual(hostile_calls, [])
+        authority.assert_issued_integrity()
+
+
+    def test_causal_cutoff_rejects_datetime_module_root_rebind_before_dispatch(self) -> None:
+        authority = self._authority()
+        hostile_calls: list[str] = []
+
+        class HostileDatetime(datetime):
+            @classmethod
+            def fromisoformat(cls, value: str):
+                hostile_calls.append("fromisoformat")
+                return cls(2026, 9, 18, 15, 0, 2, tzinfo=timezone.utc)
+
+            def astimezone(self, *args, **kwargs):
+                hostile_calls.append("astimezone")
+                raise AssertionError("hostile datetime dispatch executed")
+
+        hostile = HostileDatetime(
+            2026,
+            9,
+            18,
+            15,
+            0,
+            2,
+            tzinfo=timezone.utc,
+        )
+        with patch.object(market_outcomes_module, "datetime", HostileDatetime):
+            with self.assertRaisesRegex(ValueError, "module root was replaced"):
+                authority.assert_available_as_of(hostile)
+
+        self.assertEqual(hostile_calls, [])
+        authority.assert_issued_integrity()
+
+    def test_settlement_rejects_terminal_state_module_root_rebind_before_dispatch(self) -> None:
+        authority = self._authority()
+        hostile_calls: list[str] = []
+
+        class HostileState(MarketTerminalState):
+            def __getattribute__(self, name: str):
+                hostile_calls.append(name)
+                raise AssertionError("hostile terminal-state dispatch executed")
+
+        forged = object.__new__(HostileState)
+        with patch.object(
+            market_outcomes_module,
+            "MarketTerminalState",
+            HostileState,
+        ):
+            with self.assertRaisesRegex(ValueError, "module root was replaced"):
+                authority.settlement_by_quote(forged)
+
+        self.assertEqual(hostile_calls, [])
+        authority.assert_issued_integrity()
+
+    def test_causal_cutoff_rejects_canonical_datetime_alias_rebind(self) -> None:
+        authority = self._authority()
+
+        class HostileDatetime(datetime):
+            pass
+
+        with patch.object(
+            market_outcomes_module,
+            "_CANONICAL_DATETIME_TYPE",
+            HostileDatetime,
+        ):
+            with self.assertRaisesRegex(ValueError, "module root was replaced"):
+                authority.assert_available_as_of(self.DECISION_AS_OF)
+
         authority.assert_issued_integrity()
 
 

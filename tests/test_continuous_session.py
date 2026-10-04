@@ -55,6 +55,10 @@ from autosport.paper_settlement_learning import PaperSettlementLearningBridge
 from autosport.providers import ProviderUnavailableError
 from autosport.risk import PaperRiskPolicy
 from autosport.storage import SQLiteMarketStore
+from autosport.workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockBusyError,
+)
 
 
 class _Clock:
@@ -401,6 +405,32 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     self.assertEqual(restarted.status().state, SessionState.RUNNING)
                 finally:
                     restarted_store.close()
+            finally:
+                store.close()
+
+    def test_continuous_state_mutation_obeys_workspace_economic_writer_lock(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                with WorkspaceEconomicLock(root):
+                    with self.assertRaises(WorkspaceEconomicLockBusyError):
+                        coordinator.pause()
+                self.assertEqual(coordinator.status().state, SessionState.RUNNING)
+                coordinator.pause()
+                self.assertEqual(coordinator.status().state, SessionState.PAUSED)
             finally:
                 store.close()
 
@@ -1147,6 +1177,94 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 self.assertEqual(
                     PaperBook.load(root / "paper_book.json").balance,
                     Decimal("110"),
+                )
+                self.assertEqual(coordinator.status().cycles_completed, 1)
+            finally:
+                store.close()
+
+    def test_future_ticket_cannot_settle_before_placement_and_retries_causally(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:future-ticket",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:21:00+00:00",
+                provider_source_ids=("provider-a",),
+            )
+            book.save(root / "paper_book.json")
+            authority = _OutcomeAuthority(
+                SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="provider-result:future-ticket",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="future-ticket-outcome",
+                    evidence_sha256="0" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                with patch.object(
+                    coordinator._state,
+                    "record_failure",
+                    side_effect=RuntimeError("checkpoint-failed"),
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "settled_at must not precede placed_at",
+                    ):
+                        coordinator.tick()
+
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("90"))
+                self.assertEqual(durable.tickets[ticket.ticket_id].status.value, "open")
+                self.assertIsNone(durable.tickets[ticket.ticket_id].settled_at)
+                self.assertEqual(coordinator.status().cycles_completed, 0)
+                self.assertEqual(
+                    tuple(
+                        item["evidence_id"]
+                        for item in coordinator.status().settlement_evidence
+                    ),
+                    ("future-ticket-outcome",),
+                )
+
+                clock.value = "2026-09-19T21:22:00+00:00"
+                recovered = coordinator.tick()
+                self.assertEqual(recovered.settled_ticket_ids, (ticket.ticket_id,))
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("110"))
+                self.assertEqual(
+                    durable.tickets[ticket.ticket_id].settled_at,
+                    "2026-09-19T21:22:00+00:00",
                 )
                 self.assertEqual(coordinator.status().cycles_completed, 1)
             finally:

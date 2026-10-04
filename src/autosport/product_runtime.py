@@ -18,7 +18,6 @@ from .causal_collector import (
     DesktopApplicationReceipt,
     DesktopDeltaCheckpointStore,
     DesktopDeltaConsumer,
-    canonical_event_digest,
 )
 from .collector_service import CollectorServiceSource, HeadlessCollectorService
 from .continuous_session import (
@@ -521,6 +520,34 @@ def _settlement_authority_identity(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _sealed_product_market_digest(
+    event: MarketEvent,
+    *,
+    _to_dict=MarketEvent.to_dict,
+    _dumps=json.dumps,
+    _sha256=hashlib.sha256,
+) -> str:
+    """Digest one canonical market event without runtime descriptor dispatch.
+
+    Restart receipt authority must not depend on a replaceable MarketEvent.to_dict
+    descriptor. The canonical serializer is captured when this module is imported,
+    matching the digest bytes used by collector evidence while preventing an
+    in-process rebind from laundering generic history into receipt-backed state.
+    """
+
+    try:
+        payload = _to_dict(event)
+        raw = _dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("canonical market event payload is not JSON-safe") from exc
+    return _sha256(raw).hexdigest()
+
 def _desktop_applied_current_for_source(
     *,
     source_id: str,
@@ -531,7 +558,7 @@ def _desktop_applied_current_for_source(
     _completed_receipts=CanonicalDesktopApplication.completed_receipts_for_source,
     _validate_receipt=DesktopApplicationReceipt.validate,
     _market_events=SQLiteMarketStore.events,
-    _canonical_digest=canonical_event_digest,
+    _canonical_digest=_sealed_product_market_digest,
     _dedupe_getter=MarketEvent.dedupe_key.fget,
     _quote_getter=MarketEvent.quote_key.fget,
 ) -> tuple[MarketEvent, ...]:

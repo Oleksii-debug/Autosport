@@ -2478,5 +2478,123 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 )
 
 
+    def test_concurrent_recovery_accepts_first_durable_ack_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                goal,
+                risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(root, outcomes={leg.quote_key: "win"})
+            with patch.object(
+                AgentLoopRuntime,
+                "record_resolution",
+                side_effect=RuntimeError("leave durable OUTBOX for recovery race"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "recovery race"):
+                    bridge.reconcile_after_settlement(
+                        paper_book_path=root / "paper_book.json",
+                        resolutions=resolutions,
+                        settled_ticket_ids=(ticket.ticket_id,),
+                        at="2026-09-19T21:20:00+00:00",
+                    )
+
+            recovered_runtime = AgentLoopRuntime(root / "agent-loop.json")
+            recovered_bridge = PaperSettlementLearningBridge(
+                root / "paper_learning_bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=recovered_runtime,
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            real_record_resolution = recovered_runtime.record_resolution
+
+            def race_with_first_ack(
+                transition,
+                *,
+                outcome,
+                reward,
+                at,
+            ):
+                snapshot = real_record_resolution(
+                    transition,
+                    outcome=outcome,
+                    reward=reward,
+                    at=at,
+                )
+                racer_runtime = AgentLoopRuntime(root / "agent-loop.json")
+                racer_bridge = PaperSettlementLearningBridge(
+                    root / "paper_learning_bridge.json",
+                    paper_book_path=root / "paper_book.json",
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=racer_runtime,
+                    economic_goal=goal,
+                    risk_policy=risk,
+                )
+                self.assertEqual(
+                    len(
+                        racer_bridge.reconcile_after_settlement(
+                            paper_book_path=root / "paper_book.json",
+                            resolutions=(),
+                            settled_ticket_ids=(),
+                            at="2026-09-19T21:20:00+00:00",
+                        )
+                    ),
+                    1,
+                )
+                return snapshot
+
+            with patch.object(
+                recovered_runtime,
+                "record_resolution",
+                side_effect=race_with_first_ack,
+            ):
+                self.assertEqual(
+                    len(
+                        recovered_bridge.reconcile_after_settlement(
+                            paper_book_path=root / "paper_book.json",
+                            resolutions=(),
+                            settled_ticket_ids=(),
+                            at="2026-09-19T21:20:01+00:00",
+                        )
+                    ),
+                    1,
+                )
+
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            binding = durable["bindings"][ticket.ticket_id]
+            self.assertEqual(binding["status"], "ACKED")
+            self.assertEqual(
+                binding["ack"]["acked_at"],
+                "2026-09-19T21:20:00Z",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

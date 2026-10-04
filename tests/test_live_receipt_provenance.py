@@ -331,6 +331,96 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(store.trusted_live_events(), [])
             store.close()
 
+    def test_normalizer_cannot_reassign_provider_source_authority(self) -> None:
+        class ForeignSourceNormalizer:
+            def normalize(self, source_id, quote):
+                canonical = CanonicalNormalizer().normalize(source_id, quote)
+                return replace(canonical, source_id="provider-b")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            engine = IngestionEngine(
+                MarketEventBus(store),
+                normalizer=ForeignSourceNormalizer(),
+                clock=lambda: self.RECEIVE_TIME,
+            )
+
+            stats = engine.poll_once(
+                InMemoryProvider("provider-a", [self._quote(sequence=1)]),
+                max_items=10,
+            )
+
+            self.assertEqual(stats.accepted, 0)
+            self.assertEqual(stats.rejected, 1)
+            self.assertEqual(stats.quality_flags, ("INVALID_QUOTE",))
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
+    def test_normalized_stale_source_time_matches_live_decision_freshness(self) -> None:
+        class StaleSourceNormalizer:
+            def normalize(self, source_id, quote):
+                canonical = CanonicalNormalizer().normalize(source_id, quote)
+                return replace(
+                    canonical,
+                    source_ts="2026-10-04T02:00:00+00:00",
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            engine = IngestionEngine(
+                MarketEventBus(store),
+                normalizer=StaleSourceNormalizer(),
+                clock=lambda: self.RECEIVE_TIME,
+            )
+
+            stats = engine.poll_once(
+                InMemoryProvider("provider-a", [self._quote(sequence=1)]),
+                max_items=10,
+            )
+
+            self.assertEqual(stats.accepted, 1)
+            self.assertIn("STALE_SOURCE", stats.quality_flags)
+            live = MarketMirror.from_live_store(store)
+            decision = live.active_view(
+                as_of=datetime.fromisoformat(self.RECEIVE_TIME),
+                max_age=timedelta(seconds=120),
+            )
+            self.assertEqual(decision.events, ())
+            store.close()
+
+    def test_normalized_future_source_time_matches_live_decision_freshness(self) -> None:
+        class FutureSourceNormalizer:
+            def normalize(self, source_id, quote):
+                canonical = CanonicalNormalizer().normalize(source_id, quote)
+                return replace(
+                    canonical,
+                    source_ts="2026-10-04T04:00:00+00:00",
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            engine = IngestionEngine(
+                MarketEventBus(store),
+                normalizer=FutureSourceNormalizer(),
+                clock=lambda: self.RECEIVE_TIME,
+            )
+
+            stats = engine.poll_once(
+                InMemoryProvider("provider-a", [self._quote(sequence=1)]),
+                max_items=10,
+            )
+
+            self.assertEqual(stats.accepted, 1)
+            self.assertIn("FUTURE_CLOCK_SKEW", stats.quality_flags)
+            live = MarketMirror.from_live_store(store)
+            decision = live.active_view(
+                as_of=datetime.fromisoformat(self.RECEIVE_TIME),
+                max_age=timedelta(seconds=120),
+            )
+            self.assertEqual(decision.events, ())
+            store.close()
+
     def test_live_ingestion_stamping_survives_dependency_rebind(self) -> None:
         class PoisonMarketEvent(MarketEvent):
             pass

@@ -525,13 +525,10 @@ def _desktop_applied_current_for_source(
     *,
     source_id: str,
     market_store: SQLiteMarketStore,
-    collector_store: CollectorDeltaStore,
     canonical_application: CanonicalDesktopApplication,
-    _delta_type=CollectorDelta,
     _event_type=MarketEvent,
     _receipt_type=DesktopApplicationReceipt,
-    _deltas_after_commit=CollectorDeltaStore.deltas_after_commit,
-    _lookup_receipt=CanonicalDesktopApplication.lookup_receipt,
+    _completed_receipts=CanonicalDesktopApplication.completed_receipts_for_source,
     _validate_receipt=DesktopApplicationReceipt.validate,
     _market_events=SQLiteMarketStore.events,
     _canonical_digest=canonical_event_digest,
@@ -540,58 +537,34 @@ def _desktop_applied_current_for_source(
 ) -> tuple[MarketEvent, ...]:
     """Rebuild restart state only from completed canonical desktop applications.
 
-    Generic/import market history is valid audit evidence but is not sufficient
-    authority for the autonomous product decision mirror.  A row is eligible only
-    when immutable collector evidence binds its exact dedupe identity + canonical
-    event digest and the product-owned desktop application store proves that
-    application reached durable completion.
+    Generic/import market history remains valid audit evidence but is insufficient
+    decision authority. Completed desktop-application receipts are retained
+    independently of collector-delta compaction and bind the exact canonical event
+    payload through its digest.
     """
 
-    receipt_identities: set[tuple[str, str]] = set()
-    after_delta_id: str | None = None
-    while True:
-        try:
-            batch = _deltas_after_commit(
-                collector_store,
-                source_id=source_id,
-                after_delta_id=after_delta_id,
-                max_items=1000,
+    try:
+        receipts = _completed_receipts(canonical_application, source_id)
+    except Exception as exc:
+        raise ProductCompositionError(
+            "cannot verify desktop application receipts for product runtime restart"
+        ) from exc
+
+    receipt_digests: set[str] = set()
+    for receipt in receipts:
+        if type(receipt) is not _receipt_type:
+            raise ProductCompositionError(
+                "desktop application receipt type is not canonical"
             )
+        try:
+            _validate_receipt(receipt)
         except Exception as exc:
             raise ProductCompositionError(
-                "cannot verify collector evidence for product runtime restart"
+                "desktop application receipt is invalid"
             ) from exc
-        if not batch:
-            break
-        for delta in batch:
-            if type(delta) is not _delta_type:
-                raise ProductCompositionError(
-                    "collector evidence returned a non-canonical delta type"
-                )
-            try:
-                receipt = _lookup_receipt(canonical_application, delta)
-                if receipt is None:
-                    continue
-                if type(receipt) is not _receipt_type:
-                    raise TypeError("desktop application receipt type is not canonical")
-                _validate_receipt(receipt)
-            except Exception as exc:
-                raise ProductCompositionError(
-                    "cannot verify desktop application receipt for product runtime restart"
-                ) from exc
-            if (
-                receipt.delta_id != delta.delta_id
-                or receipt.canonical_event_digest != delta.canonical_event_digest
-            ):
-                raise ProductCompositionError(
-                    "desktop application receipt conflicts with collector evidence"
-                )
-            receipt_identities.add(
-                (delta.event_dedupe_key, delta.canonical_event_digest)
-            )
-        after_delta_id = batch[-1].delta_id
+        receipt_digests.add(receipt.canonical_event_digest)
 
-    if not receipt_identities:
+    if not receipt_digests:
         return ()
 
     try:
@@ -601,26 +574,30 @@ def _desktop_applied_current_for_source(
             "cannot verify canonical market history for product runtime restart"
         ) from exc
 
-    matched_identities: set[tuple[str, str]] = set()
+    matched_digests: set[str] = set()
     latest: dict[tuple[str, str], MarketEvent] = {}
     for event in history:
+        if type(event) is not _event_type:
+            raise ProductCompositionError(
+                "market history returned a non-canonical event type"
+            )
         if event.source_id != source_id:
             continue
         try:
-            if type(event) is not _event_type:
-                raise TypeError("market history returned a non-canonical event type")
             if _dedupe_getter is None or _quote_getter is None:
-                raise RuntimeError("canonical MarketEvent identity descriptor is unavailable")
+                raise RuntimeError(
+                    "canonical MarketEvent identity descriptor is unavailable"
+                )
             event_dedupe_key = _dedupe_getter(event)
-            identity = (event_dedupe_key, _canonical_digest(event))
+            digest = _canonical_digest(event)
             quote_key = _quote_getter(event)
         except Exception as exc:
             raise ProductCompositionError(
                 "cannot verify canonical market identity for product runtime restart"
             ) from exc
-        if identity not in receipt_identities:
+        if digest not in receipt_digests:
             continue
-        matched_identities.add(identity)
+        matched_digests.add(digest)
         key = (event.source_id, quote_key)
         previous = latest.get(key)
         previous_dedupe_key = (
@@ -632,7 +609,7 @@ def _desktop_applied_current_for_source(
         ):
             latest[key] = event
 
-    if matched_identities != receipt_identities:
+    if matched_digests != receipt_digests:
         raise ProductCompositionError(
             "desktop application receipt references missing canonical market history"
         )
@@ -1017,23 +994,22 @@ def build_autonomous_product_runtime(
             root / "desktop_application.json",
             clock=resolved_clock,
         )
-        collector_store = CollectorDeltaStore(root / "collector_deltas.json")
-
         # Restart decision state belongs to the collector/DesktopApplicationReceipt
-        # authority family. Generic/import rows remain canonical audit history, but
-        # neither another source nor an unreceipted row from this source may seed the
+        # authority family. Completed application evidence survives lawful collector
+        # compaction. Generic/import rows remain canonical audit history, but neither
+        # another source nor an unreceipted row from this source may seed the
         # autonomous decision mirror. A newer generic row also cannot hide an older,
         # exact desktop-applied row for the same quote.
         for event in _desktop_applied_current_for_source(
             source_id=source_id,
             market_store=market_store,
-            collector_store=collector_store,
             canonical_application=canonical_application,
         ):
             invalidations.accept_persisted(event)
 
         market_bus.subscribe(invalidations.accept_persisted)
         dependencies = FocusedMirrorDependencyIndex(mirror)
+        collector_store = CollectorDeltaStore(root / "collector_deltas.json")
         collector = HeadlessCollectorService(
             delta_store=collector_store,
             lifecycle=lifecycle,

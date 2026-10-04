@@ -2891,5 +2891,151 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 )
 
 
+    def test_prepared_settlement_resolutions_survive_restart_before_paperbook_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                goal,
+                risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:prepared-restart",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="prepared-restart-evidence",
+                evidence_sha256="d" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            self.assertEqual(
+                bridge.prepare_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(resolution,),
+                    at="2026-09-19T21:20:00+00:00",
+                ),
+                (ticket.ticket_id,),
+            )
+            self.assertEqual(
+                PaperBook.load(root / "paper_book.json").tickets[ticket.ticket_id].status.value,
+                "open",
+            )
+
+            reopened = PaperSettlementLearningBridge(
+                root / "paper_learning_bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=runtime,
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            self.assertEqual(
+                reopened.prepared_settlement_resolutions(
+                    paper_book_path=root / "paper_book.json",
+                ),
+                (resolution,),
+            )
+
+    def test_prepared_settlement_resolutions_reject_wrong_paperbook_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            *_, bridge = _fixture(root, legs=(leg,))
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "another PaperBook path",
+            ):
+                bridge.prepared_settlement_resolutions(
+                    paper_book_path=root / "other-paper-book.json",
+                )
+
+    def test_prepared_settlement_resolutions_revalidate_bound_ticket_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                _runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:prepared-book-fence",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="prepared-book-fence-evidence",
+                evidence_sha256="e" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            bridge.prepare_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=(resolution,),
+                at="2026-09-19T21:20:00+00:00",
+            )
+            book_path = root / "paper_book.json"
+            raw = json.loads(book_path.read_text(encoding="utf-8"))
+            raw["tickets"][0]["strategy_reason"] = "prepared-recovery-stale-book"
+            book_path.write_text(
+                json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            PaperBook.load(book_path)
+
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "economics changed after binding",
+            ):
+                bridge.prepared_settlement_resolutions(
+                    paper_book_path=book_path,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

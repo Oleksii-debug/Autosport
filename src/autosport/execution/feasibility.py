@@ -492,12 +492,17 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     while preserving the measured displayed-depth diagnostics.
     """
 
-    if not isinstance(ledger, RealExecutionLedger):
-        raise TypeError("ledger must be RealExecutionLedger")
-    if not isinstance(bound, BoundSupervisedExecutionPlan):
-        raise TypeError("bound must be BoundSupervisedExecutionPlan")
-    if not isinstance(receipt, BetfairMarketBookDepthObservation):
-        raise TypeError("receipt must be BetfairMarketBookDepthObservation")
+    # Authority-bearing inputs are exact product types. Accepting subclasses
+    # would re-open dynamic-dispatch seams below the captured canonical methods:
+    # a RealExecutionLedger subclass can override verified_snapshot(), and a
+    # BoundSupervisedExecutionPlan subclass can override binding/action/profile
+    # resolution while still satisfying isinstance().
+    if type(ledger) is not RealExecutionLedger:
+        raise TypeError("ledger must be exact RealExecutionLedger")
+    if type(bound) is not BoundSupervisedExecutionPlan:
+        raise TypeError("bound must be exact BoundSupervisedExecutionPlan")
+    if type(receipt) is not BetfairMarketBookDepthObservation:
+        raise TypeError("receipt must be exact BetfairMarketBookDepthObservation")
     acquisition_started_at = market_book_depth_acquisition_started_at(receipt)
     # Provider provenance is necessary but must not choose the decision epoch.
     # The independently durable PLAN_RESERVED event is the causal publication

@@ -132,6 +132,39 @@ class ProductProposalRiskEvaluationPrecommitForgeTests(unittest.TestCase):
         finally:
             authority.JsonlDecisionLedger._canonical_record = original_ledger
 
+    def test_protocol_constant_rebinding_fails_closed(self) -> None:
+        original = authority._PROPOSAL_EVALUATION_SCOPE
+        try:
+            authority._PROPOSAL_EVALUATION_SCOPE = "FORGED_SCOPE"
+            with self.assertRaisesRegex(
+                authority.ProductProposalRiskEvaluationPrecommitError,
+                "dispatch changed",
+            ):
+                authority._REQUIRE_DISPATCH_ORIGINAL()
+        finally:
+            authority._PROPOSAL_EVALUATION_SCOPE = original
+
+    def test_package_sealed_public_issuer_detects_rebinding(self) -> None:
+        sealed = authority.issue_product_proposal_risk_evaluation_precommit
+        original = authority.issue_product_proposal_risk_evaluation_precommit
+        try:
+            authority.issue_product_proposal_risk_evaluation_precommit = (
+                lambda *args, **kwargs: None
+            )
+            with self.assertRaisesRegex(
+                authority.ProductProposalRiskEvaluationPrecommitError,
+                "public issuer was rebound",
+            ):
+                sealed(
+                    Path("/"),
+                    target_sha256="0" * 64,
+                    membership=None,
+                    registry_path="unused",
+                    sampling_manifest_json="{}",
+                )
+        finally:
+            authority.issue_product_proposal_risk_evaluation_precommit = original
+
     def test_internal_helper_witness_root_rebinding_fails_closed(self) -> None:
         original = authority._PROPOSAL_RISK_EVALUATION_PRECOMMIT_HELPER_WITNESSES
         try:

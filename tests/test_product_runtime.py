@@ -222,7 +222,8 @@ class AutonomousProductCompositionTests(unittest.TestCase):
 
                 self.assertTrue(runtime.collector.delta_store.append(delta))
                 self.assertEqual(
-                    desktop.drain(as_of=clock.value),                    (delta.delta_id,),
+                    desktop.drain(as_of=clock.value),
+                    (delta.delta_id,),
                 )
                 self.assertEqual(runtime.mirror.snapshot(), (event,))
                 receipt = DesktopDeltaCheckpointStore(
@@ -235,6 +236,7 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 )
             finally:
                 runtime.close()
+
     def test_runtime_ack_clock_allows_application_after_causal_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

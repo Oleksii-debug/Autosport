@@ -6,7 +6,9 @@ Italy-authenticated session, that EUR is the current authenticated account
 currency, or that the represented provider rules are current at decision time.
 
 A rule-set match is therefore diagnostic/preflight structure only. It is never
-market admissibility, provider-write permission, or real-money authority.
+market admissibility, price-ladder/tick validity, funds/liquidity proof,
+provider-write permission, or real-money authority. Those independent owners
+must compose this result rather than being inferred from it.
 """
 from __future__ import annotations
 

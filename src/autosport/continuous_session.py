@@ -376,6 +376,10 @@ class _ContinuousSessionState:
                         "durable session source_id does not match configured source"
                     )
             else:
+                if self.evidence_dir.is_symlink() or self.evidence_dir.exists():
+                    raise ContinuousSessionError(
+                        "new continuous session conflicts with orphan settlement evidence journal"
+                    )
                 resolved_id = _text(
                     session_id or str(uuid.uuid4()),
                     "session_id",
@@ -1092,6 +1096,12 @@ class _ContinuousSessionState:
             f"{record['evidence_key_sha256']}.json": record
             for record in records
         }
+        if not records and (
+            self.evidence_dir.is_symlink() or self.evidence_dir.exists()
+        ):
+            raise ContinuousSessionError(
+                "empty legacy settlement evidence conflicts with existing journal"
+            )
         for path in self._record_paths():
             expected = expected_by_name.get(path.name)
             if expected is None or self._read_evidence_path(path) != expected:

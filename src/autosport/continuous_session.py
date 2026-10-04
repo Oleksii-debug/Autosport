@@ -580,6 +580,23 @@ def _bind_continuous_state_read_settlement_integrity(method):
     canonical_pending_settlement_validator_code = (
         canonical_pending_settlement_validator_func.__code__
     )
+    canonical_read_roots = {
+        "_text": _text,
+        "_sha256": _sha256,
+        "_instant": _instant,
+        "strict_json_loads": strict_json_loads,
+        "datetime": datetime,
+        "timezone": timezone,
+        "SessionState": SessionState,
+        "GapState": GapState,
+        "SyncState": SyncState,
+        "ContinuousSessionError": ContinuousSessionError,
+    }
+    canonical_read_code_roots = {
+        name: root.__code__
+        for name, root in canonical_read_roots.items()
+        if hasattr(root, "__code__")
+    }
     canonical_json_dumps = json.dumps
     canonical_json_dumps_code = json.dumps.__code__
     canonical_sha256 = hashlib.sha256
@@ -632,6 +649,17 @@ def _bind_continuous_state_read_settlement_integrity(method):
         ):
             raise ContinuousSessionError(
                 "continuous settlement state validator authority changed"
+            )
+        if any(
+            method.__globals__.get(name) is not root
+            for name, root in canonical_read_roots.items()
+        ) or any(
+            root.__code__ is not canonical_read_code_roots[name]
+            for name, root in canonical_read_roots.items()
+            if name in canonical_read_code_roots
+        ):
+            raise ContinuousSessionError(
+                "continuous session state read authority changed"
             )
         return method(
             self,

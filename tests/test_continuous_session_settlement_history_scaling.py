@@ -192,6 +192,28 @@ def test_success_without_settlement_evidence_is_bounded_operational_state() -> N
         assert snapshot.last_error_code is None
 
 
+def test_empty_checkpoint_rejects_orphan_settlement_journal() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, 0)
+        checkpoint_path = root / "continuous_session.json"
+        before = checkpoint_path.read_bytes()
+        journal = root / "continuous_session.settlement-evidence"
+        assert not journal.exists()
+        journal.mkdir()
+
+        try:
+            state.record_failure(code="SHOULD_NOT_COMMIT")
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "bounded mutation accepted an orphan settlement-evidence journal"
+            )
+
+        assert checkpoint_path.read_bytes() == before
+
+
 def test_runtime_tip_deletion_blocks_bounded_operational_mutation() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

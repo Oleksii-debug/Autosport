@@ -30,8 +30,10 @@ from autosport.paper_settlement_learning import PaperSettlementLearningBridge
 from autosport.replay import ReplayEngine, market_event_payload_sha256
 from autosport.risk import PaperRiskPolicy
 from autosport.risk_of_ruin_evaluator import (
+    ProductRiskOfRuinEvaluator,
     RiskEvidenceClass,
     RiskOfRuinEvaluationRequest,
+    RiskOfRuinIssuanceError,
     RiskPathObservation,
     RiskTargetKind,
 )
@@ -859,6 +861,62 @@ def test_product_fixed_n_risk_observations_match_evaluator_manifest(
     assert tuple(
         item.source_evidence_sha256 for item in cohort.observations
     ) == qualification.member_path_evidence_sha256
+
+
+def test_product_fixed_n_risk_observations_do_not_mint_positive_ruin_authority(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        bridge,
+        initial_capital_sha256,
+        _stake_policy_sha256,
+    ) = _qualified_fixed_n_fixture(tmp_path, monkeypatch)
+    cohort = resolve_product_fixed_n_risk_observations(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+    request = RiskOfRuinEvaluationRequest(
+        target_kind=RiskTargetKind.SINGLE,
+        bankroll_id="risk-path-bankroll",
+        currency="USD",
+        base_portfolio_sha256=initial_capital_sha256,
+        capital_state_sha256=initial_capital_sha256,
+        target_sha256="7" * 64,
+        evaluated_stakes=(Decimal("10"),),
+        research_protocol_sha256=membership.protocol_sha256,
+        reproducibility_bundle_sha256=cohort.source_evidence_sha256,
+        dataset_snapshot_id=membership.dataset_snapshot_id,
+        dataset_manifest_sha256=membership.dataset_manifest_sha256,
+        causal_cutoff="2026-09-03T10:00:31+00:00",
+        evaluated_at="2026-09-03T10:00:31+00:00",
+        confidence_level=Decimal("0.95"),
+        ruin_threshold=Decimal("0"),
+        planned_independent_units=1,
+        evidence_class=RiskEvidenceClass.PAPER,
+        observations=cohort.observations,
+    )
+    evaluator = ProductRiskOfRuinEvaluator(
+        workspace=tmp_path / "risk-of-ruin-evaluator",
+        authority_root=tmp_path / "risk-of-ruin-evaluator-authority",
+    )
+
+    with pytest.raises(
+        RiskOfRuinIssuanceError,
+        match="caller-constructed evaluation requests are assertion-only",
+    ):
+        evaluator.issue(request)
 
 
 def test_product_fixed_n_risk_observation_truth_cannot_be_caller_minted_or_subclassed() -> None:

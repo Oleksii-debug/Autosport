@@ -198,27 +198,37 @@ def test_copy_reconstruction_and_pickle_cannot_mint_authority(monkeypatch):
             subject.require_authoritative_funds_precheck(candidate)
 
 
-def test_same_object_mutation_revokes_authority(monkeypatch):
+def test_same_object_mutation_revokes_authority_monotonically(monkeypatch):
     install_provider(monkeypatch)
     issued = subject.evaluate_betfair_account_funds(
         creds(), Decimal("125"), required_currency_code="EUR"
     )
     assert subject.is_authoritative_funds_precheck(issued) is True
+    original = issued.required_liability
     object.__setattr__(issued, "required_liability", Decimal("0"))
     assert issued.numeric_sufficient is True
     assert subject.is_authoritative_funds_precheck(issued) is False
 
+    object.__setattr__(issued, "required_liability", original)
+    assert subject.is_authoritative_funds_precheck(issued) is False
 
-def test_stale_funds_mutation_revokes_authority(monkeypatch):
+
+def test_stale_funds_mutation_revokes_authority_monotonically(monkeypatch):
     install_provider(monkeypatch)
     issued = subject.evaluate_betfair_account_funds(
         creds(), Decimal("1"), required_currency_code="EUR"
     )
+    original = issued.funds_observed_at
     object.__setattr__(
         issued,
         "funds_observed_at",
-        issued.funds_observed_at - subject.MAX_EVIDENCE_AGE - timedelta(seconds=1),
+        issued.funds_observed_at
+        - subject.MAX_EVIDENCE_AGE
+        - timedelta(seconds=1),
     )
+    assert subject.is_authoritative_funds_precheck(issued) is False
+
+    object.__setattr__(issued, "funds_observed_at", original)
     assert subject.is_authoritative_funds_precheck(issued) is False
 
 
@@ -268,18 +278,61 @@ def test_rebound_readonly_number_parser_cannot_mint_funds_authority(monkeypatch)
 
 
 def test_rebound_stable_identity_descriptor_cannot_widen_semantics(monkeypatch):
-    calls = install_provider(monkeypatch)
-
-    def claim_stable(self):
-        return True
-
-    monkeypatch.setattr(
-        subject.BetfairAccountFundsPrecheck,
-        "stable_account_identity_proven",
-        property(claim_stable),
-    )
-    with pytest.raises(subject.BetfairAccountFundsPrecheckError, match="rebound|authority"):
-        subject.evaluate_betfair_account_funds(
-            creds(), Decimal("1"), required_currency_code="EUR"
+    with pytest.raises(TypeError, match="authority surface is sealed"):
+        monkeypatch.setattr(
+            subject.BetfairAccountFundsPrecheck,
+            "stable_account_identity_proven",
+            property(lambda _self: True),
         )
-    assert calls == []
+
+
+def test_hard_false_funds_authority_getters_are_non_python_and_sealed(monkeypatch):
+    install_provider(monkeypatch)
+    issued = subject.evaluate_betfair_account_funds(
+        creds(), Decimal("1"), required_currency_code="EUR"
+    )
+    for name in (
+        "stable_account_identity_proven",
+        "liability_unit_proven",
+        "passed",
+        "execution_authorized",
+    ):
+        descriptor = subject.BetfairAccountFundsPrecheck.__dict__[name]
+        assert isinstance(descriptor, property)
+        assert descriptor.fget is not None
+        assert not hasattr(descriptor.fget, "__code__")
+        assert getattr(issued, name) is False
+
+    with pytest.raises(TypeError, match="authority surface is sealed"):
+        subject.BetfairAccountFundsPrecheck._passed_constant = True
+    with pytest.raises(TypeError, match="authority surface is sealed"):
+        subject.BetfairAccountFundsPrecheck.execution_authorized = property(
+            lambda _self: True
+        )
+    with pytest.raises(AttributeError):
+        object.__setattr__(issued, "execution_authorized", True)
+
+
+def test_funds_semantic_slot_descriptors_cannot_be_class_rebound():
+    for name in (
+        "venue_id",
+        "account_id",
+        "adapter_id",
+        "adapter_version",
+        "required_liability",
+        "available_to_bet_balance",
+        "currency_code",
+        "account_observed_at",
+        "funds_observed_at",
+        "evaluated_at",
+        "account_details_sha256",
+        "account_funds_sha256",
+        "numeric_sufficient",
+        "precheck_id",
+    ):
+        with pytest.raises(TypeError, match="authority surface is sealed"):
+            setattr(
+                subject.BetfairAccountFundsPrecheck,
+                name,
+                property(lambda _self: None),
+            )

@@ -1159,6 +1159,9 @@ def _build_autonomous_product_runtime_impl(
     _desktop_restart_reader,
     _desktop_delivery_resolver,
     _desktop_consumer_type,
+    _canonical_application_type,
+    _canonical_application_apply,
+    _canonical_application_lookup,
 ) -> AutonomousProductRuntime:
     """Construct or restore one canonical headless PAPER product runtime.
 
@@ -1217,7 +1220,7 @@ def _build_autonomous_product_runtime_impl(
 
         market_bus = MarketEventBus(market_store)
         source_health = SourceHealthStore(root / "source_health.json")
-        canonical_application = CanonicalDesktopApplication(
+        canonical_application = _canonical_application_type(
             market_bus,
             source_health,
             root / "desktop_application.json",
@@ -1250,6 +1253,45 @@ def _build_autonomous_product_runtime_impl(
 
         accept_persisted = invalidations.accept_persisted
 
+        def lookup_completed_desktop_application(
+            delta: CollectorDelta,
+        ) -> DesktopApplicationReceipt | None:
+            return _canonical_application_lookup(canonical_application, delta)
+
+        def apply_completed_desktop_application(
+            delta: CollectorDelta,
+            event: MarketEvent,
+        ) -> DesktopApplicationReceipt:
+            receipt = _canonical_application_apply(
+                canonical_application,
+                delta,
+                event,
+            )
+            if type(receipt) is not DesktopApplicationReceipt:
+                raise ProductCompositionError(
+                    "canonical desktop application returned a non-canonical receipt"
+                )
+            recovered = lookup_completed_desktop_application(delta)
+            if recovered is None:
+                raise ProductCompositionError(
+                    "fresh canonical desktop application receipt is not durably recoverable"
+                )
+            if type(recovered) is not DesktopApplicationReceipt:
+                raise ProductCompositionError(
+                    "recovered canonical desktop application receipt type is invalid"
+                )
+            if (
+                recovered.delta_id != receipt.delta_id
+                or recovered.canonical_event_digest
+                != receipt.canonical_event_digest
+                or recovered.receipt_id != receipt.receipt_id
+                or recovered.applied_at != receipt.applied_at
+            ):
+                raise ProductCompositionError(
+                    "fresh canonical desktop application receipt changed during durable recovery"
+                )
+            return receipt
+
         def deliver_completed_desktop_application(
             delta: CollectorDelta,
             receipt: DesktopApplicationReceipt,
@@ -1266,8 +1308,8 @@ def _build_autonomous_product_runtime_impl(
             collector_store,
             DesktopDeltaCheckpointStore(root / "desktop_acks.json"),
             resolve_event=source.resolve_event,
-            apply_event=canonical_application.apply,
-            lookup_application_receipt=canonical_application.lookup_receipt,
+            apply_event=apply_completed_desktop_application,
+            lookup_application_receipt=lookup_completed_desktop_application,
             acknowledgement_clock=resolved_clock,
             on_application_receipt=deliver_completed_desktop_application,
         )
@@ -1310,6 +1352,9 @@ def _bind_autonomous_product_runtime_builder(
     desktop_restart_reader,
     desktop_delivery_resolver,
     desktop_consumer_type,
+    canonical_application_type,
+    canonical_application_apply,
+    canonical_application_lookup,
 ):
     """Expose the product builder without mutable restart/delivery dispatch."""
 
@@ -1334,6 +1379,9 @@ def _bind_autonomous_product_runtime_builder(
             _desktop_restart_reader=desktop_restart_reader,
             _desktop_delivery_resolver=desktop_delivery_resolver,
             _desktop_consumer_type=desktop_consumer_type,
+            _canonical_application_type=canonical_application_type,
+            _canonical_application_apply=canonical_application_apply,
+            _canonical_application_lookup=canonical_application_lookup,
         )
 
     build_autonomous_product_runtime.__doc__ = implementation.__doc__
@@ -1345,6 +1393,9 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     _desktop_applied_current_for_source,
     _desktop_applied_event_for_receipt,
     _ProductDesktopDeltaConsumer,
+    CanonicalDesktopApplication,
+    CanonicalDesktopApplication.apply,
+    CanonicalDesktopApplication.lookup_receipt,
 )
 del _ProductDesktopDeltaConsumer
 del _build_autonomous_product_runtime_impl

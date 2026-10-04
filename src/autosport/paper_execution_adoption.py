@@ -11,7 +11,12 @@ from threading import RLock
 from typing import Mapping
 
 from . import _paper_execution_reality_legacy as _paper_impl
-from .domain import MarketEvent, PaperTicket, TicketLeg
+from .domain import (
+    MarketEvent,
+    PaperTicket,
+    TicketLeg,
+    _canonical_semantic_identity,
+)
 from .opportunity import QuoteRef
 from .paper import PaperBook
 from .paper_execution_reality import (
@@ -41,10 +46,16 @@ class PaperExposureBinding:
     sport: str | None
     bankroll_id: str | None
     currency: str | None
+    market_semantics_id: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.action_id) is not str or not self.action_id:
             raise ValueError("action_id must be non-empty text")
+        if self.market_semantics_id is not None:
+            _canonical_semantic_identity(
+                self.market_semantics_id,
+                "market_semantics_id",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,6 +354,7 @@ class PaperExecutionAdoptionRuntime:
                     sport=leg.sport,
                     bankroll_id=context.bankroll_id,
                     currency=context.currency,
+                    market_semantics_id=leg.market_semantics_id,
                 )
             )
 
@@ -486,6 +498,7 @@ class PaperExecutionAdoptionRuntime:
                         sport=event.sport,
                         bankroll_id=bankroll_id,
                         currency=currency,
+                        market_semantics_id=event.market_semantics_id,
                     ),
                 ),
                 intent_evidence_json=evidence_json,
@@ -650,6 +663,7 @@ class PaperExecutionAdoptionRuntime:
                         locked_odds=attempt.execution_odds,
                         sport=binding.sport,
                         exchange_side="back",
+                        market_semantics_id=binding.market_semantics_id,
                     )
                 ],
                 attempt.execution_stake,
@@ -855,6 +869,7 @@ class PaperExecutionAdoptionRuntime:
                     locked_odds=attempt.execution_odds,
                     sport=binding.sport,
                     exchange_side="back",
+                    market_semantics_id=binding.market_semantics_id,
                 )
             ],
             attempt.execution_stake,
@@ -908,6 +923,7 @@ class PaperExecutionAdoptionRuntime:
             and leg.locked_odds == attempt.execution_odds
             and leg.sport == binding.sport
             and leg.exchange_side == "back"
+            and leg.market_semantics_id == binding.market_semantics_id
         )
 
 

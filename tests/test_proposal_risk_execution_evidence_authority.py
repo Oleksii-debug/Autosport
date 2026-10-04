@@ -1318,8 +1318,14 @@ class ProductProposalRiskScenarioPopulationTests(unittest.TestCase):
         )
         closure = issue.__closure__
         self.assertIsNotNone(closure)
-        self.assertEqual(len(closure), 1)
-        cell = closure[0]
+        binder_cells = [
+            cell
+            for cell in closure
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__name__", None) == "bind"
+        ]
+        self.assertEqual(len(binder_cells), 1)
+        cell = binder_cells[0]
         original = cell.cell_contents
 
         def forged_bind(_instance):
@@ -1329,11 +1335,60 @@ class ProductProposalRiskScenarioPopulationTests(unittest.TestCase):
             cell.cell_contents = forged_bind
             with self.assertRaisesRegex(
                 ProductProposalRiskScenarioPopulationError,
-                "dispatch changed",
+                "public issue closure changed",
             ):
                 self._issue()
         finally:
             cell.cell_contents = original
+
+    def test_public_issue_ignores_module_global_core_rebind(self) -> None:
+        original = (
+            scenario_population_authority
+            ._issue_product_proposal_risk_scenario_population_unbound
+        )
+        try:
+            scenario_population_authority._issue_product_proposal_risk_scenario_population_unbound = (
+                lambda *args, **kwargs: object()
+            )
+            issued = self._issue()
+            self.assertTrue(issued.population_identity_proven)
+            self.assertTrue(issued.fixed_n_member_mapping_complete)
+        finally:
+            scenario_population_authority._issue_product_proposal_risk_scenario_population_unbound = (
+                original
+            )
+
+    def test_public_issue_rejects_captured_core_code_mutation(self) -> None:
+        issue = (
+            scenario_population_authority
+            .issue_product_proposal_risk_scenario_population
+        )
+        closure = issue.__closure__
+        self.assertIsNotNone(closure)
+        core_cells = [
+            cell
+            for cell in closure
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__name__", "").startswith(
+                "_issue_product_proposal_risk_scenario_population_unbound"
+            )
+        ]
+        self.assertEqual(len(core_cells), 1)
+        core = core_cells[0].cell_contents
+        original_code = core.__code__
+
+        def forged_core(*_args, **_kwargs):
+            return object.__new__(ProductProposalRiskScenarioPopulation)
+
+        try:
+            core.__code__ = forged_core.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "public issue closure changed",
+            ):
+                self._issue()
+        finally:
+            core.__code__ = original_code
 
     def test_text_kwdefault_mutation_is_rejected(self) -> None:
         helper = scenario_population_authority._text

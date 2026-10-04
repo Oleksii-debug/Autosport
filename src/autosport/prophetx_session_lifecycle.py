@@ -1580,6 +1580,10 @@ class ProphetXSessionLifecycle:
             )
             + chr(10)
         )
+        if len(encoded.encode("utf-8")) > _MAX_STATE_FILE_BYTES:
+            raise ProphetXSessionLifecycleError(
+                "ProphetX session state exceeds the bounded file-size contract"
+            )
         temporary = self._scope_dir / (
             f".{self._STATE_NAME}.{os.getpid()}.{token_hex(8)}.tmp"
         )

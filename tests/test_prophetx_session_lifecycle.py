@@ -1332,6 +1332,28 @@ def test_scope_text_is_bounded(field, value):
         _scope(**kwargs)
 
 
+def test_state_writer_rejects_its_own_oversized_unicode_encoding(tmp_path):
+    boundary_text = "😀" * 4096
+    scope = ProphetXSessionScope(
+        environment=boundary_text,
+        access_key_identity_sha256=sha256(b"key-a").hexdigest(),
+        credential_revision=boundary_text,
+        integration_role=boundary_text,
+    )
+    lifecycle = ProphetXSessionLifecycle(tmp_path, scope=scope)
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="exceeds the bounded file-size contract",
+    ):
+        lifecycle.begin_login(
+            now=NOW,
+            access_token_available=False,
+        )
+
+    assert lifecycle.state_path.exists() is False
+
+
 def test_state_file_size_is_bounded_before_json_parse(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     lifecycle.begin_login(now=NOW, access_token_available=False)

@@ -1655,6 +1655,111 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 migrated.close()
 
+    def test_duplicate_legacy_baseline_does_not_become_decision_causal_on_fresh_mirror(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            legacy_event = self.event(
+                sequence=2,
+                odds="2.20",
+                observed_ts="2026-09-16T19:00:00+00:00",
+            )
+            payload = storage_module._canonical_payload(legacy_event)
+
+            raw = sqlite3.connect(path)
+            try:
+                raw.execute(
+                    """CREATE TABLE market_events (
+                        dedupe_key TEXT PRIMARY KEY,
+                        quote_key TEXT NOT NULL,
+                        event_id TEXT NOT NULL,
+                        market_id TEXT NOT NULL,
+                        selection_id TEXT NOT NULL,
+                        decimal_odds TEXT NOT NULL,
+                        observed_ts TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL
+                    )"""
+                )
+                raw.execute(
+                    """CREATE TABLE current_quotes (
+                        source_id TEXT NOT NULL,
+                        quote_key TEXT NOT NULL,
+                        observed_ts TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        PRIMARY KEY (source_id, quote_key)
+                    )"""
+                )
+                raw.execute(
+                    """INSERT INTO market_events
+                       (dedupe_key,quote_key,event_id,market_id,selection_id,
+                        decimal_odds,observed_ts,source_id,sequence,payload_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        legacy_event.dedupe_key,
+                        legacy_event.quote_key,
+                        legacy_event.event_id,
+                        legacy_event.market_id,
+                        legacy_event.selection_id,
+                        str(legacy_event.decimal_odds),
+                        legacy_event.observed_ts,
+                        legacy_event.source_id,
+                        legacy_event.sequence,
+                        payload,
+                    ),
+                )
+                raw.execute(
+                    """INSERT INTO current_quotes
+                       (source_id,quote_key,observed_ts,sequence,payload_json)
+                       VALUES (?,?,?,?,?)""",
+                    (
+                        legacy_event.source_id,
+                        legacy_event.quote_key,
+                        legacy_event.observed_ts,
+                        legacy_event.sequence,
+                        payload,
+                    ),
+                )
+                raw.commit()
+            finally:
+                raw.close()
+
+            store = SQLiteMarketStore(path)
+            try:
+                self.assertEqual(
+                    store.connection.execute(
+                        """SELECT append_generation
+                           FROM market_event_commit_order
+                           WHERE dedupe_key=?""",
+                        (legacy_event.dedupe_key,),
+                    ).fetchone(),
+                    (0,),
+                )
+
+                mirror = MarketMirror()
+                mirror.persist_and_apply(store, legacy_event)
+
+                self.assertEqual(
+                    tuple(event.dedupe_key for event in mirror.snapshot()),
+                    (legacy_event.dedupe_key,),
+                )
+                self.assertEqual(
+                    mirror.active_view(
+                        as_of=self.CUTOFF,
+                        max_age=timedelta(minutes=2),
+                    ).events,
+                    (),
+                )
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT MAX(append_generation) FROM market_event_commit_order"
+                    ).fetchone(),
+                    (0,),
+                )
+            finally:
+                store.close()
+
     def test_legacy_baseline_sequence_fence_blocks_lower_positive_replay(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

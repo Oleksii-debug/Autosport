@@ -609,7 +609,6 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 attempt.evidence_grade is EvidenceGrade.SYNTHETIC
                 or attempt.evidence_id != evidence_id
                 or attempt.evidence_sha256 is None
-                or attempt.suspended
             ):
                 raise PaperExecutionStateError(
                     "attempt conflicts with reserved observed authority"

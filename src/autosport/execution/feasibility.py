@@ -584,18 +584,23 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
             price_ladder_reasons.append(
                 "PRICE_LADDER_AUTHORITY_UNPROVEN"
             )
-        elif (
-            price_ladder_admission.decision_at.astimezone(timezone.utc)
-            > decision_utc
-        ):
-            price_ladder_reasons.append(
-                "PRICE_LADDER_EVIDENCE_AFTER_DECISION"
-            )
         else:
-            price_ladder_authoritative = True
+            # Once the exact closure-issued witness is proven, bind its identity
+            # even when a later causal fence rejects it. Otherwise two distinct
+            # provider observations that drive the same strong diagnostic could
+            # collapse to one feasibility evidence digest.
             price_ladder_evidence_digest = (
                 price_ladder_admission.evidence_digest
             )
+            if (
+                price_ladder_admission.decision_at.astimezone(timezone.utc)
+                > decision_utc
+            ):
+                price_ladder_reasons.append(
+                    "PRICE_LADDER_EVIDENCE_AFTER_DECISION"
+                )
+            else:
+                price_ladder_authoritative = True
 
     binding = bound.profile_for(action.bookmaker_id, action.account_id)
     action_digest = _canonical_digest(action.to_dict())
@@ -628,7 +633,9 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
         # quoted price was formed. Preserve diagnostics but revoke its ability
         # to satisfy this decision-time gate.
         price_ladder_authoritative = False
-        price_ladder_evidence_digest = None
+        # Keep the proven witness digest bound to the rejected result. The
+        # provider observation is still the evidence for this causal diagnosis;
+        # only its ability to satisfy the action gate is revoked.
         price_ladder_reasons.append(
             "PRICE_LADDER_EVIDENCE_PREDATES_ACTION_QUOTE"
         )

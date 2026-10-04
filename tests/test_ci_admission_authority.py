@@ -583,6 +583,47 @@ def test_main_rejects_preentry_urlopen_rebind(monkeypatch, tmp_path) -> None:
     assert not output.exists()
 
 
+def test_main_rejects_preentry_argument_parser_rebind(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    forged_calls: list[str] = []
+
+    class ForgedParser:
+        def __init__(self, *_args, **_kwargs) -> None:
+            forged_calls.append("parser")
+
+    output = tmp_path / "github-output.txt"
+    monkeypatch.setattr(
+        controller_module.argparse,
+        "ArgumentParser",
+        ForgedParser,
+    )
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+
+    assert controller_module.main(_main_admission_args()) == 2
+    assert forged_calls == []
+    assert not output.exists()
+
+
+def test_main_rejects_preentry_os_module_rebind(monkeypatch, tmp_path) -> None:
+    forged_calls: list[str] = []
+
+    class ForgedOs:
+        @property
+        def environ(self):
+            forged_calls.append("environ")
+            return {}
+
+    output = tmp_path / "github-output.txt"
+    monkeypatch.setattr(controller_module, "os", ForgedOs())
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+
+    assert controller_module.main(_main_admission_args()) == 2
+    assert forged_calls == []
+    assert not output.exists()
+
+
 def test_main_rejects_preentry_admission_code_mutation(monkeypatch) -> None:
     target = controller_module.admit_current_head
 

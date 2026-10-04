@@ -493,6 +493,40 @@ def test_main_rejects_preentry_base_urlopen_rebind(monkeypatch) -> None:
     assert forged_calls == []
 
 
+def test_main_rejects_preentry_argument_parser_rebind_scoped(
+    monkeypatch,
+) -> None:
+    forged_calls: list[str] = []
+
+    class ForgedParser:
+        def __init__(self, *_args, **_kwargs) -> None:
+            forged_calls.append("parser")
+
+    monkeypatch.setattr(
+        scoped_controller.argparse,
+        "ArgumentParser",
+        ForgedParser,
+    )
+
+    assert scoped_controller.main(_scoped_main_args()) == 2
+    assert forged_calls == []
+
+
+def test_main_rejects_preentry_os_module_rebind_scoped(monkeypatch) -> None:
+    forged_calls: list[str] = []
+
+    class ForgedOs:
+        @property
+        def environ(self):
+            forged_calls.append("environ")
+            return {}
+
+    monkeypatch.setattr(scoped_controller, "os", ForgedOs())
+
+    assert scoped_controller.main(_scoped_main_args()) == 2
+    assert forged_calls == []
+
+
 def test_scoped_main_closure_owns_canonical_orphan_effect() -> None:
     closure = {
         name: cell.cell_contents

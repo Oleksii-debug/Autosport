@@ -1266,20 +1266,25 @@ def _build_main(*, module_globals, admit_impl, cancel_impl, output_writer, api_t
     request_init_code = getattr(request_init, "__code__", None)
     urlopen_impl = module_globals.get("urlopen")
     urlopen_code = getattr(urlopen_impl, "__code__", None)
+    argparse_module = module_globals.get("argparse")
+    parser_type = argparse_module.ArgumentParser
+    parser_init = parser_type.__dict__.get("__init__")
+    parser_init_code = getattr(parser_init, "__code__", None)
+    parser_add_argument = getattr(parser_type, "add_argument", None)
+    parser_add_argument_code = getattr(parser_add_argument, "__code__", None)
+    parser_parse_args = getattr(parser_type, "parse_args", None)
+    parser_parse_args_code = getattr(parser_parse_args, "__code__", None)
+    os_module = module_globals.get("os")
+    environment = os_module.environ
     admit_defaults = freeze_default_metadata(admit_impl)
     cancel_defaults = freeze_default_metadata(cancel_impl)
     output_writer_defaults = freeze_default_metadata(output_writer)
     api_init_defaults = freeze_default_metadata(api_init)
+    parser_init_defaults = freeze_default_metadata(parser_init)
+    parser_add_argument_defaults = freeze_default_metadata(parser_add_argument)
+    parser_parse_args_defaults = freeze_default_metadata(parser_parse_args)
 
     def main(argv: list[str] | None) -> int:
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--pr-number", type=int, required=True)
-        parser.add_argument("--event-head-sha", required=True)
-        parser.add_argument("--workflow-name", required=True)
-        parser.add_argument("--current-run-id", type=int, required=True)
-        parser.add_argument("--admission-only", action="store_true")
-        args = parser.parse_args(argv)
-
         def orchestration_authority_current() -> bool:
             return (
                 module_globals.get("admit_current_head") is admit_impl
@@ -1306,15 +1311,46 @@ def _build_main(*, module_globals, admit_impl, cancel_impl, output_writer, api_t
                 and getattr(request_init, "__code__", None) is request_init_code
                 and module_globals.get("urlopen") is urlopen_impl
                 and getattr(urlopen_impl, "__code__", None) is urlopen_code
+                and module_globals.get("argparse") is argparse_module
+                and argparse_module.ArgumentParser is parser_type
+                and parser_type.__dict__.get("__init__") is parser_init
+                and getattr(parser_init, "__code__", None) is parser_init_code
+                and default_metadata_current(parser_init, parser_init_defaults)
+                and getattr(parser_type, "add_argument", None)
+                is parser_add_argument
+                and getattr(parser_add_argument, "__code__", None)
+                is parser_add_argument_code
+                and default_metadata_current(
+                    parser_add_argument, parser_add_argument_defaults
+                )
+                and getattr(parser_type, "parse_args", None) is parser_parse_args
+                and getattr(parser_parse_args, "__code__", None)
+                is parser_parse_args_code
+                and default_metadata_current(
+                    parser_parse_args, parser_parse_args_defaults
+                )
+                and module_globals.get("os") is os_module
+                and os_module.environ is environment
             )
 
         try:
             if not orchestration_authority_current():
                 raise CancellationError("main orchestration authority changed")
 
+            parser = parser_type()
+            parser_add_argument(parser, "--pr-number", type=int, required=True)
+            parser_add_argument(parser, "--event-head-sha", required=True)
+            parser_add_argument(parser, "--workflow-name", required=True)
+            parser_add_argument(parser, "--current-run-id", type=int, required=True)
+            parser_add_argument(parser, "--admission-only", action="store_true")
+            args = parser_parse_args(parser, argv)
+
+            if not orchestration_authority_current():
+                raise CancellationError("main orchestration authority changed")
+
             api = api_type(
-                repository=os.environ.get("GITHUB_REPOSITORY", ""),
-                token=os.environ.get("GITHUB_TOKEN", ""),
+                repository=environment.get("GITHUB_REPOSITORY", ""),
+                token=environment.get("GITHUB_TOKEN", ""),
             )
             if not orchestration_authority_current():
                 raise CancellationError("main orchestration authority changed")

@@ -1638,13 +1638,17 @@ class PaperSettlementLearningBridge:
         _sha(outbox["binding_id"], "outbox binding_id")
         _text(outbox["ticket_id"], "outbox ticket_id")
         try:
-            TicketStatus(outbox["ticket_status"])
+            ticket_status = TicketStatus(outbox["ticket_status"])
             ticket_payout = Decimal(_text(outbox["ticket_payout"], "ticket_payout"))
             net_reward = Decimal(_text(outbox["net_reward"], "net_reward"))
         except (ValueError, ArithmeticError) as exc:
             raise PaperSettlementLearningBridgeError(
                 "durable learner outbox economics are not canonical"
             ) from exc
+        if ticket_status is TicketStatus.OPEN:
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox cannot reference an open PaperTicket"
+            )
         if not ticket_payout.is_finite() or not net_reward.is_finite():
             raise PaperSettlementLearningBridgeError(
                 "durable learner outbox economics must be finite"

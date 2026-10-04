@@ -49,11 +49,64 @@ def _bind_canonical_settlement_engine(method):
     canonical_engine_type = SettlementEngine
     canonical_scope_resolver = _canonical_open_quote_keys_for_book
     canonical_resolution_type = SettlementResolution
-    canonical_resolution_validate = SettlementResolution.validate
-    canonical_instant = _instant
+    canonical_datetime_type = datetime
+    canonical_timezone_utc = timezone.utc
     canonical_book_type = PaperBook
     canonical_book_load = PaperBook.load
+    canonical_book_save = PaperBook.save
     canonical_workspace_lock_type = WorkspaceEconomicLock
+    canonical_hex = frozenset("0123456789abcdef")
+    canonical_outcomes = frozenset({"win", "loss", "void"})
+
+    def canonical_text(value: object, field: str) -> str:
+        if type(value) is not str or not value or value.strip() != value:
+            raise ValueError(f"{field} must be a non-empty trimmed string")
+        return value
+
+    def canonical_instant(value: object, field: str) -> datetime:
+        raw = canonical_text(value, field)
+        try:
+            parsed = canonical_datetime_type.fromisoformat(
+                raw.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ValueError(f"{field} must be valid ISO-8601") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"{field} must be timezone-aware ISO-8601")
+        return parsed.astimezone(canonical_timezone_utc)
+
+    def canonical_resolution_validate(
+        resolution: SettlementResolution,
+        *,
+        as_of: str,
+    ) -> None:
+        if type(resolution) is not canonical_resolution_type:
+            raise TypeError("settlement resolution must be canonical")
+        canonical_text(resolution.event_identity, "event_identity")
+        canonical_text(resolution.settlement_ref, "settlement_ref")
+        canonical_text(resolution.evidence_id, "evidence_id")
+        digest = resolution.evidence_sha256
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in canonical_hex for character in digest)
+        ):
+            raise ValueError(
+                "evidence_sha256 must be a lowercase SHA-256 hex digest"
+            )
+        cutoff = canonical_instant(as_of, "as_of")
+        available = canonical_instant(resolution.available_at, "available_at")
+        if available > cutoff:
+            raise ValueError(
+                "settlement evidence is not causally available at session cutoff"
+            )
+        quote_outcomes = resolution.quote_outcomes
+        if type(quote_outcomes) is not dict or not quote_outcomes:
+            raise ValueError("quote_outcomes must be a non-empty exact dict")
+        for quote_key, outcome in quote_outcomes.items():
+            canonical_text(quote_key, "quote_outcomes quote_key")
+            if type(outcome) is not str or outcome not in canonical_outcomes:
+                raise ValueError("quote_outcomes contains unsupported outcome")
 
     def guarded(self, *args, **kwargs):
         protected = {
@@ -64,6 +117,7 @@ def _bind_canonical_settlement_engine(method):
             "_settlement_instant": "settlement clock parser is internal product authority",
             "_paper_book_type": "settlement book type is internal product authority",
             "_paper_book_load": "settlement book loader is internal product authority",
+            "_paper_book_save": "settlement book saver is internal product authority",
             "_workspace_lock_type": "settlement lock origin is internal product authority",
         }
         for name, message in protected.items():
@@ -76,6 +130,7 @@ def _bind_canonical_settlement_engine(method):
         kwargs["_settlement_instant"] = canonical_instant
         kwargs["_paper_book_type"] = canonical_book_type
         kwargs["_paper_book_load"] = canonical_book_load
+        kwargs["_paper_book_save"] = canonical_book_save
         kwargs["_workspace_lock_type"] = canonical_workspace_lock_type
         return method(self, *args, **kwargs)
 
@@ -1093,6 +1148,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _settlement_instant: Callable[..., datetime],
         _paper_book_type: type[PaperBook],
         _paper_book_load: Callable[[str | Path], PaperBook],
+        _paper_book_save: Callable[[PaperBook, str | Path], None],
         _workspace_lock_type: type[WorkspaceEconomicLock],
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if type(resolutions) is not tuple:
@@ -1176,7 +1232,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 )
             )
             if settled:
-                book.save(self.paper_book_path)
+                _paper_book_save(book, self.paper_book_path)
 
         return settled, tuple(unique)
 

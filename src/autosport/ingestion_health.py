@@ -56,6 +56,23 @@ def parse_source_timestamp(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _sync_parent_directory(path: Path) -> None:
+    """Durably publish a replaced SourceHealthStore directory entry on POSIX."""
+
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    fd: int | None = None
+    try:
+        fd = os.open(path, flags)
+        os.fsync(fd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def _validate_source_id(value: object) -> str:
     if not isinstance(value, str) or not value or value.strip() != value:
         raise ValueError("source_id must be a non-empty trimmed string")
@@ -897,6 +914,7 @@ class SourceHealthStore:
                 semantic_binding_sha256=binding,
             )
             os.replace(temporary, self.path)
+            _sync_parent_directory(self.path.parent)
             published = self._current_state_sha256()
             if published != intended:
                 raise RuntimeError(

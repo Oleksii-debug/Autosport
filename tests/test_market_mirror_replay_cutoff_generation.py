@@ -1293,7 +1293,8 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
     def test_direct_first_positive_generation_cannot_be_blessed_by_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            store = SQLiteMarketStore(Path(directory) / "market.db")
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
             try:
                 forged = self.event(
                     sequence=1,
@@ -1324,6 +1325,12 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 )
             finally:
                 store.close()
+
+            with self.assertRaisesRegex(
+                MonotonicAuthorityRollbackError,
+                "positive market append chronology is missing, forged, or unproven",
+            ):
+                SQLiteMarketStore(path)
 
     def test_direct_contiguous_tail_after_product_append_cannot_be_blessed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

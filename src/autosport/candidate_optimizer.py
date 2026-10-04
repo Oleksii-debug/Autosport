@@ -37,7 +37,18 @@ class CandidatePortfolioImpact:
     standalone_expected_profit: Decimal
 
     @property
+    def scenario_worst_case_change_proven(self) -> bool:
+        """True only for exact extrema inside the supplied scenario model."""
+        return self.base_report.worst_proven and self.with_candidate_report.worst_proven
+
+    @property
+    def scenario_best_case_change_proven(self) -> bool:
+        """True only for exact extrema inside the supplied scenario model."""
+        return self.base_report.best_proven and self.with_candidate_report.best_proven
+
+    @property
     def exact_marginal_extrema(self) -> bool:
+        """Terminal-space exactness; incomplete caller scenario models never qualify."""
         return self.worst_case_change_proven and self.best_case_change_proven
 
 
@@ -113,8 +124,18 @@ class PortfolioAwareCandidateOptimizer:
             dependent = _dependent_existing_ticket_ids(open_existing, touched_groups, quote_to_group)
             with_report = self.scenario_engine.analyse(open_existing + [synthetic], groups)
 
-            worst_proven = base_report.worst_proven and with_report.worst_proven
-            best_proven = base_report.best_proven and with_report.best_proven
+            scenario_worst_proven = base_report.worst_proven and with_report.worst_proven
+            scenario_best_proven = base_report.best_proven and with_report.best_proven
+            worst_proven = (
+                scenario_worst_proven
+                and _report_has_exact_terminal_space(base_report)
+                and _report_has_exact_terminal_space(with_report)
+            )
+            best_proven = (
+                scenario_best_proven
+                and _report_has_exact_terminal_space(base_report)
+                and _report_has_exact_terminal_space(with_report)
+            )
             observed_worst_change = with_report.observed_worst - base_report.observed_worst
             conservative_floor_change = with_report.conservative_floor - base_report.conservative_floor
             observed_best_change = with_report.observed_best - base_report.observed_best
@@ -159,6 +180,10 @@ class PortfolioAwareCandidateOptimizer:
 
         ranked.sort(key=_ranking_key, reverse=True)
         return ranked[: self.result_limit]
+
+
+def _report_has_exact_terminal_space(report: ScenarioSearchReport) -> bool:
+    return report.outcome_space_exhaustive and report.outcome_space_exact
 
 
 def _scale_standalone_expected_profit(
@@ -361,15 +386,25 @@ def _ranking_key(
     Decimal,
     int,
     Decimal,
+    int,
+    Decimal,
     tuple[tuple[str, str, str, str, str, str], ...],
 ]:
-    proof_tier = 1 if impact.worst_case_change_proven else 0
+    terminal_proof_tier = 1 if impact.worst_case_change_proven else 0
+    scenario_proof_tier = 1 if impact.scenario_worst_case_change_proven else 0
+    scenario_worst_change = (
+        impact.observed_worst_case_change
+        if impact.scenario_worst_case_change_proven
+        else Decimal("-Infinity")
+    )
     expected_available = 1 if impact.expected_case_change is not None else 0
     expected_change = impact.expected_case_change if impact.expected_case_change is not None else Decimal("-Infinity")
     dependency_preference = -len(impact.dependent_existing_ticket_ids)
     return (
-        proof_tier,
+        terminal_proof_tier,
         impact.ranking_risk_change,
+        scenario_proof_tier,
+        scenario_worst_change,
         expected_available,
         expected_change,
         dependency_preference,

@@ -1314,8 +1314,31 @@ def _build_explicit_run_identity_checker(
     resolver,
     request_impl,
 ):
+    def freeze_default_metadata(function):
+        positional = getattr(function, "__defaults__", None)
+        keyword = getattr(function, "__kwdefaults__", None)
+        keyword_items = tuple(keyword.items()) if keyword is not None else ()
+        return positional, keyword, keyword_items
+
+    def default_metadata_current(function, snapshot) -> bool:
+        positional, keyword, keyword_items = snapshot
+        if getattr(function, "__defaults__", None) is not positional:
+            return False
+        current_keyword = getattr(function, "__kwdefaults__", None)
+        if current_keyword is not keyword:
+            return False
+        if keyword is None:
+            return True
+        if len(current_keyword) != len(keyword_items):
+            return False
+        return all(
+            key in current_keyword and current_keyword[key] is value
+            for key, value in keyword_items
+        )
+
     resolver_code = getattr(resolver, "__code__", None)
     request_code = getattr(request_impl, "__code__", None)
+    request_defaults = freeze_default_metadata(request_impl)
     if resolver_code is None or request_code is None:
         raise RuntimeError("explicit run identity resolver executable is unavailable")
 
@@ -1340,6 +1363,7 @@ def _build_explicit_run_identity_checker(
                 return (
                     getattr(resolver, "__code__", None) is resolver_code
                     and getattr(request_impl, "__code__", None) is request_code
+                    and default_metadata_current(request_impl, request_defaults)
                     and getattr(bound, "__self__", None) is api
                     and getattr(bound, "__func__", None) is resolver
                     and getattr(bound_request, "__self__", None) is api
@@ -1425,9 +1449,32 @@ def _build_live_pr_qualification_reader(
     pull_request,
     request_impl,
 ):
+    def freeze_default_metadata(function):
+        positional = getattr(function, "__defaults__", None)
+        keyword = getattr(function, "__kwdefaults__", None)
+        keyword_items = tuple(keyword.items()) if keyword is not None else ()
+        return positional, keyword, keyword_items
+
+    def default_metadata_current(function, snapshot) -> bool:
+        positional, keyword, keyword_items = snapshot
+        if getattr(function, "__defaults__", None) is not positional:
+            return False
+        current_keyword = getattr(function, "__kwdefaults__", None)
+        if current_keyword is not keyword:
+            return False
+        if keyword is None:
+            return True
+        if len(current_keyword) != len(keyword_items):
+            return False
+        return all(
+            key in current_keyword and current_keyword[key] is value
+            for key, value in keyword_items
+        )
+
     live_code = getattr(live_pr_qualification, "__code__", None)
     pull_code = getattr(pull_request, "__code__", None)
     request_code = getattr(request_impl, "__code__", None)
+    request_defaults = freeze_default_metadata(request_impl)
     if live_code is None or pull_code is None or request_code is None:
         raise RuntimeError("live PR qualification executable is unavailable")
 
@@ -1448,6 +1495,7 @@ def _build_live_pr_qualification_reader(
                 getattr(live_pr_qualification, "__code__", None) is live_code
                 and getattr(pull_request, "__code__", None) is pull_code
                 and getattr(request_impl, "__code__", None) is request_code
+                and default_metadata_current(request_impl, request_defaults)
                 and getattr(bound_live, "__self__", None) is api
                 and getattr(bound_live, "__func__", None) is live_pr_qualification
                 and getattr(bound_pull, "__self__", None) is api

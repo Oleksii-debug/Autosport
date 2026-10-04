@@ -1007,27 +1007,91 @@ class WorkflowScopedGitHubApi(GitHubApi):
             page += 1
         return tuple(runs)
 
-    def active_runs(
-        self,
-        *,
-        _active_statuses: tuple[str, ...] = _ACTIVE_STATUSES,
-    ) -> tuple[WorkflowRun, ...]:
-        # Snapshot-local identity state must never leak across repeated scans on one API
-        # object. A later invocation may observe a different stable queue and must derive
-        # orphan authority only from that invocation's complete observation set.
+    def _build_active_runs(
+        status_reader,
+        recovery_reader,
+        active_statuses,
+        error_type,
+    ):
+        """Freeze the moving-snapshot reader graph outside mutable class/default metadata."""
+
+        status_reader_code = getattr(status_reader, "__code__", None)
+        recovery_reader_code = getattr(recovery_reader, "__code__", None)
+        positional_defaults = getattr(status_reader, "__defaults__", None)
+        keyword_defaults = getattr(status_reader, "__kwdefaults__", None)
+        keyword_items = (
+            tuple(keyword_defaults.items()) if keyword_defaults is not None else ()
+        )
         if (
-            type(_active_statuses) is not tuple
-            or not _active_statuses
-            or any(type(item) is not str or not item for item in _active_statuses)
+            status_reader_code is None
+            or recovery_reader_code is None
+            or type(active_statuses) is not tuple
+            or not active_statuses
+            or any(type(item) is not str or not item for item in active_statuses)
         ):
-            raise CancellationError("active workflow status authority is unavailable")
-        self._unbound_active_runs.clear()
-        self._explicit_active_run_ids.clear()
-        self._conflicted_unbound_run_ids.clear()
-        runs: list[WorkflowRun] = []
-        for status in _active_statuses:
-            runs.extend(self._active_runs_for_status(status))
-        return tuple(runs)
+            raise RuntimeError("canonical active workflow snapshot authority is unavailable")
+
+        def reader_graph_current(self) -> bool:
+            bound_status_reader = getattr(self, "_active_runs_for_status", None)
+            bound_recovery_reader = getattr(
+                self,
+                "_recover_candidate_run_reference",
+                None,
+            )
+            if (
+                getattr(status_reader, "__code__", None) is not status_reader_code
+                or getattr(bound_status_reader, "__self__", None) is not self
+                or getattr(bound_status_reader, "__func__", None) is not status_reader
+                or getattr(recovery_reader, "__code__", None) is not recovery_reader_code
+                or getattr(bound_recovery_reader, "__self__", None) is not self
+                or getattr(bound_recovery_reader, "__func__", None) is not recovery_reader
+                or getattr(status_reader, "__defaults__", None) is not positional_defaults
+            ):
+                return False
+            current_keyword_defaults = getattr(
+                status_reader,
+                "__kwdefaults__",
+                None,
+            )
+            if current_keyword_defaults is not keyword_defaults:
+                return False
+            if keyword_defaults is None:
+                return True
+            if len(current_keyword_defaults) != len(keyword_items):
+                return False
+            return all(
+                key in current_keyword_defaults
+                and current_keyword_defaults[key] is value
+                for key, value in keyword_items
+            )
+
+        def active_runs(self) -> tuple[WorkflowRun, ...]:
+            # Snapshot-local identity state must never leak across repeated scans on one API
+            # object. A later invocation may observe a different stable queue and must derive
+            # orphan authority only from that invocation's complete observation set.
+            if not reader_graph_current(self):
+                raise error_type("active workflow reader authority changed")
+            self._unbound_active_runs.clear()
+            self._explicit_active_run_ids.clear()
+            self._conflicted_unbound_run_ids.clear()
+            runs: list[WorkflowRun] = []
+            for status in active_statuses:
+                if not reader_graph_current(self):
+                    raise error_type("active workflow reader authority changed")
+                runs.extend(status_reader(self, status))
+                if not reader_graph_current(self):
+                    raise error_type("active workflow reader authority changed")
+            return tuple(runs)
+
+        return active_runs
+
+    active_runs = _build_active_runs(
+        _active_runs_for_status,
+        _recover_candidate_run_reference,
+        _ACTIVE_STATUSES,
+        CancellationError,
+    )
+    del _build_active_runs
 
     def cancel_historical_unbound_runs(
         self,

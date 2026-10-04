@@ -267,6 +267,54 @@ def test_parlay_product_source_authority_roots_are_immutable_after_construction(
         assert getattr(source, name) is original or getattr(source, name) == original
 
 
+def test_product_coordinator_rejects_post_build_authority_reassignment(
+    tmp_path,
+) -> None:
+    source = _ProductSource()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=source,
+        clock=lambda: NOW,
+        outcome_authority=source,
+    )
+    try:
+        with pytest.raises(
+            ProductCompositionError,
+            match="product coordinator authority field 'outcome_authority' is immutable",
+        ):
+            runtime.coordinator.outcome_authority = source
+        with pytest.raises(
+            ProductCompositionError,
+            match="product coordinator authority field 'clock' is immutable",
+        ):
+            runtime.coordinator.clock = lambda: "2026-09-21T10:00:00Z"
+    finally:
+        runtime.close()
+
+
+def test_product_coordinator_detects_direct_authority_dict_tamper_before_use(
+    tmp_path,
+) -> None:
+    source = _ProductSource()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=source,
+        clock=lambda: NOW,
+        outcome_authority=source,
+    )
+    original = runtime.coordinator.__dict__["outcome_authority"]
+    try:
+        runtime.coordinator.__dict__["outcome_authority"] = source
+        with pytest.raises(
+            ProductCompositionError,
+            match="product coordinator authority field 'outcome_authority' changed after composition",
+        ):
+            runtime.coordinator._settlement_resolutions(as_of=NOW)
+    finally:
+        runtime.coordinator.__dict__["outcome_authority"] = original
+        runtime.close()
+
+
 def test_resolver_semantic_fingerprint_ignores_install_relocation() -> None:
     resolver = _ProductSource.resolve
     original_code = resolver.__code__

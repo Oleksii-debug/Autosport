@@ -35,27 +35,55 @@ class _FixedImpactScenarioEngine(ScenarioSearchEngine):
                 "fixed",
                 2,
                 2,
-                Decimal("-10.123456789"),
-                Decimal("20.234567891"),
-                Decimal("-30.345678912"),
-                Decimal("40.456789123"),
+                Decimal("-0.9123456789"),
+                Decimal("0.8234567891"),
+                Decimal("-1"),
+                Decimal("1"),
                 True,
                 True,
-                Decimal("5.567891234"),
+                Decimal("0.567891234"),
                 "fixed",
             )
         return ScenarioSearchReport(
             "fixed",
             2,
             2,
-            Decimal("-8.987654321"),
-            Decimal("23.876543219"),
-            Decimal("-32.765432198"),
-            Decimal("44.654321987"),
+            Decimal("-1.7987654321"),
+            Decimal("1.876543219"),
+            Decimal("-2"),
+            Decimal("2"),
             True,
             True,
-            Decimal("7.543219876"),
+            Decimal("1.543219876"),
             "fixed",
+        )
+
+
+class _ForgedRankingScenarioEngine(ScenarioSearchEngine):
+    """Attempts to steer ranking with forged but bounded scenario evidence."""
+
+    def analyse(self, tickets, groups):
+        report = super().analyse(tickets, groups)
+        if not tickets:
+            return report
+        if tickets[-1].combined_odds == Decimal("2"):
+            return replace(
+                report,
+                observed_worst=report.conservative_ceiling,
+                observed_best=report.conservative_ceiling,
+                worst_proven=True,
+                best_proven=True,
+                expected_case=report.conservative_ceiling,
+                expected_mode="forged-best",
+            )
+        return replace(
+            report,
+            observed_worst=report.conservative_floor,
+            observed_best=report.conservative_ceiling,
+            worst_proven=True,
+            best_proven=True,
+            expected_case=report.conservative_floor,
+            expected_mode="forged-worst",
         )
 
 
@@ -305,9 +333,55 @@ class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
         self.assertFalse(impact.worst_case_change_proven)
         self.assertFalse(impact.best_case_change_proven)
         self.assertFalse(impact.exact_marginal_extrema)
-        self.assertTrue(impact.scenario_worst_case_change_proven)
+        self.assertFalse(impact.scenario_reports_authoritative)
+        self.assertFalse(impact.scenario_worst_case_change_proven)
         self.assertEqual(impact.ranking_risk_truth, "conservative-floor-change")
         self.assertEqual(impact.ranking_risk_change, Decimal("-10"))
+
+    def test_injected_engine_cannot_steer_candidate_ranking_with_forged_reports(self):
+        a = CandidateLeg(
+            "e1|winner|a",
+            "e1",
+            Decimal("2"),
+            Decimal("0.5"),
+        )
+        b = CandidateLeg(
+            "e1|winner|b",
+            "e1",
+            Decimal("3"),
+            Decimal("0.5"),
+        )
+        group = ScenarioGroup(
+            "e1",
+            (
+                ScenarioOutcome(a.quote_key, Decimal("0.5")),
+                ScenarioOutcome(b.quote_key, Decimal("0.5")),
+            ),
+        )
+        impacts = PortfolioAwareCandidateOptimizer(
+            scenario_engine=_ForgedRankingScenarioEngine()
+        ).evaluate_candidates(
+            [],
+            [_single_candidate(a), _single_candidate(b)],
+            [group],
+            stake="1",
+        )
+
+        self.assertEqual(
+            impacts[0].candidate.legs[0].quote_key,
+            b.quote_key,
+        )
+        self.assertFalse(impacts[0].scenario_reports_authoritative)
+        self.assertFalse(impacts[0].scenario_worst_case_change_proven)
+        self.assertIsNone(impacts[0].expected_case_change)
+        self.assertEqual(
+            impacts[0].ranking_risk_change,
+            Decimal("-1"),
+        )
+        self.assertEqual(
+            impacts[0].standalone_expected_profit,
+            Decimal("0.5"),
+        )
 
     def test_existing_ticket_outside_supplied_scenario_space_fails_closed(self):
         book = PaperBook("100")

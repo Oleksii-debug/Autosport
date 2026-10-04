@@ -974,7 +974,9 @@ class CanonicalDesktopApplication:
         _market_event_type,
         _canonical_digest,
         _market_bus_type,
-        _market_publish,
+        _market_append,
+        _market_notify,
+        _market_snapshot,
         _market_store_type,
         _market_events,
         _dedupe_getter,
@@ -1011,6 +1013,11 @@ class CanonicalDesktopApplication:
         if type(health_store) is not _health_store_type:
             raise ApplicationReceiptError(
                 "canonical application lacks canonical health-store authority"
+            )
+        market_store = getattr(market_bus, "store", None)
+        if type(market_store) is not _market_store_type:
+            raise ApplicationReceiptError(
+                "canonical application cannot prove durable market storage"
             )
         if not callable(application_clock):
             raise ApplicationReceiptError(
@@ -1095,15 +1102,15 @@ class CanonicalDesktopApplication:
                 raise DeltaConflictError(
                     "canonical market event changed during desktop application"
                 )
-            _market_publish(market_bus, event)
+            accepted = _market_append(
+                market_store,
+                [_market_snapshot(event)],
+            )
+            if accepted:
+                _market_notify(market_bus, accepted)
             if _canonical_digest(event) != digest:
                 raise DeltaConflictError(
                     "canonical market event changed during market persistence"
-                )
-            market_store = getattr(market_bus, "store", None)
-            if type(market_store) is not _market_store_type:
-                raise ApplicationReceiptError(
-                    "canonical application cannot prove durable market storage"
                 )
             try:
                 history = _market_events(market_store, delta.event_id)
@@ -1222,6 +1229,8 @@ def _bind_canonical_desktop_application_apply(implementation):
     """Seal the exact market-event type and digest authority for desktop application."""
 
     from .ingestion import CommittedIngestionOutcome
+    from copy import deepcopy
+
     from .ingestion_health import SourceHealthState, SourceHealthStore
     from .market_bus import MarketEventBus
     from .storage import SQLiteMarketStore
@@ -1229,7 +1238,9 @@ def _bind_canonical_desktop_application_apply(implementation):
     market_event_type = MarketEvent
     canonical_digest = canonical_event_digest
     market_bus_type = MarketEventBus
-    market_publish = MarketEventBus.publish
+    market_append = SQLiteMarketStore.append_batch_accepted
+    market_notify = MarketEventBus._notify
+    market_snapshot = deepcopy
     market_store_type = SQLiteMarketStore
     market_events = SQLiteMarketStore.events
     dedupe_getter = MarketEvent.dedupe_key.fget
@@ -1262,7 +1273,9 @@ def _bind_canonical_desktop_application_apply(implementation):
             _market_event_type=market_event_type,
             _canonical_digest=canonical_digest,
             _market_bus_type=market_bus_type,
-            _market_publish=market_publish,
+            _market_append=market_append,
+            _market_notify=market_notify,
+            _market_snapshot=market_snapshot,
             _market_store_type=market_store_type,
             _market_events=market_events,
             _dedupe_getter=dedupe_getter,

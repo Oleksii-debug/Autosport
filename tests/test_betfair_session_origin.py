@@ -373,6 +373,7 @@ def test_module_exposes_no_registration_or_registry_mint_hook():
 
 
 def _build_authoritative_spanish_binding(monkeypatch, tmp_path):
+    import http.client as _http_client
     import json
     import urllib.request as _urllib_request
 
@@ -383,6 +384,7 @@ def _build_authoritative_spanish_binding(monkeypatch, tmp_path):
 
     endpoint = cert_login_endpoint(BetfairLoginJurisdiction.SPAIN)
     login_payload = b'{"sessionToken":"session-from-login","loginStatus":"SUCCESS"}'
+    canonical_opener_open = _urllib_request.OpenerDirector.open
 
     class LoginResponse:
         status = 200
@@ -400,7 +402,7 @@ def _build_authoritative_spanish_binding(monkeypatch, tmp_path):
             assert limit > len(login_payload)
             return login_payload
 
-    def fake_opener_open(self, request, data=None, timeout=0):
+    def fake_login_open(self, request, data=None, timeout=0):
         assert data is None
         assert request.full_url == endpoint
         assert timeout > 0
@@ -411,7 +413,11 @@ def _build_authoritative_spanish_binding(monkeypatch, tmp_path):
         "load_cert_chain",
         lambda self, certfile, keyfile=None, password=None: None,
     )
-    monkeypatch.setattr(_urllib_request.OpenerDirector, "open", fake_opener_open)
+    monkeypatch.setattr(
+        _urllib_request.OpenerDirector,
+        "open",
+        fake_login_open,
+    )
 
     secrets = BetfairNonInteractiveLoginSecrets(
         "application-key",
@@ -429,43 +435,82 @@ def _build_authoritative_spanish_binding(monkeypatch, tmp_path):
         credentials=session.credentials,
     )
 
+    # K07's current parent owns a fresh isolated opener per authenticated
+    # account request. Restore its canonical opener dispatch and stub only the
+    # lower HTTP connection effects.
+    monkeypatch.setattr(
+        _urllib_request.OpenerDirector,
+        "open",
+        canonical_opener_open,
+    )
+
     class AccountResponse:
+        status = 200
+        code = 200
+        reason = "OK"
+        msg = "OK"
+
         def __init__(self, payload):
             self._payload = payload
 
-        def __enter__(self):
-            return self
+        def info(self):
+            return {}
 
-        def __exit__(self, exc_type, exc, traceback):
-            return False
-
-        def read(self, limit):
-            assert limit > len(self._payload)
+        def read(self, limit=None):
+            if limit is None:
+                return self._payload
+            assert limit >= len(self._payload)
             return self._payload
 
-    class AccountOpener:
-        def open(self, request, data=None, timeout=0):
-            assert data is None
-            assert timeout > 0
-            rpc = json.loads(request.data.decode("utf-8"))
-            assert rpc["method"] == "AccountAPING/v1.0/getAccountDetails"
-            payload = json.dumps(
-                {
-                    "jsonrpc": "2.0",
-                    "id": rpc["id"],
-                    "result": {
-                        "currencyCode": "EUR",
-                        "localeCode": "es",
-                        "region": "ESP",
-                        "timezone": "Europe/Madrid",
-                    },
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            return AccountResponse(payload)
+        def close(self):
+            return None
 
-    monkeypatch.setattr(_urllib_request, "_opener", AccountOpener())
+    def fake_account_request(
+        connection,
+        method,
+        url,
+        body=None,
+        headers=None,
+        *,
+        encode_chunked=False,
+    ):
+        assert method == "POST"
+        assert url.endswith("/json-rpc/v1")
+        assert isinstance(body, bytes)
+        assert headers is not None
+        rpc = json.loads(body.decode("utf-8"))
+        assert rpc["method"] == "AccountAPING/v1.0/getAccountDetails"
+        connection._autosport_session_origin_rpc = rpc
+        connection._autosport_session_origin_encode_chunked = encode_chunked
+
+    def fake_account_getresponse(connection):
+        rpc = connection._autosport_session_origin_rpc
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": rpc["id"],
+                "result": {
+                    "currencyCode": "EUR",
+                    "localeCode": "es",
+                    "region": "ESP",
+                    "timezone": "Europe/Madrid",
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return AccountResponse(payload)
+
+    monkeypatch.setattr(
+        _http_client.HTTPSConnection,
+        "request",
+        fake_account_request,
+    )
+    monkeypatch.setattr(
+        _http_client.HTTPSConnection,
+        "getresponse",
+        fake_account_getresponse,
+    )
 
     client = build_betfair_authenticated_client(session.credentials)
     identity = resolve_betfair_authenticated_account_identity(client)

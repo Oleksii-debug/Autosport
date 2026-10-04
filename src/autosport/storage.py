@@ -98,6 +98,13 @@ _REPLAY_CUTOFF_MACHINE_KEY_PREFIX: Final = "sqlite-market-store-replay-cutoff:"
 _REPLAY_CUTOFF_STATE_SCHEMA: Final = "autosport.market-replay-cutoff.machine-state.v1"
 _REPLAY_CUTOFF_CORPUS_SCHEMA: Final = "autosport.market-replay-cutoff.corpus.v1"
 _REPLAY_CUTOFF_BINDING_SCHEMA: Final = "autosport.market-replay-cutoff.issuance-binding.v1"
+_APPEND_MACHINE_DOMAIN: Final = "data.market-event-positive-append.v1"
+_APPEND_MACHINE_KEY_PREFIX: Final = "sqlite-market-store-positive-append:"
+_APPEND_STATE_SCHEMA: Final = "autosport.market-event-positive-append.chain.v1"
+_APPEND_BINDING_SCHEMA: Final = "autosport.market-event-positive-append.binding.v1"
+_APPEND_TX_RE: Final = re.compile(
+    r"^append-(?P<start>[1-9][0-9]*)-(?P<end>[1-9][0-9]*)-(?P<nonce>[0-9a-f]{32})$"
+)
 _COMMIT_ORDER_IMMUTABILITY_TRIGGERS: Final = {
     "market_event_commit_order_no_delete": """CREATE TRIGGER market_event_commit_order_no_delete
 BEFORE DELETE ON market_event_commit_order
@@ -161,6 +168,48 @@ def _replay_cutoff_id(canonical_as_of: str) -> str:
 
 def _canonical_sha256(payload: object) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _append_state_step_sha256(
+    previous_state_sha256: str | None,
+    *,
+    append_generation: int,
+    dedupe_key: str,
+    payload_json: str,
+) -> str:
+    if (
+        type(append_generation) is not int
+        or append_generation <= 0
+        or type(dedupe_key) is not str
+        or not dedupe_key
+        or type(payload_json) is not str
+    ):
+        raise ValueError("positive market append authority entry is invalid")
+    return _canonical_sha256(
+        {
+            "schema": _APPEND_STATE_SCHEMA,
+            "previous_state_sha256": previous_state_sha256,
+            "append_generation": append_generation,
+            "dedupe_key": dedupe_key,
+            "payload_json": payload_json,
+        }
+    )
+
+
+def _append_binding_sha256(
+    *,
+    previous_state_sha256: str | None,
+    intended_state_sha256: str,
+    entries: tuple[tuple[int, str, str], ...],
+) -> str:
+    return _canonical_sha256(
+        {
+            "schema": _APPEND_BINDING_SCHEMA,
+            "previous_state_sha256": previous_state_sha256,
+            "intended_state_sha256": intended_state_sha256,
+            "entries": [list(entry) for entry in entries],
+        }
+    )
 
 
 def _replay_cutoff_state_sha256(
@@ -902,6 +951,170 @@ class SQLiteMarketStore:
             raise OverflowError("market event append generation exhausted")
         return row[0] + 1
 
+    def _market_append_authority(self) -> MonotonicWorkspaceAuthority:
+        database_path = self.path.absolute()
+        return MonotonicWorkspaceAuthority(
+            workspace=database_path.parent,
+            domain=_APPEND_MACHINE_DOMAIN,
+            key=f"{_APPEND_MACHINE_KEY_PREFIX}{database_path.name}",
+        )
+
+    @staticmethod
+    def _market_append_issuance_lock(
+        authority: MonotonicWorkspaceAuthority,
+    ) -> WorkspaceEconomicLock:
+        # Serialize product append PREPARE -> SQLite COMMIT -> machine COMMIT.
+        # Direct SQLite writers do not participate in this lock, so cutoff issuance
+        # still independently recomputes and proves the complete positive chain.
+        return WorkspaceEconomicLock(
+            authority.journal_dir / "market-positive-append-issuance"
+        )
+
+    @staticmethod
+    def _append_authority_committed_tip(
+        authority: MonotonicWorkspaceAuthority,
+    ) -> tuple[int, str | None]:
+        history = authority.read_history()
+        expected_start = 1
+        committed_head = 0
+        committed_state_sha256: str | None = None
+        for record in history:
+            if record.phase is not AuthorityPhase.COMMIT:
+                continue
+            match = _APPEND_TX_RE.fullmatch(record.tx_id)
+            if match is None:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority history has invalid transaction identity"
+                )
+            start = int(match.group("start"))
+            end = int(match.group("end"))
+            if start != expected_start or end < start:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority history is non-contiguous"
+                )
+            if record.previous_committed_state_sha256 != committed_state_sha256:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority history has inconsistent state ancestry"
+                )
+            committed_head = end
+            committed_state_sha256 = record.intended_state_sha256
+            expected_start = end + 1
+        return committed_head, committed_state_sha256
+
+    def _positive_append_generation_head(self) -> int:
+        row = self.connection.execute(
+            """SELECT COUNT(*), COALESCE(MAX(append_generation), 0)
+               FROM market_event_commit_order
+               WHERE append_generation > 0"""
+        ).fetchone()
+        if (
+            row is None
+            or type(row[0]) is not int
+            or type(row[1]) is not int
+            or row[0] != row[1]
+            or row[1] < 0
+        ):
+            raise ValueError("positive market event append generations are not contiguous")
+        return row[1]
+
+    def _validated_positive_append_entries(
+        self,
+    ) -> tuple[tuple[int, str, str], ...]:
+        qualified_columns = ",".join(
+            f"m.{column}" for column in _HISTORY_COLUMNS
+        )
+        rows = self.connection.execute(
+            f"""SELECT c.append_generation, {qualified_columns}
+                FROM market_event_commit_order AS c
+                JOIN market_events AS m ON m.dedupe_key = c.dedupe_key
+                WHERE c.append_generation > 0
+                ORDER BY c.append_generation"""
+        ).fetchall()
+        entries: list[tuple[int, str, str]] = []
+        expected_generation = 1
+        for row in rows:
+            if len(row) != len(_HISTORY_COLUMNS) + 1:
+                raise ValueError("positive market append authority row has invalid shape")
+            generation = row[0]
+            history_row = tuple(row[1:])
+            if type(generation) is not int or generation != expected_generation:
+                raise ValueError("positive market append authority is non-contiguous")
+            _event_from_history_row(history_row)
+            dedupe_key = history_row[0]
+            payload_json = history_row[-1]
+            if type(dedupe_key) is not str or type(payload_json) is not str:
+                raise ValueError("positive market append authority row is invalid")
+            entries.append((generation, dedupe_key, payload_json))
+            expected_generation += 1
+        return tuple(entries)
+
+    @staticmethod
+    def _append_state_from_entries(
+        entries: tuple[tuple[int, str, str], ...],
+    ) -> str | None:
+        state_sha256: str | None = None
+        expected_generation = 1
+        for generation, dedupe_key, payload_json in entries:
+            if generation != expected_generation:
+                raise ValueError("positive market append authority is non-contiguous")
+            state_sha256 = _append_state_step_sha256(
+                state_sha256,
+                append_generation=generation,
+                dedupe_key=dedupe_key,
+                payload_json=payload_json,
+            )
+            expected_generation += 1
+        return state_sha256
+
+    def _recover_positive_append_authority(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+    ) -> tuple[int, str | None]:
+        history = authority.read_history()
+        if history and history[-1].phase is AuthorityPhase.PREPARE:
+            pending = history[-1]
+            entries = self._validated_positive_append_entries()
+            observed_state_sha256 = self._append_state_from_entries(entries)
+            try:
+                authority.recover(observed_state_sha256=observed_state_sha256)
+            except MonotonicAuthorityRecoveryRequiredError:
+                authority.recover(
+                    observed_state_sha256=observed_state_sha256,
+                    tx_id=pending.tx_id,
+                    semantic_binding_sha256=pending.semantic_binding_sha256,
+                )
+        committed_head, committed_state_sha256 = (
+            self._append_authority_committed_tip(authority)
+        )
+        database_head = self._positive_append_generation_head()
+        if database_head != committed_head:
+            raise MonotonicAuthorityRollbackError(
+                "positive market append chronology is missing, forged, or unproven"
+            )
+        return committed_head, committed_state_sha256
+
+    def _require_product_issued_positive_history(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+    ) -> None:
+        # Cutoff issuance runs this while holding BEGIN IMMEDIATE, so an
+        # uncooperating direct SQLite writer cannot change the corpus between this
+        # proof and cutoff publication.
+        self._recover_positive_append_authority(authority)
+        entries = self._validated_positive_append_entries()
+        observed_state_sha256 = self._append_state_from_entries(entries)
+        committed_head, committed_state_sha256 = (
+            self._append_authority_committed_tip(authority)
+        )
+        observed_head = entries[-1][0] if entries else 0
+        if (
+            observed_head != committed_head
+            or observed_state_sha256 != committed_state_sha256
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "positive market append chronology is missing, forged, or unproven"
+            )
+
     def _replay_cutoff_authority(self) -> MonotonicWorkspaceAuthority:
         database_path = self.path.absolute()
         return MonotonicWorkspaceAuthority(
@@ -1191,19 +1404,129 @@ class SQLiteMarketStore:
         return True
 
     def append(self, event: MarketEvent) -> bool:
-        with self._connection_lock:
-            with self.connection:
-                return self._insert_one(event)
+        return bool(self.append_batch_accepted((event,)))
 
     def append_batch_accepted(self, events: Iterable[MarketEvent]) -> list[MarketEvent]:
-        """Insert one normalized batch in one transaction and return newly accepted events."""
-        accepted: list[MarketEvent] = []
+        """Insert one normalized batch and independently issue its positive chronology."""
+
+        authority = self._market_append_authority()
         with self._connection_lock:
-            with self.connection:
-                for event in events:
-                    if self._insert_one(event):
-                        accepted.append(event)
-        return accepted
+            with self._market_append_issuance_lock(authority):
+                self.connection.execute("BEGIN IMMEDIATE")
+                prepared: tuple[str, str, str | None] | None = None
+                accepted: list[MarketEvent] = []
+                try:
+                    self._validate_causal_replay_state()
+                    committed_head, committed_state_sha256 = (
+                        self._recover_positive_append_authority(authority)
+                    )
+                    for event in events:
+                        if self._insert_one(event):
+                            accepted.append(event)
+
+                    if not accepted:
+                        self.connection.commit()
+                        return accepted
+
+                    qualified_columns = ",".join(
+                        f"m.{column}" for column in _HISTORY_COLUMNS
+                    )
+                    entries: list[tuple[int, str, str]] = []
+                    for event in accepted:
+                        row = self.connection.execute(
+                            f"""SELECT c.append_generation, {qualified_columns}
+                                FROM market_event_commit_order AS c
+                                JOIN market_events AS m
+                                  ON m.dedupe_key = c.dedupe_key
+                                WHERE c.dedupe_key=?""",
+                            (event.dedupe_key,),
+                        ).fetchone()
+                        if row is None or len(row) != len(_HISTORY_COLUMNS) + 1:
+                            raise RuntimeError(
+                                "accepted market event lacks append authority row"
+                            )
+                        generation = row[0]
+                        history_row = tuple(row[1:])
+                        _event_from_history_row(history_row)
+                        dedupe_key = history_row[0]
+                        payload_json = history_row[-1]
+                        if (
+                            type(generation) is not int
+                            or type(dedupe_key) is not str
+                            or type(payload_json) is not str
+                        ):
+                            raise ValueError(
+                                "accepted market event append authority is invalid"
+                            )
+                        entries.append((generation, dedupe_key, payload_json))
+
+                    entries.sort(key=lambda entry: entry[0])
+                    expected_generation = committed_head + 1
+                    intended_state_sha256 = committed_state_sha256
+                    for generation, dedupe_key, payload_json in entries:
+                        if generation != expected_generation:
+                            raise MonotonicAuthorityRollbackError(
+                                "positive market append chronology diverged during product append"
+                            )
+                        intended_state_sha256 = _append_state_step_sha256(
+                            intended_state_sha256,
+                            append_generation=generation,
+                            dedupe_key=dedupe_key,
+                            payload_json=payload_json,
+                        )
+                        expected_generation += 1
+                    if intended_state_sha256 is None:
+                        raise RuntimeError("accepted append batch has no authority state")
+
+                    entry_tuple = tuple(entries)
+                    binding_sha256 = _append_binding_sha256(
+                        previous_state_sha256=committed_state_sha256,
+                        intended_state_sha256=intended_state_sha256,
+                        entries=entry_tuple,
+                    )
+                    start_generation = entry_tuple[0][0]
+                    end_generation = entry_tuple[-1][0]
+                    tx_id = (
+                        f"append-{start_generation}-{end_generation}-{uuid.uuid4().hex}"
+                    )
+                    authority.prepare(
+                        tx_id=tx_id,
+                        observed_state_sha256=committed_state_sha256,
+                        intended_state_sha256=intended_state_sha256,
+                        semantic_binding_sha256=binding_sha256,
+                    )
+                    prepared = (
+                        tx_id,
+                        binding_sha256,
+                        committed_state_sha256,
+                    )
+                    self.connection.commit()
+                except Exception as exc:
+                    self.connection.rollback()
+                    if prepared is not None:
+                        tx_id, binding_sha256, previous_state_sha256 = prepared
+                        try:
+                            authority.abort(
+                                tx_id=tx_id,
+                                observed_state_sha256=previous_state_sha256,
+                                semantic_binding_sha256=binding_sha256,
+                            )
+                        except Exception as abort_error:
+                            exc.add_note(
+                                "independent append-authority PREPARE could not be "
+                                f"aborted cleanly: {type(abort_error).__name__}: "
+                                f"{abort_error}"
+                            )
+                    raise
+
+                assert prepared is not None
+                tx_id, binding_sha256, _previous_state_sha256 = prepared
+                authority.recover(
+                    observed_state_sha256=intended_state_sha256,
+                    tx_id=tx_id,
+                    semantic_binding_sha256=binding_sha256,
+                )
+                return accepted
 
     def append_many(self, events: Iterable[MarketEvent]) -> int:
         return len(self.append_batch_accepted(events))
@@ -1274,6 +1597,9 @@ class SQLiteMarketStore:
                     self.connection.execute("BEGIN IMMEDIATE")
                     try:
                         self._validate_causal_replay_state()
+                        self._require_product_issued_positive_history(
+                            self._market_append_authority()
+                        )
                         cutoff_rows = self._validated_replay_cutoff_rows()
                         observed_state_sha256 = (
                             self._replay_cutoff_authority_state_sha256(cutoff_rows)

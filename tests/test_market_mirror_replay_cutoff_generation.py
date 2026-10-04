@@ -1979,21 +1979,28 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 store.append(original)
                 expected = self.semantic_events(self.replay(store))
                 original_require = (
-                    SQLiteMarketStore._require_independent_cutoff_issuance
+                    SQLiteMarketStore._require_canonical_cutoff_authority_bindings
                 )
                 tampered_once = False
 
                 def mutate_after_binding_check(
+                    store_instance,
                     authority,
-                    *,
-                    expected_binding_sha256: str,
+                    append_authority,
+                    cutoff_rows,
                 ) -> None:
                     nonlocal tampered_once
                     original_require(
+                        store_instance,
                         authority,
-                        expected_binding_sha256=expected_binding_sha256,
+                        append_authority,
+                        cutoff_rows,
                     )
-                    if tampered_once:
+                    # The verifier runs during preflight as well as inside the final
+                    # deferred SQLite snapshot. Mutate only after the proof executed
+                    # inside that read transaction so the escaping rows must come from
+                    # the already-proven snapshot rather than the later external write.
+                    if tampered_once or not store_instance.connection.in_transaction:
                         return
                     external.execute(
                         """UPDATE market_events
@@ -2010,8 +2017,8 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with patch.object(
                     SQLiteMarketStore,
-                    "_require_independent_cutoff_issuance",
-                    new=staticmethod(mutate_after_binding_check),
+                    "_require_canonical_cutoff_authority_bindings",
+                    new=mutate_after_binding_check,
                 ):
                     repeated = self.replay(store)
 

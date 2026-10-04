@@ -28,6 +28,7 @@ from .campaign_inception import (
     establish_campaign_inception,
 )
 from .causal_collector import CollectorDeltaStore
+from .campaign_provider_cycle_capture import CampaignCompleteBoardCycleReceipt
 from .forward_evidence_completeness import ForwardEvidenceProtocolEnvelope
 from .forward_universe_precommit_authority import ForwardUniversePrecommitLocator
 from .learning_environment import (
@@ -40,6 +41,7 @@ from .paper_campaign_admission import (
     PaperCampaignAdmissionError,
     _FORWARD_OBSERVATION_BINDING_KEYS,
     _FORWARD_OBSERVATION_CAMPAIGN_ID,
+    _FORWARD_OBSERVATION_CYCLE_RECEIPT_SHA256,
     _FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256,
     _FORWARD_OBSERVATION_INCEPTION_RECEIPT_SHA256,
     _FORWARD_OBSERVATION_PROTOCOL_SHA256,
@@ -208,12 +210,14 @@ def _install() -> None:
     campaign_store_type = CollectorDeltaStore
     campaign_source_spec_type = CampaignInceptionSourceSpec
     campaign_protocol_type = ForwardEvidenceProtocolEnvelope
+    campaign_cycle_receipt_type = CampaignCompleteBoardCycleReceipt
     campaign_binding_keys = _FORWARD_OBSERVATION_BINDING_KEYS
     campaign_id_key = _FORWARD_OBSERVATION_CAMPAIGN_ID
     campaign_source_id_key = _FORWARD_OBSERVATION_SOURCE_ID
     campaign_receipt_key = _FORWARD_OBSERVATION_INCEPTION_RECEIPT_SHA256
     campaign_plan_key = _FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256
     campaign_protocol_key = _FORWARD_OBSERVATION_PROTOCOL_SHA256
+    campaign_cycle_receipt_key = _FORWARD_OBSERVATION_CYCLE_RECEIPT_SHA256
     protocol_hash_chars = frozenset("0123456789abcdef")
     json_loads = json.loads
     json_dumps = json.dumps
@@ -227,6 +231,7 @@ def _install() -> None:
         campaign_collector_store: CollectorDeltaStore | None = None,
         campaign_source_spec: CampaignInceptionSourceSpec | None = None,
         campaign_forward_protocol: ForwardEvidenceProtocolEnvelope | None = None,
+        campaign_cycle_receipt: CampaignCompleteBoardCycleReceipt | None = None,
         **kwargs,
     ) -> None:
         campaign_args = (
@@ -234,6 +239,7 @@ def _install() -> None:
             campaign_collector_store,
             campaign_source_spec,
             campaign_forward_protocol,
+            campaign_cycle_receipt,
         )
         campaign_requested = any(value is not None for value in campaign_args)
         if learning_environment is None:
@@ -257,10 +263,11 @@ def _install() -> None:
             or type(campaign_collector_store) is not campaign_store_type
             or type(campaign_source_spec) is not campaign_source_spec_type
             or type(campaign_forward_protocol) is not campaign_protocol_type
+            or type(campaign_cycle_receipt) is not campaign_cycle_receipt_type
         ):
             raise TypeError(
                 "forward campaign execution requires exact precommit locator, "
-                "collector store, source spec, and forward protocol"
+                "collector store, source spec, forward protocol, and cycle receipt"
             )
 
         # Reject malformed forward capability before the base execution runtime may
@@ -296,6 +303,30 @@ def _install() -> None:
                 raise _origin.PaperExecutionDecisionOriginError(
                     "forward protocol campaign differs from campaign inception"
                 )
+            if (
+                campaign_cycle_receipt.campaign_id != receipt.campaign_id
+                or campaign_cycle_receipt.source_id != receipt.source_id
+                or campaign_cycle_receipt.campaign_receipt_sha256
+                != receipt.receipt_sha256
+            ):
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "forward cycle receipt differs from campaign inception"
+                )
+            cycle_receipt_sha256 = campaign_cycle_receipt.receipt_sha256
+            if (
+                type(cycle_receipt_sha256) is not str
+                or len(cycle_receipt_sha256) != 64
+                or cycle_receipt_sha256 != cycle_receipt_sha256.lower()
+                or any(
+                    character not in protocol_hash_chars
+                    for character in cycle_receipt_sha256
+                )
+            ):
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "forward cycle receipt identity is invalid"
+                )
+            cycle_provider_captured_at = campaign_cycle_receipt.provider_captured_at
+            _utc(cycle_provider_captured_at, "forward cycle provider_captured_at")
             protocol_sha256 = campaign_forward_protocol.protocol_sha256
             if (
                 type(protocol_sha256) is not str
@@ -311,12 +342,15 @@ def _install() -> None:
                 campaign_collector_store,
                 campaign_source_spec,
                 campaign_forward_protocol,
+                campaign_cycle_receipt,
                 receipt.receipt_sha256,
                 receipt.campaign_id,
                 receipt.source_id,
                 receipt.evaluation_universe_sha256,
                 receipt.observation_not_before,
                 receipt.observation_not_after,
+                cycle_receipt_sha256,
+                cycle_provider_captured_at,
                 protocol_sha256,
             )
 
@@ -379,12 +413,15 @@ def _install() -> None:
                 campaign_collector_store,
                 campaign_source_spec,
                 campaign_forward_protocol,
+                campaign_cycle_receipt,
                 expected_receipt_sha256,
                 expected_campaign_id,
                 expected_source_id,
                 expected_plan_sha256,
                 expected_observation_not_before,
                 expected_observation_not_after,
+                expected_cycle_receipt_sha256,
+                expected_cycle_provider_captured_at,
                 expected_protocol_sha256,
             ) = campaign_binding
             if (
@@ -412,6 +449,15 @@ def _install() -> None:
                 != expected_observation_not_before
                 or current_receipt.observation_not_after
                 != expected_observation_not_after
+                or type(campaign_cycle_receipt) is not campaign_cycle_receipt_type
+                or campaign_cycle_receipt.campaign_id != expected_campaign_id
+                or campaign_cycle_receipt.source_id != expected_source_id
+                or campaign_cycle_receipt.campaign_receipt_sha256
+                != expected_receipt_sha256
+                or campaign_cycle_receipt.receipt_sha256
+                != expected_cycle_receipt_sha256
+                or campaign_cycle_receipt.provider_captured_at
+                != expected_cycle_provider_captured_at
                 or type(campaign_forward_protocol) is not campaign_protocol_type
                 or campaign_forward_protocol.campaign_id != expected_campaign_id
                 or campaign_forward_protocol.protocol_sha256
@@ -431,6 +477,17 @@ def _install() -> None:
                     "decision-time learning observation predates prospective "
                     "campaign observation window"
                 )
+            if _utc(
+                available_at,
+                "decision-time learning available_at",
+            ) < _utc(
+                expected_cycle_provider_captured_at,
+                "forward cycle provider_captured_at",
+            ):
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "decision-time learning observation predates bound "
+                    "provider cycle evidence"
+                )
             campaign_evidence = (
                 (campaign_id_key, current_receipt.campaign_id),
                 (campaign_source_id_key, current_receipt.source_id),
@@ -440,6 +497,7 @@ def _install() -> None:
                     current_receipt.evaluation_universe_sha256,
                 ),
                 (campaign_protocol_key, expected_protocol_sha256),
+                (campaign_cycle_receipt_key, expected_cycle_receipt_sha256),
             )
 
         try:

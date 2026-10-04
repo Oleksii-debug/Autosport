@@ -142,6 +142,7 @@ class AdmissionFixture:
         campaign_collector_store=None,
         campaign_source_spec=None,
         campaign_forward_protocol=None,
+        campaign_cycle_receipt=None,
     ) -> None:
         selected_timeline = (T0, T1, T2, T3, T4) if timeline is None else timeline
         if type(selected_timeline) is not tuple or len(selected_timeline) != 5:
@@ -222,6 +223,7 @@ class AdmissionFixture:
             campaign_collector_store=campaign_collector_store,
             campaign_source_spec=campaign_source_spec,
             campaign_forward_protocol=campaign_forward_protocol,
+            campaign_cycle_receipt=campaign_cycle_receipt,
         )
         self.execution_runtime = execution_runtime
         if seed_execution_decision:

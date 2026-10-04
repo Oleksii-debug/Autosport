@@ -9,6 +9,7 @@ existing #708 intent/DecisionLedger contract.
 from __future__ import annotations
 
 import inspect
+from datetime import datetime, timezone
 from typing import Mapping
 
 from . import campaign_forward_universe_cycle_binding as _forward
@@ -48,6 +49,18 @@ def _build_sealed_forward_admission():
     receipt_type = forward_module.CampaignForwardEvidenceVerification
     cycle_receipt_type = forward_module.CampaignCompleteBoardCycleReceipt
     expected_scope = "CYCLE_BOUND_PROVIDER_UNIVERSE_STRUCTURAL_ONLY"
+    observation_type = admission_module.Observation
+    observation_evidence_descriptor = getattr_static(observation_type, "evidence")
+    observation_available_at_descriptor = getattr_static(
+        observation_type,
+        "available_at",
+    )
+    cycle_observation_key = (
+        admission_module._FORWARD_OBSERVATION_CYCLE_RECEIPT_SHA256
+    )
+    datetime_type = datetime
+    timezone_type = timezone
+    timezone_utc = timezone.utc
 
     exact_type = type
     exact_dict = dict
@@ -88,6 +101,8 @@ def _build_sealed_forward_admission():
         "campaign_id",
         "source_id",
         "campaign_receipt_sha256",
+        "receipt_sha256",
+        "provider_captured_at",
     )
     cycle_identity_field_descriptors = exact_tuple(
         (name, getattr_static(cycle_receipt_type, name))
@@ -151,6 +166,15 @@ def _build_sealed_forward_admission():
             is not receipt_type
             or forward_module.CampaignCompleteBoardCycleReceipt
             is not cycle_receipt_type
+            or admission_module.Observation is not observation_type
+            or admission_module._FORWARD_OBSERVATION_CYCLE_RECEIPT_SHA256
+            != cycle_observation_key
+            or getattr_static(observation_type, "evidence")
+            is not observation_evidence_descriptor
+            or getattr_static(observation_type, "available_at")
+            is not observation_available_at_descriptor
+            or module_globals.get("datetime") is not datetime_type
+            or module_globals.get("timezone") is not timezone_type
             or exact_any(
                 getattr_static(receipt_type, name) is not descriptor
                 for name, descriptor in receipt_field_descriptors
@@ -183,6 +207,19 @@ def _build_sealed_forward_admission():
             state[name] = descriptor.__get__(value, expected_type)
         require_surfaces()
         return state
+
+    def instant(value: object, name: str):
+        if exact_type(value) is not exact_str:
+            raise expected_error(f"{name} must be timezone-aware ISO-8601")
+        try:
+            parsed = datetime_type.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise expected_error(
+                f"{name} must be timezone-aware ISO-8601"
+            ) from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise expected_error(f"{name} must be timezone-aware ISO-8601")
+        return parsed.astimezone(timezone_utc)
 
     def sha(value: object, name: str) -> str:
         if (
@@ -395,6 +432,61 @@ def _build_sealed_forward_admission():
             raise exact_type_error(
                 "coordinator must be exact PaperCampaignAdmissionCoordinator"
             )
+
+        cycle_state = read_stored_fields(
+            cycle_receipt,
+            expected_type=cycle_receipt_type,
+            descriptors=cycle_identity_field_descriptors,
+            label="campaign cycle receipt",
+        )
+        if exact_type(observation) is not observation_type:
+            raise expected_error(
+                "forward admission requires exact canonical learning Observation"
+            )
+        require_surfaces()
+        observation_evidence = observation_evidence_descriptor.__get__(
+            observation,
+            observation_type,
+        )
+        observation_available_at = observation_available_at_descriptor.__get__(
+            observation,
+            observation_type,
+        )
+        if (
+            exact_type(observation_evidence) is not exact_tuple
+            or exact_any(
+                exact_type(item) is not exact_tuple
+                or exact_len(item) != 2
+                or exact_type(item[0]) is not exact_str
+                or exact_type(item[1]) is not exact_str
+                for item in observation_evidence
+            )
+            or exact_len({item[0] for item in observation_evidence})
+            != exact_len(observation_evidence)
+        ):
+            raise expected_error(
+                "forward admission learning Observation evidence is noncanonical"
+            )
+        cycle_receipt_sha256 = sha(
+            cycle_state["receipt_sha256"],
+            "cycle_receipt_sha256",
+        )
+        if exact_dict(observation_evidence).get(cycle_observation_key) != cycle_receipt_sha256:
+            raise expected_error(
+                "predecision learning Observation is not bound to exact "
+                "forward provider cycle receipt"
+            )
+        if instant(
+            observation_available_at,
+            "learning observation available_at",
+        ) < instant(
+            cycle_state["provider_captured_at"],
+            "provider cycle captured_at",
+        ):
+            raise expected_error(
+                "predecision learning Observation predates bound provider cycle evidence"
+            )
+        require_surfaces()
 
         request = (
             precommit_locator,

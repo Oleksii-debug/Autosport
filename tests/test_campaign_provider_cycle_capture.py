@@ -75,8 +75,12 @@ from autosport._paper_execution_decision_origin import (
     PaperExecutionDecisionOriginError,
 )
 from autosport.decision_ledger import JsonlDecisionLedger
+from autosport.learning_environment import Observation
 from autosport.paper_campaign_admission import PaperCampaignAdmissionError
-from autosport.paper_campaign_forward_admission import admit_forward_verified
+from autosport.paper_campaign_forward_admission import (
+    PaperCampaignForwardAdmissionError,
+    admit_forward_verified,
+)
 from paper_campaign_admission_test_support import AdmissionFixture
 
 
@@ -1348,6 +1352,7 @@ def test_campaign_predecision_observation_rejects_preprospective_timestamp_but_a
         campaign_collector_store=store,
         campaign_source_spec=spec,
         campaign_forward_protocol=protocol,
+        campaign_cycle_receipt=_cycle_receipt,
     )
     issuer = getattr(
         fixture.execution_runtime,
@@ -1455,6 +1460,7 @@ def test_cycle_bound_forward_verification_drives_durable_paper_admission(
         campaign_collector_store=store,
         campaign_source_spec=spec,
         campaign_forward_protocol=protocol,
+        campaign_cycle_receipt=cycle_receipt,
     )
     coordinator = fixture.coordinator()
     learning_evidence = dict(fixture.observation.evidence)
@@ -1469,6 +1475,49 @@ def test_cycle_bound_forward_verification_drives_durable_paper_admission(
         == expected.prospective_evaluation_plan_sha256
     )
     assert learning_evidence["campaign_forward_protocol_sha256"] == expected.protocol_sha256
+    assert (
+        learning_evidence["campaign_forward_cycle_receipt_sha256"]
+        == cycle_receipt.receipt_sha256
+    )
+
+    retroactive_observation = Observation(
+        environment_id=fixture.observation.environment_id,
+        observed_at="2100-01-01T06:00:00.100000+00:00",
+        available_at="2100-01-01T06:00:00.200000+00:00",
+        evidence=fixture.observation.evidence,
+    )
+    with pytest.raises(
+        PaperCampaignForwardAdmissionError,
+        match="predates bound provider cycle evidence",
+    ):
+        admit_forward_verified(
+            coordinator,
+            precommit_locator=locator,
+            collector_store=store,
+            source_spec=spec,
+            cycle_receipt=cycle_receipt,
+            provider_evidence_store=provider_store,
+            universe_store=universe_store,
+            event_lifecycle=None,
+            evidence=evidence,
+            admission_id="retroactive-cycle-admission",
+            observation=retroactive_observation,
+            action_type="PAPER_PROPOSAL",
+            decision_action="OPEN_PAPER_TICKET",
+            decision_at=fixture.t2,
+            at=fixture.t2,
+            replay_run_id="retroactive-cycle-run",
+            agent="admission-test",
+            execution_decision_id=fixture.execution_decision_id,
+            execution_run_id=fixture.execution_run_id,
+            execution_attempt_id=fixture.execution_attempt_id,
+            execution_ticket_id=fixture.execution_ticket_id,
+        )
+    assert json.loads(
+        (fixture.workspace / "paper-campaign-admission.json").read_text(
+            encoding="utf-8"
+        )
+    )["admissions"] == {}
 
     alternate_protocol = ForwardEvidenceProtocolEnvelope(
         campaign_id=protocol.campaign_id,
@@ -1493,6 +1542,7 @@ def test_cycle_bound_forward_verification_drives_durable_paper_admission(
         campaign_collector_store=store,
         campaign_source_spec=spec,
         campaign_forward_protocol=alternate_protocol,
+        campaign_cycle_receipt=cycle_receipt,
     )
     with pytest.raises(
         PaperCampaignAdmissionError,

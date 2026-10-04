@@ -653,6 +653,90 @@ def test_launch_binds_bridge_before_pywebview_api_use(monkeypatch) -> None:
     assert controller.events == [("state", None), ("close", None)]
 
 
+class _HostMethodRetargetAfterValidationWebview(_FakeWebview):
+    def __init__(self) -> None:
+        super().__init__()
+        self.forged_bind_calls = 0
+        self.forged_close_calls = 0
+
+    def start(self, *, gui: str, **kwargs) -> None:
+        del kwargs
+        self.requested_gui = gui
+        self.api.__dict__["_bind_trusted_window"] = (
+            lambda *args, **kwargs: setattr(
+                self, "forged_bind_calls", self.forged_bind_calls + 1
+            )
+        )
+        self.api.__dict__["_close_from_host"] = (
+            lambda: setattr(
+                self, "forged_close_calls", self.forged_close_calls + 1
+            )
+        )
+        assert self.window.events.initialized.fire("edgechromium") == [True]
+        self.window.events.before_load.fire()
+        assert self.api.get_state()["ok"] is True
+
+
+def test_launch_captures_host_methods_before_callback_tocou(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    fake = _HostMethodRetargetAfterValidationWebview()
+    controller = _Controller()
+    bridge = AutosportWebBridge(controller)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    assert launch_windows_shell(bridge, storage_path=tmp_path / "webview") == 0
+
+    assert fake.forged_bind_calls == 0
+    assert fake.forged_close_calls == 0
+    assert controller.events == [("state", None), ("close", None)]
+
+
+class _RevokeRetargetAfterValidationWebview(_FakeWebview):
+    def __init__(self) -> None:
+        super().__init__()
+        self.forged_revoke_calls = 0
+        self.foreign_document_rejected = False
+
+    def start(self, *, gui: str, **kwargs) -> None:
+        del kwargs
+        self.requested_gui = gui
+        assert self.window.events.initialized.fire("edgechromium") == [True]
+        self.window.events.before_load.fire()
+        self.api.__dict__["_revoke_trust"] = (
+            lambda: setattr(
+                self, "forged_revoke_calls", self.forged_revoke_calls + 1
+            )
+        )
+        self.window.current_url = "https://foreign.example/"
+        self.window.real_url = "https://foreign.example/"
+        assert self.window.events.before_load.fire() == [False]
+        with pytest.raises(WindowsWebBridgeTrustError):
+            self.api.get_state()
+        self.foreign_document_rejected = True
+
+
+def test_launch_captures_revoke_before_navigation_tocou(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    fake = _RevokeRetargetAfterValidationWebview()
+    controller = _Controller()
+    bridge = AutosportWebBridge(controller)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    with pytest.raises(
+        WindowsWebViewUnavailable,
+        match="lost its trusted WebView document binding",
+    ):
+        launch_windows_shell(bridge, storage_path=tmp_path / "webview")
+
+    assert fake.forged_revoke_calls == 0
+    assert fake.foreign_document_rejected is True
+    assert controller.events == [("close", None)]
+
+
 class _ForeignFirstDocumentWebview(_FakeWebview):
     def __init__(self) -> None:
         super().__init__()

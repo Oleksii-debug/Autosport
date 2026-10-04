@@ -2785,6 +2785,10 @@ def launch_windows_shell(
     api = _require_canonical_web_bridge_surface(
         AutosportWebBridge() if bridge is None else bridge
     )
+    bind_trusted_window = api._bind_trusted_window
+    close_from_host = api._close_from_host
+    revoke_trust = api._revoke_trust
+    runtime_witness_path_for_controller = api._runtime_witness_path
     expected_original_url = str(asset)
     canonical_bridge = True
     required_renderer = "edgechromium"
@@ -2798,7 +2802,7 @@ def launch_windows_shell(
     runtime_witness_path: Path | None = None
     if canonical_bridge:
         try:
-            runtime_witness_path = api._runtime_witness_path()
+            runtime_witness_path = runtime_witness_path_for_controller()
         except WindowsWebBridgeTrustError as exc:
             raise WindowsWebViewUnavailable(
                 "Autosport could not bind the WebView2 runtime witness workspace"
@@ -2816,12 +2820,12 @@ def launch_windows_shell(
         nonlocal expected_real_url, renderer_observed, trusted_document_violation
         if type(renderer) is not str or renderer != required_renderer:
             if canonical_bridge:
-                api._revoke_trust()
+                revoke_trust()
             return False
         renderer_observed = True
         if canonical_bridge:
             if window is None:
-                api._revoke_trust()
+                revoke_trust()
                 trusted_document_violation = True
                 return False
             try:
@@ -2830,7 +2834,7 @@ def launch_windows_shell(
                     expected_original_url=expected_original_url,
                 )
             except WindowsWebBridgeTrustError:
-                api._revoke_trust()
+                revoke_trust()
                 trusted_document_violation = True
                 return False
         return True
@@ -2842,21 +2846,21 @@ def launch_windows_shell(
         if not canonical_bridge:
             return None
         if not renderer_observed or window is None:
-            api._revoke_trust()
+            revoke_trust()
             trusted_document_violation = True
             return False
         if runtime_witness_path is not None:
             try:
                 observed_version = _observed_webview2_browser_version(window)
             except WindowsWebViewUnavailable:
-                api._revoke_trust()
+                revoke_trust()
                 runtime_identity_violation = True
                 trusted_document_violation = True
                 return False
             if runtime_browser_version is None:
                 runtime_browser_version = observed_version
             elif runtime_browser_version != observed_version:
-                api._revoke_trust()
+                revoke_trust()
                 runtime_identity_violation = True
                 trusted_document_violation = True
                 return False
@@ -2872,9 +2876,9 @@ def launch_windows_shell(
                 raise WindowsWebBridgeTrustError(
                     "The WebView bridge rejected packaged URL retargeting"
                 )
-            api._bind_trusted_window(window, expected_url=expected_real_url)
+            bind_trusted_window(window, expected_url=expected_real_url)
         except WindowsWebBridgeTrustError:
-            api._revoke_trust()
+            revoke_trust()
             trusted_document_violation = True
             return False
 
@@ -2892,7 +2896,7 @@ def launch_windows_shell(
                     runtime_browser_version,
                 )
             except OSError:
-                api._revoke_trust()
+                revoke_trust()
                 runtime_identity_violation = True
                 trusted_document_violation = True
                 return False
@@ -2908,7 +2912,7 @@ def launch_windows_shell(
     def run_close_teardown() -> None:
         nonlocal close_teardown_thread, close_teardown_succeeded
         try:
-            api._close_from_host()
+            close_from_host()
         except Exception:
             # The controller publishes bounded operator-safe failure state and
             # resets its retry fence. Leave the window open for state readback and
@@ -2963,7 +2967,7 @@ def launch_windows_shell(
             # back to the older synchronous safety path: block the native close
             # until canonical teardown succeeds, or veto it on any failure.
             try:
-                api._close_from_host()
+                close_from_host()
             except Exception:
                 return False
             with close_teardown_lock:
@@ -3020,14 +3024,14 @@ def launch_windows_shell(
             )
     except WindowsWebViewUnavailable:
         try:
-            api._close_from_host()
+            close_from_host()
         except BaseException:
             # Never let teardown replace the already-bounded primary launch failure.
             pass
         raise
     except Exception as exc:
         try:
-            api._close_from_host()
+            close_from_host()
         except BaseException:
             # Preserve the actual startup/runtime failure as the causal root.
             pass
@@ -3036,13 +3040,13 @@ def launch_windows_shell(
         ) from exc
     except BaseException:
         try:
-            api._close_from_host()
+            close_from_host()
         except BaseException:
             pass
         raise
 
     try:
-        api._close_from_host()
+        close_from_host()
     except Exception as exc:
         raise WindowsWebViewUnavailable(
             "Autosport could not safely finalize the semantic shell"

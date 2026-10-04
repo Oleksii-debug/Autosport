@@ -561,6 +561,25 @@ def _bind_continuous_state_settlement_integrity(method):
 def _bind_continuous_state_read_settlement_integrity(method):
     """Bind pending-outcome digest reproof against later module-global rebinding."""
 
+    kwdefaults = method.__kwdefaults__ or {}
+    canonical_settlement_evidence_validator = kwdefaults[
+        "_settlement_evidence_validator"
+    ]
+    canonical_pending_settlement_validator = kwdefaults[
+        "_pending_settlement_validator"
+    ]
+    canonical_settlement_evidence_validator_func = (
+        canonical_settlement_evidence_validator.__func__
+    )
+    canonical_pending_settlement_validator_func = (
+        canonical_pending_settlement_validator.__func__
+    )
+    canonical_settlement_evidence_validator_code = (
+        canonical_settlement_evidence_validator_func.__code__
+    )
+    canonical_pending_settlement_validator_code = (
+        canonical_pending_settlement_validator_func.__code__
+    )
     canonical_json_dumps = json.dumps
     canonical_json_dumps_code = json.dumps.__code__
     canonical_sha256 = hashlib.sha256
@@ -605,9 +624,20 @@ def _bind_continuous_state_read_settlement_integrity(method):
         return canonical_sha256(payload).hexdigest()
 
     def guarded(self):
+        if (
+            canonical_settlement_evidence_validator_func.__code__
+            is not canonical_settlement_evidence_validator_code
+            or canonical_pending_settlement_validator_func.__code__
+            is not canonical_pending_settlement_validator_code
+        ):
+            raise ContinuousSessionError(
+                "continuous settlement state validator authority changed"
+            )
         return method(
             self,
             _pending_outcomes_digest=pending_outcomes_digest,
+            _settlement_evidence_validator=canonical_settlement_evidence_validator,
+            _pending_settlement_validator=canonical_pending_settlement_validator,
         )
 
     guarded.__name__ = method.__name__
@@ -869,6 +899,14 @@ class _ContinuousSessionState:
         self,
         *,
         _pending_outcomes_digest: Callable[[dict[str, object]], str],
+        _settlement_evidence_validator: Callable[
+            [object],
+            tuple[dict[str, str], ...],
+        ] = _validate_settlement_evidence,
+        _pending_settlement_validator: Callable[
+            [object],
+            tuple[dict[str, object], ...],
+        ] = _validate_pending_settlement_resolutions,
     ) -> dict[str, Any]:
         try:
             raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
@@ -906,7 +944,7 @@ class _ContinuousSessionState:
                 _instant(raw[name], name)
         if raw["last_error_code"] is not None:
             _text(raw["last_error_code"], "last_error_code")
-        evidence = self._validate_settlement_evidence(raw["settlement_evidence"])
+        evidence = _settlement_evidence_validator(raw["settlement_evidence"])
         if legacy_v2:
             outcome_digests: dict[str, str | None] = {
                 item["evidence_id"]: None for item in evidence
@@ -932,7 +970,7 @@ class _ContinuousSessionState:
                 raw["schema_version"] = self._VERSION
                 raw["pending_settlement_resolutions"] = []
 
-        pending = self._validate_pending_settlement_resolutions(
+        pending = _pending_settlement_validator(
             raw["pending_settlement_resolutions"]
         )
         evidence_by_id = {

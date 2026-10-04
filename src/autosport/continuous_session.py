@@ -252,7 +252,12 @@ class _ContinuousSessionCoordinatorMeta(type):
             raise TypeError("canonical settlement consumer entry binding is immutable")
         return super().__new__(mcls, name, bases, namespace, **kwargs)
 
-    def __setattr__(cls, name: str, value: object) -> None:
+    def __setattr__(
+        cls,
+        name: str,
+        value: object,
+        _protected_entries=_CONTINUOUS_STATE_PROTECTED_ENTRIES,
+    ) -> None:
         sealed = any(
             ancestor.__dict__.get("_settlement_consumer_bindings_sealed", False)
             for ancestor in cls.__mro__
@@ -715,7 +720,14 @@ def _seal_continuous_state_entry(method):
 class _ContinuousSessionStateMeta(type):
     """Prevent class/subclass replacement of canonical durable-state entrypoints."""
 
-    def __new__(mcls, name, bases, namespace, **kwargs):
+    def __new__(
+        mcls,
+        name,
+        bases,
+        namespace,
+        _protected_entries=_CONTINUOUS_STATE_PROTECTED_ENTRIES,
+        **kwargs,
+    ):
         inherits_sealed_state = any(
             any(
                 ancestor.__dict__.get(
@@ -726,9 +738,7 @@ class _ContinuousSessionStateMeta(type):
             )
             for base in bases
         )
-        if inherits_sealed_state and _CONTINUOUS_STATE_PROTECTED_ENTRIES.intersection(
-            namespace
-        ):
+        if inherits_sealed_state and _protected_entries.intersection(namespace):
             raise TypeError("continuous session state authority binding is immutable")
         return super().__new__(mcls, name, bases, namespace, **kwargs)
 
@@ -737,16 +747,20 @@ class _ContinuousSessionStateMeta(type):
             ancestor.__dict__.get("_state_authority_bindings_sealed", False)
             for ancestor in cls.__mro__
         )
-        if sealed and name in _CONTINUOUS_STATE_PROTECTED_ENTRIES:
+        if sealed and name in _protected_entries:
             raise TypeError("continuous session state authority binding is immutable")
         super().__setattr__(name, value)
 
-    def __delattr__(cls, name: str) -> None:
+    def __delattr__(
+        cls,
+        name: str,
+        _protected_entries=_CONTINUOUS_STATE_PROTECTED_ENTRIES,
+    ) -> None:
         sealed = any(
             ancestor.__dict__.get("_state_authority_bindings_sealed", False)
             for ancestor in cls.__mro__
         )
-        if sealed and name in _CONTINUOUS_STATE_PROTECTED_ENTRIES:
+        if sealed and name in _protected_entries:
             raise TypeError("continuous session state authority binding is immutable")
         super().__delattr__(name)
 

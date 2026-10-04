@@ -1659,6 +1659,24 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     ).events,
                     (),
                 )
+
+                live_history = MarketMirror.current_history_view_from_store(
+                    migrated,
+                    as_of=self.CUTOFF,
+                    max_age=timedelta(minutes=2),
+                )
+                self.assertEqual(live_history.events, ())
+                self.assertEqual(
+                    migrated.connection.execute(
+                        "SELECT COUNT(*) FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (0,),
+                )
+                self.assertEqual(
+                    migrated._replay_cutoff_authority().read_history(),
+                    (),
+                )
+
                 self.assertEqual(self.replay(migrated).events, ())
 
                 migrated.append(
@@ -4746,6 +4764,18 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     as_of=self.CUTOFF,
                     max_age=timedelta(minutes=2),
                 )
+
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (0,),
+                )
+                self.assertEqual(
+                    store._replay_cutoff_authority().read_history(),
+                    (),
+                )
+
                 replay = self.replay(store)
 
                 self.assertEqual(len(live.events), 1)

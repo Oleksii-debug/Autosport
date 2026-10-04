@@ -188,6 +188,7 @@ class _ContinuousSessionCoordinatorMeta(type):
             "_settle",
             "_settlement_resolutions",
             "__setattr__",
+            "__delattr__",
             "_settlement_consumer_bindings_sealed",
         }
         inherits_sealed_consumer = any(
@@ -213,6 +214,7 @@ class _ContinuousSessionCoordinatorMeta(type):
             "_settle",
             "_settlement_resolutions",
             "__setattr__",
+            "__delattr__",
             "_settlement_consumer_bindings_sealed",
         }:
             raise TypeError("canonical settlement consumer entry binding is immutable")
@@ -225,6 +227,9 @@ class _ContinuousSessionCoordinatorMeta(type):
         )
         if sealed and name in {
             "_settle",
+            "_settlement_resolutions",
+            "__setattr__",
+            "__delattr__",
             "_settlement_consumer_bindings_sealed",
         }:
             raise TypeError("canonical settlement consumer entry binding is immutable")
@@ -1002,6 +1007,39 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 f"continuous session authority field {name} is immutable after construction"
             )
         object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        try:
+            sealed = object.__getattribute__(self, "_authority_fields_sealed")
+        except AttributeError:
+            sealed = False
+        if sealed and name in {
+            "_authority_fields_sealed",
+            "workspace",
+            "collector",
+            "lifecycle",
+            "market_store",
+            "desktop_consumer",
+            "invalidation_buffer",
+            "dependency_index",
+            "paper_book_path",
+            "outcome_authority",
+            "_outcome_resolver",
+            "settlement_learning_handoff",
+            "_settlement_prepare",
+            "_settlement_reconcile",
+            "clock",
+            "required_history",
+            "max_invalidation_batches_per_tick",
+            "max_invalidation_items_per_batch",
+            "causal_view",
+            "initial_bankroll",
+            "_state",
+        }:
+            raise ContinuousSessionError(
+                f"continuous session authority field {name} is immutable after construction"
+            )
+        object.__delattr__(self, name)
 
     def __init__(
         self,

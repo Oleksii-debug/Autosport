@@ -133,6 +133,109 @@ def _journal_snapshot(root: Path) -> dict[str, bytes]:
 
 
 
+
+def test_checkpoint_rejects_projection_identity_without_gap_sync_state() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        state = _state_with_history(root, 1)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["source_state_delta_id"] = "delta-skipped-gap"
+        raw["source_projection_stream_epoch"] = "epoch-1"
+        raw["source_gap_state"] = None
+        raw["source_sync_state"] = None
+        path.write_text(json.dumps(raw, sort_keys=True), encoding="utf-8")
+
+        try:
+            state.operational_snapshot()
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "checkpoint allowed projection resume identity without gap/sync truth"
+            )
+
+
+def test_checkpoint_rejects_detected_gap_without_unresolved_identity() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        state = _state_with_history(root, 1)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["source_state_delta_id"] = "gap-detected"
+        raw["source_projection_stream_epoch"] = "epoch-1"
+        raw["source_gap_state"] = "DETECTED"
+        raw["source_sync_state"] = "GAP_DETECTED"
+        raw["source_unresolved_gap_delta_ids"] = []
+        path.write_text(json.dumps(raw, sort_keys=True), encoding="utf-8")
+
+        try:
+            state.operational_snapshot()
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "checkpoint allowed DETECTED gap without durable gap identity"
+            )
+
+
+def test_checkpoint_rejects_untrimmed_unresolved_gap_identity() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        state = _state_with_history(root, 1)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["source_state_delta_id"] = "gap-detected"
+        raw["source_projection_stream_epoch"] = "epoch-1"
+        raw["source_gap_state"] = "DETECTED"
+        raw["source_sync_state"] = "GAP_DETECTED"
+        raw["source_unresolved_gap_delta_ids"] = [" gap-detected"]
+        path.write_text(json.dumps(raw, sort_keys=True), encoding="utf-8")
+
+        try:
+            state.operational_snapshot()
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "checkpoint allowed non-canonical unresolved gap identity"
+            )
+
+
+def test_wave_m_migration_rejects_projection_identity_without_state_before_journal() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        embedded = _checkpoint_payload(1)
+        embedded["schema_version"] = 3
+        embedded["source_state_delta_id"] = "delta-skipped-gap"
+        embedded["source_projection_stream_epoch"] = "epoch-1"
+        embedded["settlement_evidence"][0]["quote_outcomes_sha256"] = (
+            continuous_session._settlement_quote_outcomes_sha256(
+                {"provider-a:event-0:winner:home": "win"}
+            )
+        )
+        path.write_text(json.dumps(embedded, sort_keys=True), encoding="utf-8")
+        before = path.read_bytes()
+
+        try:
+            continuous_session._ContinuousSessionState(
+                path,
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "Wave M migration accepted projection identity without state"
+            )
+
+        assert path.read_bytes() == before
+        assert not (root / "continuous_session.settlement-evidence").exists()
+
+
 def test_checkpoint_rejects_completed_cycles_without_last_success() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

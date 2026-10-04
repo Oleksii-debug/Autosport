@@ -1130,14 +1130,20 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "source projection identity is incomplete"
             )
-        if raw["source_state_delta_id"] is None and gap_state is not None:
+        projection_present = raw["source_state_delta_id"] is not None
+        if projection_present != (gap_state is not None):
             raise ContinuousSessionError(
-                "source projection state requires a canonical delta identity"
+                "source projection identity and gap/sync state must be present together"
             )
         unresolved = raw["source_unresolved_gap_delta_ids"]
         if (
             type(unresolved) is not list
-            or any(type(item) is not str or not item.strip() for item in unresolved)
+            or any(
+                type(item) is not str
+                or not item
+                or item.strip() != item
+                for item in unresolved
+            )
             or len(set(unresolved)) != len(unresolved)
         ):
             raise ContinuousSessionError(
@@ -1153,6 +1159,14 @@ class _ContinuousSessionState:
         ):
             raise ContinuousSessionError(
                 "unresolved source gaps require DETECTED/GAP_DETECTED projection"
+            )
+        if (
+            gap_state == GapState.DETECTED.value
+            and sync_state == SyncState.GAP_DETECTED.value
+            and not unresolved
+        ):
+            raise ContinuousSessionError(
+                "DETECTED/GAP_DETECTED projection requires unresolved gap identity"
             )
         raw["state"] = state.value
 

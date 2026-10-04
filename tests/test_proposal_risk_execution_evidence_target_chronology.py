@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import unittest
 from decimal import Decimal
+from pathlib import Path
 
+import autosport.proposal_risk_evaluation_precommit_authority as precommit_authority
 from autosport.proposal_risk_execution_evidence_authority import (
     ProductProposalRiskExecutionEvidenceError,
     derive_product_proposal_risk_execution_evidence,
@@ -36,6 +38,25 @@ class ProductProposalRiskExecutionEvidenceTargetChronologyTests(unittest.TestCas
             object.__setattr__(self.precommit, "ruin_threshold", Decimal("999"))
         self.assertEqual(self.precommit.ruin_threshold, original)
         self.assertTrue(self.precommit.binding_identity_proven)
+
+    def test_precommit_issuer_rejects_binding_descriptor_rebinding(self) -> None:
+        binding_type = precommit_authority.ProductProposalRiskEvaluationPrecommit
+        original = binding_type.__dict__["ruin_threshold"]
+        try:
+            binding_type.ruin_threshold = property(lambda self: Decimal("0"))
+            with self.assertRaisesRegex(
+                precommit_authority.ProductProposalRiskEvaluationPrecommitError,
+                "binding descriptor ruin_threshold changed",
+            ):
+                precommit_authority.issue_product_proposal_risk_evaluation_precommit(
+                    Path("/"),
+                    target_sha256="0" * 64,
+                    membership=None,
+                    registry_path="unused",
+                    sampling_manifest_json="{}",
+                )
+        finally:
+            binding_type.ruin_threshold = original
 
     def test_member_assertion_slots_reject_object_setattr_mutation(self) -> None:
         row = self._row("member-a", source="source-a")

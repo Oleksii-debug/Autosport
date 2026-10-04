@@ -1265,23 +1265,51 @@ class ProductProposalRiskScenarioPopulationTests(unittest.TestCase):
         finally:
             guard.__defaults__ = original_defaults
 
-    def test_mint_kwdefault_binder_mutation_is_rejected(self) -> None:
-        mint = scenario_population_authority._mint
-        kwdefaults = mint.__kwdefaults__
-        original = kwdefaults["_bind_identity"]
+    def test_internal_unbound_resolution_cannot_mint_population_identity(self) -> None:
+        issued = self._issue()
+        self.assertTrue(issued.population_identity_proven)
+        self.assertFalse(hasattr(scenario_population_authority, "_BIND_IDENTITY"))
+        self.assertFalse(hasattr(scenario_population_authority, "_mint"))
 
-        def forged_bind(_instance):
-            return None
+        unbound = (
+            scenario_population_authority
+            ._resolve_product_proposal_risk_scenario_population_unbound(
+                self.workspace,
+                self.precommit,
+                self.terminal_population,
+            )
+        )
+        self.assertFalse(unbound.population_identity_proven)
+        self.assertFalse(unbound.fixed_n_member_mapping_complete)
+        self.assertFalse(unbound.provider_terminal_population_proven)
+        self.assertFalse(unbound.terminal_mapping_proven)
+        self.assertFalse(unbound.scenario_execution_proven)
+        self.assertFalse(unbound.grants_ticket_authority)
+        self.assertFalse(unbound.grants_real_money_authority)
 
+    def test_public_issue_resolver_rebind_is_rejected_by_durable_core(self) -> None:
+        original = (
+            scenario_population_authority
+            .issue_product_proposal_risk_scenario_population
+        )
         try:
-            kwdefaults["_bind_identity"] = forged_bind
+            scenario_population_authority.issue_product_proposal_risk_scenario_population = (
+                lambda *args, **kwargs: None
+            )
             with self.assertRaisesRegex(
                 ProductProposalRiskScenarioPopulationError,
                 "dispatch changed",
             ):
-                self._issue()
+                scenario_population_authority._issue_product_proposal_risk_scenario_population_unbound(
+                    self.workspace,
+                    self.precommit,
+                    self.terminal_population,
+                    self._members(),
+                )
         finally:
-            kwdefaults["_bind_identity"] = original
+            scenario_population_authority.issue_product_proposal_risk_scenario_population = (
+                original
+            )
 
     def test_text_kwdefault_mutation_is_rejected(self) -> None:
         helper = scenario_population_authority._text

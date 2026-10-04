@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 from hashlib import sha256
 from http.client import HTTPException, HTTPSConnection
@@ -25,6 +25,47 @@ from autosport.prophetx_account_readonly import (
 
 
 FIXED_NOW = datetime(2026, 9, 22, 18, 59, tzinfo=timezone.utc)
+
+
+class _ChangingOffsetTz(tzinfo):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def utcoffset(self, _dt: datetime | None) -> timedelta:
+        self.calls += 1
+        if self.calls == 1:
+            return timedelta(0)
+        return timedelta(hours=-12)
+
+    def dst(self, _dt: datetime | None) -> timedelta:
+        return timedelta(0)
+
+    def tzname(self, _dt: datetime | None) -> str:
+        return "CHANGING"
+
+
+class _InvalidOffsetTz(tzinfo):
+    def utcoffset(self, _dt: datetime | None):
+        return "invalid"
+
+    def dst(self, _dt: datetime | None) -> timedelta:
+        return timedelta(0)
+
+    def tzname(self, _dt: datetime | None) -> str:
+        return "INVALID"
+
+
+class _ExtremeOffsetTz(tzinfo):
+    def utcoffset(self, _dt: datetime | None) -> timedelta:
+        return timedelta(hours=23)
+
+    def dst(self, _dt: datetime | None) -> timedelta:
+        return timedelta(0)
+
+    def tzname(self, _dt: datetime | None) -> str:
+        return "EXTREME"
+
+
 GOOD_BODY = (
     b'{"data":{"balance":1000.00,"gec_balance":500.00,'
     b'"matched_order_balance":200.00,"unmatched_order_balance":50.00,'
@@ -1097,6 +1138,48 @@ def test_timeout_must_be_positive_and_finite(timeout: float):
             transport=FakeTransport([]),
             timeout_seconds=timeout,
         )
+
+
+def test_observation_clock_uses_one_offset_observation_and_canonical_utc():
+    zone = _ChangingOffsetTz()
+    client = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-secret"),
+        transport=FakeTransport([http_response()]),
+        clock=lambda: datetime(2026, 9, 22, 18, 59, tzinfo=zone),
+    )
+
+    wallet = client.read_wallet()
+
+    assert zone.calls == 1
+    assert wallet.evidence.observed_at == FIXED_NOW.isoformat()
+
+
+def test_observation_clock_invalid_offset_is_bounded_error():
+    client = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-secret"),
+        transport=FakeTransport([http_response()]),
+        clock=lambda: datetime(2026, 9, 22, 18, 59, tzinfo=_InvalidOffsetTz()),
+    )
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="invalid timezone offset",
+    ):
+        client.read_wallet()
+
+
+def test_observation_clock_utc_normalization_overflow_is_bounded_error():
+    client = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-secret"),
+        transport=FakeTransport([http_response()]),
+        clock=lambda: datetime(1, 1, 1, 0, 0, tzinfo=_ExtremeOffsetTz()),
+    )
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="cannot be normalized to UTC",
+    ):
+        client.read_wallet()
 
 
 def test_clock_must_be_timezone_aware():

@@ -7,7 +7,7 @@ production host, or turns ProphetX exposure-credit / locked-funds fields into sp
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 from http.client import HTTPException
@@ -1161,15 +1161,30 @@ class ProphetXReadOnlyClient:
 
     def _observed_at(self) -> str:
         value = self._clock()
+        if type(value) is not datetime or value.tzinfo is None:
+            raise ProphetXReadOnlyError(
+                "clock must return an exact timezone-aware datetime"
+            )
+        try:
+            offset = value.utcoffset()
+        except Exception as exc:
+            raise ProphetXReadOnlyError(
+                "clock returned datetime with invalid timezone offset"
+            ) from exc
         if (
-            not isinstance(value, datetime)
-            or value.tzinfo is None
-            or value.utcoffset() is None
+            type(offset) is not timedelta
+            or not (-timedelta(days=1) < offset < timedelta(days=1))
         ):
             raise ProphetXReadOnlyError(
-                "clock must return timezone-aware datetime"
+                "clock returned datetime without a bounded concrete UTC offset"
             )
-        return value.isoformat()
+        try:
+            naive_utc = value.replace(tzinfo=None) - offset
+        except (OverflowError, ValueError) as exc:
+            raise ProphetXReadOnlyError(
+                "clock datetime cannot be normalized to UTC"
+            ) from exc
+        return naive_utc.replace(tzinfo=timezone.utc).isoformat()
 
     @staticmethod
     def _build_provider_origin_issuers(

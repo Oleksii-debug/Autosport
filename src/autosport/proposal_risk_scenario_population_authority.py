@@ -222,22 +222,22 @@ def _workspace_path(value: object) -> Path:
 
 @dataclass(frozen=True, slots=True)
 class CounterfactualScenarioMemberBinding:
-    """Caller-declared member→scenario identity, never positive source truth."""
+    """Caller-declared member→scenario mapping identity.
+
+    The upstream terminal state population is product/provider verified separately.
+    This object identifies only the fixed-N member's selected scenario and mapping
+    material; it never proves that the selection belongs to, or was sampled from,
+    that population.
+    """
 
     member_id: str
     scenario_id: str
-    scenario_source_sha256: str
     mapping_sha256: str
-    settlement_semantics_sha256: str
-    causal_cutoff: str
 
     def __post_init__(self) -> None:
         _text(self.member_id, "member_id")
         _text(self.scenario_id, "scenario_id")
-        _sha(self.scenario_source_sha256, "scenario_source_sha256")
         _sha(self.mapping_sha256, "mapping_sha256")
-        _sha(self.settlement_semantics_sha256, "settlement_semantics_sha256")
-        _instant(self.causal_cutoff, "causal_cutoff")
 
 
 def _make_identity_capability():
@@ -274,12 +274,14 @@ class ProductProposalRiskScenarioPopulation:
     candidate_vector_sha256: str
     evaluated_stakes: tuple[Decimal, ...]
     planned_member_ids: tuple[str, ...]
+    terminal_population_sha256: str
+    terminal_market_group_sha256s: tuple[str, ...]
+    terminal_market_count: int
+    terminal_state_count: int
+    terminal_space_exact: bool
     bound_at: str
     member_scenario_ids: tuple[str, ...]
-    member_scenario_source_sha256s: tuple[str, ...]
     member_mapping_sha256s: tuple[str, ...]
-    member_settlement_semantics_sha256s: tuple[str, ...]
-    member_causal_cutoffs: tuple[str, ...]
     binding_scope: str
     population_sha256: str
     _scenario_population_capability: object = field(
@@ -306,7 +308,10 @@ class ProductProposalRiskScenarioPopulation:
         return _proven(self)
 
     @property
-    def causal_cutoff_compatible(self, _proven=_IDENTITY_PROVEN) -> bool:
+    def provider_terminal_population_proven(
+        self,
+        _proven=_IDENTITY_PROVEN,
+    ) -> bool:
         return _proven(self)
 
     @property
@@ -358,12 +363,14 @@ _RESULT_FIELDS = (
     "candidate_vector_sha256",
     "evaluated_stakes",
     "planned_member_ids",
+    "terminal_population_sha256",
+    "terminal_market_group_sha256s",
+    "terminal_market_count",
+    "terminal_state_count",
+    "terminal_space_exact",
     "bound_at",
     "member_scenario_ids",
-    "member_scenario_source_sha256s",
     "member_mapping_sha256s",
-    "member_settlement_semantics_sha256s",
-    "member_causal_cutoffs",
     "binding_scope",
     "population_sha256",
 )
@@ -528,23 +535,13 @@ def _validate_members(
         )
     if len(members) != len(precommit.planned_member_ids):
         raise ProductProposalRiskScenarioPopulationError(
-            "scenario population must contain the exact fixed-N cohort"
+            "member scenario mapping must contain the exact fixed-N cohort"
         )
-    membership_cutoff = _instant(
-        precommit.membership_causal_cutoff,
-        "membership_causal_cutoff",
-    )
     validated: list[CounterfactualScenarioMemberBinding] = []
     for index, member in enumerate(members):
         if type(member) is not CounterfactualScenarioMemberBinding:
             raise ProductProposalRiskScenarioPopulationError(
                 f"members[{index}] must be exact CounterfactualScenarioMemberBinding"
-            )
-        if _instant(
-            member.causal_cutoff, f"members[{index}].causal_cutoff"
-        ) > membership_cutoff:
-            raise ProductProposalRiskScenarioPopulationError(
-                f"members[{index}] causal cutoff exceeds the scientific membership cutoff"
             )
         validated.append(member)
     result = tuple(validated)
@@ -557,15 +554,15 @@ def _validate_members(
         raise ProductProposalRiskScenarioPopulationError(
             "scenario member ids must be unique"
         )
-    # The scientific sampler is IID with replacement. Repeated sampled
-    # scenario identities are therefore valid evidence of multiplicity, not a
-    # duplicate-error condition. Exact member order + the population digest bind
-    # every repetition without silently converting the design to without-replacement.
+    # The scientific sampler is IID with replacement. Repeated scenario or mapping
+    # identities remain valid multiplicity; this layer freezes them but does not
+    # claim a product-owned draw law.
     return result
 
 
 def _population_material(
     precommit: ProductProposalRiskEvaluationPrecommit,
+    terminal_population: ProductProposalTargetTerminalPopulation,
     members: tuple[CounterfactualScenarioMemberBinding, ...],
     *,
     bound_at: str,
@@ -607,19 +604,27 @@ def _population_material(
             precommit.scientific_precommit_sha256,
             "scientific_precommit_sha256",
         ),
+        "terminal_population_sha256": _sha(
+            terminal_population.population_sha256,
+            "terminal_population_sha256",
+        ),
+        "terminal_market_group_sha256s": list(
+            terminal_population.market_group_sha256s
+        ),
+        "terminal_market_count": terminal_population.terminal_market_count,
+        "terminal_state_count": terminal_population.terminal_state_count,
+        "terminal_space_exact": terminal_population.terminal_space_exact,
         "bound_at": _text(bound_at, "bound_at"),
         "binding_scope": _BINDING_SCOPE,
         "members": [
             {
                 "member_id": member.member_id,
                 "scenario_id": member.scenario_id,
-                "scenario_source_sha256": member.scenario_source_sha256,
                 "mapping_sha256": member.mapping_sha256,
-                "settlement_semantics_sha256": member.settlement_semantics_sha256,
-                "causal_cutoff": member.causal_cutoff,
             }
             for member in members
         ],
+        "provider_terminal_population_proven": True,
         "product_scenario_source_provenance_proven": False,
         "terminal_mapping_proven": False,
         "scenario_execution_proven": False,

@@ -14,6 +14,7 @@ from .paper_execution_reality import (
     PaperExecutionIntegrityError,
     PaperExecutionLedger,
     PaperExecutionStateError,
+    _canonical_suspended_action_ids,
 )
 
 
@@ -194,7 +195,10 @@ def _reserve_run_with_decision_origin(
     config,
     started_at: str,
     observation_evidence_ids: Mapping[str, str],
+    suspended_action_ids: frozenset[str] = frozenset(),
 ) -> None:
+    canonical_suspensions = _canonical_suspended_action_ids(suspended_action_ids)
+    suspension_set = frozenset(canonical_suspensions)
     origin = _DECISION_ORIGIN.get()
     if origin is None:
         return _ORIGINAL_LEDGER_RESERVE(
@@ -205,6 +209,7 @@ def _reserve_run_with_decision_origin(
             config=config,
             started_at=started_at,
             observation_evidence_ids=observation_evidence_ids,
+            suspended_action_ids=suspension_set,
         )
     if type(self) is not PaperExecutionLedger:
         raise PaperExecutionDecisionOriginError(
@@ -223,8 +228,10 @@ def _reserve_run_with_decision_origin(
         "started_at": started_at,
         "action_ids": [action.action_id for action in plan.actions],
         "observation_evidence_ids": dict(sorted(observation_evidence_ids.items())),
-        "decision_origin": origin.to_dict(),
     }
+    if canonical_suspensions:
+        payload["suspended_action_ids"] = list(canonical_suspensions)
+    payload["decision_origin"] = origin.to_dict()
     self._append_event(
         event_type="RUN_RESERVED",
         run_id=run_id,
@@ -242,7 +249,10 @@ def _load_run_with_decision_origin(
     config,
     started_at: str,
     observation_evidence_ids: Mapping[str, str],
+    suspended_action_ids: frozenset[str] = frozenset(),
 ):
+    canonical_suspensions = _canonical_suspended_action_ids(suspended_action_ids)
+    suspension_set = frozenset(canonical_suspensions)
     events = _raw_events(self, run_id)
     stored = _reservation_origin_from_events(events)
     expected = _DECISION_ORIGIN.get()
@@ -272,6 +282,7 @@ def _load_run_with_decision_origin(
             config=config,
             started_at=started_at,
             observation_evidence_ids=observation_evidence_ids,
+            suspended_action_ids=suspension_set,
         )
     finally:
         _MASK_ORIGIN_FOR_LEGACY_LOAD.reset(token)

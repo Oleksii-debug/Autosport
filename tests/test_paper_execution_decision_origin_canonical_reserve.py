@@ -55,7 +55,12 @@ def _config() -> PaperExecutionModelConfig:
     )
 
 
-def _reserve(target, *, observation_evidence_ids):
+def _reserve(
+    target,
+    *,
+    observation_evidence_ids,
+    suspended_action_ids: frozenset[str] = frozenset(),
+):
     return instance_guard._STABLE_RESERVE_RUN(
         target,
         run_id=RUN_ID,
@@ -64,6 +69,7 @@ def _reserve(target, *, observation_evidence_ids):
         config=_config(),
         started_at=STARTED_AT,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspended_action_ids,
     )
 
 
@@ -94,6 +100,28 @@ def test_origin_binding_only_extends_pristine_canonical_reserve_payload(tmp_path
     assert bound_payload == plain_payload
     assert plain_payload["observation_evidence_ids"] == {"a": "1", "b": "2"}
 
+
+
+def test_origin_binding_preserves_suspension_reservation_identity(tmp_path) -> None:
+    bound = PaperExecutionLedger(tmp_path / "bound-suspension.jsonl")
+    origin = origin_module.DecisionRecordOrigin(
+        decision_id=DECISION_ID,
+        record_sha256="d" * 64,
+    )
+
+    _reserve(
+        instance_guard._CanonicalReservationView(bound, origin),
+        observation_evidence_ids={},
+        suspended_action_ids=frozenset({"action-origin-canonical-reserve-1"}),
+    )
+
+    events = bound.events(RUN_ID)
+    assert len(events) == 1
+    payload = events[0]["payload"]
+    assert payload["decision_origin"] == origin.to_dict()
+    assert payload["suspended_action_ids"] == [
+        "action-origin-canonical-reserve-1"
+    ]
 
 def test_origin_bound_reserve_keeps_pristine_preappend_rejection(tmp_path) -> None:
     plain = PaperExecutionLedger(tmp_path / "plain-invalid.jsonl")

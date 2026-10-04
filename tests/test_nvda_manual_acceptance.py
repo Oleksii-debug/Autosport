@@ -466,6 +466,60 @@ def test_resolution_verifier_rejects_instance_events_override(tmp_path):
     assert hostile_called is False
 
 
+def test_structural_validator_rebinding_cannot_mint_manual_decision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger = _ledger(tmp_path)
+    hostile_called = False
+
+    def hostile_validate(*_args, **_kwargs):
+        nonlocal hostile_called
+        hostile_called = True
+        raise AssertionError("hostile structural validator executed")
+
+    monkeypatch.setattr(
+        nvda_manual_module,
+        "validate_human_nvda_acceptance_transcript",
+        hostile_validate,
+    )
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="structural validator authority changed",
+    ):
+        _record(ledger, _transcript())
+    assert hostile_called is False
+    assert ledger.events() == ()
+
+
+def test_structural_verifier_rebinding_cannot_mint_manual_decision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger = _ledger(tmp_path)
+    hostile_called = False
+
+    def hostile_verify(*_args, **_kwargs):
+        nonlocal hostile_called
+        hostile_called = True
+        raise AssertionError("hostile structural verifier executed")
+
+    monkeypatch.setattr(
+        nvda_manual_module,
+        "verify_human_nvda_acceptance_structural_result",
+        hostile_verify,
+    )
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="structural validator authority changed",
+    ):
+        _record(ledger, _transcript())
+    assert hostile_called is False
+    assert ledger.events() == ()
+
+
 def test_resolution_registry_is_not_module_visible() -> None:
     assert not hasattr(nvda_manual_module, "_ISSUED_RESOLUTIONS")
     assert not hasattr(nvda_manual_module, "_REGISTER_RESOLUTION_WITNESS")

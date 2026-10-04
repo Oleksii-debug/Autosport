@@ -1196,3 +1196,48 @@ class SQLiteMarketStore:
     def close(self) -> None:
         with self._connection_lock:
             self.connection.close()
+
+def _seal_live_receipt_authority_call_surfaces() -> None:
+    """Hide canonical dependency bindings from callers of receipt-authority APIs."""
+
+    live_append_impl = SQLiteMarketStore._append_live_batch_accepted
+    append_impl = SQLiteMarketStore.append_batch_accepted
+    has_receipt_impl = SQLiteMarketStore.has_trusted_live_receipt
+    trusted_events_impl = SQLiteMarketStore.trusted_live_events
+    trusted_current_impl = SQLiteMarketStore.trusted_live_current_by_source
+
+    def _append_live_batch_accepted(
+        self: SQLiteMarketStore,
+        events: Iterable[MarketEvent],
+    ) -> list[MarketEvent]:
+        return live_append_impl(self, events)
+
+    def append_batch_accepted(
+        self: SQLiteMarketStore,
+        events: Iterable[MarketEvent],
+    ) -> list[MarketEvent]:
+        return append_impl(self, events)
+
+    def has_trusted_live_receipt(
+        self: SQLiteMarketStore,
+        event: MarketEvent,
+    ) -> bool:
+        return has_receipt_impl(self, event)
+
+    def trusted_live_events(self: SQLiteMarketStore) -> list[MarketEvent]:
+        return trusted_events_impl(self)
+
+    def trusted_live_current_by_source(
+        self: SQLiteMarketStore,
+    ) -> dict[tuple[str, str], MarketEvent]:
+        return trusted_current_impl(self)
+
+    SQLiteMarketStore._append_live_batch_accepted = _append_live_batch_accepted
+    SQLiteMarketStore.append_batch_accepted = append_batch_accepted
+    SQLiteMarketStore.has_trusted_live_receipt = has_trusted_live_receipt
+    SQLiteMarketStore.trusted_live_events = trusted_live_events
+    SQLiteMarketStore.trusted_live_current_by_source = trusted_live_current_by_source
+
+
+_seal_live_receipt_authority_call_surfaces()
+del _seal_live_receipt_authority_call_surfaces

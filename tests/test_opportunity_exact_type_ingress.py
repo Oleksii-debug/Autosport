@@ -398,3 +398,71 @@ def test_serialized_nested_reconstruction_ignores_rebound_type_globals(
     assert type(restored.decision) is OpportunityDecision
     assert all(type(item) is QuoteRef for item in restored.quotes)
     assert all(type(item) is EvidenceRef for item in restored.evidence_refs)
+
+def test_quote_key_uses_captured_canonical_identity_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quote = _quote()
+    expected_quote_key = quote.quote_key
+
+    def _poison_quote_identity(*args: object, **kwargs: object) -> str:
+        raise AssertionError("rebound quote identity dispatch executed")
+
+    monkeypatch.setattr(
+        opportunity_module,
+        "_quote_identity",
+        _poison_quote_identity,
+    )
+
+    assert quote.quote_key == expected_quote_key
+
+
+def test_economic_identity_hashing_uses_captured_dispatch_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quote = _quote()
+    opportunity = Opportunity(
+        strategy_class=StrategyClass.ARBITRAGE,
+        decision=OpportunityDecision.ACTIONABLE,
+        quotes=(quote,),
+    )
+    opportunity_set = OpportunitySet((opportunity,))
+    plan = PortfolioPlan(opportunity_set=opportunity_set)
+    expected_ids = (
+        quote.market_event_hash,
+        opportunity.conflict_key,
+        opportunity.opportunity_id,
+        opportunity_set.opportunity_set_id,
+        plan.plan_id,
+    )
+
+    class _PoisonJson:
+        @staticmethod
+        def dumps(*args: object, **kwargs: object) -> str:
+            raise AssertionError("rebound json.dumps executed")
+
+    class _PoisonHashlib:
+        @staticmethod
+        def sha256(*args: object, **kwargs: object) -> object:
+            raise AssertionError("rebound hashlib.sha256 executed")
+
+    monkeypatch.setattr(opportunity_module, "json", _PoisonJson())
+    monkeypatch.setattr(opportunity_module, "hashlib", _PoisonHashlib())
+
+    rebuilt_quote = _quote()
+    rebuilt_opportunity = Opportunity(
+        strategy_class=StrategyClass.ARBITRAGE,
+        decision=OpportunityDecision.ACTIONABLE,
+        quotes=(rebuilt_quote,),
+    )
+    rebuilt_set = OpportunitySet((rebuilt_opportunity,))
+    rebuilt_plan = PortfolioPlan(opportunity_set=rebuilt_set)
+
+    assert (
+        rebuilt_quote.market_event_hash,
+        rebuilt_opportunity.conflict_key,
+        rebuilt_opportunity.opportunity_id,
+        rebuilt_set.opportunity_set_id,
+        rebuilt_plan.plan_id,
+    ) == expected_ids
+

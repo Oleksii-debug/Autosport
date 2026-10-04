@@ -561,13 +561,11 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     "product runtime authority field 'tick' is immutable",
                 ):
                     runtime.tick = lambda: None
-                with self.assertRaises(AttributeError):
-                    _ = runtime.__dict__
                 self.assertEqual(runtime.status().source_id, "provider-a")
             finally:
                 runtime.close()
 
-    def test_product_runtime_ignores_object_setattr_authority_bypass(self) -> None:
+    def test_product_runtime_rejects_object_setattr_authority_bypass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_autonomous_product_runtime(
                 workspace=Path(directory),
@@ -580,8 +578,13 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             try:
                 object.__setattr__(runtime, "coordinator", object())
                 self.assertIs(runtime.coordinator, original)
-                self.assertEqual(runtime.status().source_id, "provider-a")
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product runtime authority field 'coordinator' changed after composition",
+                ):
+                    runtime.status()
             finally:
+                object.__setattr__(runtime, "coordinator", original)
                 runtime.close()
 
     def test_builder_ignores_product_desktop_consumer_module_rebind(self) -> None:

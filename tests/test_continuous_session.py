@@ -1376,6 +1376,99 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_recovered_settlement_cannot_reinterpret_staged_quote_outcomes(self) -> None:
+        class Handoff:
+            def __init__(self, resolution):
+                self.resolution = resolution
+
+            def prepared_settlement_resolutions(self, *, paper_book_path):
+                return (self.resolution,)
+
+            def reconcile_after_settlement(self, **_kwargs):
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            original = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:recovery-digest",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="recovery-digest-evidence",
+                evidence_sha256="b" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            handoff = Handoff(original)
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-recovery-digest",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                settlement_learning_handoff=handoff,
+            )
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(original,),
+                )
+                handoff.resolution = SettlementResolution(
+                    event_identity=original.event_identity,
+                    settlement_ref=original.settlement_ref,
+                    quote_outcomes={"event-1|winner|home": "loss"},
+                    evidence_id=original.evidence_id,
+                    evidence_sha256=original.evidence_sha256,
+                    available_at=original.available_at,
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "settlement outcome interpretation conflicts with durable evidence",
+                ):
+                    coordinator._recovered_settlement_resolutions(as_of=clock())
+            finally:
+                store.close()
+
+    def test_recovered_settlement_requires_exact_tuple_contract(self) -> None:
+        class Handoff:
+            def prepared_settlement_resolutions(self, *, paper_book_path):
+                return []
+
+            def reconcile_after_settlement(self, **_kwargs):
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-recovery-shape",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                settlement_learning_handoff=Handoff(),
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "prepared settlement recovery must return a tuple",
+                ):
+                    coordinator._recovered_settlement_resolutions(as_of=clock())
+            finally:
+                store.close()
+
     def test_direct_settle_rejects_conflicting_duplicate_evidence_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

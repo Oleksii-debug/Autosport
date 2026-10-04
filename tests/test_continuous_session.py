@@ -773,6 +773,34 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_continuous_session_authority_deletion_cannot_reopen_setattr(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "authority field _authority_fields_sealed is immutable",
+                ):
+                    del coordinator._authority_fields_sealed
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "authority field _outcome_resolver is immutable",
+                ):
+                    coordinator._outcome_resolver = lambda *_args, **_kwargs: None
+            finally:
+                store.close()
+
     def test_continuous_session_authority_setattr_dispatch_is_sealed(self) -> None:
         original = ContinuousSessionCoordinator.__setattr__
         with self.assertRaisesRegex(

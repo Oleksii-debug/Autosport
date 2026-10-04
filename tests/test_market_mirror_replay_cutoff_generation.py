@@ -858,6 +858,80 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_verified_cutoff_rows_cannot_change_between_binding_check_and_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            external = sqlite3.connect(path)
+            external.execute("PRAGMA journal_mode=WAL")
+            try:
+                original = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                tampered = self.event(
+                    sequence=1,
+                    odds="9.99",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                store.append(original)
+                expected = self.semantic_events(self.replay(store))
+                original_require = (
+                    SQLiteMarketStore._require_independent_cutoff_issuance
+                )
+                tampered_once = False
+
+                def mutate_after_binding_check(
+                    authority,
+                    *,
+                    expected_binding_sha256: str,
+                ) -> None:
+                    nonlocal tampered_once
+                    original_require(
+                        authority,
+                        expected_binding_sha256=expected_binding_sha256,
+                    )
+                    if tampered_once:
+                        return
+                    external.execute(
+                        """UPDATE market_events
+                           SET decimal_odds=?, payload_json=?
+                           WHERE dedupe_key=?""",
+                        (
+                            str(tampered.decimal_odds),
+                            storage_module._canonical_payload(tampered),
+                            original.dedupe_key,
+                        ),
+                    )
+                    external.commit()
+                    tampered_once = True
+
+                with patch.object(
+                    SQLiteMarketStore,
+                    "_require_independent_cutoff_issuance",
+                    new=staticmethod(mutate_after_binding_check),
+                ):
+                    repeated = self.replay(store)
+
+                self.assertTrue(tampered_once)
+                self.assertEqual(self.semantic_events(repeated), expected)
+                self.assertEqual(
+                    external.execute(
+                        "SELECT decimal_odds FROM market_events WHERE dedupe_key=?",
+                        (original.dedupe_key,),
+                    ).fetchone(),
+                    ("9.99",),
+                )
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "workspace state is missing, rolled back, or unproven",
+                ):
+                    self.replay(store)
+            finally:
+                external.close()
+                store.close()
+
     def test_cutoff_issuance_recovers_after_sqlite_commit_before_authority_commit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

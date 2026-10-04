@@ -57,7 +57,7 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
             }
         )
         with self.assertRaisesRegex(ValueError, "balance is inconsistent"):
-            PaperBook.load(path)
+            PaperBook.load_bytes(path.read_bytes())
 
     def test_load_rejects_duplicate_ticket_identity_instead_of_overwriting(self):
         ticket = {
@@ -84,7 +84,7 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
             }
         )
         with self.assertRaisesRegex(ValueError, "duplicate ticket_id"):
-            PaperBook.load(path)
+            PaperBook.load_bytes(path.read_bytes())
 
     def test_load_rejects_duplicate_quote_key_legs(self):
         leg = {
@@ -111,7 +111,7 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
             }
         )
         with self.assertRaisesRegex(ValueError, "duplicate quote_key"):
-            PaperBook.load(path)
+            PaperBook.load_bytes(path.read_bytes())
 
     def test_load_rejects_impossible_status_payout(self):
         path = self._snapshot(
@@ -139,7 +139,7 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
             }
         )
         with self.assertRaisesRegex(ValueError, "open/lost ticket payout must be zero"):
-            PaperBook.load(path)
+            PaperBook.load_bytes(path.read_bytes())
 
     def test_load_rejects_non_finite_economic_values(self):
         path = self._snapshot(
@@ -150,7 +150,7 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
             }
         )
         with self.assertRaisesRegex(ValueError, "non-finite balance"):
-            PaperBook.load(path)
+            PaperBook.load_bytes(path.read_bytes())
 
 
 if __name__ == "__main__":

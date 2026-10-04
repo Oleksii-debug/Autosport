@@ -925,7 +925,9 @@ class CanonicalDesktopApplication:
         _market_events,
         _dedupe_getter,
         _health_store_type,
-        _health_get,
+        _health_state_type,
+        _health_read,
+        _health_state_from_payload,
         _record_health,
         _outcome_builder,
         _application_store_type,
@@ -959,6 +961,22 @@ class CanonicalDesktopApplication:
             raise ApplicationReceiptError(
                 "canonical application clock authority is unavailable"
             )
+
+        def durable_health_state():
+            try:
+                raw_health = _health_read(health_store)
+                sources = raw_health.get("sources")
+                if type(sources) is not dict:
+                    raise ValueError("source-health projection is malformed")
+                payload = sources.get(delta.source_id)
+                if payload is None:
+                    return _health_state_type(source_id=delta.source_id)
+                return _health_state_from_payload(payload)
+            except (TypeError, ValueError) as exc:
+                raise ApplicationReceiptError(
+                    "cannot verify canonical durable health authority"
+                ) from exc
+
         if type(event) is not _market_event_type:
             raise DeltaConflictError(
                 "canonical desktop application requires an exact MarketEvent"
@@ -981,7 +999,7 @@ class CanonicalDesktopApplication:
                 raise ApplicationReceiptError(
                     "canonical application cannot predate desktop availability"
                 )
-            health_before = _health_get(health_store, delta.source_id)
+            health_before = durable_health_state()
             outcome = _outcome_builder(
                 delta,
                 event,
@@ -1067,7 +1085,7 @@ class CanonicalDesktopApplication:
                 raise ApplicationReceiptError("canonical application progress disappeared")
 
         if not progress.get("health_applied"):
-            current = _health_get(health_store, delta.source_id)
+            current = durable_health_state()
             if current == expected_after:
                 _state_mark_health_applied(state, delta)
             elif current == expected_before:
@@ -1082,7 +1100,7 @@ class CanonicalDesktopApplication:
                     "canonical source health changed during desktop application; refusing ambiguous retry"
                 )
         else:
-            current = _health_get(health_store, delta.source_id)
+            current = durable_health_state()
             if current != expected_after:
                 raise ApplicationReceiptError(
                     "canonical application health marker lacks its durable post-state"
@@ -1093,7 +1111,7 @@ class CanonicalDesktopApplication:
             raise DeltaConflictError(
                 "canonical market event changed before application completion"
             )
-        current = _health_get(health_store, delta.source_id)
+        current = durable_health_state()
         if current != expected_after:
             raise ApplicationReceiptError(
                 "canonical health effect changed before application completion"
@@ -1144,7 +1162,7 @@ def _bind_canonical_desktop_application_apply(implementation):
     """Seal the exact market-event type and digest authority for desktop application."""
 
     from .ingestion import CommittedIngestionOutcome
-    from .ingestion_health import SourceHealthStore
+    from .ingestion_health import SourceHealthState, SourceHealthStore
     from .market_bus import MarketEventBus
     from .storage import SQLiteMarketStore
 
@@ -1156,7 +1174,9 @@ def _bind_canonical_desktop_application_apply(implementation):
     market_events = SQLiteMarketStore.events
     dedupe_getter = MarketEvent.dedupe_key.fget
     health_store_type = SourceHealthStore
-    health_get = SourceHealthStore.get
+    health_state_type = SourceHealthState
+    health_read = SourceHealthStore._read
+    health_state_from_payload = SourceHealthStore._state_from_payload
     record_health = CommittedIngestionOutcome.record_health
     outcome_builder = CanonicalDesktopApplication._outcome
     application_store_type = _CanonicalDesktopApplicationStore
@@ -1186,7 +1206,9 @@ def _bind_canonical_desktop_application_apply(implementation):
             _market_events=market_events,
             _dedupe_getter=dedupe_getter,
             _health_store_type=health_store_type,
-            _health_get=health_get,
+            _health_state_type=health_state_type,
+            _health_read=health_read,
+            _health_state_from_payload=health_state_from_payload,
             _record_health=record_health,
             _outcome_builder=outcome_builder,
             _application_store_type=application_store_type,

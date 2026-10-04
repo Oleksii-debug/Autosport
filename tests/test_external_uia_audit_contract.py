@@ -83,6 +83,7 @@ def test_external_uia_audit_requires_semantic_control_type_for_critical_controls
         "305": "ControlType.Button",
         "306": "ControlType.Edit",
         "307": "ControlType.List",
+        "329": "ControlType.Button",
         "product-source-select": "ControlType.ComboBox",
         "product-source-save": "ControlType.Button",
         "product-runtime-start": "ControlType.Button",
@@ -429,3 +430,26 @@ def test_windows_candidate_requires_external_keyboard_shortcut_evidence() -> Non
     assert "extracted_external_uia_keyboard_shortcuts_status" in step
     assert "extracted_external_uia_f2_focus_automation_id" in step
     assert "extracted_external_uia_f8_focus_automation_id" in step
+
+
+def test_external_uia_closes_disclosures_and_proves_trigger_focus_handoff() -> None:
+    audit = _audit()
+
+    owner_close = next(
+        line for line in audit.splitlines() if "automation_id = '329'" in line
+    )
+    assert "name = 'Закрити економічні межі'" in owner_close
+    assert "required_pattern = 'Action'" in owner_close
+    assert "require_external_focus = $true" in owner_close
+    assert "expected_control_type = 'ControlType.Button'" in owner_close
+
+    assert "-AutomationId '329'" in audit
+    assert "Invoke-ExternalAction -Element $ownerClose" in audit
+    assert "Wait-ForFocusedAutomationId -AutomationId '305'" in audit
+    assert "owner disclosure close did not restore focus to automation_id=305" in audit
+
+    assert "-AutomationId '336'" in audit
+    assert "Invoke-ExternalAction -Element $manualClose" in audit
+    assert "Wait-ForFocusedAutomationId -AutomationId '330'" in audit
+    assert "manual disclosure close did not restore focus to automation_id=330" in audit
+    assert "packaged disclosure focus-handoff audit failed" in audit

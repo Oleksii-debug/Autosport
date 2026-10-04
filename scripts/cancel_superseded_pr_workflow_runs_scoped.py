@@ -1977,6 +1977,8 @@ def _build_main(
     base_request_code = getattr(base_request_impl, "__code__", None)
     base_cancel_impl = base_api_type.__dict__.get("cancel")
     base_cancel_code = getattr(base_cancel_impl, "__code__", None)
+    scoped_cancel_impl = api_type.__dict__.get("cancel")
+    scoped_cancel_code = getattr(scoped_cancel_impl, "__code__", None)
     base_request_globals = getattr(base_request_impl, "__globals__", {})
     request_type = base_request_globals.get("Request")
     request_init = request_type.__dict__.get("__init__")
@@ -2007,6 +2009,7 @@ def _build_main(
     api_init_defaults = freeze_default_metadata(api_init)
     base_request_defaults = freeze_default_metadata(base_request_impl)
     base_cancel_defaults = freeze_default_metadata(base_cancel_impl)
+    scoped_cancel_defaults = freeze_default_metadata(scoped_cancel_impl)
     parser_init_defaults = freeze_default_metadata(parser_init)
     parser_add_argument_defaults = freeze_default_metadata(parser_add_argument)
     parser_parse_args_defaults = freeze_default_metadata(parser_parse_args)
@@ -2040,7 +2043,13 @@ def _build_main(
                     base_cancel_impl, base_cancel_defaults
                 )
                 and getattr(api_type, "_request", None) is base_request_impl
-                and getattr(api_type, "cancel", None) is base_cancel_impl
+                and api_type.__dict__.get("cancel") is scoped_cancel_impl
+                and getattr(scoped_cancel_impl, "__code__", None)
+                is scoped_cancel_code
+                and default_metadata_current(
+                    scoped_cancel_impl, scoped_cancel_defaults
+                )
+                and getattr(api_type, "cancel", None) is scoped_cancel_impl
                 and base_request_globals.get("Request") is request_type
                 and request_type.__dict__.get("__init__") is request_init
                 and getattr(request_init, "__code__", None) is request_init_code

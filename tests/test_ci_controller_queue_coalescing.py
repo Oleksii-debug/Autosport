@@ -334,6 +334,25 @@ def _scoped_main_args() -> list[str]:
     ]
 
 
+def test_scoped_main_canonical_production_graph_reaches_argument_validation(
+    monkeypatch,
+    capsys,
+) -> None:
+    assert (
+        scoped_controller.WorkflowScopedGitHubApi.__dict__["cancel"]
+        is not scoped_controller.GitHubApi.__dict__["cancel"]
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+    args = _scoped_main_args()
+    args[args.index("--event-head-sha") + 1] = "not-a-sha"
+
+    assert scoped_controller.main(args) == 2
+    error = capsys.readouterr().err
+    assert "invalid event head sha" in error
+    assert "controller orchestration authority changed" not in error
+
+
 def test_main_rejects_preentry_scoped_api_rebind(monkeypatch) -> None:
     forged_calls: list[str] = []
 

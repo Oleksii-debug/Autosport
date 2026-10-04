@@ -22,6 +22,7 @@ from autosport.proposal_risk_target_authority import (
     issue_product_proposal_risk_target,
     resolve_product_proposal_risk_target,
 )
+import autosport.risk as risk_module
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 
 
@@ -305,6 +306,29 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
                 signal_strengths=(Decimal("1"),),
                 contexts=contexts,
             )
+
+    def test_risk_policy_provenance_global_rebinding_fails_closed(self) -> None:
+        with patch.object(
+            risk_module,
+            "_sha256_payload",
+            lambda _payload: "0" * 64,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "risk-policy provenance hash helper",
+            ):
+                self._issue()
+
+        with patch.object(
+            risk_module,
+            "provenance_for",
+            lambda _goal: object(),
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "risk-policy provenance dependency",
+            ):
+                self._issue()
 
     def test_risk_policy_provenance_descriptor_rebinding_fails_closed(self) -> None:
         forged = property(lambda _policy: "0" * 64)

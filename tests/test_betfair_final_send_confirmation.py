@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import tempfile
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -18,7 +19,6 @@ from autosport.betfair_supervised_execution import (
     PlaceOrdersOutcome,
     execute_betfair_supervised_action,
 )
-from autosport.economic_goal import EconomicGoalContract
 from autosport.real_execution_ledger import AttemptState
 from autosport.supervised_confirmation import SupervisedConfirmationAuthority
 
@@ -282,12 +282,10 @@ def test_pre_admission_owner_stop_does_not_consume_confirmation() -> None:
         client = _enabled_client(profile, transport, store=goal_store)
         owner = goal_store.load()
         goal_store.persist_automatic_successor(
-            EconomicGoalContract(
-                **{
-                    **owner.__dict__,
-                    "revision": owner.revision + 1,
-                    "emergency_stop": True,
-                }
+            replace(
+                owner,
+                revision=owner.revision + 1,
+                emergency_stop=True,
             )
         )
 

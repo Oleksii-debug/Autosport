@@ -138,6 +138,10 @@ class _LearningHandoff:
         self.calls.append(("prepare", paper_book_path, resolutions, at))
         return ("prepared",)
 
+    def prepared_settlement_resolutions(self, *, paper_book_path):
+        self.calls.append(("prepared_recovery", paper_book_path))
+        return ()
+
     def reconcile_after_settlement(
         self,
         *,
@@ -175,6 +179,16 @@ def _replacement_learning_reconcile(
     if at == "never":
         raise AssertionError("replacement learning handoff executable semantics")
     return ("forged",)
+
+
+def _replacement_learning_prepared_resolutions(
+    self,
+    *,
+    paper_book_path,
+):
+    if str(paper_book_path) == "never":
+        raise AssertionError("replacement prepared recovery executable semantics")
+    return ()
 
 
 def _replacement_fetch_catalog_page(self, checkpoint):
@@ -484,6 +498,38 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 _LearningHandoff.reconcile_after_settlement = original
 
+    def test_restart_rejects_changed_prepared_settlement_recovery_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+                settlement_learning_handoff=_LearningHandoff(),
+            )
+            runtime.close()
+            original = _LearningHandoff.prepared_settlement_resolutions
+            try:
+                _LearningHandoff.prepared_settlement_resolutions = (
+                    _replacement_learning_prepared_resolutions
+                )
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "settlement learning handoff identity conflicts with durable product composition",
+                ):
+                    build_autonomous_product_runtime(
+                        workspace=root,
+                        source=_Source(),
+                        clock=_Clock(),
+                        sleep=lambda _: None,
+                        initial_bankroll="100",
+                        settlement_learning_handoff=_LearningHandoff(),
+                    )
+            finally:
+                _LearningHandoff.prepared_settlement_resolutions = original
+
     def test_product_source_and_learning_proxy_class_dispatch_is_immutable(
         self,
     ) -> None:
@@ -524,6 +570,15 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     type.__setattr__(
                         type(learning_proxy),
                         "reconcile_after_settlement",
+                        lambda *_args, **_kwargs: (),
+                    )
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "settlement learning proxy class member 'prepared_settlement_resolutions' is immutable",
+                ):
+                    type.__setattr__(
+                        type(learning_proxy),
+                        "prepared_settlement_resolutions",
                         lambda *_args, **_kwargs: (),
                     )
                 with self.assertRaisesRegex(

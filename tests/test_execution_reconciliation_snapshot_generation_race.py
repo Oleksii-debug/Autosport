@@ -185,7 +185,7 @@ def test_post_ack_sibling_attempt_cannot_enter_verified_snapshot_race(
     assert injected
     with pytest.raises(KeyError):
         ledger.attempt_state("attempt-race-reserved")
-    assert proposal.state is RoutingState.ROUTE
+    _assert_no_positive_route(proposal)
 
 
 def test_serialized_reread_holds_canonical_cross_instance_writer_lock(
@@ -222,5 +222,5 @@ def test_serialized_reread_holds_canonical_cross_instance_writer_lock(
 
     assert reads == 2
     assert writer_blocked
-    assert proposal.state is RoutingState.ROUTE
+    _assert_no_positive_route(proposal)
 

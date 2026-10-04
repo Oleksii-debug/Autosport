@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import uuid
 from datetime import datetime, timezone
@@ -589,6 +590,70 @@ class ParlayApiProductSource:
                 raise ProductSourceStateError("unassigned pending item cannot contain a delta")
 
     @classmethod
+    def _snapshot_provider_metadata(
+        cls,
+        value: object,
+        *,
+        path: str = "metadata",
+        depth: int = 0,
+        active: set[int] | None = None,
+    ) -> object:
+        """Copy only exact canonical JSON value types without coercion."""
+
+        if depth > 64:
+            raise ProductSourcePayloadError(
+                "provider metadata exceeds acquisition snapshot depth"
+            )
+        if value is None or type(value) in (str, bool, int):
+            return value
+        if type(value) is float:
+            if not math.isfinite(value):
+                raise ProductSourcePayloadError(
+                    f"{path} contains non-finite JSON number"
+                )
+            return value
+        if type(value) not in (list, dict):
+            raise ProductSourcePayloadError(
+                f"{path} contains non-canonical JSON value type"
+            )
+
+        if active is None:
+            active = set()
+        marker = id(value)
+        if marker in active:
+            raise ProductSourcePayloadError(
+                f"{path} contains cyclic JSON container"
+            )
+        active.add(marker)
+        try:
+            if type(value) is list:
+                return [
+                    cls._snapshot_provider_metadata(
+                        item,
+                        path=f"{path}[{index}]",
+                        depth=depth + 1,
+                        active=active,
+                    )
+                    for index, item in enumerate(value)
+                ]
+
+            result: dict[str, object] = {}
+            for key, item in value.items():
+                if type(key) is not str:
+                    raise ProductSourcePayloadError(
+                        f"{path} contains non-canonical JSON object key"
+                    )
+                result[key] = cls._snapshot_provider_metadata(
+                    item,
+                    path=f"{path}.{key}",
+                    depth=depth + 1,
+                    active=active,
+                )
+            return result
+        finally:
+            active.remove(marker)
+
+    @classmethod
     def _snapshot_provider_quote(cls, quote: object) -> ProviderQuote:
         """Revalidate one provider DTO at the product-source acquisition boundary.
 
@@ -627,7 +692,13 @@ class ParlayApiProductSource:
                 "provider quote uses non-canonical acquisition value types"
             )
         try:
-            metadata = strict_json_loads(cls._canonical_json(quote.metadata))
+            metadata = cls._snapshot_provider_metadata(quote.metadata)
+            if type(metadata) is not dict:
+                raise TypeError("provider quote metadata must be an object")
+            # Canonical JSON encode/decode is now only a determinism check/copy
+            # witness; the exact-type traversal above has already rejected values
+            # that JSON would otherwise coerce (for example tuple -> array).
+            metadata = strict_json_loads(cls._canonical_json(metadata))
             if type(metadata) is not dict:
                 raise TypeError("provider quote metadata must be an object")
             return ProviderQuote(

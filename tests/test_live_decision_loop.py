@@ -33,6 +33,7 @@ from autosport.live_decision_loop import (
 )
 from autosport.market_bus import MarketEventBus
 from autosport.market_mirror import MirrorSnapshot
+from autosport.market_state_identity import PROPHETX_REST_MARKET_STATE_CONTRACT
 from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
 from autosport.opportunity import Opportunity, OpportunityDecision, QuoteRef, StrategyClass
 from autosport.paper import PaperBook
@@ -235,6 +236,42 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             status=status,
             source_ts=timestamp,
             ingest_ts=timestamp,
+        )
+
+    @staticmethod
+    def _prophetx_refresh_event(
+        *,
+        sequence: int,
+        observed: datetime,
+        odds: str = "2.00",
+    ) -> MarketEvent:
+        timestamp = observed.isoformat()
+        return MarketEvent(
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-a",
+            decimal_odds=Decimal(odds),
+            observed_ts=timestamp,
+            source_id="prophetx:sandbox",
+            sequence=sequence,
+            status="open",
+            ingest_ts=timestamp,
+            metadata={
+                "provider": "prophetx",
+                "environment": "sandbox",
+                "transport_surface": "v3_affiliate_get_markets",
+                "request_fingerprint_sha256": "a" * 64,
+                "product_acquisition_sequence": sequence,
+                "response_sha256": f"{sequence:x}".rjust(64, "0"),
+                "snapshot_fingerprint_sha256": (
+                    f"{sequence + 100:x}".rjust(64, "0")
+                ),
+                "sequence_authority_id": "prophetx-rest-test-authority",
+                "sequence_source_id": (
+                    "prophetx:sandbox:rest:v3-affiliate-get-markets"
+                ),
+                "semantic_state_contract": PROPHETX_REST_MARKET_STATE_CONTRACT,
+            },
         )
 
     @staticmethod
@@ -2902,6 +2939,65 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
                 2,
             )
+
+    def test_semantic_refresh_still_recomputes_until_evidence_rebind_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            first_time = self.START + timedelta(seconds=1)
+            refresh_time = self.START + timedelta(seconds=2)
+            clock = _ManualClock(first_time)
+            observer = _DurableObserver(
+                workspace,
+                [
+                    (
+                        self._prophetx_refresh_event(
+                            sequence=1,
+                            observed=first_time,
+                        ),
+                    ),
+                    (
+                        self._prophetx_refresh_event(
+                            sequence=2,
+                            observed=refresh_time,
+                        ),
+                    ),
+                ],
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="prophetx:sandbox",
+                event_ids="event-1",
+                market_ids="market-1",
+                selection_ids="selection-a",
+            )
+
+            first = loop.run_cycle()
+            self.assertEqual(first.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls[-1][1], (("selection-a", 1, "open"),))
+
+            factory.calls.clear()
+            clock.value = self.START + timedelta(seconds=3)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(second.affected_input_ids, ("input-a",))
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 2, "open"),))],
+            )
+            current = loop.dependencies.decision_view(
+                "input-a",
+                as_of=clock.value,
+                max_age=loop.max_quote_age,
+            )
+            self.assertEqual(current.events[0].sequence, 2)
 
     def test_single_dirty_and_no_change_cycles_avoid_unrelated_mirror_scans(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

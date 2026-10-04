@@ -1556,35 +1556,67 @@ class SQLiteMarketStore:
         authority: MonotonicWorkspaceAuthority,
         max_generation: int,
     ) -> None:
-        """Prove a frozen cutoff is inside the committed append-authority prefix.
+        """Prove a frozen cutoff is an exact committed append transition prefix.
 
         This deliberately does not recover a pending append. Existing cutoffs must
         remain readable while a newer live writer owns PREPARE, but they may never
         rely on a SQLite generation that lacks an independently committed product
-        append transition.
+        append transition. A cutoff inside one atomic multi-event append batch is
+        likewise invalid: only the batch's committed end generation was ever a
+        product-issued durable state.
         """
 
         if type(max_generation) is not int or max_generation < 0:
             raise ValueError("max_generation must be a non-negative int")
         history = authority.read_history()
-        committed_head, _committed_state_sha256 = (
-            self._append_authority_committed_tip(history)
+        commits = tuple(
+            record for record in history if record.phase is AuthorityPhase.COMMIT
         )
-        if max_generation > committed_head:
+        if not commits:
+            raise MonotonicAuthorityRollbackError(
+                "market append authority lacks a committed generation-zero baseline"
+            )
+
+        prefix_commits: list[AuthorityRecord] = [commits[0]]
+        covered_generation = 0
+        expected_start = 1
+        for record in commits[1:]:
+            if covered_generation == max_generation:
+                break
+            match = _APPEND_TX_RE.fullmatch(record.tx_id)
+            if match is None:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority history has invalid transaction identity"
+                )
+            start = int(match.group("start"))
+            end = int(match.group("end"))
+            if start != expected_start or end < start:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority history is non-contiguous"
+                )
+            if end > max_generation:
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff is not an exact committed append transition boundary"
+                )
+            prefix_commits.append(record)
+            covered_generation = end
+            expected_start = end + 1
+
+        if covered_generation != max_generation:
             raise MonotonicAuthorityRollbackError(
                 "causal replay cutoff exceeds independently committed append authority"
             )
 
         entries = self._validated_positive_append_entries(
-            max_generation=committed_head
+            max_generation=max_generation
         )
-        if len(entries) != committed_head:
+        if len(entries) != max_generation:
             raise MonotonicAuthorityRollbackError(
                 "committed append authority is missing durable market history"
             )
         baseline_state_sha256 = self._generation_zero_baseline_state_sha256()
         self._require_canonical_append_authority_bindings(
-            history,
+            tuple(prefix_commits),
             entries,
             baseline_state_sha256=baseline_state_sha256,
         )

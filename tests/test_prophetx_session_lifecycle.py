@@ -1665,6 +1665,38 @@ def test_refresh_success_wait_evidence_cannot_carry_failure_history(
 
 
 @pytest.mark.parametrize(
+    "state",
+    [
+        ProphetXSessionState.NO_SESSION,
+        ProphetXSessionState.ACTIVE,
+        ProphetXSessionState.EXPIRED,
+    ],
+)
+def test_nonfailure_states_reject_noncausal_transient_failure_count(state):
+    active = state is ProphetXSessionState.ACTIVE
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="non-failure session state cannot carry transient failure count",
+    ):
+        ProphetXSessionSnapshot(
+            state=state,
+            generation=2,
+            credential_revision="rev-1",
+            integration_role="market-maker-primary",
+            last_transition_at=NOW,
+            session_lineage_id="a" * 64 if active else None,
+            access_expires_at=(
+                NOW + timedelta(minutes=10) if active else None
+            ),
+            slot_hold_started_at=NOW if active else None,
+            slot_hold_until=(
+                NOW + CONSERVATIVE_SESSION_SLOT_HOLD if active else None
+            ),
+            transient_failures=1,
+        )
+
+
+@pytest.mark.parametrize(
     ("state", "login_failure", "renewal_failure", "slot_wait"),
     [
         (

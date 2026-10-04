@@ -4893,6 +4893,16 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 with self.assertRaises(MonotonicAuthorityRollbackError):
                     store.events_at_committed_append_boundary(2)
                 self.assertEqual(authority.read_history(), before)
+
+                # A fresh economic publication gate is intentionally stronger. It may
+                # recover this exact abandoned product PREPARE after taking the append
+                # issuance lock, then prove the sampled generation-1 boundary inside
+                # the now-fully-authorized current history.
+                store.require_current_append_authority_with_boundary(1)
+                after = authority.read_history()
+                self.assertEqual(after[-1].phase.value, "COMMIT")
+                self.assertNotEqual(after, before)
+                store.require_committed_append_generation(2)
             finally:
                 store.close()
 

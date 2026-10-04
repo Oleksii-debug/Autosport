@@ -960,10 +960,18 @@ class DesktopDeltaConsumer:
 
                 durable_receipt = self.lookup_application_receipt(delta)
                 if durable_receipt is not None:
-                    durable_receipt.validate()
-                    if durable_receipt.canonical_event_digest != delta.canonical_event_digest:
+                    if not isinstance(durable_receipt, DesktopApplicationReceipt):
                         raise ApplicationReceiptError(
-                            f"durable application receipt digest conflicts with delta {delta.delta_id}"
+                            "durable application receipt must use the canonical receipt type"
+                        )
+                    durable_receipt.validate()
+                    if (
+                        durable_receipt.delta_id != delta.delta_id
+                        or durable_receipt.canonical_event_digest
+                        != delta.canonical_event_digest
+                    ):
+                        raise ApplicationReceiptError(
+                            f"durable application receipt is not bound to delta {delta.delta_id}"
                         )
                     if self._on_application_receipt is not None:
                         self._on_application_receipt(delta, durable_receipt)

@@ -910,6 +910,107 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.close()
 
+    def test_duplicate_append_pending_restart_canonicalizes_ledger_market_frontier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            provider = _EmptyProvider()
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            first = loop.run_cycle()
+            self.assertEqual(first.status, LiveCycleStatus.DECIDED)
+
+            peer_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                peer_store.append(
+                    MarketEvent(
+                        event_id="event-1",
+                        market_id="market-1",
+                        selection_id="selection-a",
+                        decimal_odds=Decimal("2.10"),
+                        observed_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                        source_id="provider-a",
+                        sequence=2,
+                        status="open",
+                        source_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                        ingest_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                    )
+                )
+            finally:
+                peer_store.close()
+
+            with patch.object(
+                loop,
+                "_verified_ledger_record_at_offset",
+                side_effect=RuntimeError(
+                    "simulated loss after duplicate APPEND_PENDING publication"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "duplicate APPEND_PENDING publication",
+                ):
+                    loop.run_cycle()
+
+            pending = json.loads(loop.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(pending["phase"], "append_pending")
+            self.assertEqual(pending["market_append_generation"], 2)
+            loop.close()
+
+            resumed_provider = _EmptyProvider()
+            resumed = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=resumed_provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            recovered = resumed.run_cycle()
+
+            self.assertEqual(
+                recovered.status,
+                LiveCycleStatus.DUPLICATE_DECISION,
+            )
+            self.assertEqual(recovered.decision_id, first.decision_id)
+            self.assertEqual(resumed_provider.calls, 0)
+            records = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].payload["market_append_generation"], 1)
+            committed = json.loads(
+                resumed.progress_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(committed["phase"], "committed")
+            self.assertEqual(committed["market_append_generation"], 1)
+            resumed.close()
+
     def test_decision_frontier_leaves_post_cutoff_peer_commit_for_next_cycle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

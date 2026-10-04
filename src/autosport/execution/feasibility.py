@@ -480,7 +480,15 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     action_id: str,
     max_snapshot_age: timedelta,
     price_ladder_admission: BetfairPriceLadderAdmission | None,
+    _ledger_type,
     _verified_execution_view,
+    _bound_type,
+    _bound_verify_binding,
+    _bound_action_for,
+    _bound_profile_for,
+    _receipt_type,
+    _market_book_acquisition_started_at,
+    _assert_market_book_depth_authoritative,
     _price_ladder_type,
     _price_ladder_admissible,
 ) -> ExecutionFeasibilitySnapshot:
@@ -502,19 +510,19 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     # a RealExecutionLedger subclass can override verified_snapshot(), and a
     # BoundSupervisedExecutionPlan subclass can override binding/action/profile
     # resolution while still satisfying isinstance().
-    if type(ledger) is not RealExecutionLedger:
+    if type(ledger) is not _ledger_type:
         raise TypeError("ledger must be exact RealExecutionLedger")
-    if type(bound) is not BoundSupervisedExecutionPlan:
+    if type(bound) is not _bound_type:
         raise TypeError("bound must be exact BoundSupervisedExecutionPlan")
-    if type(receipt) is not BetfairMarketBookDepthObservation:
+    if type(receipt) is not _receipt_type:
         raise TypeError("receipt must be exact BetfairMarketBookDepthObservation")
-    acquisition_started_at = market_book_depth_acquisition_started_at(receipt)
+    acquisition_started_at = _market_book_acquisition_started_at(receipt)
     # Provider provenance is necessary but must not choose the decision epoch.
     # The independently durable PLAN_RESERVED event is the causal publication
     # boundary for DECISION_EVIDENCE semantics.
-    assert_market_book_depth_authoritative(receipt)
+    _assert_market_book_depth_authoritative(receipt)
     _require_aware(acquisition_started_at, "acquisition_started_at")
-    bound.verify_binding()
+    _bound_verify_binding(bound)
     try:
         plan_view = _verified_execution_view(
             ledger,
@@ -533,7 +541,7 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     decision_at = _provider_timestamp(plan_view.plan_reserved_at)
     _require_aware(decision_at, "decision_at")
 
-    action = bound.action_for(action_id)
+    action = _bound_action_for(bound, action_id)
     try:
         provider_selection_id = int(action.selection_id)
     except (TypeError, ValueError) as exc:
@@ -602,7 +610,7 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
             else:
                 price_ladder_authoritative = True
 
-    binding = bound.profile_for(action.bookmaker_id, action.account_id)
+    binding = _bound_profile_for(bound, action.bookmaker_id, action.account_id)
     action_digest = _canonical_digest(action.to_dict())
     response_received_at = _provider_timestamp(receipt.evidence.observed_at)
     if response_received_at < acquisition_started_at:
@@ -774,8 +782,19 @@ def _install_execution_feasibility_result_authority():
     raw_assess_code = raw_assess.__code__
     canonical_assess = _assess_execution_feasibility
     canonical_assess_code = canonical_assess.__code__
-    verified_execution_view = RealExecutionLedger.verified_execution_view
+    ledger_type = RealExecutionLedger
+    verified_execution_view = ledger_type.verified_execution_view
     verified_execution_view_code = verified_execution_view.__code__
+    bound_type = BoundSupervisedExecutionPlan
+    bound_verify_binding = bound_type.verify_binding
+    bound_verify_binding_code = bound_verify_binding.__code__
+    bound_action_for = bound_type.action_for
+    bound_action_for_code = bound_action_for.__code__
+    bound_profile_for = bound_type.profile_for
+    bound_profile_for_code = bound_profile_for.__code__
+    receipt_type = BetfairMarketBookDepthObservation
+    market_book_acquisition = market_book_depth_acquisition_started_at
+    market_book_assert_authoritative = assert_market_book_depth_authoritative
     price_ladder_type = BetfairPriceLadderAdmission
     price_ladder_admissible_property = price_ladder_type.admissible
     price_ladder_admissible = price_ladder_admissible_property.fget
@@ -801,8 +820,10 @@ def _install_execution_feasibility_result_authority():
             raise RuntimeError(
                 "canonical execution feasibility assessor changed"
             )
+        if RealExecutionLedger is not ledger_type:
+            raise RuntimeError("canonical execution ledger authority changed")
         if (
-            RealExecutionLedger.verified_execution_view
+            ledger_type.verified_execution_view
             is not verified_execution_view
             or verified_execution_view.__code__
             is not verified_execution_view_code
@@ -810,6 +831,27 @@ def _install_execution_feasibility_result_authority():
             raise RuntimeError(
                 "canonical execution ledger verified plan view changed"
             )
+        if (
+            BoundSupervisedExecutionPlan is not bound_type
+            or bound_type.verify_binding is not bound_verify_binding
+            or bound_verify_binding.__code__ is not bound_verify_binding_code
+            or bound_type.action_for is not bound_action_for
+            or bound_action_for.__code__ is not bound_action_for_code
+            or bound_type.profile_for is not bound_profile_for
+            or bound_profile_for.__code__ is not bound_profile_for_code
+        ):
+            raise RuntimeError(
+                "canonical supervised execution plan authority changed"
+            )
+        if BetfairMarketBookDepthObservation is not receipt_type:
+            raise RuntimeError("canonical MarketBook receipt type changed")
+        if (
+            market_book_depth_acquisition_started_at
+            is not market_book_acquisition
+            or assert_market_book_depth_authoritative
+            is not market_book_assert_authoritative
+        ):
+            raise RuntimeError("canonical MarketBook receipt authority changed")
         if (
             BetfairPriceLadderAdmission is not price_ladder_type
             or price_ladder_type.admissible
@@ -829,7 +871,15 @@ def _install_execution_feasibility_result_authority():
             action_id=action_id,
             max_snapshot_age=max_snapshot_age,
             price_ladder_admission=price_ladder_admission,
+            _ledger_type=ledger_type,
             _verified_execution_view=verified_execution_view,
+            _bound_type=bound_type,
+            _bound_verify_binding=bound_verify_binding,
+            _bound_action_for=bound_action_for,
+            _bound_profile_for=bound_profile_for,
+            _receipt_type=receipt_type,
+            _market_book_acquisition_started_at=market_book_acquisition,
+            _assert_market_book_depth_authoritative=market_book_assert_authoritative,
             _price_ladder_type=price_ladder_type,
             _price_ladder_admissible=price_ladder_admissible,
         )

@@ -139,7 +139,7 @@ class MarketMirrorUpdateBuffer:
 
         self._validate_durable_event(event)
         try:
-            self._store.append(event)
+            accepted = self._store.append(event)
         except (TypeError, ValueError) as exc:
             # Invalid staged input was already rejected above. A remaining store-side
             # TypeError/ValueError is safe to consume only when canonical history proves
@@ -156,7 +156,40 @@ class MarketMirrorUpdateBuffer:
             raise _DurableStoreFailure(
                 "durable market append failed before acknowledgement"
             ) from exc
-        return self._mirror.apply(event)
+
+        if accepted:
+            # The staged queue owns this snapshot and append=True proves a newly
+            # product-issued positive generation, so it is decision-causal.
+            return self._mirror.apply(event)
+
+        # A durable duplicate may be either a positive product-issued event or a
+        # sealed generation-zero migration row. Re-read the independently proven
+        # canonical value and its append provenance before mutating a fresh or
+        # incomplete mirror; never launder baseline state through public apply().
+        try:
+            canonical_with_generation = next(
+                (
+                    (persisted, append_generation)
+                    for persisted, append_generation in self._store.events_with_append_generation(
+                        event.event_id
+                    )
+                    if persisted.dedupe_key == event.dedupe_key
+                ),
+                None,
+            )
+        except (TypeError, ValueError) as integrity_exc:
+            raise _DurableStoreFailure(
+                "durable market history failed integrity validation"
+            ) from integrity_exc
+        if canonical_with_generation is None:
+            raise _DurableStoreFailure(
+                "durable duplicate disappeared from canonical market history"
+            )
+        canonical, append_generation = canonical_with_generation
+        return self._mirror._apply_with_causal_authority(
+            canonical,
+            decision_causal=append_generation > 0,
+        )
 
     def submit(self, event: MarketEvent) -> BufferSubmitResult:
         if not isinstance(event, MarketEvent):

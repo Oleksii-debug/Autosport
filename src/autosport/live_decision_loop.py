@@ -2340,6 +2340,16 @@ class PersistentLiveDecisionLoop:
                 "committed live progress conflicts with Decision Ledger record"
             )
 
+        live_records = tuple(
+            record
+            for record in self.decision_ledger.verified_records()
+            if record.replay_run_id == f"live:{self.loop_id}"
+        )
+        if not live_records or live_records[-1].decision_id != progress.decision_id:
+            raise DecisionLedgerIntegrityError(
+                "committed live progress is not the latest durable live decision"
+            )
+
     def _persist_control(self, state: LiveControlState) -> None:
         candidate = _Control(self.loop_id, state)
         with WorkspaceEconomicLock(self.workspace):

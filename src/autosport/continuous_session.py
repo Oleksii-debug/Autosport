@@ -975,6 +975,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             return ()
         resolutions: list[SettlementResolution] = []
         for record in self.lifecycle.records():
+            # A continuous session is bound to exactly one collector source. A
+            # shared lifecycle may contain other providers, but their settlement
+            # records are outside this session's economic authority.
+            if record.source_id != self.collector.source_id:
+                continue
             if record.phase is not EventPhase.COMPLETED or record.settlement_ref is None:
                 continue
             resolution = self.outcome_authority.resolve(record, as_of=as_of)

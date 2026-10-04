@@ -1381,6 +1381,27 @@ def cancel_superseded(
     active_run_snapshot = active_runs()
     if not cancellation_authority_current() or not api_dispatch_current():
         raise CancellationError("superseded-run cancellation authority changed")
+
+    # A moving multi-status scan can observe the same immutable run id more than once.
+    # Do not let one older observation authorize cancellation when another observation
+    # disagrees on source head, workflow or PR identity. Consistent duplicates collapse
+    # to one candidate; conflicting identities defer that run to a later stable sweep.
+    observations_by_run_id: dict[int, list[WorkflowRun]] = {}
+    for run in active_run_snapshot:
+        observations_by_run_id.setdefault(run.run_id, []).append(run)
+    stable_active_runs: list[WorkflowRun] = []
+    for observations in observations_by_run_id.values():
+        first = observations[0]
+        if any(
+            observation.head_sha != first.head_sha
+            or observation.workflow_name != first.workflow_name
+            or observation.pr_numbers != first.pr_numbers
+            for observation in observations[1:]
+        ):
+            continue
+        stable_active_runs.append(first)
+    active_run_snapshot = tuple(stable_active_runs)
+
     confirmation = _qualification_snapshot_impl(
         api, pr_number, legacy_cancel_same_head=cancel_same_head
     )

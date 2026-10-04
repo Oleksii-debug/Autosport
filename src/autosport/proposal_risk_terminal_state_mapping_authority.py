@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from .market_outcomes import (
+    MarketOutcomeIdentity,
     MarketSettlementOutcomeAuthority,
     MarketTerminalState,
 )
@@ -41,19 +42,29 @@ _PRECOMMIT_TYPE = ProductProposalRiskEvaluationPrecommit
 _TARGET_TYPE = ProductProposalRiskTarget
 _TERMINAL_TYPE = ProductProposalTargetTerminalPopulation
 _SCENARIO_TYPE = ProductProposalRiskScenarioPopulation
+_IDENTITY_TYPE = MarketOutcomeIdentity
 _AUTHORITY_TYPE = MarketSettlementOutcomeAuthority
 _STATE_TYPE = MarketTerminalState
 _TARGET_RESOLVER = resolve_product_proposal_risk_target
 _TERMINAL_RESOLVER = resolve_product_proposal_target_terminal_population
 _SCENARIO_RESOLVER = resolve_product_proposal_risk_scenario_population
 _SETTLEMENT_BY_QUOTE = MarketSettlementOutcomeAuthority.settlement_by_quote
+_STATE_IS_DERIVED = MarketSettlementOutcomeAuthority._state_is_derived
+_QUOTE_KEY = MarketOutcomeIdentity.quote_key
+_MARKET_KEY_GETTER = MarketOutcomeIdentity.market_key.fget
+_AUTHORITY_SHA_GETTER = MarketSettlementOutcomeAuthority.authority_sha256.fget
 _JSON_DUMPS = json.dumps
 _JSON_LOADS = json.loads
+_JSON_DECODE_ERROR_TYPE = json.JSONDecodeError
 _HASHLIB_SHA256 = hashlib.sha256
 _TARGET_RESOLVER_CODE = getattr(_TARGET_RESOLVER, "__code__", None)
 _TERMINAL_RESOLVER_CODE = getattr(_TERMINAL_RESOLVER, "__code__", None)
 _SCENARIO_RESOLVER_CODE = getattr(_SCENARIO_RESOLVER, "__code__", None)
 _SETTLEMENT_BY_QUOTE_CODE = getattr(_SETTLEMENT_BY_QUOTE, "__code__", None)
+_STATE_IS_DERIVED_CODE = getattr(_STATE_IS_DERIVED, "__code__", None)
+_QUOTE_KEY_CODE = getattr(_QUOTE_KEY, "__code__", None)
+_MARKET_KEY_GETTER_CODE = getattr(_MARKET_KEY_GETTER, "__code__", None)
+_AUTHORITY_SHA_GETTER_CODE = getattr(_AUTHORITY_SHA_GETTER, "__code__", None)
 _JSON_DUMPS_CODE = getattr(_JSON_DUMPS, "__code__", None)
 _JSON_LOADS_CODE = getattr(_JSON_LOADS, "__code__", None)
 
@@ -68,6 +79,7 @@ def _require_dispatch() -> None:
         or ProductProposalRiskTarget is not _TARGET_TYPE
         or ProductProposalTargetTerminalPopulation is not _TERMINAL_TYPE
         or ProductProposalRiskScenarioPopulation is not _SCENARIO_TYPE
+        or MarketOutcomeIdentity is not _IDENTITY_TYPE
         or MarketSettlementOutcomeAuthority is not _AUTHORITY_TYPE
         or MarketTerminalState is not _STATE_TYPE
         or resolve_product_proposal_risk_target is not _TARGET_RESOLVER
@@ -84,10 +96,23 @@ def _require_dispatch() -> None:
         is not _SETTLEMENT_BY_QUOTE
         or getattr(_SETTLEMENT_BY_QUOTE, "__code__", None)
         is not _SETTLEMENT_BY_QUOTE_CODE
+        or MarketSettlementOutcomeAuthority._state_is_derived is not _STATE_IS_DERIVED
+        or getattr(_STATE_IS_DERIVED, "__code__", None)
+        is not _STATE_IS_DERIVED_CODE
+        or MarketOutcomeIdentity.quote_key is not _QUOTE_KEY
+        or getattr(_QUOTE_KEY, "__code__", None) is not _QUOTE_KEY_CODE
+        or MarketOutcomeIdentity.market_key.fget is not _MARKET_KEY_GETTER
+        or getattr(_MARKET_KEY_GETTER, "__code__", None)
+        is not _MARKET_KEY_GETTER_CODE
+        or MarketSettlementOutcomeAuthority.authority_sha256.fget
+        is not _AUTHORITY_SHA_GETTER
+        or getattr(_AUTHORITY_SHA_GETTER, "__code__", None)
+        is not _AUTHORITY_SHA_GETTER_CODE
         or json.dumps is not _JSON_DUMPS
         or getattr(_JSON_DUMPS, "__code__", None) is not _JSON_DUMPS_CODE
         or json.loads is not _JSON_LOADS
         or getattr(_JSON_LOADS, "__code__", None) is not _JSON_LOADS_CODE
+        or json.JSONDecodeError is not _JSON_DECODE_ERROR_TYPE
         or hashlib.sha256 is not _HASHLIB_SHA256
     ):
         raise ProductProposalRiskTerminalStateMappingError(
@@ -186,7 +211,7 @@ def _parse_canonical_json(value: object, name: str) -> dict[str, object]:
     value = _text(value, name, max_length=1_000_000)
     try:
         parsed = _JSON_LOADS(value, object_pairs_hook=_reject_duplicate_keys)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (TypeError, ValueError, _JSON_DECODE_ERROR_TYPE) as exc:
         raise ProductProposalRiskTerminalStateMappingError(
             f"{name} is invalid JSON"
         ) from exc
@@ -241,6 +266,8 @@ class ProductProposalRiskTerminalStateMapping:
     target_sha256: str
     candidate_vector_sha256: str
     terminal_population_sha256: str
+    terminal_state_count: int
+    terminal_space_exact: bool
     scenario_population_sha256: str
     member_ids: tuple[str, ...]
     member_scenario_ids: tuple[str, ...]
@@ -324,6 +351,8 @@ _RESULT_FIELDS = (
     "target_sha256",
     "candidate_vector_sha256",
     "terminal_population_sha256",
+    "terminal_state_count",
+    "terminal_space_exact",
     "scenario_population_sha256",
     "member_ids",
     "member_scenario_ids",
@@ -794,6 +823,8 @@ def resolve_product_proposal_risk_terminal_state_mapping(
     scenario_population: ProductProposalRiskScenarioPopulation,
     authorities: tuple[MarketSettlementOutcomeAuthority, ...],
     selections: tuple[CounterfactualMemberTerminalStateSelection, ...],
+    *,
+    _bind_identity=_BIND_IDENTITY,
 ) -> ProductProposalRiskTerminalStateMapping:
     """Re-derive exact target settlements for the durably precommitted member states."""
 
@@ -860,6 +891,8 @@ def resolve_product_proposal_risk_terminal_state_mapping(
         "target_sha256": precommit.target_sha256,
         "candidate_vector_sha256": precommit.candidate_vector_sha256,
         "terminal_population_sha256": terminal_population.population_sha256,
+        "terminal_state_count": terminal_population.terminal_state_count,
+        "terminal_space_exact": terminal_population.terminal_space_exact,
         "scenario_population_sha256": scenario_population.population_sha256,
         "member_ids": precommit.planned_member_ids,
         "member_scenario_ids": scenario_population.member_scenario_ids,
@@ -869,7 +902,7 @@ def resolve_product_proposal_risk_terminal_state_mapping(
     }
     for name in _RESULT_FIELDS:
         object.__setattr__(instance, name, values[name])
-    _BIND_IDENTITY(instance)
+    _bind_identity(instance)
     return instance
 
 

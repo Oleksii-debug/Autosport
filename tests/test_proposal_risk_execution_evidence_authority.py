@@ -1083,6 +1083,15 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
             mapped.member_mapping_sha256s,
             scenario.member_mapping_sha256s,
         )
+        self.assertEqual(
+            mapped.terminal_state_count,
+            self.terminal_population.terminal_state_count,
+        )
+        self.assertIs(
+            mapped.terminal_space_exact,
+            self.terminal_population.terminal_space_exact,
+        )
+        self.assertFalse(mapped.terminal_space_exact)
         self.assertEqual(len(mapped.member_settlement_json), 2)
         for raw in mapped.member_settlement_json:
             material = json.loads(raw)
@@ -1184,6 +1193,41 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
         self.assertFalse(forged.proposal_target_counterfactual_execution_proven)
         self.assertFalse(forged.risk_upper_bound_for_target)
         self.assertFalse(forged.grants_real_money_authority)
+
+    def test_capability_binder_is_not_left_as_module_global(self) -> None:
+        self.assertFalse(hasattr(terminal_mapping_authority, "_BIND_IDENTITY"))
+        selections = self._selections()
+        scenario = self._scenario(selections)
+        mapped = resolve_product_proposal_risk_terminal_state_mapping(
+            self.workspace,
+            self.precommit,
+            self.terminal_population,
+            scenario,
+            self.authorities,
+            selections,
+        )
+        self.assertTrue(mapped.terminal_mapping_proven)
+
+    def test_nested_settlement_dispatch_rebinding_fails_closed(self) -> None:
+        selections = self._selections()
+        original = terminal_mapping_authority.MarketSettlementOutcomeAuthority._state_is_derived
+        try:
+            terminal_mapping_authority.MarketSettlementOutcomeAuthority._state_is_derived = (
+                lambda *args, **kwargs: True
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "dispatch changed",
+            ):
+                derive_product_proposal_risk_terminal_member_bindings(
+                    self.workspace,
+                    self.precommit,
+                    self.terminal_population,
+                    self.authorities,
+                    selections,
+                )
+        finally:
+            terminal_mapping_authority.MarketSettlementOutcomeAuthority._state_is_derived = original
 
     def test_mapper_dispatch_rebinding_fails_closed(self) -> None:
         selections = self._selections()

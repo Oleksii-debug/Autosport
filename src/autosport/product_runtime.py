@@ -846,9 +846,23 @@ def _source_resolver_identity_impl(
                 f"{field_name} must be lowercase SHA-256 hex"
             )
 
+    declared_authority_fields = getattr(
+        source_type,
+        "_AUTHORITY_FIELDS",
+        frozenset(),
+    )
+    if type(declared_authority_fields) is not frozenset or any(
+        type(name) is not str or not name
+        for name in declared_authority_fields
+    ):
+        raise _error_type(
+            "product source _AUTHORITY_FIELDS must be a frozenset of non-empty strings"
+        )
+
     payload = {
         "source_id": source_id,
         "implementation": f"{type(source).__module__}.{type(source).__qualname__}",
+        "authority_fields": sorted(declared_authority_fields),
         "resolver_owner": f"{resolver.__module__}.{resolver.__qualname__}",
         "resolver_semantic_sha256": resolver_semantic_sha256,
         "catalog_fetch_owner": (
@@ -1171,10 +1185,24 @@ def _settlement_learning_handoff_identity_impl(
             "settlement_learning_configuration_sha256 must be lowercase SHA-256 hex"
         )
 
+    declared_authority_fields = getattr(
+        handoff_type,
+        "_AUTHORITY_FIELDS",
+        frozenset(),
+    )
+    if type(declared_authority_fields) is not frozenset or any(
+        type(name) is not str or not name
+        for name in declared_authority_fields
+    ):
+        raise _error_type(
+            "settlement learning _AUTHORITY_FIELDS must be a frozenset of non-empty strings"
+        )
+
     prepare = methods["prepare_settlement"]
     reconcile = methods["reconcile_after_settlement"]
     payload = {
         "implementation": f"{handoff_type.__module__}.{handoff_type.__qualname__}",
+        "authority_fields": sorted(declared_authority_fields),
         "implementation_id": implementation_id,
         "configuration_sha256": configuration_sha256,
         "prepare_owner": None if prepare is None else prepare[0],

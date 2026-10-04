@@ -1165,6 +1165,54 @@ def test_iid_member_materializer_rejects_payload_digest_dispatch_rebinding(
     assert attacker_called is False
 
 
+def test_iid_member_materializer_rejects_market_event_codec_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    plan = resolve_product_iid_expected_draw_plan(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        authority_root=authority_root,
+    )
+    attacker_called = False
+
+    def forged_to_dict(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        return event.to_dict()
+
+    monkeypatch.setattr(MarketEvent, "to_dict", forged_to_dict)
+
+    with pytest.raises(ProductIidDrawPlanError, match="authority dispatch changed"):
+        materialize_product_iid_member_market_events(
+            plan,
+            member_index=0,
+            market_events=[event],
+        )
+    assert attacker_called is False
+
+
 def _iid_replay_dataset(
     root,
     event: MarketEvent,

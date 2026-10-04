@@ -810,7 +810,18 @@ def _install_execution_feasibility_result_authority():
         raise RuntimeError("Betfair price-ladder admissible property has no getter")
     price_ladder_admissible_code = price_ladder_admissible.__code__
     fingerprint = _feasibility_result_fingerprint
+    fingerprint_code = fingerprint.__code__
+    canonical_digest = _canonical_digest
+    canonical_digest_code = canonical_digest.__code__
     exact_type = type
+
+    def fingerprint_dispatch_intact() -> bool:
+        return (
+            _feasibility_result_fingerprint is fingerprint
+            and fingerprint.__code__ is fingerprint_code
+            and _canonical_digest is canonical_digest
+            and canonical_digest.__code__ is canonical_digest_code
+        )
 
     def assess(
         ledger: RealExecutionLedger,
@@ -821,6 +832,10 @@ def _install_execution_feasibility_result_authority():
         max_snapshot_age: timedelta,
         price_ladder_admission: BetfairPriceLadderAdmission | None = None,
     ) -> ExecutionFeasibilitySnapshot:
+        if not fingerprint_dispatch_intact():
+            raise RuntimeError(
+                "canonical execution feasibility fingerprint changed"
+            )
         if (
             raw_assess.__code__ is not raw_assess_code
             or _assess_execution_feasibility is not canonical_assess
@@ -920,7 +935,10 @@ def _install_execution_feasibility_result_authority():
         return result
 
     def is_authoritative(result: ExecutionFeasibilitySnapshot) -> bool:
-        if exact_type(result) is not result_type:
+        if (
+            not fingerprint_dispatch_intact()
+            or exact_type(result) is not result_type
+        ):
             return False
         current = issued.get(id(result))
         if current is None or current[0]() is not result:

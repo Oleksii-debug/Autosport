@@ -961,6 +961,40 @@ def test_unreserved_bound_plan_cannot_cross_product_authority_seam() -> None:
             )
 
 
+def test_result_fingerprint_dispatch_rebind_cannot_relabel_issued_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, _source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        result = assess_authoritative_betfair_execution_feasibility(
+            _reserved_ledger(tmp, bound),
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+        )
+
+    assert result.sufficient is False
+    issued_fingerprint = (
+        feasibility_module._feasibility_result_fingerprint(result)
+    )
+    object.__setattr__(
+        result,
+        "state",
+        FeasibilityState.SNAPSHOT_DEPTH_SUFFICIENT_BUT_RACY,
+    )
+    monkeypatch.setattr(
+        feasibility_module,
+        "_canonical_digest",
+        lambda _payload: issued_fingerprint,
+    )
+    assert result.sufficient is False
+
+
 def test_builtin_type_rebinding_cannot_mask_ledger_subclass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

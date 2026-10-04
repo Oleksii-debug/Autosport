@@ -338,10 +338,9 @@ class IngestionEngine:
         latest_source: datetime | None = None
         now_point = _parse_timestamp(now)
         for quote in batch.quotes:
-            source_point: datetime | None = None
             if quote.source_ts is not None:
                 try:
-                    source_point = _parse_timestamp(quote.source_ts)
+                    _parse_timestamp(quote.source_ts)
                 except (AttributeError, TypeError, ValueError):
                     flags.add("INVALID_SOURCE_TIMESTAMP")
                     rejected += 1
@@ -352,18 +351,24 @@ class IngestionEngine:
                 # Durable ingestion time is owned by this post-acquisition
                 # product clock, never by provider-controlled quote payloads.
                 event = _stamp(event, now)
+                if event.source_id != batch.source_id:
+                    raise ValueError("normalizer returned mismatched source_id")
+                source_point = (
+                    _parse_timestamp(event.source_ts)
+                    if event.source_ts is not None
+                    else None
+                )
+                observed_point = _parse_timestamp(event.observed_ts)
             except (TypeError, ValueError):
                 flags.add("INVALID_QUOTE")
                 rejected += 1
                 continue
 
-            # Decision freshness uses provider source time when available and the
-            # canonical observation time otherwise. Health must classify the same
-            # temporal truth that MarketMirror.active_view will later enforce.
+            # Health must classify the exact temporal truth persisted in MarketEvent,
+            # because MarketMirror.active_view later makes decisions from these same
+            # normalized source/observation clocks.
             freshness_point = (
-                source_point
-                if source_point is not None
-                else _parse_timestamp(event.observed_ts)
+                source_point if source_point is not None else observed_point
             )
             age_seconds = (now_point - freshness_point).total_seconds()
             if age_seconds > self.policy.stale_after_seconds:

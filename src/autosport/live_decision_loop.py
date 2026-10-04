@@ -1919,6 +1919,7 @@ class PersistentLiveDecisionLoop:
                 store,
                 as_of=as_of,
                 max_age=self.max_quote_age,
+                require_live_receipt_authority=True,
             )
         finally:
             store.close()

@@ -1721,7 +1721,6 @@ def resolve_product_iid_run_execution(
     return result
 
 
-
 _RUN_EXECUTION_RECEIPT_FIELDS = (
     "experiment_id",
     "member_id",

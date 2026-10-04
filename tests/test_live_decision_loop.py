@@ -526,13 +526,9 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             stale_progress = stale._progress
             controller.stop()
 
-            with self.assertRaisesRegex(
-                LiveDecisionProgressError,
-                "control changed concurrently before pending publication",
-            ):
-                stale.run_cycle()
+            self.assertEqual(stale.run_cycle().status, LiveCycleStatus.STOPPED)
 
-            self.assertEqual(stale_observer.calls, 1)
+            self.assertEqual(stale_observer.calls, 0)
             self.assertEqual(stale._progress, stale_progress)
             self.assertEqual(
                 len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
@@ -551,6 +547,115 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             controller.close()
             stale.close()
             stopped.close()
+
+    def test_stale_cycle_rejects_newer_progress_before_provider_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            bootstrap = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            bootstrap.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(bootstrap.run_cycle().status, LiveCycleStatus.DECIDED)
+            bootstrap.close()
+
+            active = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            stale_observer = _DurableObserver(
+                workspace,
+                [
+                    (
+                        self._event(
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START + timedelta(seconds=2),
+                        ),
+                    )
+                ],
+            )
+            stale = self._loop(
+                workspace,
+                observer=stale_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            active._write_pending(
+                decision_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                market_state_sha256="d" * 64,
+                affected_input_ids=("input-a",),
+                gate="normal",
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "progress changed concurrently before cycle",
+            ):
+                stale.run_cycle()
+
+            self.assertEqual(stale_observer.calls, 0)
+            active.close()
+            stale.close()
+
+    def test_stale_cycle_rejects_registry_change_before_provider_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            bootstrap = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            bootstrap.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(bootstrap.run_cycle().status, LiveCycleStatus.DECIDED)
+            bootstrap.close()
+
+            active = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            stale_observer = _DurableObserver(
+                workspace,
+                [
+                    (
+                        self._event(
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START + timedelta(seconds=2),
+                        ),
+                    )
+                ],
+            )
+            stale = self._loop(
+                workspace,
+                observer=stale_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            active.register_input("input-b", selection_ids="selection-b")
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "dependency registry changed concurrently before cycle",
+            ):
+                stale.run_cycle()
+
+            self.assertEqual(stale_observer.calls, 0)
+            active.close()
+            stale.close()
 
     def test_unfinished_append_pending_recovers_before_durable_stop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

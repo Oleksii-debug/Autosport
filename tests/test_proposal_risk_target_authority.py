@@ -1745,6 +1745,97 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
                 market_inputs=(market_input,),
             )
 
+    def test_outcome_input_mapping_json_dump_root_rechecks_after_dispatch(self) -> None:
+        original = outcome_input_authority.json.dumps
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        outcome_input_authority._require_dispatch()
+        with (
+            patch.object(outcome_input_authority, "_JSON_DUMPS", fake),
+            patch.object(outcome_input_authority.json, "dumps", fake),
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskOutcomeInputMappingError,
+                "dispatch authority changed",
+            ):
+                outcome_input_authority._canonical_json_text({"safe": True})
+
+    def test_outcome_input_mapping_json_dump_code_mutation_rechecks_after_dispatch(
+        self,
+    ) -> None:
+        serializer = outcome_input_authority.json.dumps
+        original_code = serializer.__code__
+
+        def forged(*args: object, **kwargs: object) -> str:
+            return '{"forged":true}'
+
+        outcome_input_authority._require_dispatch()
+        try:
+            serializer.__code__ = forged.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskOutcomeInputMappingError,
+                "dispatch authority changed",
+            ):
+                outcome_input_authority._canonical_json_text({"safe": True})
+        finally:
+            serializer.__code__ = original_code
+
+    def test_outcome_input_mapping_json_load_root_rechecks_after_dispatch(self) -> None:
+        original = outcome_input_authority.json.loads
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        outcome_input_authority._require_dispatch()
+        with (
+            patch.object(outcome_input_authority, "_JSON_LOADS", fake),
+            patch.object(outcome_input_authority.json, "loads", fake),
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskOutcomeInputMappingError,
+                "dispatch authority changed",
+            ):
+                outcome_input_authority._target_market_requirements(object())
+
+    def test_outcome_input_mapping_json_load_code_mutation_rechecks_after_dispatch(
+        self,
+    ) -> None:
+        parser = outcome_input_authority.json.loads
+        original_code = parser.__code__
+
+        def forged(*args: object, **kwargs: object) -> object:
+            return {}
+
+        outcome_input_authority._require_dispatch()
+        try:
+            parser.__code__ = forged.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskOutcomeInputMappingError,
+                "dispatch authority changed",
+            ):
+                outcome_input_authority._target_market_requirements(object())
+        finally:
+            parser.__code__ = original_code
+
+    def test_outcome_input_mapping_sha_root_rechecks_after_dispatch(self) -> None:
+        original = outcome_input_authority.hashlib.sha256
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        outcome_input_authority._require_dispatch()
+        with (
+            patch.object(outcome_input_authority, "_HASHLIB_SHA256", fake),
+            patch.object(outcome_input_authority.hashlib, "sha256", fake),
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskOutcomeInputMappingError,
+                "dispatch authority changed",
+            ):
+                outcome_input_authority._digest({"safe": True})
+
 
 if __name__ == "__main__":
     unittest.main()

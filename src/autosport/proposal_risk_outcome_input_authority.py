@@ -77,8 +77,13 @@ _LOCK_EXIT_CODE = getattr(_LOCK_EXIT, "__code__", None)
 _ENSURE_DURABLE_FILE = ensure_durable_file
 _ENSURE_DURABLE_FILE_CODE = getattr(_ENSURE_DURABLE_FILE, "__code__", None)
 _JSON_DUMPS = json.dumps
+_JSON_DUMPS_EXPECTED = _JSON_DUMPS
+_JSON_DUMPS_CODE = getattr(_JSON_DUMPS, "__code__", None)
 _JSON_LOADS = json.loads
+_JSON_LOADS_EXPECTED = _JSON_LOADS
+_JSON_LOADS_CODE = getattr(_JSON_LOADS, "__code__", None)
 _HASHLIB_SHA256 = hashlib.sha256
+_HASHLIB_SHA256_EXPECTED = _HASHLIB_SHA256
 
 
 class ProductProposalRiskOutcomeInputMappingError(RuntimeError):
@@ -309,6 +314,14 @@ def _instant(value: object, name: str) -> datetime:
 
 
 def _canonical_json_text(value: object) -> str:
+    if (
+        _JSON_DUMPS is not _JSON_DUMPS_EXPECTED
+        or json.dumps is not _JSON_DUMPS_EXPECTED
+        or getattr(_JSON_DUMPS_EXPECTED, "__code__", None) is not _JSON_DUMPS_CODE
+    ):
+        raise ProductProposalRiskOutcomeInputMappingError(
+            "proposal risk outcome-input mapping dispatch authority changed"
+        )
     try:
         return _JSON_DUMPS(
             value,
@@ -324,6 +337,13 @@ def _canonical_json_text(value: object) -> str:
 
 
 def _digest(value: object) -> str:
+    if (
+        _HASHLIB_SHA256 is not _HASHLIB_SHA256_EXPECTED
+        or hashlib.sha256 is not _HASHLIB_SHA256_EXPECTED
+    ):
+        raise ProductProposalRiskOutcomeInputMappingError(
+            "proposal risk outcome-input mapping dispatch authority changed"
+        )
     return _HASHLIB_SHA256(_canonical_json_text(value).encode("utf-8")).hexdigest()
 
 
@@ -404,9 +424,14 @@ def _require_dispatch() -> None:
         or ensure_durable_file is not _ENSURE_DURABLE_FILE
         or getattr(_ENSURE_DURABLE_FILE, "__code__", None)
         is not _ENSURE_DURABLE_FILE_CODE
-        or json.dumps is not _JSON_DUMPS
-        or json.loads is not _JSON_LOADS
-        or hashlib.sha256 is not _HASHLIB_SHA256
+        or _JSON_DUMPS is not _JSON_DUMPS_EXPECTED
+        or json.dumps is not _JSON_DUMPS_EXPECTED
+        or getattr(_JSON_DUMPS_EXPECTED, "__code__", None) is not _JSON_DUMPS_CODE
+        or _JSON_LOADS is not _JSON_LOADS_EXPECTED
+        or json.loads is not _JSON_LOADS_EXPECTED
+        or getattr(_JSON_LOADS_EXPECTED, "__code__", None) is not _JSON_LOADS_CODE
+        or _HASHLIB_SHA256 is not _HASHLIB_SHA256_EXPECTED
+        or hashlib.sha256 is not _HASHLIB_SHA256_EXPECTED
         or _RESULT_FIELDS is not _RESULT_FIELDS_EXPECTED
         or _HELPER_WITNESSES is not _HELPER_WITNESSES_EXPECTED
         or any(
@@ -482,6 +507,14 @@ def _resolve_target(workspace: Path, target_sha256: str) -> ProductProposalRiskT
 def _target_market_requirements(
     target: ProductProposalRiskTarget,
 ) -> tuple[tuple[tuple[str, str, str, str, str], tuple[str, ...]], ...]:
+    if (
+        _JSON_LOADS is not _JSON_LOADS_EXPECTED
+        or json.loads is not _JSON_LOADS_EXPECTED
+        or getattr(_JSON_LOADS_EXPECTED, "__code__", None) is not _JSON_LOADS_CODE
+    ):
+        raise ProductProposalRiskOutcomeInputMappingError(
+            "proposal risk outcome-input mapping dispatch authority changed"
+        )
     requirements: dict[tuple[str, str, str, str, str], set[str]] = {}
     for context_index, raw_text in enumerate(target.candidate_context_json):
         if type(raw_text) is not str or not raw_text:

@@ -1725,44 +1725,18 @@ def _install_market_book_depth_authority():
         if not origin_at_read_start or not source_origin_authoritative(self):
             return observation
         observation_id = id(observation)
-        market_key = (observation.venue_id, observation.market_id)
-        definition = (
-            observation.ladder_type,
-            observation.line_range_min,
-            observation.line_range_max,
-            observation.line_range_interval,
-            observation.line_range_unit,
-        )
 
         def forget(current: object, *, key: int = observation_id) -> None:
-            with generation_lock:
-                existing = issued.get(key)
-                if existing is not None and existing[0] is current:
-                    issued.pop(key, None)
+            existing = issued.get(key)
+            if existing is not None and existing[0] is current:
+                issued.pop(key, None)
 
-        # listMarketCatalogue does not expose a monotonic MarketDescription
-        # version. Preserve the stronger fact we do have: once this process has
-        # observed an incompatible definition for the same exact Betfair market,
-        # older definition evidence can never become current again. Re-observing
-        # the same definition keeps the generation; A->B->A increments twice and
-        # therefore cannot re-authorize the original A receipt.
-        with generation_lock:
-            previous = latest_definitions.get(market_key)
-            if previous is None:
-                generation = 0
-            elif previous[1] == definition:
-                generation = previous[0]
-            else:
-                generation = previous[0] + 1
-            latest_definitions[market_key] = (generation, definition)
-            issued[observation_id] = (
-                ref(observation, forget),
-                fingerprint(observation),
-                ref(self),
-                acquisition_started_at,
-                generation,
-                market_key,
-            )
+        issued[observation_id] = (
+            ref(observation, forget),
+            fingerprint(observation),
+            ref(self),
+            acquisition_started_at,
+        )
         return observation
 
     def require_authoritative(
@@ -1911,18 +1885,44 @@ def _install_market_price_ladder_authority():
             return observation
 
         observation_id = id(observation)
+        market_key = (observation.venue_id, observation.market_id)
+        definition = (
+            observation.ladder_type,
+            observation.line_range_min,
+            observation.line_range_max,
+            observation.line_range_interval,
+            observation.line_range_unit,
+        )
 
         def forget(current: object, *, key: int = observation_id) -> None:
-            existing = issued.get(key)
-            if existing is not None and existing[0] is current:
-                issued.pop(key, None)
+            with generation_lock:
+                existing = issued.get(key)
+                if existing is not None and existing[0] is current:
+                    issued.pop(key, None)
 
-        issued[observation_id] = (
-            ref(observation, forget),
-            fingerprint(observation),
-            ref(self),
-            acquisition_started_at,
-        )
+        # listMarketCatalogue does not expose a monotonic MarketDescription
+        # version. Preserve the stronger fact we do have: once this process has
+        # observed an incompatible definition for the same exact Betfair market,
+        # older definition evidence can never become current again. Re-observing
+        # the same definition keeps the generation; A->B->A increments twice and
+        # therefore cannot re-authorize the original A receipt.
+        with generation_lock:
+            previous = latest_definitions.get(market_key)
+            if previous is None:
+                generation = 0
+            elif previous[1] == definition:
+                generation = previous[0]
+            else:
+                generation = previous[0] + 1
+            latest_definitions[market_key] = (generation, definition)
+            issued[observation_id] = (
+                ref(observation, forget),
+                fingerprint(observation),
+                ref(self),
+                acquisition_started_at,
+                generation,
+                market_key,
+            )
         return observation
 
     def require_authoritative(

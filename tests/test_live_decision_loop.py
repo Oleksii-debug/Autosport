@@ -97,6 +97,7 @@ class _EmptyProvider:
     def __init__(self) -> None:
         self.calls = 0
         self.on_read = None
+        self.error: Exception | None = None
 
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         del max_items
@@ -105,6 +106,10 @@ class _EmptyProvider:
         if hook is not None:
             self.on_read = None
             hook()
+        error = self.error
+        if error is not None:
+            self.error = None
+            raise error
         return ProviderBatch(source_id=self.source_id, quotes=())
 
 
@@ -448,6 +453,76 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(
                 factory.calls[-1],
                 ("input-a", (("selection-a", 2, "open"),)),
+            )
+            loop.close()
+
+    def test_provider_gap_reconciles_peer_append_committed_during_failed_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            provider = _EmptyProvider()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=self._scientific_registry(
+                    workspace,
+                    self._strategy_version(),
+                ),
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            def publish_from_peer() -> None:
+                peer_store = SQLiteMarketStore(workspace / "market.db")
+                try:
+                    MarketEventBus(peer_store).publish_many(
+                        (
+                            self._event(
+                                sequence=2,
+                                odds="2.10",
+                                observed=self.START + timedelta(seconds=2),
+                            ),
+                        )
+                    )
+                finally:
+                    peer_store.close()
+
+            provider.on_read = publish_from_peer
+            provider.error = ProviderUnavailableError("simulated provider outage")
+            clock.value = self.START + timedelta(seconds=2)
+            gap = loop.run_cycle()
+
+            self.assertEqual(gap.status, LiveCycleStatus.PROVIDER_GAP)
+            self.assertEqual(provider.calls, 2)
+            visible = loop.dependencies.decision_view(
+                "input-a",
+                as_of=clock.value,
+                max_age=timedelta(seconds=5),
+            )
+            self.assertEqual(
+                tuple((event.selection_id, event.sequence) for event in visible.events),
+                (("selection-a", 2),),
+            )
+            latest = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[-1]
+            self.assertEqual(latest.payload["gate"], "provider_gap")
+            self.assertEqual(
+                latest.payload["market_state_sha256"],
+                loop._market_state_sha256(),
             )
             loop.close()
 

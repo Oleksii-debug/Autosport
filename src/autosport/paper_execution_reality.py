@@ -215,6 +215,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     raise PaperExecutionIntegrityError(
                         "PAPER exposure-scope payload is invalid"
                     )
+                binding_action_ids: list[str] = []
                 for binding in payload["bindings"]:
                     if (
                         type(binding) is not dict
@@ -225,12 +226,80 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                             "bankroll_id",
                             "currency",
                         }
-                        or type(binding.get("action_id")) is not str
-                        or not binding["action_id"]
                     ):
                         raise PaperExecutionIntegrityError(
                             "PAPER exposure-scope binding is invalid"
                         )
+                    try:
+                        action_id = _impl._text(
+                            binding.get("action_id"),
+                            "scope action_id",
+                        )
+                        sport = binding.get("sport")
+                        if sport is not None:
+                            _impl._text(sport, "scope sport")
+                        bankroll_id = binding.get("bankroll_id")
+                        currency = binding.get("currency")
+                        if (bankroll_id is None) != (currency is None):
+                            raise ValueError(
+                                "scope bankroll/currency must be paired"
+                            )
+                        if bankroll_id is not None:
+                            _impl._text(
+                                bankroll_id,
+                                "scope bankroll_id",
+                            )
+                            currency = _impl._text(
+                                currency,
+                                "scope currency",
+                            )
+                            if (
+                                len(currency) != 3
+                                or not currency.isascii()
+                                or not currency.isalpha()
+                                or currency != currency.upper()
+                            ):
+                                raise ValueError(
+                                    "scope currency is noncanonical"
+                                )
+                    except (TypeError, ValueError) as exc:
+                        raise PaperExecutionIntegrityError(
+                            "PAPER exposure-scope binding is invalid"
+                        ) from exc
+                    binding_action_ids.append(action_id)
+                if len(binding_action_ids) != len(
+                    set(binding_action_ids)
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER exposure-scope bindings are not unique"
+                    )
+                try:
+                    _impl._text(
+                        payload.get("plan_id"),
+                        "scope plan_id",
+                    )
+                    _impl._text(
+                        payload.get("plan_fingerprint"),
+                        "scope plan_fingerprint",
+                    )
+                    evidence_sha256 = _impl._text(
+                        payload.get("intent_evidence_sha256"),
+                        "scope intent_evidence_sha256",
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise PaperExecutionIntegrityError(
+                        "PAPER exposure-scope identity is invalid"
+                    ) from exc
+                if (
+                    len(evidence_sha256) != 64
+                    or any(
+                        char not in "0123456789abcdef"
+                        for char in evidence_sha256
+                    )
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER exposure-scope evidence digest is invalid"
+                    )
                 scope_body = dict(payload)
                 binding_sha256 = scope_body.pop("binding_sha256")
                 if binding_sha256 != _impl._digest(scope_body):

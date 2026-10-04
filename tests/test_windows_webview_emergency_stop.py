@@ -165,6 +165,40 @@ def test_webview_emergency_stop_is_not_gated_by_ordinary_busy_or_closing_state(t
     assert authority.current().mode is ExecutionAuthorityMode.STOPPED
 
 
+def test_webview_emergency_stop_authority_rebind_fails_closed_without_forged_calls(
+    tmp_path,
+):
+    class ForgedEmergencyStop:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def status(self):
+            self.calls.append("status")
+            raise AssertionError("forged status must never be called")
+
+        def activate(self):
+            self.calls.append("activate")
+            raise AssertionError("forged activate must never be called")
+
+    controller = EmergencyStopWebController(tmp_path)
+    original = controller._emergency_stop
+    forged = ForgedEmergencyStop()
+    controller.__dict__["_emergency_stop"] = forged
+    try:
+        projected = controller.state()["emergency_stop"]
+        result = controller.dispatch(_command("forged-stop-authority"))
+    finally:
+        controller.__dict__["_emergency_stop"] = original
+
+    assert projected["available"] is False
+    assert projected["execution_blocked"] is True
+    assert projected["integrity_confirmed"] is False
+    assert result["status"] == "rejected"
+    assert "НЕ ПІДТВЕРДЖЕНО" in result["message"]
+    assert forged.calls == []
+    controller.close()
+
+
 def test_webview_emergency_stop_corrupt_authority_fails_closed_without_overwrite(tmp_path):
     path = execution_stop_path(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)

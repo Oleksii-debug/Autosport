@@ -44,15 +44,33 @@ class EmergencyStopWebController(AutosportWebController):
         emergency_stop: WindowsEmergencyStopBridge | None = None,
     ) -> None:
         super().__init__(workspace)
-        self._emergency_stop = emergency_stop or WindowsEmergencyStopBridge.for_workspace(
+        stop_authority = emergency_stop or WindowsEmergencyStopBridge.for_workspace(
             self.workspace
         )
+        object.__setattr__(self, "_emergency_stop", stop_authority)
+        object.__setattr__(self, "_emergency_stop_witness", stop_authority)
         # Emergency STOP is a safety lane, not an ordinary controller command.
         # Its own lock/cache preserve duplicate safety without waiting for
         # AutosportWebController._lock, which may be held by a slow command.
         self._emergency_dispatch_lock = threading.RLock()
         self._retired_request_ids: set[bytes] = set()
         self._request_replay_saturated = False
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in {"_emergency_stop", "_emergency_stop_witness"} and hasattr(
+            self, "_emergency_stop_witness"
+        ):
+            raise RuntimeError("emergency STOP authority is immutable")
+        super().__setattr__(name, value)
+
+    def _emergency_stop_authority(self) -> WindowsEmergencyStopBridge | None:
+        authority = getattr(self, "_emergency_stop_witness", None)
+        if (
+            not isinstance(authority, WindowsEmergencyStopBridge)
+            or getattr(self, "_emergency_stop", None) is not authority
+        ):
+            return None
+        return authority
 
     def _reserve_request_identity(
         self,
@@ -110,7 +128,22 @@ class EmergencyStopWebController(AutosportWebController):
 
     def state(self) -> dict[str, Any]:
         state = super().state()
-        stop_status = self._emergency_stop.status()
+        authority = self._emergency_stop_authority()
+        if authority is None:
+            state["emergency_stop"] = {
+                "status": (
+                    "Стан аварійного STOP недоступний через порушення цілісності "
+                    "локальної authority; допуск нових виконань має залишатися заблокованим."
+                ),
+                "available": False,
+                "execution_blocked": True,
+                "mode": None,
+                "revision": None,
+                "integrity_confirmed": False,
+                "initialized": False,
+            }
+            return state
+        stop_status = authority.status()
         state["emergency_stop"] = {
             "status": stop_status.message_uk,
             "available": stop_status.available,
@@ -123,7 +156,17 @@ class EmergencyStopWebController(AutosportWebController):
         return state
 
     def _activate_emergency_stop(self) -> dict[str, Any]:
-        result = self._emergency_stop.activate()
+        authority = self._emergency_stop_authority()
+        if authority is None:
+            return {
+                "status": "rejected",
+                "message": (
+                    "АВАРІЙНИЙ STOP НЕ ПІДТВЕРДЖЕНО. "
+                    "Локальну authority підмінено або пошкоджено; "
+                    "нові виконання мають залишатися заблокованими."
+                ),
+            }
+        result = authority.activate()
         if not result.stopped:
             return {"status": "rejected", "message": result.message_uk}
         return {

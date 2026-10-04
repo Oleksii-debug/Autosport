@@ -97,8 +97,10 @@ def _quote_key(
     market_id: str,
     selection_id: str,
     sport: str | None,
+    *,
+    _quote_identity_fn=_quote_identity,
 ) -> str:
-    return _quote_identity(event_id, market_id, selection_id, sport)
+    return _quote_identity_fn(event_id, market_id, selection_id, sport)
 
 
 def _canonical_hash(value: object, field_name: str) -> str:
@@ -156,15 +158,20 @@ def _decimal_from_serialized(
     return result
 
 
-def _canonical_json_hash(payload: object) -> str:
-    encoded = json.dumps(
+def _canonical_json_hash(
+    payload: object,
+    *,
+    _json_dumps=json.dumps,
+    _sha256=hashlib.sha256,
+) -> str:
+    encoded = _json_dumps(
         payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return _sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True, slots=True, order=True)

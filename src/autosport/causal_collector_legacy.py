@@ -957,8 +957,10 @@ class DesktopDeltaConsumer:
     are durable. ``lookup_application_receipt`` recovers only such complete receipts.
     ``acknowledgement_clock`` separates operational ACK time from the causal ``as_of``
     visibility cutoff. ``on_application_receipt`` runs only after that durable receipt
-    exists and ACK timing has been validated, but before the ACK mutation. If delivery
-    fails, the ACK remains absent and recovery replays the callback from the durable
+    exists and a pre-delivery ACK-clock fence has been validated. When an operational
+    clock exists, it is sampled again after delivery and that second sample is persisted
+    as the ACK timestamp; rollback behind the pre-delivery sample leaves ACK absent. If
+    delivery fails, the ACK remains absent and recovery replays the callback from the durable
     receipt without reapplying the canonical event/health transaction.
     Separate post-receipt health mutation is rejected because it creates an unrecoverable
     crash boundary between event persistence and desktop acknowledgement.
@@ -1000,14 +1002,16 @@ class DesktopDeltaConsumer:
         receipt: DesktopApplicationReceipt,
         *,
         cutoff: datetime,
+        clock: Callable[[], str] | None,
+        not_before: datetime | None = None,
     ) -> str:
-        """Validate an operational ACK clock before any post-receipt delivery."""
-        if self._acknowledgement_clock is None:
+        """Validate one exact operational ACK-clock sample for this handoff."""
+        if clock is None:
             acknowledged = cutoff
         else:
             try:
                 acknowledged = _instant(
-                    self._acknowledgement_clock(),
+                    clock(),
                     "acknowledged_at",
                 )
             except (TypeError, ValueError) as exc:
@@ -1017,6 +1021,10 @@ class DesktopDeltaConsumer:
             if acknowledged < cutoff:
                 raise ApplicationReceiptError(
                     "desktop acknowledgement clock moved before the causal drain cutoff"
+                )
+            if not_before is not None and acknowledged < not_before:
+                raise ApplicationReceiptError(
+                    "desktop acknowledgement clock moved backward after receipt delivery"
                 )
 
         available = _instant(delta.desktop_available_at, "desktop_available_at")
@@ -1081,13 +1089,27 @@ class DesktopDeltaConsumer:
                         raise ApplicationReceiptError(
                             f"durable application receipt is not bound to delta {delta.delta_id}"
                         )
+                    acknowledgement_clock = self._acknowledgement_clock
+                    on_application_receipt = self._on_application_receipt
                     acknowledged_at = self._acknowledged_at(
                         delta,
                         durable_receipt,
                         cutoff=now,
+                        clock=acknowledgement_clock,
                     )
-                    if self._on_application_receipt is not None:
-                        self._on_application_receipt(delta, durable_receipt)
+                    if on_application_receipt is not None:
+                        on_application_receipt(delta, durable_receipt)
+                        if acknowledgement_clock is not None:
+                            acknowledged_at = self._acknowledged_at(
+                                delta,
+                                durable_receipt,
+                                cutoff=now,
+                                clock=acknowledgement_clock,
+                                not_before=_instant(
+                                    acknowledged_at,
+                                    "pre_delivery_acknowledged_at",
+                                ),
+                            )
                     self.checkpoint._ack_locked(
                         delta,
                         application_receipt=durable_receipt,
@@ -1110,13 +1132,27 @@ class DesktopDeltaConsumer:
                 _validate_receipt(receipt)
                 if receipt.delta_id != delta.delta_id or receipt.canonical_event_digest != digest:
                     raise ApplicationReceiptError("application receipt is not bound to this delta/digest")
+                acknowledgement_clock = self._acknowledgement_clock
+                on_application_receipt = self._on_application_receipt
                 acknowledged_at = self._acknowledged_at(
                     delta,
                     receipt,
                     cutoff=now,
+                    clock=acknowledgement_clock,
                 )
-                if self._on_application_receipt is not None:
-                    self._on_application_receipt(delta, receipt)
+                if on_application_receipt is not None:
+                    on_application_receipt(delta, receipt)
+                    if acknowledgement_clock is not None:
+                        acknowledged_at = self._acknowledged_at(
+                            delta,
+                            receipt,
+                            cutoff=now,
+                            clock=acknowledgement_clock,
+                            not_before=_instant(
+                                acknowledged_at,
+                                "pre_delivery_acknowledged_at",
+                            ),
+                        )
                 self.checkpoint._ack_locked(
                     delta,
                     application_receipt=receipt,

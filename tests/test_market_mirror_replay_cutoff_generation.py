@@ -4813,6 +4813,12 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     [(1, 1)],
                 )
 
+                # Read-only frozen-prefix recovery is intentionally weaker than a
+                # fresh economic publication gate. New economics must fail closed
+                # while any later durable tail lacks product authority.
+                with self.assertRaises(MonotonicAuthorityRollbackError):
+                    store.require_current_append_authority_with_boundary(1)
+
                 # The direct generation-2 tail is not machine-authorized and cannot
                 # be promoted merely because its SQLite numbering is contiguous.
                 with self.assertRaises(MonotonicAuthorityRollbackError):

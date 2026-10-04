@@ -2327,6 +2327,44 @@ class SQLiteMarketStore:
                     self.connection.rollback()
                     raise
 
+    def require_current_append_authority_with_boundary(
+        self,
+        max_generation: int,
+    ) -> None:
+        """Prove both one sampled boundary and the complete current append authority.
+
+        Live economic publication uses this stronger gate: the selected historical
+        boundary must be an exact committed transition, and every later durable
+        positive generation currently present must also be independently product-issued.
+        Read-only crash recovery uses require_committed_append_generation() instead so
+        a later unissued tail cannot revoke an older immutable committed prefix.
+        """
+
+        if type(max_generation) is not int or max_generation < 0:
+            raise ValueError("max_generation must be a non-negative int")
+
+        authority = self._market_append_authority()
+        with self._market_append_issuance_lock(authority):
+            with self._connection_lock:
+                self.connection.execute("BEGIN")
+                try:
+                    _validate_canonical_table(self.connection, "market_events")
+                    self._validate_causal_replay_state()
+                    self._require_product_issued_positive_history(authority)
+                    current_head = self._positive_append_generation_head()
+                    if max_generation > current_head:
+                        raise MonotonicAuthorityRollbackError(
+                            "requested market append boundary exceeds committed authority"
+                        )
+                    self._require_committed_append_authority_through(
+                        authority,
+                        max_generation,
+                    )
+                    self._commit_stable_database_path()
+                except BaseException:
+                    self.connection.rollback()
+                    raise
+
     def events_at_committed_append_boundary(
         self,
         max_generation: int,

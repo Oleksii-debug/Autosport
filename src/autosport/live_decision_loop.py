@@ -2499,11 +2499,15 @@ class PersistentLiveDecisionLoop:
                 raise LiveDecisionProgressError(
                     "decision market frontier lost its canonical store before publication"
                 )
-            # append_generation_hint() is intentionally not authority.  Prove the
-            # exact boundary only for a cycle that is about to publish economics.
-            # A later append may already exist; proving this immutable prefix still
-            # binds recovery to the corpus that existed at the selected cutoff.
-            store.require_committed_append_generation(market_append_generation)
+            # append_generation_hint() is intentionally not authority. Economic
+            # publication proves both the exact sampled boundary and the complete
+            # current tail: a later canonical product append is safe and belongs to
+            # the next cycle, but an unissued/tampered tail must fail closed before
+            # PENDING becomes durable. Restart recovery later consumes only the
+            # already-proven immutable prefix.
+            store.require_current_append_authority_with_boundary(
+                market_append_generation
+            )
         with WorkspaceEconomicLock(self.workspace):
             durable_control = self._load_control()
             if durable_control is None:

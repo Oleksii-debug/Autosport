@@ -373,8 +373,8 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 ) as proven_current,
                 patch.object(
                     live_store,
-                    "require_committed_append_generation",
-                    wraps=live_store.require_committed_append_generation,
+                    "require_current_append_authority_with_boundary",
+                    wraps=live_store.require_current_append_authority_with_boundary,
                 ) as proven_frontier,
             ):
                 clock.value = self.START + timedelta(seconds=2)

@@ -758,6 +758,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     "settlement_learning_handoff": (
                         coordinator.settlement_learning_handoff
                     ),
+                    "_settlement_source_id": coordinator._settlement_source_id,
                     "clock": coordinator.clock,
                     "causal_view": coordinator.causal_view,
                     "initial_bankroll": coordinator.initial_bankroll,

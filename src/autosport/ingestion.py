@@ -346,11 +346,17 @@ class IngestionEngine:
         # acquisition/validation/normalization already succeeded.
         ordered_flags = tuple(sorted(flags))
         try:
-            accepted = (
-                MarketEventBus._publish_many_live_ingestion(self.bus, normalized)
-                if isinstance(self.bus, MarketEventBus)
-                else self.bus.publish_many(normalized)
-            )
+            if type(self.bus) is MarketEventBus:
+                accepted = MarketEventBus._publish_many_live_ingestion(
+                    self.bus,
+                    normalized,
+                )
+            elif isinstance(self.bus, MarketEventBus):
+                # Subclasses are non-canonical and stay provenance-neutral even if
+                # they override publication methods.
+                accepted = MarketEventBus.publish_many(self.bus, normalized)
+            else:
+                accepted = self.bus.publish_many(normalized)
         except MarketEventDeliveryError as delivery_error:
             # MarketEventDeliveryError can only be raised after transactional
             # persistence succeeds. Preserve the exact storage-derived outcome in

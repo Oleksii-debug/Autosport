@@ -43,6 +43,10 @@ _STORE_TYPE = _settlement.BetfairSettlementRevisionStore
 
 _ORIGINAL_INGEST = _STORE_TYPE.ingest
 _ORIGINAL_INGEST_CODE = getattr(_ORIGINAL_INGEST, "__code__", None)
+_STORE_RELOAD = vars(_STORE_TYPE).get("_reload")
+_STORE_RELOAD_CODE = getattr(_STORE_RELOAD, "__code__", None)
+_STORE_APPEND = vars(_STORE_TYPE).get("_append")
+_STORE_APPEND_CODE = getattr(_STORE_APPEND, "__code__", None)
 _ACTION_TO_DICT = vars(_ACTION_TYPE).get("to_dict")
 _ACTION_TO_DICT_CODE = getattr(_ACTION_TO_DICT, "__code__", None)
 _CAPTURE_VERIFY = vars(_CAPTURE_TYPE).get("assert_authoritative")
@@ -71,6 +75,10 @@ _LEDGER_DISPATCH_CODE = {
 
 if (
     _ORIGINAL_INGEST_CODE is None
+    or not callable(_STORE_RELOAD)
+    or _STORE_RELOAD_CODE is None
+    or not callable(_STORE_APPEND)
+    or _STORE_APPEND_CODE is None
     or not callable(_ACTION_TO_DICT)
     or _ACTION_TO_DICT_CODE is None
     or not callable(_CAPTURE_VERIFY)
@@ -90,6 +98,10 @@ def _require_dispatch() -> None:
     if (
         _STORE_TYPE.ingest is not _ingest_with_exact_authority
         or getattr(_ORIGINAL_INGEST, "__code__", None) is not _ORIGINAL_INGEST_CODE
+        or vars(_STORE_TYPE).get("_reload") is not _STORE_RELOAD
+        or getattr(_STORE_RELOAD, "__code__", None) is not _STORE_RELOAD_CODE
+        or vars(_STORE_TYPE).get("_append") is not _STORE_APPEND
+        or getattr(_STORE_APPEND, "__code__", None) is not _STORE_APPEND_CODE
         or vars(_ACTION_TYPE).get("to_dict") is not _ACTION_TO_DICT
         or getattr(_ACTION_TO_DICT, "__code__", None) is not _ACTION_TO_DICT_CODE
         or vars(_CAPTURE_TYPE).get("assert_authoritative") is not _CAPTURE_VERIFY

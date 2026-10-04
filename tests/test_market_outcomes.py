@@ -244,6 +244,14 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
                 verified_authority=copied_reverified,
             )
 
+        type_confused_schema = copy.deepcopy(raw)
+        type_confused_schema["schema_version"] = True
+        with self.assertRaisesRegex(ValueError, "unsupported market outcome authority schema"):
+            MarketSettlementOutcomeAuthority.from_dict(
+                type_confused_schema,
+                verified_authority=reverified,
+            )
+
         tampered_count = copy.deepcopy(raw)
         tampered_count["terminal_state_count"] += 1
         with self.assertRaisesRegex(

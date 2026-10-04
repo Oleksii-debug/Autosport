@@ -6,6 +6,7 @@ import unittest
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.causal_collector import (
     CollectorDelta,
@@ -460,6 +461,107 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     self.assertEqual(second.settled_ticket_ids, ())
                     settled_again = PaperBook.load(root / "paper_book.json")
                     self.assertEqual(settled_again.balance, Decimal("110"))
+                    self.assertEqual(authority.calls, 2)
+                finally:
+                    restarted_store.close()
+            finally:
+                store.close()
+
+    def test_crash_after_book_save_before_session_receipt_replays_idempotently(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:crash-window",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-crash-window",
+                    position=1,
+                    events=(event,),
+                )
+            )
+
+            book = PaperBook("100")
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+            )
+            book.save(root / "paper_book.json")
+
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="provider-result:crash-window",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="outcome-crash-window",
+                evidence_sha256="c" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            authority = _OutcomeAuthority(resolution)
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                with patch.object(
+                    coordinator._state,
+                    "record_success",
+                    side_effect=RuntimeError(
+                        "synthetic crash before session receipt commit"
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "synthetic crash before session receipt commit",
+                    ):
+                        coordinator.tick()
+
+                after_crash = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(after_crash.balance, Decimal("110"))
+                self.assertEqual(
+                    after_crash.tickets[ticket.ticket_id].status.value,
+                    "won",
+                )
+                crashed_status = coordinator.status()
+                self.assertEqual(crashed_status.cycles_completed, 0)
+                self.assertEqual(crashed_status.settlement_evidence, ())
+
+                restarted, restarted_store, *_ = _build_coordinator(
+                    root,
+                    source,
+                    clock,
+                    outcome_authority=authority,
+                )
+                try:
+                    recovered = restarted.tick()
+                    self.assertEqual(recovered.settled_ticket_ids, ())
+                    after_replay = PaperBook.load(root / "paper_book.json")
+                    self.assertEqual(after_replay.balance, Decimal("110"))
+                    status = restarted.status()
+                    self.assertEqual(status.cycles_completed, 1)
+                    self.assertEqual(status.settlement_evidence_count, 1)
+                    self.assertEqual(
+                        status.settlement_evidence[0]["evidence_id"],
+                        "outcome-crash-window",
+                    )
+                    self.assertIsNotNone(
+                        status.settlement_evidence[0][
+                            "quote_outcomes_sha256"
+                        ]
+                    )
                     self.assertEqual(authority.calls, 2)
                 finally:
                     restarted_store.close()

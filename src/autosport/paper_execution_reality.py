@@ -563,22 +563,12 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             _, existing_attempts = self._attempts_in_event_order(
                 run_events
             )
-            if attempt.sequence < len(existing_attempts):
-                if existing_attempts[attempt.sequence] != attempt:
-                    raise PaperExecutionIntegrityError(
-                        "durable attempt sequence already has different payload"
-                    )
-                return
-            if attempt.sequence != len(existing_attempts):
+            retry_existing = attempt.sequence < len(
+                existing_attempts
+            )
+            if attempt.sequence > len(existing_attempts):
                 raise PaperExecutionStateError(
                     "attempt sequence must extend the exact durable prefix"
-                )
-            if any(
-                event["event_type"] == "RUN_COMPLETED"
-                for event in run_events
-            ):
-                raise PaperExecutionStateError(
-                    "attempt cannot be appended after RUN_COMPLETED"
                 )
             reservation = reservations[0]["payload"]
             action_ids = reservation["action_ids"]
@@ -623,6 +613,19 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             ):
                 raise PaperExecutionStateError(
                     "attempt conflicts with reserved observed authority"
+                )
+            if retry_existing:
+                if existing_attempts[attempt.sequence] != attempt:
+                    raise PaperExecutionIntegrityError(
+                        "durable attempt sequence already has different payload"
+                    )
+                return
+            if any(
+                event["event_type"] == "RUN_COMPLETED"
+                for event in run_events
+            ):
+                raise PaperExecutionStateError(
+                    "attempt cannot be appended after RUN_COMPLETED"
                 )
             if (
                 existing_attempts

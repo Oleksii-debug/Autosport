@@ -128,6 +128,61 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertTrue(store.has_trusted_live_receipt(trusted[0]))
             store.close()
 
+    def test_live_retry_uses_sealed_market_event_codec_descriptors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+
+            with (
+                patch.object(
+                    MarketEvent,
+                    "from_dict",
+                    side_effect=AssertionError("mutable from_dict descriptor must not be consulted"),
+                ),
+                patch.object(
+                    MarketEvent,
+                    "to_dict",
+                    side_effect=AssertionError("mutable to_dict descriptor must not be consulted"),
+                ),
+            ):
+                accepted = store._append_live_batch_accepted([event])
+
+            self.assertEqual(accepted, [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_trusted_live_reads_use_sealed_market_event_codec_descriptors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            self._ingest(store)
+            expected = store.trusted_live_events()[0]
+
+            with (
+                patch.object(
+                    MarketEvent,
+                    "from_dict",
+                    side_effect=AssertionError("mutable from_dict descriptor must not be consulted"),
+                ),
+                patch.object(
+                    MarketEvent,
+                    "to_dict",
+                    side_effect=AssertionError("mutable to_dict descriptor must not be consulted"),
+                ),
+            ):
+                trusted = store.trusted_live_events()
+                current = store.trusted_live_current_by_source()
+                has_receipt = store.has_trusted_live_receipt(expected)
+
+            self.assertEqual(trusted, [expected])
+            self.assertEqual(
+                current[(expected.source_id, expected.quote_key)],
+                expected,
+            )
+            self.assertTrue(has_receipt)
+            store.close()
+
     def test_live_receipt_self_type_authority_survives_module_class_rebind(self) -> None:
         class PoisonStore(SQLiteMarketStore):
             pass
@@ -428,6 +483,39 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
                 market_bus_module,
                 "deepcopy",
                 side_effect=AssertionError("mutable deepcopy global must not be consulted"),
+            ):
+                accepted = MarketEventBus._publish_many_live_ingestion(bus, [event])
+
+            self.assertEqual(accepted, 1)
+            self.assertEqual(delivered, [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_live_bus_snapshot_ignores_market_event_copy_and_codec_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            bus = MarketEventBus(store)
+            delivered = []
+            bus.subscribe(delivered.append)
+            event = self._direct_event(sequence=1)
+
+            with (
+                patch.object(
+                    MarketEvent,
+                    "__deepcopy__",
+                    side_effect=AssertionError("mutable __deepcopy__ must not control live snapshots"),
+                    create=True,
+                ),
+                patch.object(
+                    MarketEvent,
+                    "from_dict",
+                    side_effect=AssertionError("mutable from_dict descriptor must not be consulted"),
+                ),
+                patch.object(
+                    MarketEvent,
+                    "to_dict",
+                    side_effect=AssertionError("mutable to_dict descriptor must not be consulted"),
+                ),
             ):
                 accepted = MarketEventBus._publish_many_live_ingestion(bus, [event])
 

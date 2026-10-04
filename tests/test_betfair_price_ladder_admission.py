@@ -5,6 +5,7 @@ from datetime import timedelta
 from decimal import Decimal, localcontext
 import json
 from threading import Event, Thread
+from time import monotonic, sleep
 import urllib.request as urllib_request
 
 import pytest
@@ -395,6 +396,29 @@ def test_out_of_order_incompatible_definition_reads_fail_closed_until_fresh_read
         match="lacks canonical direct Betfair provider IO origin",
     ):
         _assess(newer, Decimal("2.01"))
+
+
+def test_cached_positive_admission_expires_and_reread_cannot_rejuvenate_it():
+    transport = PriceLadderTransport("CLASSIC")
+    receipt, client = _canonical_receipt(transport)
+    result = assess_betfair_price_ladder_admission(
+        receipt,
+        Decimal("2.00"),
+        max_evidence_age=timedelta(milliseconds=500),
+    )
+    assert result.admissible is True
+
+    deadline = monotonic() + 3.0
+    while result.admissible and monotonic() < deadline:
+        sleep(0.02)
+    assert result.admissible is False
+
+    # A later same-definition receipt may establish fresh authority for a new
+    # decision, but it must not rejuvenate the expired cached result.
+    fresh_receipt = _canonical_read(client, transport)
+    fresh_result = _assess(fresh_receipt, Decimal("2.00"))
+    assert fresh_result.admissible is True
+    assert result.admissible is False
 
 
 def test_same_market_definition_reread_preserves_current_generation():

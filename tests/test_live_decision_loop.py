@@ -5892,6 +5892,63 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(final.status, LiveCycleStatus.DECIDED)
             self.assertGreater((workspace / "decisions.jsonl").stat().st_size, before_size)
 
+    def test_committed_zero_stake_rejects_forged_execution_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+            first.close()
+
+            ledger_path = workspace / "decisions.jsonl"
+            envelope = json.loads(ledger_path.read_text(encoding="utf-8"))
+            record = envelope["record"]
+            record["payload"]["paper_execution"] = {
+                "schema": "autosport.paper_execution_adoption",
+                "schema_version": 1,
+                "plan_id": "forged-plan",
+                "plan_fingerprint": "forged-plan-fingerprint",
+                "model_fingerprint": "forged-model-fingerprint",
+                "run_id": "forged-run",
+                "intent_evidence_json": "{}",
+            }
+            canonical = JsonlDecisionLedger._canonical_record(record)
+            envelope["sha256"] = hashlib.sha256(
+                canonical.encode("utf-8")
+            ).hexdigest()
+            ledger_path.write_text(
+                json.dumps(
+                    envelope,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            JsonlDecisionLedger(ledger_path).verify_integrity()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "unexpected execution evidence",
+            ):
+                self._loop(
+                    workspace,
+                    observer=resumed_observer,
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                )
+            self.assertEqual(resumed_observer.calls, 0)
+
     def test_restart_rejects_semantically_rehashed_committed_plan_tamper(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

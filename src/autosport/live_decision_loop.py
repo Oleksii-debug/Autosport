@@ -3047,7 +3047,8 @@ class PersistentLiveDecisionLoop:
             or type(scope.get("bindings")) is not list
         ):
             raise DecisionLedgerIntegrityError(
-                "committed live decision #623 exposure scope conflicts with decision evidence"
+                "committed live decision #623 exposure scope conflicts with "
+                "decision evidence"
             )
         bindings = scope["bindings"]
         if tuple(

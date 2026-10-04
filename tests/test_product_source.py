@@ -149,6 +149,52 @@ class ParlayApiProductSourceTests(unittest.TestCase):
         )
         self.assertEqual(instant.microsecond, 123456)
 
+    def test_truncated_provider_page_must_fill_requested_acquisition_bound(self) -> None:
+        batch = ProviderBatch(
+            source_id=_SOURCE_ID,
+            quotes=(_quote(),),
+            cursor="snapshot-1",
+            quality_flags=("TRUNCATED_BATCH",),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([batch]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "must fill requested acquisition page",
+            ):
+                source.fetch_catalog_page(None)
+
+    def test_truncated_provider_page_fails_at_exact_snapshot_capacity(self) -> None:
+        batch = ProviderBatch(
+            source_id=_SOURCE_ID,
+            quotes=(_quote(),),
+            cursor="snapshot-1",
+            quality_flags=("TRUNCATED_BATCH",),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([batch]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with (
+                patch.object(ParlayApiProductSource, "_READ_BATCH_ITEMS", 1),
+                patch.object(ParlayApiProductSource, "_MAX_SNAPSHOT_ITEMS", 1),
+                self.assertRaisesRegex(
+                    ProductSourcePayloadError,
+                    "exceeds bounded source capacity",
+                ),
+            ):
+                source.fetch_catalog_page(None)
+
     def test_snapshot_becomes_restart_safe_catalog_delta_and_event(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"

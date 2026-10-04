@@ -832,14 +832,21 @@ class ParlayApiProductSource:
                 raise ProductSourcePayloadError(
                     "provider snapshot cursor changed while draining one snapshot"
                 )
+            truncated = "TRUNCATED_BATCH" in batch.quality_flags
+            if truncated and len(batch.quotes) != self._READ_BATCH_ITEMS:
+                raise ProductSourcePayloadError(
+                    "truncated provider batch must fill requested acquisition page"
+                )
             quotes.extend(batch.quotes)
-            if len(quotes) > self._MAX_SNAPSHOT_ITEMS:
-                raise ProductSourcePayloadError("provider snapshot exceeds bounded source capacity")
+            if len(quotes) > self._MAX_SNAPSHOT_ITEMS or (
+                truncated and len(quotes) == self._MAX_SNAPSHOT_ITEMS
+            ):
+                raise ProductSourcePayloadError(
+                    "provider snapshot exceeds bounded source capacity"
+                )
             flags.update(flag for flag in batch.quality_flags if flag != "TRUNCATED_BATCH")
-            if "TRUNCATED_BATCH" not in batch.quality_flags:
+            if not truncated:
                 break
-            if not batch.quotes:
-                raise ProductSourcePayloadError("provider returned empty truncated snapshot page")
         assert cursor is not None
         return cursor, tuple(quotes), tuple(sorted(flags))
 

@@ -318,6 +318,28 @@ def test_all_required_bare_labels_cannot_mint_actionable_truth(
     assert not hasattr(evaluation, "positive_action_candidate")
     assert not hasattr(evaluation, "proof_gate_decision")
 
+
+def test_execution_authorized_requires_exact_bool_contract_value() -> None:
+    contract = proof_contract_for(
+        StrategyClass.ARBITRAGE,
+        claims_probability_edge=False,
+    )
+
+    with pytest.raises(
+        StrategyProofContractError,
+        match="execution_authorized must be a bool",
+    ):
+        StrategyProofEvaluation(
+            strategy_class=StrategyClass.ARBITRAGE,
+            claims_probability_edge=False,
+            required_proofs=contract.required_proofs,
+            present_proofs=contract.required_proofs,
+            missing_proofs=(),
+            required_labels_present=True,
+            execution_authorized=0,  # type: ignore[arg-type]
+        )
+
+
 class _HostileProofSet(frozenset):
     def __iter__(self):
         raise AssertionError("hostile frozenset iteration executed")

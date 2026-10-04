@@ -1089,6 +1089,7 @@ def build_autonomous_product_runtime(
             clock=resolved_clock,
             sleep=sleep,
         )
+
         def deliver_completed_desktop_application(
             delta: CollectorDelta,
             receipt: DesktopApplicationReceipt,

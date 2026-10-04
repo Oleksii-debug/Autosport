@@ -781,8 +781,8 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             path = Path(directory) / "market.db"
             store = SQLiteMarketStore(path)
             with patch.object(
-                store,
-                "_insert_live_receipt_authority",
+                SQLiteMarketStore,
+                "_sealed_live_receipt_writer",
                 side_effect=sqlite3.OperationalError("receipt write failed"),
             ):
                 with self.assertRaisesRegex(sqlite3.OperationalError, "receipt write failed"):

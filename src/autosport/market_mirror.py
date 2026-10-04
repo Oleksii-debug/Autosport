@@ -7,13 +7,11 @@ from enum import Enum
 from threading import RLock
 
 from .domain import MarketEvent, _quote_identity
-from .market_state_identity import same_semantic_market_state
 from .storage import SQLiteMarketStore, _timezone_aware_instant
 
 
 class MirrorUpdate(str, Enum):
     APPLIED = "applied"
-    REFRESH = "refresh"
     DUPLICATE = "duplicate"
     STALE = "stale"
 
@@ -224,15 +222,6 @@ class MarketMirror:
                     "conflicting MarketEvent payload reused an existing source-local sequence"
                 )
 
-            previous_decision_causal = key in self._decision_causal_keys
-            semantic_refresh = (
-                previous_decision_causal is decision_causal
-                and (
-                    previous.metadata.get("semantic_state_contract") is not None
-                    or event.metadata.get("semantic_state_contract") is not None
-                )
-                and same_semantic_market_state(previous, event)
-            )
             self._latest[key] = self._snapshot_event(event)
             if decision_causal:
                 self._decision_causal_keys.add(key)
@@ -240,11 +229,7 @@ class MarketMirror:
                 self._decision_causal_keys.discard(key)
             self._revision += 1
             return MirrorApplyResult(
-                (
-                    MirrorUpdate.REFRESH
-                    if semantic_refresh
-                    else MirrorUpdate.APPLIED
-                ),
+                MirrorUpdate.APPLIED,
                 event.source_id,
                 event.quote_key,
                 previous.sequence,

@@ -1346,6 +1346,36 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             original,
         )
 
+    def test_pending_retention_scope_injection_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-retention-injection",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "settlement scope origin is internal product authority",
+                ):
+                    coordinator._retained_pending_settlement_ids(
+                        resolutions=(),
+                        settled_at=clock(),
+                        _settlement_scope_resolver=lambda *_args: set(),
+                    )
+            finally:
+                store.close()
+
     def test_recovered_settlement_resolution_collection_is_sealed(self) -> None:
         original = ContinuousSessionCoordinator._recovered_settlement_resolutions
         with self.assertRaisesRegex(
@@ -3225,6 +3255,122 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 self.assertEqual(restarted.status().cycles_completed, 2)
             finally:
                 restarted_store.close()
+
+    def test_pending_retention_clears_settled_ticket_but_keeps_other_open_ticket_truth(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event_one = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:selective-settled",
+                event_id="event-1",
+            )
+            event_two = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:selective-partial",
+                event_id="event-2",
+            )
+            event_three = _event(
+                phase=EventPhase.PRE_MATCH,
+                event_id="event-3",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-selective-retention",
+                    position=1,
+                    events=(event_one, event_two, event_three),
+                )
+            )
+            first_leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            second_legs = (
+                TicketLeg(
+                    event_id="event-2",
+                    market_id="winner",
+                    selection_id="home",
+                    locked_odds=Decimal("2.00"),
+                    sport="table_tennis",
+                ),
+                TicketLeg(
+                    event_id="event-3",
+                    market_id="winner",
+                    selection_id="away",
+                    locked_odds=Decimal("1.50"),
+                    sport="table_tennis",
+                ),
+            )
+            book = PaperBook("100")
+            settled_ticket = book.open_ticket(
+                (first_leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:10+00:00",
+                provider_source_ids=("provider-a",),
+            )
+            open_ticket = book.open_ticket(
+                second_legs,
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:11+00:00",
+                provider_source_ids=("provider-a",),
+            )
+            book.save(root / "paper_book.json")
+            settled_resolution = SettlementResolution(
+                event_identity=event_one.identity,
+                settlement_ref="provider-result:selective-settled",
+                quote_outcomes={first_leg.quote_key: "win"},
+                evidence_id="selective-settled-evidence",
+                evidence_sha256="3" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            partial_resolution = SettlementResolution(
+                event_identity=event_two.identity,
+                settlement_ref="provider-result:selective-partial",
+                quote_outcomes={second_legs[0].quote_key: "win"},
+                evidence_id="selective-partial-evidence",
+                evidence_sha256="4" * 64,
+                available_at="2026-09-19T21:19:31+00:00",
+            )
+            authority = _MappedOutcomeAuthority(
+                {
+                    event_one.identity: settled_resolution,
+                    event_two.identity: partial_resolution,
+                }
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                result = coordinator.tick()
+                self.assertEqual(
+                    result.settled_ticket_ids,
+                    (settled_ticket.ticket_id,),
+                )
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(
+                    durable.tickets[settled_ticket.ticket_id].status.value,
+                    "won",
+                )
+                self.assertEqual(
+                    durable.tickets[open_ticket.ticket_id].status.value,
+                    "open",
+                )
+                self.assertEqual(
+                    coordinator.status().pending_settlement_evidence_ids,
+                    (partial_resolution.evidence_id,),
+                )
+            finally:
+                store.close()
 
     def test_partial_multileg_settlement_truth_accumulates_across_ticks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

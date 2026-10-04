@@ -409,7 +409,12 @@ class SourceHealthStore:
                 observed,
                 kind="BOOTSTRAP",
             )
-            tx_id = f"source-health-bootstrap-{observed}"
+            tx_id = self._next_authority_tx_id(
+                authority,
+                None,
+                observed,
+                binding,
+            )
             authority.prepare(
                 tx_id=tx_id,
                 observed_state_sha256=None,
@@ -448,6 +453,7 @@ class SourceHealthStore:
         authority: MonotonicWorkspaceAuthority,
         observed: str | None,
         intended: str,
+        semantic_binding_sha256: str,
     ) -> str:
         history = authority.read_history()
         authority_tip = history[-1].record_sha256 if history else "<PRISTINE>"
@@ -457,6 +463,7 @@ class SourceHealthStore:
                 authority_tip,
                 observed or "<PRISTINE>",
                 intended,
+                semantic_binding_sha256,
             )
         ).encode("utf-8")
         return f"source-health-{hashlib.sha256(material).hexdigest()}"
@@ -948,6 +955,7 @@ class SourceHealthStore:
                 authority,
                 observed,
                 intended,
+                binding,
             )
             authority.prepare(
                 tx_id=tx_id,

@@ -423,6 +423,9 @@ class SourceHealthStore:
         )
         return authority
 
+    def _recover_current_for_write(self) -> None:
+        self._recover_or_bootstrap_authority(self._current_state_sha256())
+
     def _verify_authority_current(self, observed: str) -> None:
         authority = self._monotonic_authority()
         history = authority.read_history()
@@ -587,6 +590,7 @@ class SourceHealthStore:
         )
 
         with self._writer_guard():
+            self._recover_current_for_write()
             state = self.get(source_id)
             return self._record_success_locked(
                 state,
@@ -630,6 +634,7 @@ class SourceHealthStore:
         )
 
         with self._writer_guard():
+            self._recover_current_for_write()
             current = self.get(expected_before.source_id)
             if ambiguous_after is not None and current == ambiguous_after:
                 raise RuntimeError(
@@ -666,6 +671,7 @@ class SourceHealthStore:
         ):
             raise ValueError("invalid source health failure kind")
         with self._writer_guard():
+            self._recover_current_for_write()
             state = self.get(source_id)
             state.poll_count += 1
             state.total_failures += 1

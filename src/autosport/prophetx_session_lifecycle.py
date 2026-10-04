@@ -537,6 +537,13 @@ class ProphetXSessionSnapshot:
                     raise ProphetXSessionLifecycleError(
                         "provider-slot hold cannot precede observed access expiry"
                     )
+                if (
+                    self.slot_hold_until
+                    < self.last_transition_at + CONSERVATIVE_SESSION_SLOT_HOLD
+                ):
+                    raise ProphetXSessionLifecycleError(
+                        "wait hold is below the conservative refresh floor"
+                    )
 
         if self.state in {
             ProphetXSessionState.AUTH_RETRYABLE_FAILURE,

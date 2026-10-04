@@ -1600,22 +1600,32 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
         finally:
             getter.__code__ = original_code
 
-    def test_mint_binder_replacement_is_rejected(self) -> None:
-        kwdefaults = terminal_mapping_authority._mint_result.__kwdefaults__
-        original = kwdefaults["_bind_mapping"]
+    def test_validated_values_cannot_directly_mint_positive_mapping(self) -> None:
+        bindings = self._bindings()
+        self._issue(bindings)
+        self.assertFalse(hasattr(terminal_mapping_authority, "_BIND_MAPPING"))
+        self.assertFalse(hasattr(terminal_mapping_authority, "_mint_result"))
 
-        def forged_bind(_instance):
-            return None
+        values = (
+            terminal_mapping_authority
+            ._resolve_product_proposal_risk_terminal_state_mapping_values(
+                self.workspace,
+                precommit=self.precommit,
+                authorities=self.authorities,
+                member_market_state_ids=(
+                    bindings[0].market_state_ids,
+                    bindings[1].market_state_ids,
+                ),
+            )
+        )
+        forged = object.__new__(ProductProposalRiskTerminalStateMapping)
+        for name in terminal_mapping_authority._RESULT_FIELDS_EXPECTED:
+            object.__setattr__(forged, name, values[name])
 
-        try:
-            kwdefaults["_bind_mapping"] = forged_bind
-            with self.assertRaisesRegex(
-                ProductProposalRiskTerminalStateMappingError,
-                "result mint capability changed",
-            ):
-                self._binding(("winner:other-a", "winner:selection-b"))
-        finally:
-            kwdefaults["_bind_mapping"] = original
+        self.assertFalse(forged.mapping_identity_proven)
+        self.assertFalse(forged.terminal_mapping_proven)
+        self.assertFalse(forged.grants_ticket_authority)
+        self.assertFalse(forged.grants_real_money_authority)
 
     def test_protocol_constant_rebind_is_rejected(self) -> None:
         original = terminal_mapping_authority._MAPPING_SCHEMA

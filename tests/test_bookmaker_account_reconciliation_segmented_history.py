@@ -660,3 +660,39 @@ def test_segmented_history_rejects_reused_position_id_with_changed_payload(
         _store(path, authority_root).append_snapshot(
             _snapshot(3, open_positions=(conflicting,))
         )
+
+
+def test_segmented_decode_dispatch_rebind_fails_before_callback(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "account.json"
+    authority_root = tmp_path / "authority"
+    store = _store(path, authority_root)
+    first = _snapshot(1)
+    second = _snapshot(2)
+    assert store.append_snapshot(first)
+    assert store.append_snapshot(second)
+    _force_segmented(store, path)
+
+    canonical_decode = reconciliation_module._decode_snapshot
+    callback_reached = False
+
+    def hostile_decode(*args, **kwargs):
+        nonlocal callback_reached
+        callback_reached = True
+        return canonical_decode(*args, **kwargs)
+
+    monkeypatch.setattr(
+        reconciliation_module,
+        "_decode_snapshot",
+        hostile_decode,
+    )
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="transitive module dispatch graph changed",
+    ):
+        _store(path, authority_root).latest_snapshot()
+
+    assert callback_reached is False

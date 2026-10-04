@@ -2399,6 +2399,157 @@ def _install_canonical_store_dispatch_seal(
     parse_time = _time
     integrity_error = AccountReconciliationIntegrityError
     stale_error = AccountSnapshotStaleError
+    module_namespace = globals()
+    schema_version = cls.SCHEMA_VERSION
+
+    # Exact lower-method bytecode is not a complete authority boundary: those
+    # functions still resolve module globals dynamically. Freeze the transitive
+    # semantic helpers/constants that can reinterpret already-authorized durable
+    # bytes while leaving the outer store method unchanged.
+    guarded_module_names = (
+        "_RECONCILIATION_AUTHORITY_DOMAIN",
+        "_RECONCILIATION_TRANSITION_SCHEMA",
+        "_CANONICAL_AUTHORITY_CLASS",
+        "_CANONICAL_AUTHORITY_METHOD_NAMES",
+        "_CANONICAL_AUTHORITY_METHODS",
+        "_CANONICAL_AUTHORITY_METHOD_CODES",
+        "_CANONICAL_ACCOUNT_SNAPSHOT_CLASS",
+        "_CANONICAL_CAPABILITY_PROFILE_CLASS",
+        "_CANONICAL_CAPABILITY_FACT_CLASS",
+        "_CANONICAL_BALANCE_OBSERVATION_CLASS",
+        "_CANONICAL_POSITION_OBSERVATION_CLASS",
+        "_CANONICAL_CAPABILITY_CLASS",
+        "_CANONICAL_CAPABILITY_FACT_VALIDATE",
+        "_CANONICAL_CAPABILITY_PROFILE_VALIDATE",
+        "_CANONICAL_BALANCE_OBSERVATION_VALIDATE",
+        "_CANONICAL_POSITION_OBSERVATION_VALIDATE",
+        "_CANONICAL_ACCOUNT_SNAPSHOT_VALIDATE",
+        "_CANONICAL_CAPABILITY_PROFILE_TO_DICT",
+        "strict_json_loads",
+        "_exact_keys",
+        "_optional_decimal",
+        "_decode_profile",
+        "_decode_balance",
+        "_decode_position",
+        "_decode_snapshot",
+        "_require_canonical_snapshot_graph",
+        "snapshot_to_canonical_dict",
+        "snapshot_fingerprint",
+        "_balance_to_dict",
+        "_position_to_dict",
+        "_decimal_text",
+        "_optional_decimal_text",
+        "_exact_decimal_difference",
+        "_time",
+        "_authority_tx_prefix",
+        "_authority_transition_binding",
+        "sha256",
+        "json",
+        "AuthorityPhase",
+        "MonotonicWorkspaceAuthorityError",
+    )
+    frozen_module_graph = tuple(
+        (
+            name,
+            module_namespace[name],
+            getattr(module_namespace[name], "__code__", None),
+            getattr(module_namespace[name], "__defaults__", None),
+            dict(getattr(module_namespace[name], "__kwdefaults__", None) or {}),
+            (
+                tuple(module_namespace[name].items())
+                if isinstance(module_namespace[name], dict)
+                else None
+            ),
+        )
+        for name in guarded_module_names
+    )
+    missing_module_binding = object()
+
+    def _descriptor_code(descriptor: object) -> object:
+        if isinstance(descriptor, (staticmethod, classmethod)):
+            target = descriptor.__func__
+        elif isinstance(descriptor, property):
+            target = descriptor.fget
+        else:
+            target = descriptor
+        return getattr(target, "__code__", None)
+
+    class_dispatch_specs = (
+        (
+            "BookmakerCapabilityFact",
+            _CANONICAL_CAPABILITY_FACT_CLASS,
+            ("__init__", "__post_init__"),
+        ),
+        (
+            "BookmakerCapabilityProfile",
+            _CANONICAL_CAPABILITY_PROFILE_CLASS,
+            (
+                "__init__",
+                "__post_init__",
+                "profile_id",
+                "to_canonical_dict",
+                "state_of",
+                "require",
+            ),
+        ),
+        (
+            "BookmakerBalanceObservation",
+            _CANONICAL_BALANCE_OBSERVATION_CLASS,
+            ("__init__", "__post_init__"),
+        ),
+        (
+            "BookmakerPositionObservation",
+            _CANONICAL_POSITION_OBSERVATION_CLASS,
+            ("__init__", "__post_init__"),
+        ),
+        (
+            "BookmakerAccountSnapshot",
+            _CANONICAL_ACCOUNT_SNAPSHOT_CLASS,
+            (
+                "__init__",
+                "__post_init__",
+                "_validate_cross_state_position_identity",
+                "_validate_balance",
+                "_validate_positions",
+                "_validate_not_after_snapshot",
+                "_validate_identity",
+            ),
+        ),
+        ("ReconciledPosition", ReconciledPosition, ("__init__",)),
+        ("UnexplainedBalanceDelta", UnexplainedBalanceDelta, ("__init__",)),
+        (
+            "ReconciledAccountState",
+            ReconciledAccountState,
+            ("__init__", "position_state"),
+        ),
+    )
+    frozen_class_dispatch_graph = tuple(
+        (
+            class_name,
+            expected_class,
+            tuple(
+                (
+                    descriptor_name,
+                    vars(expected_class).get(descriptor_name),
+                    _descriptor_code(vars(expected_class).get(descriptor_name)),
+                )
+                for descriptor_name in descriptor_names
+            ),
+        )
+        for class_name, expected_class, descriptor_names in class_dispatch_specs
+    )
+    frozen_field_descriptor_graph = tuple(
+        (
+            class_name,
+            expected_class,
+            tuple(
+                (field_name, vars(expected_class)[field_name])
+                for field_name in getattr(expected_class, "__slots__", ())
+                if field_name != "__weakref__" and field_name in vars(expected_class)
+            ),
+        )
+        for class_name, expected_class, _descriptor_names in class_dispatch_specs
+    )
 
     def _guard(store: BookmakerAccountReconciliationStore) -> None:
         if type(store) is not cls:
@@ -2406,6 +2557,78 @@ def _install_canonical_store_dispatch_seal(
                 "account reconciliation store type changed at canonical dispatch boundary"
             )
         instance_dict = object.__getattribute__(store, "__dict__")
+        if cls.SCHEMA_VERSION != schema_version:
+            raise integrity_error(
+                "account reconciliation class contract changed"
+            )
+        for (
+            name,
+            expected,
+            expected_code,
+            expected_defaults,
+            expected_kwdefaults,
+            expected_mapping_items,
+        ) in frozen_module_graph:
+            live = module_namespace.get(name, missing_module_binding)
+            if live is not expected:
+                raise integrity_error(
+                    "account reconciliation transitive module dispatch graph changed"
+                )
+            if expected_code is not None and (
+                getattr(live, "__code__", None) is not expected_code
+                or getattr(live, "__defaults__", None) != expected_defaults
+                or dict(getattr(live, "__kwdefaults__", None) or {})
+                != expected_kwdefaults
+            ):
+                raise integrity_error(
+                    "account reconciliation transitive module dispatch implementation changed"
+                )
+            if expected_mapping_items is not None and (
+                type(live) is not dict
+                or len(live) != len(expected_mapping_items)
+                or any(
+                    key not in live or live[key] is not expected_value
+                    for key, expected_value in expected_mapping_items
+                )
+            ):
+                raise integrity_error(
+                    "account reconciliation transitive module dispatch mapping changed"
+                )
+        for class_name, expected_class, descriptors in frozen_class_dispatch_graph:
+            if (
+                module_namespace.get(class_name, missing_module_binding)
+                is not expected_class
+            ):
+                raise integrity_error(
+                    "account reconciliation canonical DTO class binding changed"
+                )
+            for (
+                descriptor_name,
+                expected_descriptor,
+                expected_descriptor_code,
+            ) in descriptors:
+                live_descriptor = vars(expected_class).get(descriptor_name)
+                if (
+                    live_descriptor is not expected_descriptor
+                    or _descriptor_code(live_descriptor)
+                    is not expected_descriptor_code
+                ):
+                    raise integrity_error(
+                        "account reconciliation canonical DTO class dispatch changed"
+                    )
+        for (
+            _class_name,
+            expected_class,
+            field_descriptors,
+        ) in frozen_field_descriptor_graph:
+            for field_name, expected_field_descriptor in field_descriptors:
+                if (
+                    vars(expected_class).get(field_name)
+                    is not expected_field_descriptor
+                ):
+                    raise integrity_error(
+                        "account reconciliation canonical DTO field descriptor changed"
+                    )
         if (
             _read_stable_reconciliation_bytes is not stable_reader
             or getattr(_read_stable_reconciliation_bytes, "__code__", None)
@@ -2474,6 +2697,7 @@ def _install_canonical_store_dispatch_seal(
         self: BookmakerAccountReconciliationStore,
         snapshot: BookmakerAccountSnapshot,
     ) -> bool:
+        _guard(self)
         snapshot = require_snapshot(snapshot)
         with write_lock(self.path):
             result = _invoke(self, "_append_snapshot_bounded", snapshot)

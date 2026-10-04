@@ -68,7 +68,7 @@ class _Source:
 
 class _AlternateResolverSource(_Source):
     def resolve_event(self, delta):
-        event = super().resolve_event(delta)
+        event = _Source.resolve_event(self, delta)
         if event.status != "open":
             raise AssertionError("alternate resolver requires an open market")
         return event

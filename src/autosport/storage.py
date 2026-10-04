@@ -2323,30 +2323,6 @@ class SQLiteMarketStore:
                     self.connection.rollback()
                     raise
 
-    def committed_append_generation_head(self) -> int:
-        """Return the exact independently committed positive append boundary.
-
-        The returned generation is a product-issued durable transition boundary, not a
-        raw SQLite MAX() observation.  Readers may persist it as a causal frontier and
-        later reconstruct the same immutable history prefix even after newer appends.
-        """
-
-        authority = self._market_append_authority()
-        with self._market_append_issuance_lock(authority):
-            with self._connection_lock:
-                self.connection.execute("BEGIN")
-                try:
-                    _validate_canonical_table(self.connection, "market_events")
-                    self._validate_causal_replay_state()
-                    self._require_product_issued_positive_history(authority)
-                    head = self._positive_append_generation_head()
-                    self._require_committed_append_authority_through(authority, head)
-                    self._commit_stable_database_path()
-                except BaseException:
-                    self.connection.rollback()
-                    raise
-        return head
-
     def events_at_committed_append_boundary(
         self,
         max_generation: int,

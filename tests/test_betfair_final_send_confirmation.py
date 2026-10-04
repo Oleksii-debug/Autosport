@@ -543,6 +543,97 @@ def test_final_send_fails_closed_if_confirmation_authority_graph_changes(
         assert _audit_receipt(authority, review, receipt).receipt.consumed_at is None
 
 
+
+@pytest.mark.parametrize(
+    "authority_target",
+    (
+        "coordinated_resolve_root",
+        "coordinated_consume_root",
+        "generic_module_helper",
+        "generic_authority_helper",
+    ),
+)
+def test_moving_generic_confirmation_authority_stops_before_provider_transport(
+    monkeypatch,
+    authority_target: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = f"attempt-generic-authority-drift-{authority_target}"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        authority, review, receipt = _confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _accepted_transport(action)
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        if authority_target == "coordinated_resolve_root":
+            replacement = lambda *args, **kwargs: None
+            monkeypatch.setattr(
+                confirmation_runtime._AUTHORITY_TYPE,
+                "resolve_receipt_binding",
+                replacement,
+            )
+            monkeypatch.setattr(
+                confirmation_runtime,
+                "_RESOLVE_BINDING",
+                replacement,
+            )
+            monkeypatch.setattr(
+                confirmation_runtime,
+                "_RESOLVE_BINDING_CODE",
+                replacement.__code__,
+            )
+        elif authority_target == "coordinated_consume_root":
+            replacement = lambda *args, **kwargs: None
+            monkeypatch.setattr(
+                confirmation_runtime._AUTHORITY_TYPE,
+                "consume_receipt",
+                replacement,
+            )
+            monkeypatch.setattr(
+                confirmation_runtime,
+                "_CONSUME_RECEIPT",
+                replacement,
+            )
+            monkeypatch.setattr(
+                confirmation_runtime,
+                "_CONSUME_RECEIPT_CODE",
+                replacement.__code__,
+            )
+        elif authority_target == "generic_module_helper":
+            monkeypatch.setattr(
+                confirmation_runtime._confirmation,
+                "_require_sha256",
+                lambda *args, **kwargs: "0" * 64,
+            )
+        else:
+            monkeypatch.setattr(
+                confirmation_runtime._confirmation.SupervisedConfirmationAuthority,
+                "_load",
+                lambda *args, **kwargs: None,
+            )
+
+        with pytest.raises(BetfairSupervisedExecutionError, match="authority"):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert _audit_receipt(authority, review, receipt).receipt.consumed_at is None
+
 def test_transport_ambiguity_after_confirmation_consumption_never_retransmits() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         attempt_id = "attempt-confirmed-transport-ambiguity"

@@ -381,6 +381,8 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                         .poll_count,
                         0,
                     )
+                    self.assertEqual(runtime.mirror.snapshot(), ())
+                    self.assertEqual(runtime.invalidations.pending_count, 0)
                 finally:
                     runtime.close()
 
@@ -392,10 +394,14 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 initial_bankroll="100",
             )
             try:
+                self.assertEqual(restored.mirror.snapshot(), ())
+                self.assertEqual(restored.invalidations.pending_count, 0)
                 self.assertEqual(
                     restored.coordinator.desktop_consumer.drain(as_of=clock.value),
                     (delta.delta_id,),
                 )
+                self.assertEqual(restored.mirror.snapshot(), (event,))
+                self.assertEqual(restored.invalidations.pending_count, 1)
                 self.assertEqual(len(restored.market_store.events(event.event_id)), 1)
                 health = SourceHealthStore(root / "source_health.json").get(source.source_id)
                 self.assertEqual(health.poll_count, 1)

@@ -306,6 +306,19 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
                 contexts=contexts,
             )
 
+    def test_risk_policy_provenance_descriptor_rebinding_fails_closed(self) -> None:
+        forged = property(lambda _policy: "0" * 64)
+        with patch.object(
+            PaperRiskPolicy,
+            "provenance_sha256",
+            forged,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "risk-policy provenance digest",
+            ):
+                self._issue()
+
     def test_dispatch_rebinding_of_existing_allocator_fails_closed(self) -> None:
         original = PaperRiskPolicy.derive_goal_stake_vector
 

@@ -73,19 +73,6 @@ class _AlternateResolverSource(_Source):
             raise AssertionError("alternate resolver requires an open market")
         return event
 
-class _CrashAfterPersistBus(MarketEventBus):
-    """Simulate process loss after SQLite/subscriber delivery but before app progress."""
-
-    crashed = False
-
-    def publish(self, event):
-        accepted = super().publish(event)
-        if not type(self).crashed:
-            type(self).crashed = True
-            raise RuntimeError("crash-after-market-persist")
-        return accepted
-
-
 def _event() -> MarketEvent:
     return MarketEvent.from_dict(
         {
@@ -927,6 +914,7 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     sleep=lambda _: None,
                     initial_bankroll="100",
                 )
+
     def test_restart_with_different_source_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1019,21 +1007,21 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             event = _event()
             delta = _delta(event)
             source = _Source(resolved_event=event)
-            _CrashAfterPersistBus.crashed = False
 
-            with patch(
-                "autosport.product_runtime.MarketEventBus",
-                _CrashAfterPersistBus,
-            ):
-                runtime = build_autonomous_product_runtime(
-                    workspace=root,
-                    source=source,
-                    clock=clock,
-                    sleep=lambda _: None,
-                    initial_bankroll="100",
-                )
-                try:
-                    self.assertTrue(runtime.collector.delta_store.append(delta))
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                with patch.object(
+                    MarketEventBus,
+                    "_notify",
+                    side_effect=RuntimeError("crash-after-market-persist"),
+                ):
                     with self.assertRaisesRegex(
                         RuntimeError,
                         "crash-after-market-persist",
@@ -1041,17 +1029,17 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                         runtime.coordinator.desktop_consumer.drain(
                             as_of=clock.value,
                         )
-                    self.assertEqual(len(runtime.market_store.events(event.event_id)), 1)
-                    self.assertEqual(
-                        SourceHealthStore(root / "source_health.json")
-                        .get(source.source_id)
-                        .poll_count,
-                        0,
-                    )
-                    self.assertEqual(runtime.mirror.snapshot(), ())
-                    self.assertEqual(runtime.invalidations.pending_count, 0)
-                finally:
-                    runtime.close()
+                self.assertEqual(len(runtime.market_store.events(event.event_id)), 1)
+                self.assertEqual(
+                    SourceHealthStore(root / "source_health.json")
+                    .get(source.source_id)
+                    .poll_count,
+                    0,
+                )
+                self.assertEqual(runtime.mirror.snapshot(), ())
+                self.assertEqual(runtime.invalidations.pending_count, 0)
+            finally:
+                runtime.close()
 
             restored = build_autonomous_product_runtime(
                 workspace=root,

@@ -332,6 +332,69 @@ def test_pending_settlement_journal_recovers_after_write_crash() -> None:
         assert final_checkpoint["settlement_evidence_count"] == _SMALL_HISTORY + 1
 
 
+def test_wrong_session_id_cannot_recover_pending_transaction() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        state = _state_with_history(root, _SMALL_HISTORY)
+        resolution = continuous_session.SettlementResolution(
+            event_identity="provider-a:event-wrong-session",
+            settlement_ref="provider-result:wrong-session",
+            quote_outcomes={
+                "provider-a:event-wrong-session:winner:home": "win"
+            },
+            evidence_id="receipt-wrong-session",
+            evidence_sha256="9" * 64,
+            available_at=_AT,
+        )
+
+        with patch.object(
+            state,
+            "_write_evidence_record",
+            side_effect=OSError("synthetic evidence write crash"),
+        ):
+            try:
+                state.record_success(
+                    at=_AT,
+                    full_refresh=False,
+                    settlement_evidence=(resolution,),
+                )
+            except OSError:
+                pass
+            else:
+                raise AssertionError("synthetic write crash did not interrupt commit")
+
+        checkpoint = json.loads(path.read_text(encoding="utf-8"))
+        pending = checkpoint["settlement_evidence_pending"]
+        assert pending is not None
+        pending_path = (
+            root
+            / "continuous_session.settlement-evidence"
+            / f"{pending['records'][0]['evidence_key_sha256']}.json"
+        )
+        checkpoint_before = path.read_bytes()
+        journal_before = _journal_snapshot(root)
+        assert not pending_path.exists()
+
+        try:
+            continuous_session._ContinuousSessionState(
+                path,
+                session_id="wrong-session-id",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "wrong session identity was allowed to recover durable state"
+            )
+
+        assert path.read_bytes() == checkpoint_before
+        assert _journal_snapshot(root) == journal_before
+        assert not pending_path.exists()
+
+
 def test_pending_recovery_accepts_exact_already_written_pending_prefix() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -510,6 +573,37 @@ def test_pending_recovery_rejects_corrupt_base_before_advancing_checkpoint() -> 
         assert unchanged["settlement_evidence_pending"] == pending
         assert unchanged["settlement_evidence_count"] == _SMALL_HISTORY
         assert unchanged["cycles_completed"] == _SMALL_HISTORY
+
+
+def test_wrong_session_id_cannot_migrate_legacy_checkpoint() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        legacy = json.dumps(
+            _checkpoint_payload(_SMALL_HISTORY),
+            sort_keys=True,
+        )
+        path.write_text(legacy, encoding="utf-8")
+        before = path.read_bytes()
+        journal = root / "continuous_session.settlement-evidence"
+        assert not journal.exists()
+
+        try:
+            continuous_session._ContinuousSessionState(
+                path,
+                session_id="wrong-session-id",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "wrong session identity was allowed to migrate durable state"
+            )
+
+        assert path.read_bytes() == before
+        assert not journal.exists()
 
 
 def test_legacy_v2_migration_preserves_session_truth_and_evidence() -> None:

@@ -273,6 +273,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
         catalog_source_id: str | None = None,
         catalog_required_history: timedelta = timedelta(0),
         paper_execution: PaperExecutionAdoptionRuntime | None = None,
+        max_quote_age: timedelta | None = timedelta(seconds=5),
     ) -> PersistentLiveDecisionLoop:
         selected_strategy = strategy_version or self._strategy_version()
         registry = self._scientific_registry(workspace, selected_strategy)
@@ -295,7 +296,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             scientific_registry=registry,
             observation_runner=observer,
             bounds=bounds,
-            max_quote_age=timedelta(seconds=5),
+            max_quote_age=max_quote_age,
             clock=clock,
             post_append_hook=post_append_hook,
             paper_execution=paper_execution,
@@ -1775,6 +1776,46 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             self.assertEqual(result.status, LiveCycleStatus.DECIDED)
             self.assertEqual(factory.calls, [("input-a", ())])
+
+    def test_saturated_economic_quote_age_has_no_unrepresentable_freshness_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            goal = EconomicGoalContract(
+                goal_id="goal-live-saturated-age",
+                revision=1,
+                bankroll_id="bankroll-live-test",
+                currency="EUR",
+                max_quote_age_seconds=Decimal("999999999999999999"),
+            )
+            authority = EconomicDecisionAuthority(
+                goal,
+                PaperRiskPolicy(economic_goal=goal),
+            )
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(sequence=1),)],
+                ),
+                factory=factory,
+                clock=clock,
+                authority=authority,
+                max_quote_age=None,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(loop.max_quote_age, timedelta.max)
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+            self.assertIsNone(loop._freshness_deadlines["input-a"])
+            loop.close()
 
     def test_pause_and_stop_are_durable_and_do_not_poll_provider(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

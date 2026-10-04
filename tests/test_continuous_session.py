@@ -1318,6 +1318,20 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_pending_settlement_resolution_collection_is_sealed(self) -> None:
+        original = ContinuousSessionCoordinator._pending_settlement_resolutions
+        with self.assertRaisesRegex(
+            TypeError,
+            "canonical settlement consumer entry binding is immutable",
+        ):
+            ContinuousSessionCoordinator._pending_settlement_resolutions = (
+                lambda *_args, **_kwargs: ()
+            )
+        self.assertIs(
+            ContinuousSessionCoordinator._pending_settlement_resolutions,
+            original,
+        )
+
     def test_recovered_settlement_resolution_collection_is_sealed(self) -> None:
         original = ContinuousSessionCoordinator._recovered_settlement_resolutions
         with self.assertRaisesRegex(
@@ -3198,6 +3212,153 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 restarted_store.close()
 
+    def test_staged_pending_settlement_recovers_before_learning_prepare(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:state-pending-crash",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-state-pending-crash",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:10+00:00",
+                provider_source_ids=("provider-a",),
+            )
+            book.save(root / "paper_book.json")
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="provider-result:state-pending-crash",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="state-pending-crash-evidence",
+                evidence_sha256="9" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            authority = _OneShotOutcomeAuthority(resolution)
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                coordinator.collector.run_cycle()
+                first_seen = coordinator._settlement_resolutions(as_of=clock())
+                self.assertEqual(first_seen, (resolution,))
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=first_seen,
+                )
+                raw = json.loads(
+                    (root / "continuous_session.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(raw["schema_version"], 4)
+                self.assertEqual(
+                    raw["pending_settlement_resolutions"][0]["evidence_id"],
+                    resolution.evidence_id,
+                )
+                self.assertEqual(
+                    raw["pending_settlement_resolutions"][0]["quote_outcomes"],
+                    resolution.quote_outcomes,
+                )
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("90"))
+                self.assertEqual(
+                    durable.tickets[ticket.ticket_id].status.value,
+                    "open",
+                )
+                self.assertEqual(authority.calls, 1)
+            finally:
+                store.close()
+
+            restarted, restarted_store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                result = restarted.tick()
+                self.assertGreaterEqual(authority.calls, 2)
+                self.assertEqual(result.settled_ticket_ids, (ticket.ticket_id,))
+                self.assertIn(
+                    resolution.evidence_id,
+                    result.settlement_evidence_ids,
+                )
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("110"))
+                self.assertEqual(
+                    durable.tickets[ticket.ticket_id].status.value,
+                    "won",
+                )
+                raw = json.loads(
+                    (root / "continuous_session.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(raw["pending_settlement_resolutions"], [])
+                self.assertEqual(raw["cycles_completed"], 1)
+            finally:
+                restarted_store.close()
+
+    def test_pending_settlement_outcomes_tamper_fails_digest_reproof(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-pending-tamper",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:pending-tamper",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="pending-tamper-evidence",
+                evidence_sha256="8" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                state_path = root / "continuous_session.json"
+                raw = json.loads(state_path.read_text(encoding="utf-8"))
+                raw["pending_settlement_resolutions"][0]["quote_outcomes"][
+                    "event-1|winner|home"
+                ] = "loss"
+                state_path.write_text(
+                    json.dumps(raw, sort_keys=True, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "settlement outcome interpretation conflicts with durable evidence",
+                ):
+                    coordinator._pending_settlement_resolutions(as_of=clock())
+            finally:
+                store.close()
+
     def test_prepared_learning_settlement_recovers_when_outcome_authority_is_one_shot(
         self,
     ) -> None:
@@ -3663,6 +3824,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             state = json.loads(state_path.read_text(encoding="utf-8"))
             state["schema_version"] = 2
             state.pop("settlement_outcome_digests")
+            state.pop("pending_settlement_resolutions")
             state_path.write_text(
                 json.dumps(state, sort_keys=True, separators=(",", ":")),
                 encoding="utf-8",
@@ -3686,6 +3848,53 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     Decimal("110"),
                 )
                 self.assertEqual(restarted.status().cycles_completed, 1)
+            finally:
+                restarted_store.close()
+
+    def test_legacy_v3_session_state_upgrades_with_empty_pending_settlement_journal(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-v3-upgrade",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            store.close()
+
+            state_path = root / "continuous_session.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["schema_version"] = 3
+            state.pop("pending_settlement_resolutions")
+            state_path.write_text(
+                json.dumps(state, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            restarted, restarted_store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+            )
+            try:
+                self.assertEqual(restarted.status().cycles_completed, 0)
+                restarted._state.record_failure(code="legacy-v3-upgrade-probe")
+                upgraded = json.loads(
+                    state_path.read_text(encoding="utf-8")
+                )
+                self.assertEqual(upgraded["schema_version"], 4)
+                self.assertEqual(upgraded["pending_settlement_resolutions"], [])
+                self.assertEqual(
+                    upgraded["last_error_code"],
+                    "legacy-v3-upgrade-probe",
+                )
             finally:
                 restarted_store.close()
 

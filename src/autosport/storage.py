@@ -2498,17 +2498,12 @@ class SQLiteMarketStore:
         ):
             pass
 
-    def events_at_committed_append_boundary(
+    @contextmanager
+    def _guard_committed_append_boundary(
         self,
         max_generation: int,
-    ) -> list[tuple[MarketEvent, int]]:
-        """Read the trusted immutable history prefix at one committed append boundary.
-
-        Unlike replay cutoff issuance, this does not mint timestamp authority.  The
-        caller supplies a previously observed generation frontier; this method proves
-        that it is an exact independently committed append transition boundary and
-        returns only the canonical corpus at or below it.
-        """
+    ) -> Iterator[list[tuple[MarketEvent, int]]]:
+        """Hold one independently committed immutable append prefix for a caller."""
 
         if type(max_generation) is not int or max_generation < 0:
             raise ValueError("max_generation must be a non-negative int")
@@ -2537,11 +2532,27 @@ class SQLiteMarketStore:
                             max_generation
                         )
                     )
+                    self._require_database_path_identity()
+                    yield events_with_generation
                     self._commit_stable_database_path()
                 except BaseException:
                     self.connection.rollback()
                     raise
-        return events_with_generation
+
+    def events_at_committed_append_boundary(
+        self,
+        max_generation: int,
+    ) -> list[tuple[MarketEvent, int]]:
+        """Read the trusted immutable history prefix at one committed append boundary.
+
+        Unlike replay cutoff issuance, this does not mint timestamp authority. The
+        caller supplies a previously observed generation frontier; this method proves
+        that it is an exact independently committed append transition boundary and
+        returns only the canonical corpus at or below it.
+        """
+
+        with self._guard_committed_append_boundary(max_generation) as prefix:
+            return list(prefix)
 
     def events_with_append_generation(
         self,

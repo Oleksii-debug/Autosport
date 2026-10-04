@@ -121,6 +121,42 @@ _ACTIVE_SUBSCRIPTION_BY_TRANSPORT: WeakKeyDictionary[
 ] = WeakKeyDictionary()
 
 
+def _build_market_definition_evidence_registry():
+    issued: WeakKeyDictionary[object, tuple[str, ReferenceType[Any]]] = (
+        WeakKeyDictionary()
+    )
+
+    def register(evidence: object, fingerprint: str, runtime: object) -> None:
+        issued[evidence] = (fingerprint, ref(runtime))
+
+    def lookup(
+        evidence: object,
+    ) -> tuple[str, ReferenceType[Any]] | None:
+        return issued.get(evidence)
+
+    return register, lookup
+
+
+_register_market_definition_evidence, _lookup_market_definition_evidence = (
+    _build_market_definition_evidence_registry()
+)
+del _build_market_definition_evidence_registry
+_CANONICAL_REGISTER_MARKET_DEFINITION_EVIDENCE = (
+    _register_market_definition_evidence
+)
+_CANONICAL_REGISTER_MARKET_DEFINITION_EVIDENCE_CODE = getattr(
+    _CANONICAL_REGISTER_MARKET_DEFINITION_EVIDENCE,
+    "__code__",
+    None,
+)
+_CANONICAL_LOOKUP_MARKET_DEFINITION_EVIDENCE = _lookup_market_definition_evidence
+_CANONICAL_LOOKUP_MARKET_DEFINITION_EVIDENCE_CODE = getattr(
+    _CANONICAL_LOOKUP_MARKET_DEFINITION_EVIDENCE,
+    "__code__",
+    None,
+)
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True, eq=False)
 class BetfairAuthenticatedMarketDefinitionEvidence:
     """Process-local provider-origin proof for one exact Stream marketDefinition."""
@@ -174,17 +210,25 @@ class BetfairAuthenticatedMarketDefinitionEvidence:
         if self.evidence_id != _market_definition_evidence_fingerprint(self):
             raise ValueError("marketDefinition evidence_id does not match canonical payload")
 
-    def assert_issued(self) -> None:
+    def assert_issued(
+        self,
+        _lookup=_CANONICAL_LOOKUP_MARKET_DEFINITION_EVIDENCE,
+        _lookup_code=_CANONICAL_LOOKUP_MARKET_DEFINITION_EVIDENCE_CODE,
+    ) -> None:
+        if getattr(_lookup, "__code__", None) is not _lookup_code:
+            raise BetfairAuthenticatedStreamError(
+                "marketDefinition issuance registry dispatch changed"
+            )
         with _AUTHORITY_LOCK:
-            authority = _ISSUED_MARKET_DEFINITIONS.get(self)
+            authority = _lookup(self)
         if (
             authority is None
-            or authority.fingerprint != _market_definition_evidence_fingerprint(self)
+            or authority[0] != _market_definition_evidence_fingerprint(self)
         ):
             raise BetfairAuthenticatedStreamError(
                 "marketDefinition evidence was not issued by authenticated Stream runtime"
             )
-        runtime = authority.runtime_ref()
+        runtime = authority[1]()
         if (
             runtime is None
             or not runtime._market_definition_evidence_is_current(self)
@@ -206,15 +250,9 @@ class BetfairAuthenticatedMarketDefinitionEvidence:
         return False
 
 
-@dataclass(frozen=True, slots=True)
-class _MarketDefinitionEvidenceAuthority:
-    fingerprint: str
-    runtime_ref: ReferenceType[Any]
-
-
-_ISSUED_MARKET_DEFINITIONS: WeakKeyDictionary[
-    BetfairAuthenticatedMarketDefinitionEvidence, _MarketDefinitionEvidenceAuthority
-] = WeakKeyDictionary()
+_CANONICAL_MARKET_DEFINITION_ASSERT_ISSUED_DEFAULTS = (
+    BetfairAuthenticatedMarketDefinitionEvidence.assert_issued.__defaults__
+)
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, eq=False)
@@ -579,12 +617,23 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                     evidence = BetfairAuthenticatedMarketDefinitionEvidence(
                         **candidate
                     )
-                    _ISSUED_MARKET_DEFINITIONS[evidence] = (
-                        _MarketDefinitionEvidenceAuthority(
-                            _market_definition_evidence_fingerprint(evidence),
-                            ref(self),
+                    if (
+                        getattr(
+                            _CANONICAL_REGISTER_MARKET_DEFINITION_EVIDENCE,
+                            "__code__",
+                            None,
                         )
-                    )
+                        is not _CANONICAL_REGISTER_MARKET_DEFINITION_EVIDENCE_CODE
+                    ):
+                        raise BetfairAuthenticatedStreamError(
+                            "marketDefinition issuance registry dispatch changed"
+                        )
+                    with _AUTHORITY_LOCK:
+                        _CANONICAL_REGISTER_MARKET_DEFINITION_EVIDENCE(
+                            evidence,
+                            _market_definition_evidence_fingerprint(evidence),
+                            self,
+                        )
                     self._market_definition_by_market_id[evidence.market_id] = evidence
                 for evidence in issued:
                     identity = evidence.quote.identity

@@ -355,3 +355,27 @@ def test_market_definition_evidence_json_is_content_bound(
     )
     with pytest.raises(BetfairAuthenticatedStreamError):
         evidence.assert_issued()
+
+
+
+def test_fake_module_registry_cannot_self_mint_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autosport import betfair_authenticated_stream as auth_module
+
+    _, runtime = _runtime(monkeypatch, payload=_mcm())
+    runtime.read_and_ingest()
+    issued = runtime.resolve_market_definition("1.234")
+    assert issued is not None
+    forged = replace(issued)
+
+    auth_module._ISSUED_MARKET_DEFINITIONS = {  # type: ignore[attr-defined]
+        forged: object(),
+    }
+    with pytest.raises(
+        BetfairAuthenticatedStreamError,
+        match="not issued",
+    ):
+        forged.assert_issued()
+    with pytest.raises(BetfairAuthenticatedStreamError):
+        assess_betfair_authenticated_market_definition_authority(forged)

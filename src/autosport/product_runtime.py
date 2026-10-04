@@ -1162,6 +1162,22 @@ def _build_autonomous_product_runtime_impl(
     _canonical_application_type,
     _canonical_application_apply,
     _canonical_application_lookup,
+    _paper_book_type,
+    _runtime_lease_type,
+    _settlement_authority_identity_fn,
+    _manifest_store_type,
+    _lifecycle_type,
+    _market_store_type,
+    _mirror_type,
+    _invalidation_buffer_type,
+    _market_bus_type,
+    _source_health_type,
+    _dependency_index_type,
+    _collector_store_type,
+    _collector_service_type,
+    _checkpoint_type,
+    _coordinator_type,
+    _start_transition_store_type,
 ) -> AutonomousProductRuntime:
     """Construct or restore one canonical headless PAPER product runtime.
 
@@ -1181,7 +1197,7 @@ def _build_autonomous_product_runtime_impl(
 
     try:
         normalized_bankroll = str(initial_bankroll)
-        PaperBook(normalized_bankroll)
+        _paper_book_type(normalized_bankroll)
     except Exception as exc:
         raise ValueError("initial_bankroll must construct a valid PaperBook") from exc
 
@@ -1190,7 +1206,7 @@ def _build_autonomous_product_runtime_impl(
 
     lease_stack = ExitStack()
     try:
-        runtime_lease = lease_stack.enter_context(_ProductRuntimeLease(root))
+        runtime_lease = lease_stack.enter_context(_runtime_lease_type(root))
     except WorkspaceEconomicLockBusyError as exc:
         raise ProductCompositionError(
             "another Autosport product runtime already owns this workspace"
@@ -1201,25 +1217,25 @@ def _build_autonomous_product_runtime_impl(
         ) from exc
 
     with lease_stack:
-        settlement_authority_identity = _settlement_authority_identity(
+        settlement_authority_identity = _settlement_authority_identity_fn(
             source=source,
             source_id=source_id,
             outcome_authority=outcome_authority,
         )
-        manifest = _ManifestStore(root / "product_composition.json").load_or_create(
+        manifest = _manifest_store_type(root / "product_composition.json").load_or_create(
             source_id=source_id,
             initial_bankroll=normalized_bankroll,
             settlement_authority_identity=settlement_authority_identity,
         )
 
-        lifecycle = ContinuousEventLifecycle(root / "catalog.json")
-        market_store = SQLiteMarketStore(root / "market.db")
+        lifecycle = _lifecycle_type(root / "catalog.json")
+        market_store = _market_store_type(root / "market.db")
         lease_stack.callback(market_store.close)
-        mirror = MarketMirror()
-        invalidations = BoundedMirrorInvalidationBuffer(mirror)
+        mirror = _mirror_type()
+        invalidations = _invalidation_buffer_type(mirror)
 
-        market_bus = MarketEventBus(market_store)
-        source_health = SourceHealthStore(root / "source_health.json")
+        market_bus = _market_bus_type(market_store)
+        source_health = _source_health_type(root / "source_health.json")
         canonical_application = _canonical_application_type(
             market_bus,
             source_health,
@@ -1239,9 +1255,9 @@ def _build_autonomous_product_runtime_impl(
         ):
             invalidations.accept_persisted(event)
 
-        dependencies = FocusedMirrorDependencyIndex(mirror)
-        collector_store = CollectorDeltaStore(root / "collector_deltas.json")
-        collector = HeadlessCollectorService(
+        dependencies = _dependency_index_type(mirror)
+        collector_store = _collector_store_type(root / "collector_deltas.json")
+        collector = _collector_service_type(
             delta_store=collector_store,
             lifecycle=lifecycle,
             source=source,
@@ -1306,14 +1322,14 @@ def _build_autonomous_product_runtime_impl(
 
         desktop = _desktop_consumer_type(
             collector_store,
-            DesktopDeltaCheckpointStore(root / "desktop_acks.json"),
+            _checkpoint_type(root / "desktop_acks.json"),
             resolve_event=source.resolve_event,
             apply_event=apply_completed_desktop_application,
             lookup_application_receipt=lookup_completed_desktop_application,
             acknowledgement_clock=resolved_clock,
             on_application_receipt=deliver_completed_desktop_application,
         )
-        coordinator = ContinuousSessionCoordinator(
+        coordinator = _coordinator_type(
             workspace=root,
             collector=collector,
             lifecycle=lifecycle,
@@ -1337,7 +1353,7 @@ def _build_autonomous_product_runtime_impl(
             invalidations=invalidations,
             dependencies=dependencies,
             _runtime_lease=runtime_lease,
-            _start_transition_store=_ProductStartTransitionStore(
+            _start_transition_store=_start_transition_store_type(
                 root / "product_start_transition.json"
             ),
         )
@@ -1355,6 +1371,22 @@ def _bind_autonomous_product_runtime_builder(
     canonical_application_type,
     canonical_application_apply,
     canonical_application_lookup,
+    paper_book_type,
+    runtime_lease_type,
+    settlement_authority_identity_fn,
+    manifest_store_type,
+    lifecycle_type,
+    market_store_type,
+    mirror_type,
+    invalidation_buffer_type,
+    market_bus_type,
+    source_health_type,
+    dependency_index_type,
+    collector_store_type,
+    collector_service_type,
+    checkpoint_type,
+    coordinator_type,
+    start_transition_store_type,
 ):
     """Expose the product builder without mutable restart/delivery dispatch."""
 
@@ -1382,6 +1414,22 @@ def _bind_autonomous_product_runtime_builder(
             _canonical_application_type=canonical_application_type,
             _canonical_application_apply=canonical_application_apply,
             _canonical_application_lookup=canonical_application_lookup,
+            _paper_book_type=paper_book_type,
+            _runtime_lease_type=runtime_lease_type,
+            _settlement_authority_identity_fn=settlement_authority_identity_fn,
+            _manifest_store_type=manifest_store_type,
+            _lifecycle_type=lifecycle_type,
+            _market_store_type=market_store_type,
+            _mirror_type=mirror_type,
+            _invalidation_buffer_type=invalidation_buffer_type,
+            _market_bus_type=market_bus_type,
+            _source_health_type=source_health_type,
+            _dependency_index_type=dependency_index_type,
+            _collector_store_type=collector_store_type,
+            _collector_service_type=collector_service_type,
+            _checkpoint_type=checkpoint_type,
+            _coordinator_type=coordinator_type,
+            _start_transition_store_type=start_transition_store_type,
         )
 
     build_autonomous_product_runtime.__doc__ = implementation.__doc__
@@ -1396,6 +1444,22 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     CanonicalDesktopApplication,
     CanonicalDesktopApplication.apply,
     CanonicalDesktopApplication.lookup_receipt,
+    PaperBook,
+    _ProductRuntimeLease,
+    _settlement_authority_identity,
+    _ManifestStore,
+    ContinuousEventLifecycle,
+    SQLiteMarketStore,
+    MarketMirror,
+    BoundedMirrorInvalidationBuffer,
+    MarketEventBus,
+    SourceHealthStore,
+    FocusedMirrorDependencyIndex,
+    CollectorDeltaStore,
+    HeadlessCollectorService,
+    DesktopDeltaCheckpointStore,
+    ContinuousSessionCoordinator,
+    _ProductStartTransitionStore,
 )
 del _ProductDesktopDeltaConsumer
 del _build_autonomous_product_runtime_impl

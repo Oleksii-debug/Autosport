@@ -879,7 +879,7 @@ class ManualNvdaAcceptanceLedger:
         if not self._anchor_path.exists():
             return None
         try:
-            raw = self._anchor_path.read_text(encoding="utf-8")
+            raw = self._anchor_path.read_bytes().decode("utf-8")
         except (OSError, UnicodeError) as exc:
             raise NvdaManualAcceptanceIntegrityError(
                 "cannot read manual NVDA ledger anchor"
@@ -889,6 +889,10 @@ class ManualNvdaAcceptanceLedger:
                 "manual NVDA ledger anchor lacks canonical trailing newline"
             )
         anchor = _parse_json_object(raw, what="manual NVDA ledger anchor")
+        if raw != _canonical(anchor) + "\n":
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger anchor bytes are not canonical"
+            )
         if frozenset(anchor) != _ANCHOR_KEYS:
             raise NvdaManualAcceptanceIntegrityError(
                 "manual NVDA ledger anchor schema is invalid"
@@ -938,7 +942,7 @@ class ManualNvdaAcceptanceLedger:
         if not self.path.exists():
             return (), (), None
         try:
-            raw = self.path.read_text(encoding="utf-8")
+            raw = self.path.read_bytes().decode("utf-8")
         except (OSError, UnicodeError) as exc:
             raise NvdaManualAcceptanceIntegrityError(
                 "cannot read manual NVDA ledger"
@@ -947,7 +951,7 @@ class ManualNvdaAcceptanceLedger:
             raise NvdaManualAcceptanceIntegrityError(
                 "manual NVDA ledger lacks canonical trailing newline"
             )
-        raw_lines = raw.splitlines()
+        raw_lines = [] if not raw else raw[:-1].split("\n")
         if any(not line for line in raw_lines):
             raise NvdaManualAcceptanceIntegrityError(
                 "manual NVDA ledger contains a blank event line"
@@ -956,8 +960,12 @@ class ManualNvdaAcceptanceLedger:
         records: list[ManualNvdaDecisionRecord] = []
         events: list[dict[str, Any]] = []
         prior_sha: str | None = None
-        for sequence, raw in enumerate(raw_lines):
-            event = _parse_json_object(raw, what="manual NVDA ledger event")
+        for sequence, raw_line in enumerate(raw_lines):
+            event = _parse_json_object(raw_line, what="manual NVDA ledger event")
+            if raw_line != _canonical(event):
+                raise NvdaManualAcceptanceIntegrityError(
+                    "manual NVDA ledger event bytes are not canonical"
+                )
             if event.get("sequence") != sequence:
                 raise NvdaManualAcceptanceIntegrityError(
                     "manual NVDA ledger sequence is invalid"
@@ -1041,7 +1049,7 @@ class ManualNvdaAcceptanceLedger:
         if not self._pending_path.exists():
             return None
         try:
-            raw = self._pending_path.read_text(encoding="utf-8")
+            raw = self._pending_path.read_bytes().decode("utf-8")
         except (OSError, UnicodeError) as exc:
             raise NvdaManualAcceptanceIntegrityError(
                 "cannot read pending manual NVDA decision"
@@ -1051,6 +1059,10 @@ class ManualNvdaAcceptanceLedger:
                 "pending manual NVDA decision lacks canonical trailing newline"
             )
         pending = _parse_json_object(raw, what="pending manual NVDA decision")
+        if raw != _canonical(pending) + "\n":
+            raise NvdaManualAcceptanceIntegrityError(
+                "pending manual NVDA decision bytes are not canonical"
+            )
         if frozenset(pending) != _PENDING_KEYS:
             raise NvdaManualAcceptanceIntegrityError(
                 "pending manual NVDA decision schema is invalid"

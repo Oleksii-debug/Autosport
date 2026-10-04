@@ -32,6 +32,13 @@ def _install() -> None:
         sufficient,
         doc=original_descriptor.__doc__,
     )
+    snapshot_meta = type(snapshot_type)
+    seal = getattr(snapshot_meta, "seal", None)
+    if not callable(seal):
+        raise RuntimeError(
+            "execution feasibility sufficient authority metaclass is unavailable"
+        )
+    seal(snapshot_type)
 
     # The property now closes over the exact canonical verifier.  Leaving these
     # module globals present would preserve an ordinary-import mutation/mint surface

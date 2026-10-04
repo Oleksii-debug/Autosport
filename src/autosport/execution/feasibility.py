@@ -246,8 +246,44 @@ class MarketBookSnapshot:
         _require_aware(self.received_at, "received_at")
 
 
-@dataclass(frozen=True, slots=True, weakref_slot=True)
-class ExecutionFeasibilitySnapshot:
+def _build_feasibility_result_meta():
+    sealed: set[type] = set()
+    protected = frozenset({"sufficient"})
+
+    class _FeasibilityResultMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            if cls in sealed and name in protected:
+                raise TypeError(
+                    "Execution feasibility authority surface is sealed: "
+                    + name
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name: str) -> None:
+            if cls in sealed and name in protected:
+                raise TypeError(
+                    "Execution feasibility authority surface is sealed: "
+                    + name
+                )
+            super().__delattr__(name)
+
+        @classmethod
+        def seal(mcls, cls: type) -> None:
+            sealed.add(cls)
+
+    return _FeasibilityResultMeta
+
+
+_ExecutionFeasibilityResultMeta = _build_feasibility_result_meta()
+del _build_feasibility_result_meta
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+    weakref_slot=True,
+)
+class ExecutionFeasibilitySnapshot(metaclass=_ExecutionFeasibilityResultMeta):
     state: FeasibilityState
     evidence_digest: str
     reasons: tuple[str, ...]

@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+import pytest
+
 import autosport.execution.feasibility as feasibility_module
 from autosport.execution.feasibility import (
     ExecutionFeasibilitySnapshot,
@@ -10,6 +12,22 @@ from autosport.execution.feasibility import (
     ProjectionKind,
     SourceMode,
 )
+
+
+def test_sufficient_authority_property_rebinding_is_rejected() -> None:
+    with pytest.raises(
+        TypeError,
+        match="Execution feasibility authority surface is sealed: sufficient",
+    ):
+        ExecutionFeasibilitySnapshot.sufficient = property(
+            lambda _snapshot: True
+        )
+
+    with pytest.raises(
+        TypeError,
+        match="Execution feasibility authority surface is sealed: sufficient",
+    ):
+        del ExecutionFeasibilitySnapshot.sufficient
 
 
 def test_caller_cannot_mint_positive_execution_feasibility_result() -> None:

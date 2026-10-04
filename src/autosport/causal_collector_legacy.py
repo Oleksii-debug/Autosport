@@ -75,15 +75,35 @@ def _text(value: Any, field: str) -> str:
     return value
 
 
-def canonical_event_digest(event_or_payload: Any) -> str:
-    payload = event_or_payload.to_dict() if hasattr(event_or_payload, "to_dict") else event_or_payload
+def canonical_event_digest(
+    event_or_payload: Any,
+    *,
+    _market_event_type: type[MarketEvent] = MarketEvent,
+    _market_event_to_dict=MarketEvent.to_dict,
+    _dumps=json.dumps,
+    _sha256=hashlib.sha256,
+) -> str:
+    """Hash canonical event evidence without mutable MarketEvent codec dispatch."""
+
+    if type(event_or_payload) is _market_event_type:
+        payload = _market_event_to_dict(event_or_payload)
+    else:
+        payload = (
+            event_or_payload.to_dict()
+            if hasattr(event_or_payload, "to_dict")
+            else event_or_payload
+        )
     try:
-        raw = json.dumps(
-            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        raw = _dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise ValueError("canonical event payload is not JSON-safe") from exc
-    return hashlib.sha256(raw).hexdigest()
+    return _sha256(raw).hexdigest()
 
 
 def digest_source_payload(raw_payload: bytes | bytearray | memoryview | str) -> str:
@@ -967,7 +987,15 @@ class DesktopDeltaConsumer:
             )
         return acknowledged.isoformat()
 
-    def drain(self, *, as_of: str, view: CausalView = CausalView.AS_KNOWN_AT_DECISION) -> tuple[str, ...]:
+    def _drain_impl(
+        self,
+        *,
+        as_of: str,
+        view: CausalView = CausalView.AS_KNOWN_AT_DECISION,
+        _receipt_type,
+        _validate_receipt,
+        _canonical_digest,
+    ) -> tuple[str, ...]:
         now = _instant(as_of, "as_of")
         available = self.collector.deltas_available_through(as_of=as_of, view=view)
         delivered: list[str] = []
@@ -999,11 +1027,11 @@ class DesktopDeltaConsumer:
 
                 durable_receipt = self.lookup_application_receipt(delta)
                 if durable_receipt is not None:
-                    if not isinstance(durable_receipt, DesktopApplicationReceipt):
+                    if type(durable_receipt) is not _receipt_type:
                         raise ApplicationReceiptError(
                             "durable application receipt must use the canonical receipt type"
                         )
-                    durable_receipt.validate()
+                    _validate_receipt(durable_receipt)
                     if (
                         durable_receipt.delta_id != delta.delta_id
                         or durable_receipt.canonical_event_digest
@@ -1028,13 +1056,13 @@ class DesktopDeltaConsumer:
                     continue
 
                 event = self.resolve_event(delta)
-                digest = canonical_event_digest(event)
+                digest = _canonical_digest(event)
                 if digest != delta.canonical_event_digest:
                     raise DeltaConflictError(f"canonical event digest mismatch for delta {delta.delta_id}")
                 receipt = self.apply_event(delta, event)
-                if not isinstance(receipt, DesktopApplicationReceipt):
+                if type(receipt) is not _receipt_type:
                     raise ApplicationReceiptError("apply_event must return a durable DesktopApplicationReceipt")
-                receipt.validate()
+                _validate_receipt(receipt)
                 if receipt.delta_id != delta.delta_id or receipt.canonical_event_digest != digest:
                     raise ApplicationReceiptError("application receipt is not bound to this delta/digest")
                 acknowledged_at = self._acknowledged_at(
@@ -1051,6 +1079,38 @@ class DesktopDeltaConsumer:
                 )
                 delivered.append(delta.delta_id)
         return tuple(delivered)
+
+
+def _bind_desktop_delta_consumer_drain(implementation):
+    """Seal receipt identity and digest dependencies outside mutable module dispatch."""
+
+    receipt_type = DesktopApplicationReceipt
+    validate_receipt = DesktopApplicationReceipt.validate
+    canonical_digest = canonical_event_digest
+
+    def drain(
+        self,
+        *,
+        as_of: str,
+        view: CausalView = CausalView.AS_KNOWN_AT_DECISION,
+    ) -> tuple[str, ...]:
+        return implementation(
+            self,
+            as_of=as_of,
+            view=view,
+            _receipt_type=receipt_type,
+            _validate_receipt=validate_receipt,
+            _canonical_digest=canonical_digest,
+        )
+
+    return drain
+
+
+DesktopDeltaConsumer.drain = _bind_desktop_delta_consumer_drain(
+    DesktopDeltaConsumer._drain_impl
+)
+del DesktopDeltaConsumer._drain_impl
+del _bind_desktop_delta_consumer_drain
 
 
 class RemoteCollectorAdapter:

@@ -769,6 +769,111 @@ class CollectorDeltaTests(unittest.TestCase):
             )
             self.assertEqual(delivery_calls, ["d1", "d1"])
 
+    def test_consumer_digest_rejects_wrong_event_after_market_serializer_rebind(self):
+        expected_payload = event_payload()
+        wrong_event = MarketEvent.from_dict(
+            {
+                **expected_payload,
+                "decimal_odds": "9.99",
+            }
+        )
+        forged_payload = dict(expected_payload)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = CollectorDeltaStore(Path(tmp) / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(Path(tmp) / "desktop.json")
+            collector.append(self.make_delta(payload=expected_payload))
+
+            def must_not_apply(_delta, _event):
+                raise AssertionError("digest mismatch must fail before application")
+
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda _: wrong_event,
+                apply_event=must_not_apply,
+                lookup_application_receipt=lambda _delta: None,
+            )
+
+            def forged_to_dict(_event):
+                return dict(forged_payload)
+
+            with patch.object(MarketEvent, "to_dict", forged_to_dict):
+                with self.assertRaises(DeltaConflictError):
+                    consumer.drain(as_of="2026-01-01T00:00:05+00:00")
+
+            self.assertFalse(checkpoint.has_ack("d1"))
+
+    def test_consumer_rejects_receipt_subclass_before_delivery_or_ack(self):
+        class ForgedReceipt(DesktopApplicationReceipt):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = self.make_delta(payload=payload)
+            collector.append(delta)
+            forged = ForgedReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                receipt_id="forged-receipt",
+                applied_at="2026-01-01T00:00:05+00:00",
+            )
+            deliveries = []
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda _: event,
+                apply_event=lambda *_: self.fail("apply_event must not run"),
+                lookup_application_receipt=lambda _: forged,
+                on_application_receipt=lambda *_: deliveries.append(True),
+            )
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "canonical receipt type",
+            ):
+                consumer.drain(as_of="2026-01-01T00:00:06+00:00")
+            self.assertEqual(deliveries, [])
+            self.assertFalse(checkpoint.has_ack(delta.delta_id))
+
+    def test_consumer_rejects_fresh_receipt_subclass_before_delivery_or_ack(self):
+        class ForgedReceipt(DesktopApplicationReceipt):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = self.make_delta(payload=payload)
+            collector.append(delta)
+            forged = ForgedReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                receipt_id="forged-receipt",
+                applied_at="2026-01-01T00:00:05+00:00",
+            )
+            deliveries = []
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda _: event,
+                apply_event=lambda *_: forged,
+                lookup_application_receipt=lambda _: None,
+                on_application_receipt=lambda *_: deliveries.append(True),
+            )
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "apply_event must return a durable DesktopApplicationReceipt",
+            ):
+                consumer.drain(as_of="2026-01-01T00:00:06+00:00")
+            self.assertEqual(deliveries, [])
+            self.assertFalse(checkpoint.has_ack(delta.delta_id))
+
     def test_consumer_rechecks_peer_ack_after_serialization_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

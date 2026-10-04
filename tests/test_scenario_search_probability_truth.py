@@ -207,6 +207,33 @@ class ScenarioSearchProbabilityTruthTests(unittest.TestCase):
         self.assertEqual(left.mode, "bounded-approximation")
         self.assertEqual(left.expected_mode, "sampled-independent-groups")
 
+    def test_conservative_bounds_are_independent_of_ambient_decimal_context(self) -> None:
+        book = PaperBook("1000")
+        a = TicketLeg("e1", "winner", "a", Decimal("2.3456789"))
+        b = TicketLeg("e1", "winner", "b", Decimal("3.4567891"))
+        ticket_a = book.open_ticket([a], "1.23456789")
+        ticket_b = book.open_ticket([b], "2.34567891")
+        groups = [
+            ScenarioGroup(
+                "e1-winner",
+                (
+                    ScenarioOutcome(a.quote_key, Decimal("0.5")),
+                    ScenarioOutcome(b.quote_key, Decimal("0.5")),
+                ),
+            )
+        ]
+
+        engine = ScenarioSearchEngine()
+        baseline = engine.analyse([ticket_a, ticket_b], groups)
+        with localcontext() as context:
+            context.prec = 2
+            hostile = engine.analyse([ticket_a, ticket_b], groups)
+
+        self.assertEqual(hostile.conservative_floor, baseline.conservative_floor)
+        self.assertEqual(hostile.conservative_ceiling, baseline.conservative_ceiling)
+        self.assertEqual(hostile.observed_worst, baseline.observed_worst)
+        self.assertEqual(hostile.observed_best, baseline.observed_best)
+
     def test_zero_probability_outcome_cannot_be_selected_at_zero_target(self) -> None:
         outcomes = (
             ScenarioOutcome("event|winner|never", Decimal("0")),

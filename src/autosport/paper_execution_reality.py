@@ -517,8 +517,8 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             observation_evidence_ids=observation_evidence_ids,
             suspended_action_ids=suspended_action_ids,
         )
+        durable_events = self.events()
         if observation_evidence_ids:
-            durable_events = self.events()
             for evidence_id in observation_evidence_ids.values():
                 matches = [
                     event
@@ -534,6 +534,24 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     raise PaperExecutionStateError(
                         "reserved observation evidence is not durably registered"
                     )
+        run_events = [
+            event
+            for event in durable_events
+            if event["run_id"] == run_id
+        ]
+        reservations = [
+            event
+            for event in run_events
+            if event["event_type"] == "RUN_RESERVED"
+        ]
+        if not reservations and any(
+            event["event_type"]
+            in {"ATTEMPT_RECORDED", "RUN_COMPLETED"}
+            for event in run_events
+        ):
+            raise PaperExecutionIntegrityError(
+                "RUN_RESERVED cannot be retroactively appended after run state"
+            )
         self._append_event(
             event_type="RUN_RESERVED",
             run_id=run_id,

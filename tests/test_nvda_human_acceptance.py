@@ -289,6 +289,29 @@ def test_module_global_registry_rebinding_cannot_revoke_real_issuance(
     assert _verify(issued) is issued
 
 
+def test_live_structural_issuance_registry_evicts_oldest_authority_fail_closed() -> None:
+    first = None
+    latest = None
+    for index in range(257):
+        transcript = _valid_transcript()
+        transcript["human_tester_attestation"] = (
+            "I performed this session manually with NVDA and keyboard only. "
+            f"issuance {index}"
+        )
+        latest = _validate(transcript)
+        if index == 0:
+            first = latest
+
+    assert first is not None
+    assert latest is not None
+    with pytest.raises(
+        NvdaHumanAcceptanceError,
+        match="not a live validator-issued authority",
+    ):
+        _verify(first)
+    assert _verify(latest) is latest
+
+
 def test_generated_template_is_intentionally_invalid() -> None:
     template = build_manual_nvda_transcript_template(
         artifact_sha256=ARTIFACT_SHA,

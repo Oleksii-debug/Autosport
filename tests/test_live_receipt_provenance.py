@@ -1547,6 +1547,78 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_reopen_migrates_missing_trusted_current_projection_from_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            self._ingest(store, sequence=1)
+            trusted = next(iter(store.trusted_live_current_by_source().values()))
+            store.close()
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("DROP TABLE trusted_live_current_quotes")
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = SQLiteMarketStore(path)
+            try:
+                self.assertEqual(
+                    reopened.trusted_live_current_by_source()[
+                        (trusted.source_id, trusted.quote_key)
+                    ],
+                    trusted,
+                )
+            finally:
+                reopened.close()
+
+    def test_trusted_current_projection_cannot_mint_authority_without_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                event = self._direct_event(sequence=1)
+                self.assertTrue(store.append(event))
+                store.connection.execute(
+                    """INSERT INTO trusted_live_current_quotes
+                       (source_id,quote_key,sequence,dedupe_key)
+                       VALUES (?,?,?,?)""",
+                    (
+                        event.source_id,
+                        event.quote_key,
+                        event.sequence,
+                        event.dedupe_key,
+                    ),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "missing receipt authority",
+                ):
+                    store.trusted_live_current_by_source()
+            finally:
+                store.close()
+
+    def test_trusted_current_projection_identity_drift_fails_closed_until_reopen(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            try:
+                self._ingest(store, sequence=1)
+                store.connection.execute(
+                    "UPDATE trusted_live_current_quotes SET sequence=99"
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "projection identity mismatch: sequence",
+                ):
+                    store.trusted_live_current_by_source()
+            finally:
+                store.close()
+
     def test_reopen_repairs_tampered_trusted_current_projection_from_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

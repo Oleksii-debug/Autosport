@@ -201,6 +201,11 @@ from . import _monotonic_root_selection_dispatch_guard as _monotonic_root_select
 # imports the execution implementation.
 from . import _betfair_supervised_public_transport_boundary as _betfair_supervised_public_transport_boundary  # noqa: F401,E402
 
+# Durable supervised-approval revocation must serialize with the exact economic
+# critical section held through the irreversible Betfair provider write. Install
+# after transport/STOP composition so the existing provider-write graph is unchanged.
+from . import _supervised_approval_revocation_fence as _supervised_approval_revocation_fence  # noqa: F401,E402
+
 # Drift metric values are exact fixed-point scientific metadata. Reject noncanonical
 # exponent forms and oversized text before Decimal fixed-point materialization so
 # tiny hostile inputs cannot amplify into attacker-sized evidence strings.

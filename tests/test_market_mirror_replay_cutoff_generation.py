@@ -3441,6 +3441,50 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_persist_and_apply_uses_exact_storage_admission_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            mirror = MarketMirror()
+            original = MarketEvent.from_dict(
+                {
+                    **self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    ).to_dict(),
+                    "metadata": {"witness": {"value": 1}},
+                }
+            )
+            original_commit = store._commit_stable_database_path
+            mutated = False
+
+            def commit_then_mutate_caller():
+                nonlocal mutated
+                result = original_commit()
+                if not mutated:
+                    original.metadata["witness"]["value"] = 2
+                    mutated = True
+                return result
+
+            try:
+                with patch.object(
+                    store,
+                    "_commit_stable_database_path",
+                    new=commit_then_mutate_caller,
+                ):
+                    result = mirror.persist_and_apply(store, original)
+
+                self.assertEqual(result.status.value, "applied")
+                self.assertTrue(mutated)
+                live = mirror.event_for_quote_key(original.source_id, original.quote_key)
+                self.assertIsNotNone(live)
+                assert live is not None
+                self.assertEqual(live.metadata["witness"]["value"], 1)
+                self.assertEqual(store.events()[0].metadata["witness"]["value"], 1)
+                self.assertEqual(original.metadata["witness"]["value"], 2)
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

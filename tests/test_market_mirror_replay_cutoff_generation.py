@@ -2422,8 +2422,12 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
             # Seal generation zero before the writer starts. This cutoff is already
             # independently authoritative and must not depend on a later append's
-            # machine-COMMIT progress.
+            # machine-COMMIT progress. Equivalent timezone representations must reuse
+            # the same canonical cutoff identity rather than being treated as new.
             self.assertEqual(len(self.replay(second).events), 0)
+            equivalent_cutoff = self.CUTOFF.astimezone(
+                timezone(timedelta(hours=2))
+            )
 
             def guarded_recover(authority, **kwargs):
                 tx_id = kwargs.get("tx_id")
@@ -2461,7 +2465,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     writer.start()
                     self.assertTrue(writer_at_machine_commit.wait(timeout=5))
 
-                    snapshot = self.replay(second)
+                    snapshot = self.replay(second, as_of=equivalent_cutoff)
                     self.assertEqual(len(snapshot.events), 0)
                     self.assertFalse(foreign_recovery.is_set())
 

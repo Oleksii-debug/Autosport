@@ -720,6 +720,192 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             controller.close()
             stale.close()
 
+    def test_stop_during_catalog_refresh_blocks_market_provider_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            controller = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            market_observer = _DurableObserver(workspace, [()])
+            lifecycle = ContinuousEventLifecycle(workspace / "catalog_lifecycle.json")
+            page = CatalogPage(
+                source_id="provider-a",
+                stream_epoch="epoch-1",
+                cursor="cursor-1",
+                position=1,
+                events=(),
+            )
+
+            def fetch_page(_checkpoint):
+                controller.stop()
+                return page
+
+            stale = self._loop(
+                workspace,
+                observer=market_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+                catalog_lifecycle=lifecycle,
+                catalog_fetch_page=fetch_page,
+                catalog_source_id="provider-a",
+            )
+
+            result = stale.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.STOPPED)
+            self.assertEqual(market_observer.calls, 0)
+            self.assertFalse(stale.progress_path.exists())
+            self.assertTrue(stale.stopped)
+            controller.close()
+            stale.close()
+
+    def test_pause_during_catalog_refresh_blocks_market_provider_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            controller = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            market_observer = _DurableObserver(workspace, [()])
+            lifecycle = ContinuousEventLifecycle(workspace / "catalog_lifecycle.json")
+            page = CatalogPage(
+                source_id="provider-a",
+                stream_epoch="epoch-1",
+                cursor="cursor-1",
+                position=1,
+                events=(),
+            )
+
+            def fetch_page(_checkpoint):
+                controller.pause()
+                return page
+
+            stale = self._loop(
+                workspace,
+                observer=market_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+                catalog_lifecycle=lifecycle,
+                catalog_fetch_page=fetch_page,
+                catalog_source_id="provider-a",
+            )
+
+            result = stale.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.PAUSED)
+            self.assertEqual(market_observer.calls, 0)
+            self.assertFalse(stale.progress_path.exists())
+            self.assertTrue(stale.paused)
+            controller.close()
+            stale.close()
+
+    def test_registry_change_during_catalog_refresh_fences_market_provider_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            controller = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            market_observer = _DurableObserver(workspace, [()])
+            lifecycle = ContinuousEventLifecycle(workspace / "catalog_lifecycle.json")
+            page = CatalogPage(
+                source_id="provider-a",
+                stream_epoch="epoch-1",
+                cursor="cursor-1",
+                position=1,
+                events=(),
+            )
+
+            def fetch_page(_checkpoint):
+                controller.register_input(
+                    "peer-input",
+                    selection_ids="selection-peer",
+                )
+                return page
+
+            stale = self._loop(
+                workspace,
+                observer=market_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+                catalog_lifecycle=lifecycle,
+                catalog_fetch_page=fetch_page,
+                catalog_source_id="provider-a",
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "dependency registry changed concurrently before cycle",
+            ):
+                stale.run_cycle()
+
+            self.assertEqual(market_observer.calls, 0)
+            self.assertFalse(stale.progress_path.exists())
+            self.assertEqual(controller.dependencies.input_ids, ("peer-input",))
+            self.assertEqual(stale.dependencies.input_ids, ())
+            controller.close()
+            stale.close()
+
+    def test_progress_change_during_catalog_refresh_fences_market_provider_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            controller = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            market_observer = _DurableObserver(workspace, [()])
+            lifecycle = ContinuousEventLifecycle(workspace / "catalog_lifecycle.json")
+            page = CatalogPage(
+                source_id="provider-a",
+                stream_epoch="epoch-1",
+                cursor="cursor-1",
+                position=1,
+                events=(),
+            )
+
+            def fetch_page(_checkpoint):
+                controller._write_pending(
+                    decision_ts=self.START.isoformat(),
+                    market_state_sha256="a" * 64,
+                    affected_input_ids=(),
+                    gate="normal",
+                )
+                return page
+
+            stale = self._loop(
+                workspace,
+                observer=market_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+                catalog_lifecycle=lifecycle,
+                catalog_fetch_page=fetch_page,
+                catalog_source_id="provider-a",
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "progress changed concurrently before cycle",
+            ):
+                stale.run_cycle()
+
+            self.assertEqual(market_observer.calls, 0)
+            self.assertTrue(stale.progress_path.exists())
+            self.assertEqual(
+                json.loads(stale.progress_path.read_text(encoding="utf-8"))["phase"],
+                "pending",
+            )
+            controller.close()
+            stale.close()
+
     def test_unfinished_pending_recovers_before_durable_pause(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

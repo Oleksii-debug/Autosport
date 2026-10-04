@@ -351,6 +351,37 @@ def test_empty_settlement_validation_does_not_scan_history() -> None:
             state.validate_settlement_evidence(settlement_evidence=())
 
 
+def test_empty_settlement_validation_verifies_committed_tip_without_history_scan() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        checkpoint = json.loads(
+            (root / "continuous_session.json").read_text(encoding="utf-8")
+        )
+        tip_path = (
+            root
+            / "continuous_session.settlement-evidence"
+            / f"{checkpoint['settlement_evidence_tip_key_sha256']}.json"
+        )
+        tip_path.unlink()
+
+        with patch.object(
+            state,
+            "_load_evidence_history",
+            side_effect=AssertionError(
+                "bounded empty validation must not scan settlement history"
+            ),
+        ):
+            try:
+                state.validate_settlement_evidence(settlement_evidence=())
+            except continuous_session.ContinuousSessionError:
+                pass
+            else:
+                raise AssertionError(
+                    "empty settlement validation accepted a missing committed tip"
+                )
+
+
 def test_pending_settlement_journal_recovers_after_write_crash() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

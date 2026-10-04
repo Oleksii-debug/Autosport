@@ -21,6 +21,9 @@ class ProductProposalRiskEvaluationPrecommitForgeTests(unittest.TestCase):
         self.assertFalse(forged.binding_identity_proven)
         self.assertFalse(forged.proposal_target_identity_proven)
         self.assertFalse(forged.scientific_precommit_proven)
+        self.assertFalse(forged.scientific_preoutcome_chronology_proven)
+        self.assertFalse(forged.proposal_target_bound_after_scientific_precommit)
+        self.assertFalse(forged.scientific_precommit_proves_proposal_execution_scope)
         self.assertFalse(forged.proposal_target_counterfactual_execution_proven)
         self.assertFalse(forged.risk_upper_bound_for_target)
         self.assertFalse(forged.grants_ticket_authority)
@@ -34,6 +37,8 @@ class ProductProposalRiskEvaluationPrecommitForgeTests(unittest.TestCase):
         self.assertNotIn("result_sha256", names)
         self.assertIn("target_sha256", names)
         self.assertIn("scientific_precommit_sha256", names)
+        self.assertIn("proposal_evaluation_scope", names)
+        self.assertIn("membership_outcome_reveal_after", names)
         self.assertIn("binding_sha256", names)
 
     def test_dispatch_guard_root_rebinding_fails_closed(self) -> None:
@@ -65,6 +70,7 @@ class ProductProposalRiskEvaluationPrecommitForgeTests(unittest.TestCase):
             "_text",
             "_sha",
             "_decimal_text",
+            "_instant",
             "_canonical_json",
             "_digest",
         ):

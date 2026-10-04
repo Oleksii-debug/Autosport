@@ -1071,43 +1071,53 @@ class PersistentLiveDecisionLoop:
         self._decision_market_history_frozen = False
 
         store = self._default_market_store
+        owns_store = store is None
         if store is None:
-            return self._sample_clock()
+            # Custom observation runners still participate in the canonical durable
+            # market authority. Open one bounded verifier connection so their crash
+            # cursor gets the same append-generation frontier as the default provider
+            # path instead of falling back to timestamp-only recovery.
+            store = SQLiteMarketStore(self.workspace / "market.db")
 
-        # The token is sampled before trusted projection reconciliation and again
-        # after the candidate decision clock. If a peer commits anywhere across that
-        # interval, discard the candidate cutoff, reconcile the newly durable truth,
-        # and sample again. When the latest-only mirror hides a causally visible
-        # predecessor, freeze the already-proven append history inside this same token
-        # interval. A later fallback must consume this snapshot rather than re-open the
-        # database after the decision cutoff.
-        for _ in range(_MARKET_FRONTIER_RETRY_LIMIT):
-            expected_token = self._reconcile_default_market_changes(
-                store,
-                self.mirror_updates,
-            )
-            # Sample only a cheap, explicitly untrusted generation hint inside the
-            # same token interval as the decision clock.  A material cycle proves this
-            # exact boundary immediately before PENDING publication; idle cycles never
-            # pay the full append-history authority proof.
-            append_generation = store.append_generation_hint()
-            decision_time = self._sample_clock()
-            frozen_history: tuple[tuple[MarketEvent, int], ...] | None = None
-            if self._decision_refresh_may_need_history(decision_time) and any(
-                self.dependencies.requires_current_history_fallback(
-                    input_id,
-                    as_of=decision_time,
+        try:
+            # The token is sampled before trusted projection reconciliation and again
+            # after the candidate decision clock. If a peer commits anywhere across that
+            # interval, discard the candidate cutoff, reconcile the newly durable truth,
+            # and sample again. When the latest-only mirror hides a causally visible
+            # predecessor, freeze the already-proven append history inside this same token
+            # interval. A later fallback must consume this snapshot rather than re-open the
+            # database after the decision cutoff.
+            for _ in range(_MARKET_FRONTIER_RETRY_LIMIT):
+                expected_token = self._reconcile_default_market_changes(
+                    store,
+                    self.mirror_updates,
+                    force=owns_store,
                 )
-                for input_id in self.dependencies.input_ids
-            ):
-                frozen_history = tuple(store.events_with_append_generation())
+                # Sample only a cheap, explicitly untrusted generation hint inside the
+                # same token interval as the decision clock. A material cycle proves this
+                # exact boundary immediately before PENDING publication; idle cycles never
+                # pay the full append-history authority proof.
+                append_generation = store.append_generation_hint()
+                decision_time = self._sample_clock()
+                frozen_history: tuple[tuple[MarketEvent, int], ...] | None = None
+                if self._decision_refresh_may_need_history(decision_time) and any(
+                    self.dependencies.requires_current_history_fallback(
+                        input_id,
+                        as_of=decision_time,
+                    )
+                    for input_id in self.dependencies.input_ids
+                ):
+                    frozen_history = tuple(store.events_with_append_generation())
 
-            if store.external_change_token() == expected_token:
-                self._decision_market_frontier_as_of = decision_time
-                self._decision_market_append_generation = append_generation
-                self._decision_market_history = frozen_history
-                self._decision_market_history_frozen = True
-                return decision_time
+                if store.external_change_token() == expected_token:
+                    self._decision_market_frontier_as_of = decision_time
+                    self._decision_market_append_generation = append_generation
+                    self._decision_market_history = frozen_history
+                    self._decision_market_history_frozen = True
+                    return decision_time
+        finally:
+            if owns_store:
+                store.close()
 
         raise LiveDecisionProgressError(
             "cross-process market truth changed continuously across decision cutoff"
@@ -2495,19 +2505,22 @@ class PersistentLiveDecisionLoop:
         )
         if market_append_generation is not None:
             store = self._default_market_store
+            owns_store = store is None
             if store is None:
-                raise LiveDecisionProgressError(
-                    "decision market frontier lost its canonical store before publication"
+                store = SQLiteMarketStore(self.workspace / "market.db")
+            try:
+                # append_generation_hint() is intentionally not authority. Economic
+                # publication proves both the exact sampled boundary and the complete
+                # current tail: a later canonical product append is safe and belongs to
+                # the next cycle, but an unissued/tampered tail must fail closed before
+                # PENDING becomes durable. Restart recovery later consumes only the
+                # already-proven immutable prefix.
+                store.require_current_append_authority_with_boundary(
+                    market_append_generation
                 )
-            # append_generation_hint() is intentionally not authority. Economic
-            # publication proves both the exact sampled boundary and the complete
-            # current tail: a later canonical product append is safe and belongs to
-            # the next cycle, but an unissued/tampered tail must fail closed before
-            # PENDING becomes durable. Restart recovery later consumes only the
-            # already-proven immutable prefix.
-            store.require_current_append_authority_with_boundary(
-                market_append_generation
-            )
+            finally:
+                if owns_store:
+                    store.close()
         with WorkspaceEconomicLock(self.workspace):
             durable_control = self._load_control()
             if durable_control is None:

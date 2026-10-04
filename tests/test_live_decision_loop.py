@@ -3478,6 +3478,76 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed_observer.calls, 1)
             self.assertEqual(len(ledger.verified_records()), 2)
 
+    def test_custom_observer_pending_restart_uses_append_frontier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(input_id, snapshot):
+                del input_id, snapshot
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+
+            pending = json.loads(first.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(pending["phase"], "pending")
+            self.assertEqual(pending["market_append_generation"], 1)
+            first.close()
+
+            peer_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                peer_store.append(
+                    self._event(
+                        selection="selection-a",
+                        sequence=2,
+                        odds="2.10",
+                        observed=self.START + timedelta(milliseconds=500),
+                    )
+                )
+            finally:
+                peer_store.close()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed_factory = _EmptyIntentFactory()
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=resumed_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            recovered = resumed.run_cycle()
+
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertEqual(
+                resumed_factory.calls[-1],
+                ("input-a", (("selection-a", 1, "open"),)),
+            )
+            committed = json.loads(
+                resumed.progress_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(committed["market_append_generation"], 1)
+
+            advanced = resumed.run_cycle()
+            self.assertEqual(advanced.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(resumed_observer.calls, 1)
+            self.assertEqual(
+                resumed_factory.calls[-1],
+                ("input-a", (("selection-a", 2, "open"),)),
+            )
+            resumed.close()
+
     def test_pending_restart_uses_frontier_after_backdated_append(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

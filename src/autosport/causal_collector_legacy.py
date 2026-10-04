@@ -431,6 +431,66 @@ class _CanonicalDesktopApplicationStore(_JsonAtomicStore):
         receipt.validate()
         return receipt
 
+    def completed_receipts_for_source(
+        self,
+        source_id: str,
+    ) -> tuple[DesktopApplicationReceipt, ...]:
+        """Return completed product-owned application receipts for one source.
+
+        This index is intentionally independent of retained collector rows: acknowledged
+        deltas from old epochs may be compacted, while the completed desktop application
+        remains the durable witness that a canonical market effect reached the product.
+        """
+
+        _text(source_id, "source_id")
+        raw = self._read()
+        applications = raw.get("applications")
+        if type(applications) is not dict:
+            raise ApplicationReceiptError(
+                "canonical desktop application index is malformed"
+            )
+        receipts: list[DesktopApplicationReceipt] = []
+        for delta_id, item in applications.items():
+            if type(delta_id) is not str or type(item) is not dict:
+                raise ApplicationReceiptError(
+                    "canonical desktop application entry is malformed"
+                )
+            if item.get("delta_id") != delta_id:
+                raise ApplicationReceiptError(
+                    "canonical desktop application delta identity is inconsistent"
+                )
+            stored_source_id = item.get("source_id")
+            try:
+                _text(stored_source_id, "source_id")
+            except (TypeError, ValueError) as exc:
+                raise ApplicationReceiptError(
+                    "canonical desktop application source identity is invalid"
+                ) from exc
+            if stored_source_id != source_id:
+                continue
+            market_applied = item.get("market_applied")
+            health_applied = item.get("health_applied")
+            if type(market_applied) is not bool or type(health_applied) is not bool:
+                raise ApplicationReceiptError(
+                    "canonical desktop application completion flags are invalid"
+                )
+            completed_at = item.get("completed_at")
+            if completed_at is None:
+                continue
+            if not market_applied or not health_applied:
+                raise ApplicationReceiptError(
+                    "canonical desktop application completed without durable effects"
+                )
+            receipt = DesktopApplicationReceipt(
+                delta_id=delta_id,
+                canonical_event_digest=item.get("canonical_event_digest"),
+                receipt_id=item.get("receipt_id"),
+                applied_at=completed_at,
+            )
+            receipt.validate()
+            receipts.append(receipt)
+        return tuple(sorted(receipts, key=lambda receipt: receipt.delta_id))
+
 
 class CanonicalDesktopApplication:
     """Compose existing market and health authorities into one durable application receipt."""
@@ -452,6 +512,12 @@ class CanonicalDesktopApplication:
 
     def lookup_receipt(self, delta: CollectorDelta) -> DesktopApplicationReceipt | None:
         return self._state.receipt(delta)
+
+    def completed_receipts_for_source(
+        self,
+        source_id: str,
+    ) -> tuple[DesktopApplicationReceipt, ...]:
+        return self._state.completed_receipts_for_source(source_id)
 
     @staticmethod
     def _outcome(

@@ -1303,6 +1303,12 @@ class _ContinuousSessionState:
         settlement_evidence: tuple[SettlementResolution, ...],
     ) -> None:
         if not settlement_evidence:
+            # This pre-effect trust boundary must still verify the bounded
+            # checkpoint and committed journal tip. It deliberately avoids
+            # materializing historical receipts, but it must not let a tick
+            # proceed into settlement-learning side effects over corrupt
+            # durable authority.
+            self._read_current_state()
             return
         with durable_path_lock(self.path):
             raw = self._current_state_locked()

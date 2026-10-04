@@ -180,6 +180,10 @@ def _build_constraint_evidence_meta():
         {
             "__new__",
             "__getnewargs__",
+            "__getattribute__",
+            "__getitem__",
+            "__iter__",
+            "__len__",
             "provider_id",
             "jurisdiction_scope",
             "currency_code",
@@ -623,21 +627,14 @@ def _build_constraint_resolver():
 
     observation_new = observation_type.__new__
     result_new = result_type.__new__
-    provider_getter = observation_type.__dict__["provider_id"].fget
-    scope_getter = observation_type.__dict__["jurisdiction_scope"].fget
-    currency_getter = observation_type.__dict__["currency_code"].fget
-    min_size_getter = observation_type.__dict__["min_standard_size"].fget
-    min_payout_getter = observation_type.__dict__["min_payout"].fget
-    lower_enabled_getter = observation_type.__dict__[
-        "lower_minimum_payout_enabled"
-    ].fget
-    available_getter = observation_type.__dict__["available_at"].fget
-    effective_from_getter = observation_type.__dict__["effective_from"].fget
-    effective_until_getter = observation_type.__dict__["effective_until"].fget
-    review_expires_getter = observation_type.__dict__["review_expires_at"].fget
-    order_family_getter = observation_type.__dict__["order_family"].fget
-    generation_getter = observation_type.__dict__["generation_sha256"].fget
-    semantic_getter = observation_type.__dict__["semantic_sha256"].fget
+    tuple_getitem = tuple.__getitem__
+    tuple_len = tuple.__len__
+
+    # Resolver truth must come from the immutable tuple payload itself. Captured
+    # operator.itemgetter objects still dispatch through a subclass's mutable
+    # __getitem__, so they are not a raw-slot authority boundary.
+    def raw_slot(item: tuple, index: int):
+        return tuple_getitem(item, index)
 
     def make_result(
         *,
@@ -652,7 +649,7 @@ def _build_constraint_resolver():
         lower_minimum_payout_enabled: bool | None = None,
     ) -> BetfairProviderConstraintResolution:
         generations = tuple(
-            sorted({generation_getter(item) for item in candidates})
+            sorted({raw_slot(item, 18) for item in candidates})
         )
         payload = {
             "schema": "autosport.betfair_standard_limit_constraint_resolution",
@@ -712,14 +709,14 @@ def _build_constraint_resolver():
 
         canonical_observations = []
         for item in observations:
-            if len(item) != 19:
+            if tuple_len(item) != 19:
                 raise error_type(
                     "observation tuple shape does not match canonical schema"
                 )
             try:
                 rebuilt = observation_new(
                     observation_type,
-                    *tuple(item[:17]),
+                    *(raw_slot(item, index) for index in range(17)),
                 )
             except error_type:
                 raise
@@ -727,14 +724,17 @@ def _build_constraint_resolver():
                 raise error_type(
                     "observation canonical reconstruction failed"
                 ) from exc
-            if tuple(rebuilt) != tuple(item):
+            if tuple_len(rebuilt) != 19 or any(
+                raw_slot(rebuilt, index) != raw_slot(item, index)
+                for index in range(19)
+            ):
                 raise error_type(
                     "observation payload/digests do not match canonical reconstruction"
                 )
             canonical_observations.append(rebuilt)
 
         unique_by_generation = {
-            generation_getter(item): item for item in canonical_observations
+            raw_slot(item, 18): item for item in canonical_observations
         }
         normalized_observations = tuple(
             unique_by_generation[generation]
@@ -747,10 +747,10 @@ def _build_constraint_resolver():
         matching = tuple(
             item
             for item in normalized_observations
-            if provider_getter(item) == provider_id
-            and scope_getter(item) == scope
-            and currency_getter(item) == currency
-            and order_family_getter(item) == order_family
+            if raw_slot(item, 0) == provider_id
+            and raw_slot(item, 1) == scope
+            and raw_slot(item, 2) == currency
+            and raw_slot(item, 15) == order_family
         )
         if not matching:
             return make_result(
@@ -764,7 +764,7 @@ def _build_constraint_resolver():
         causally_available = tuple(
             item
             for item in matching
-            if utc_fn(available_getter(item), "available_at") <= current
+            if utc_fn(raw_slot(item, 11), "available_at") <= current
         )
         if not causally_available:
             # Future evidence did not exist for this product decision cut.
@@ -779,11 +779,10 @@ def _build_constraint_resolver():
         applicable = tuple(
             item
             for item in causally_available
-            if utc_fn(effective_from_getter(item), "effective_from") <= current
+            if utc_fn(raw_slot(item, 12), "effective_from") <= current
             and (
-                effective_until_getter(item) is None
-                or current
-                < utc_fn(effective_until_getter(item), "effective_until")
+                raw_slot(item, 13) is None
+                or current < utc_fn(raw_slot(item, 13), "effective_until")
             )
         )
         if not applicable:
@@ -798,7 +797,7 @@ def _build_constraint_resolver():
         reviewed_current = tuple(
             item
             for item in applicable
-            if current < utc_fn(review_expires_getter(item), "review_expires_at")
+            if current < utc_fn(raw_slot(item, 14), "review_expires_at")
         )
         if not reviewed_current:
             return make_result(
@@ -809,7 +808,7 @@ def _build_constraint_resolver():
                 candidates=applicable,
             )
 
-        semantics = {semantic_getter(item) for item in reviewed_current}
+        semantics = {raw_slot(item, 17) for item in reviewed_current}
         if len(semantics) != 1:
             return make_result(
                 state=state_type.CONFLICTING_UNVERIFIED,
@@ -826,10 +825,10 @@ def _build_constraint_resolver():
             currency_code=currency,
             as_of=current,
             candidates=reviewed_current,
-            semantic_sha256=semantic_getter(exemplar),
-            min_standard_size=min_size_getter(exemplar),
-            min_payout=min_payout_getter(exemplar),
-            lower_minimum_payout_enabled=lower_enabled_getter(exemplar),
+            semantic_sha256=raw_slot(exemplar, 17),
+            min_standard_size=raw_slot(exemplar, 3),
+            min_payout=raw_slot(exemplar, 4),
+            lower_minimum_payout_enabled=raw_slot(exemplar, 5),
         )
 
     return resolve_betfair_standard_limit_constraint_evidence

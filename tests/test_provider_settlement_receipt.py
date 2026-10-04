@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import autosport.provider_settlement_receipt as settlement_module
 from autosport.provider_settlement_receipt import (
     ProviderSettlementReceipt,
     ProviderSettlementReceiptError,
@@ -299,3 +300,124 @@ def test_from_dict_rejects_json_bool_schema_version_alias() -> None:
 
     with pytest.raises(ProviderSettlementReceiptError, match="unsupported settlement"):
         ProviderSettlementReceipt.from_dict(raw)
+
+def test_canonical_receipt_authority_resists_module_global_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous = _receipt()
+    previous_digest = previous.receipt_sha256
+    previous_dict = previous.to_dict()
+
+    class ForgedReceipt:
+        pass
+
+    class ForgedDisposition:
+        WIN = object()
+        LOSS = object()
+
+    class ForgedHashlib:
+        @staticmethod
+        def sha256(payload: bytes) -> object:
+            raise AssertionError("forged hashlib must not execute")
+
+    class ForgedJson:
+        @staticmethod
+        def dumps(*args: object, **kwargs: object) -> str:
+            raise AssertionError("forged json must not execute")
+
+    monkeypatch.setattr(
+        settlement_module,
+        "ProviderSettlementReceipt",
+        ForgedReceipt,
+    )
+    monkeypatch.setattr(
+        settlement_module,
+        "SettlementDisposition",
+        ForgedDisposition,
+    )
+    monkeypatch.setattr(
+        settlement_module,
+        "_digest",
+        lambda payload: "f" * 64,
+    )
+    monkeypatch.setattr(
+        settlement_module,
+        "_receipt_payload_unchecked",
+        lambda receipt: {"forged": True},
+    )
+    monkeypatch.setattr(
+        settlement_module,
+        "_assert_receipt_sealed",
+        lambda receipt: "f" * 64,
+    )
+    monkeypatch.setattr(
+        settlement_module,
+        "_seal_receipt",
+        lambda receipt: None,
+    )
+    monkeypatch.setattr(
+        settlement_module,
+        "_text",
+        lambda value, label: "forged",
+    )
+    monkeypatch.setattr(
+        settlement_module,
+        "_sha256",
+        lambda value, label: "f" * 64,
+    )
+    monkeypatch.setattr(
+        settlement_module,
+        "_utc",
+        lambda value, label: value,
+    )
+    monkeypatch.setattr(settlement_module, "json", ForgedJson)
+    monkeypatch.setattr(settlement_module, "hashlib", ForgedHashlib)
+
+    assert previous.receipt_sha256 == previous_digest
+    assert previous.to_dict() == previous_dict
+
+    current = _receipt(
+        disposition=SettlementDisposition.LOSS,
+        rule_sha256="c" * 64,
+        revision=1,
+        supersedes_receipt_sha256=previous_digest,
+    )
+    assert type(current) is ProviderSettlementReceipt
+    verify_settlement_revision(previous, current)
+
+    restored = ProviderSettlementReceipt.from_dict(current.to_dict())
+    assert type(restored) is ProviderSettlementReceipt
+    assert restored == current
+    assert restored.receipt_sha256 == current.receipt_sha256
+
+    with pytest.raises(
+        ProviderSettlementReceiptError,
+        match="exact SettlementDisposition",
+    ):
+        ProviderSettlementReceipt(
+            provider="betfair",
+            provider_receipt_id="settlement-forged",
+            execution_id="execution-forged",
+            market_id="market-forged",
+            selection_id="selection-forged",
+            disposition=ForgedDisposition.WIN,  # type: ignore[arg-type]
+            settled_at=datetime(2026, 9, 21, tzinfo=UTC),
+            rule_id="rule",
+            rule_version="v1",
+            rule_sha256="a" * 64,
+            provider_evidence_sha256="b" * 64,
+        )
+
+
+def test_from_dict_rejects_subclass_parser_entry() -> None:
+    raw = _receipt().to_dict()
+
+    class ReceiptSubclass(ProviderSettlementReceipt):
+        pass
+
+    with pytest.raises(
+        ProviderSettlementReceiptError,
+        match="parser requires canonical receipt type",
+    ):
+        ReceiptSubclass.from_dict(raw)
+

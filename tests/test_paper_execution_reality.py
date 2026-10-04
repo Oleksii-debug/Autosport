@@ -320,6 +320,43 @@ class PaperExecutionRealityTests(unittest.TestCase):
                     started_at=STARTED_AT,
                 )
 
+    def test_observed_suspension_evidence_remains_valid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(
+                Path(tmp) / "paper-execution.jsonl"
+            )
+            current = plan(action("a1"))
+            observation, registry = registered_observation(
+                ledger,
+                current.actions[0],
+                PaperAttemptOutcome.REJECTED,
+                suspended=True,
+            )
+            first = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-observed-suspension",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                observations={"a1": observation},
+                evidence_registry=registry,
+            )
+            second = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-observed-suspension",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                observations={"a1": observation},
+                evidence_registry=registry,
+            )
+            self.assertEqual(first, second)
+            self.assertTrue(first.attempts[0].suspended)
+            self.assertEqual(
+                first.attempts[0].evidence_grade,
+                EvidenceGrade.EMPIRICAL,
+            )
+
     def test_observation_and_suspension_cannot_claim_same_action(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")

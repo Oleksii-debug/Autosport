@@ -822,7 +822,7 @@ class SQLiteMarketStore:
                 self._rebuild_current_quotes(
                     append_authority=append_authority,
                 )
-        except Exception:
+        except BaseException:
             self.connection.close()
             raise
 
@@ -899,7 +899,7 @@ class SQLiteMarketStore:
             self.connection.execute("DROP TABLE current_quotes")
             self._create_current_quotes()
             _validate_canonical_table(self.connection, "current_quotes")
-        except Exception:
+        except BaseException:
             self.connection.rollback()
             raise
         else:
@@ -988,7 +988,7 @@ class SQLiteMarketStore:
                 _validate_canonical_table(self.connection, table_name)
             _ensure_canonical_secondary_indexes(self.connection)
             self._validate_causal_replay_state()
-        except Exception:
+        except BaseException:
             self.connection.rollback()
             raise
         else:
@@ -1772,7 +1772,7 @@ class SQLiteMarketStore:
                         payload,
                     ),
                 )
-        except Exception:
+        except BaseException:
             self.connection.rollback()
             raise
         else:
@@ -2004,7 +2004,7 @@ class SQLiteMarketStore:
                     )
                     prepared = (tx_id, binding_sha256)
                     self._commit_stable_database_path()
-                except Exception:
+                except BaseException:
                     # Once PREPARE exists, do not guess whether SQLite publication
                     # is durable. A commit can succeed before a post-commit pathname
                     # check fails, and rollback cannot undo that durable state. Leave
@@ -2052,7 +2052,7 @@ class SQLiteMarketStore:
                         ).fetchall()
                     events = [_event_from_history_row(row) for row in rows]
                     self._commit_stable_database_path()
-                except Exception:
+                except BaseException:
                     self.connection.rollback()
                     raise
         return sorted(events, key=_event_order_key)
@@ -2219,7 +2219,7 @@ class SQLiteMarketStore:
                                 (cutoff_id, canonical_as_of, max_generation),
                             )
                         self._commit_stable_database_path()
-                    except Exception:
+                    except BaseException:
                         # PREPARE is intentionally retained on every post-prepare
                         # failure. SQLite commit outcome and the final pathname
                         # identity can diverge across an exception boundary; durable
@@ -2298,7 +2298,7 @@ class SQLiteMarketStore:
                         (max_generation,),
                     ).fetchall()
                     self._commit_stable_database_path()
-                except Exception:
+                except BaseException:
                     self.connection.rollback()
                     raise
 
@@ -2355,7 +2355,7 @@ class SQLiteMarketStore:
                             "current quote projection diverges from canonical market history"
                         )
                     self._commit_stable_database_path()
-                except Exception:
+                except BaseException:
                     self.connection.rollback()
                     raise
                 return current

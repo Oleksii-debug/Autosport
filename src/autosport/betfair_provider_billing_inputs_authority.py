@@ -281,19 +281,25 @@ def _build_observation_authority():
         return register(source)
 
     def validate(source: object):
-        """Return only an exact, untampered observation issued by ``read`` above."""
+        """Return only a current exact observation issued by ``read`` above."""
 
         if type(source) is not source_cls:
             raise TypeError(
                 "source must be exact BetfairProviderBillingInputsObservation"
             )
-        validate_structure(source)
         registered = issued.get(id(source))
         if registered is None or registered[0] is not source:
             raise error_cls(
                 "provider billing observation must be issued by canonical provider read"
             )
-        if projection(source) != registered[1]:
+        try:
+            validate_structure(source)
+            current_projection = projection(source)
+        except Exception:
+            issued.pop(id(source), None)
+            raise
+        if current_projection != registered[1]:
+            issued.pop(id(source), None)
             raise error_cls(
                 "provider billing observation no longer matches issued identity"
             )

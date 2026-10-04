@@ -269,19 +269,28 @@ class MarketMirror:
         # fresh/incomplete mirror, applying the caller's retry object would expose
         # local timestamps that are not the durable canonical history. Re-read the
         # independently trusted persisted event before mutating live state.
-        canonical = next(
+        canonical_with_generation = next(
             (
-                persisted
-                for persisted in store.events(event.event_id)
+                (persisted, append_generation)
+                for persisted, append_generation in store.events_with_append_generation(
+                    event.event_id
+                )
                 if persisted.dedupe_key == event.dedupe_key
             ),
             None,
         )
-        if canonical is None:
+        if canonical_with_generation is None:
             raise RuntimeError(
                 "duplicate market event disappeared from canonical history"
             )
-        return self.apply(canonical)
+        canonical, append_generation = canonical_with_generation
+        # A storage duplicate can refer to sealed generation-zero migration history.
+        # Reconstructing a fresh/incomplete mirror must preserve that row as an
+        # audit/sequence fence without laundering it into decision-causal live state.
+        return self._apply_with_causal_authority(
+            canonical,
+            decision_causal=append_generation > 0,
+        )
 
     def view(
         self,

@@ -237,7 +237,11 @@ def betfair_execution_confirmation_spec(
     review_payload = {
         "schema": "autosport.betfair_final_send_review",
         "schema_version": 1,
-        **material,
+        **{
+            key: value
+            for key, value in material.items()
+            if key not in {"schema", "schema_version"}
+        },
         "decision_id": decision_id,
         "decision_sha256": decision_sha256,
     }

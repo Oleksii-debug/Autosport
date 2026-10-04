@@ -610,6 +610,105 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             payload=payload,
         )
 
+
+    def _append_event_unlocked(
+        self,
+        *,
+        events: list[dict[str, Any]],
+        event_type: str,
+        run_id: str,
+        key: str,
+        payload: dict[str, Any],
+    ) -> None:
+        by_key = {item["event_key"]: item for item in events}
+        prior = by_key.get(key)
+        sequence = len(events)
+        previous_sha256 = None if not events else events[-1]["event_sha256"]
+        event = self._event(
+            event_type=event_type,
+            run_id=run_id,
+            key=key,
+            payload=payload,
+            sequence=sequence,
+            previous_sha256=previous_sha256,
+        )
+        if prior is not None:
+            comparable = dict(prior)
+            comparable.pop("sequence", None)
+            comparable.pop("previous_sha256", None)
+            comparable.pop("event_sha256", None)
+            proposed = dict(event)
+            proposed.pop("sequence", None)
+            proposed.pop("previous_sha256", None)
+            proposed.pop("event_sha256", None)
+            if comparable != proposed:
+                raise PaperExecutionIntegrityError(
+                    "event_key already has different payload"
+                )
+            return
+
+        encoded = _impl._canonical(event) + "\n"
+        path_existed_before = self.path.exists()
+        try:
+            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if not path_existed_before or not self._path_durable:
+                self._sync_parent_directory()
+            self._write_anchor_unlocked(events + [event])
+        except OSError as exc:
+            self._path_durable = False
+            raise PaperExecutionIntegrityError(
+                "PAPER execution ledger durability barrier failed"
+            ) from exc
+        self._path_durable = True
+
+    def publish_exposure_scope(
+        self,
+        *,
+        run_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Publish the adoption exposure scope before run state, atomically."""
+        if type(payload) is not dict:
+            raise TypeError("payload must be a dict")
+        key = f"{run_id}:exposure-scope"
+
+        def mutate() -> None:
+            self._ensure_existing_path_durable()
+            events = self._load_unlocked()
+            run_events = [
+                event for event in events if event["run_id"] == run_id
+            ]
+            scope_events = [
+                event
+                for event in run_events
+                if event["event_type"] == "PAPER_EXPOSURE_SCOPE_BOUND"
+            ]
+            if scope_events:
+                if (
+                    len(scope_events) != 1
+                    or scope_events[0]["payload"] != payload
+                ):
+                    raise PaperExecutionStateError(
+                        "durable exposure scope conflicts with prepared execution"
+                    )
+                return
+            if run_events:
+                raise PaperExecutionStateError(
+                    "exposure scope cannot be retroactively published after run state"
+                )
+            self._append_event_unlocked(
+                events=events,
+                event_type="PAPER_EXPOSURE_SCOPE_BOUND",
+                run_id=run_id,
+                key=key,
+                payload=payload,
+            )
+
+        self._with_writer_lock(mutate)
+
     @staticmethod
     def _attempts_in_event_order(
         events: list[dict[str, Any]],

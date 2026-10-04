@@ -886,6 +886,71 @@ class PaperExecutionRealityTests(unittest.TestCase):
             ):
                 ledger.record_attempt(result.attempts[0])
 
+    def test_exposure_scope_must_bind_exact_execution_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            current = plan(action("a1"))
+            model = config()
+            source = PaperExecutionLedger(
+                Path(tmp) / "source-plan-scope.jsonl"
+            )
+            source_run = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-plan-scope",
+                config=model,
+                ledger=source,
+                started_at=STARTED_AT,
+            )
+
+            target = PaperExecutionLedger(
+                Path(tmp) / "target-plan-scope.jsonl"
+            )
+            scope_body = {
+                "schema": (
+                    "autosport.paper_execution.exposure_scope_binding"
+                ),
+                "schema_version": 1,
+                "plan_id": "forged-plan-id",
+                "plan_fingerprint": current.fingerprint,
+                "intent_evidence_sha256": "a" * 64,
+                "bindings": [
+                    {
+                        "action_id": "a1",
+                        "sport": None,
+                        "bankroll_id": None,
+                        "currency": None,
+                    }
+                ],
+            }
+            binding_sha256 = __import__("hashlib").sha256(
+                json.dumps(
+                    scope_body,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            target._append_event(
+                event_type="PAPER_EXPOSURE_SCOPE_BOUND",
+                run_id=source_run.run_id,
+                key=f"{source_run.run_id}:exposure-scope",
+                payload={
+                    **scope_body,
+                    "binding_sha256": binding_sha256,
+                },
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "exposure scope conflicts with execution plan",
+            ):
+                execute_paper_plan(
+                    plan=current,
+                    trigger_id="trigger-plan-scope",
+                    config=model,
+                    ledger=target,
+                    started_at=STARTED_AT,
+                )
+
     def test_writer_lock_fails_closed_instead_of_creating_parallel_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-execution.jsonl"

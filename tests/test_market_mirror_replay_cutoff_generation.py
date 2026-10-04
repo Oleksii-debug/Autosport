@@ -3864,6 +3864,96 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_later_cutoff_commit_cannot_launder_invalid_prior_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                authority = store._replay_cutoff_authority()
+                first_as_of = storage_module._canonical_replay_cutoff(
+                    self.CUTOFF.isoformat()
+                )
+                second_as_of = storage_module._canonical_replay_cutoff(
+                    (self.CUTOFF + timedelta(seconds=1)).isoformat()
+                )
+                first_id = storage_module._replay_cutoff_id(first_as_of)
+                second_id = storage_module._replay_cutoff_id(second_as_of)
+                corpus_sha256 = store._frozen_replay_corpus_sha256(0)
+
+                first_binding = storage_module._replay_cutoff_binding_sha256(
+                    cutoff_id=first_id,
+                    canonical_as_of=first_as_of,
+                    max_append_generation=0,
+                    corpus_sha256=corpus_sha256,
+                )
+                wrong_first_state = "0" * 64
+                first_tx = f"{first_id[:32]}-{'1' * 32}"
+                authority.prepare(
+                    tx_id=first_tx,
+                    observed_state_sha256=None,
+                    intended_state_sha256=wrong_first_state,
+                    semantic_binding_sha256=first_binding,
+                )
+                store.connection.execute(
+                    """INSERT INTO market_replay_cutoffs
+                       (cutoff_id, as_of, max_append_generation)
+                       VALUES (?, ?, ?)""",
+                    (first_id, first_as_of, 0),
+                )
+                store.connection.commit()
+                authority.recover(
+                    observed_state_sha256=wrong_first_state,
+                    tx_id=first_tx,
+                    semantic_binding_sha256=first_binding,
+                )
+
+                second_binding = storage_module._replay_cutoff_binding_sha256(
+                    cutoff_id=second_id,
+                    canonical_as_of=second_as_of,
+                    max_append_generation=0,
+                    corpus_sha256=corpus_sha256,
+                )
+                final_rows = tuple(
+                    sorted(
+                        (
+                            (first_id, first_as_of, 0),
+                            (second_id, second_as_of, 0),
+                        ),
+                        key=lambda row: row[0],
+                    )
+                )
+                final_state = storage_module._replay_cutoff_state_sha256(
+                    final_rows,
+                    sealed_corpus_sha256=corpus_sha256,
+                )
+                assert final_state is not None
+                second_tx = f"{second_id[:32]}-{'2' * 32}"
+                authority.prepare(
+                    tx_id=second_tx,
+                    observed_state_sha256=wrong_first_state,
+                    intended_state_sha256=final_state,
+                    semantic_binding_sha256=second_binding,
+                )
+                store.connection.execute(
+                    """INSERT INTO market_replay_cutoffs
+                       (cutoff_id, as_of, max_append_generation)
+                       VALUES (?, ?, ?)""",
+                    (second_id, second_as_of, 0),
+                )
+                store.connection.commit()
+                authority.recover(
+                    observed_state_sha256=final_state,
+                    tx_id=second_tx,
+                    semantic_binding_sha256=second_binding,
+                )
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "committed transition state is invalid",
+                ):
+                    self.replay(store)
+            finally:
+                store.close()
+
     def test_committed_cutoff_with_noncanonical_transaction_id_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

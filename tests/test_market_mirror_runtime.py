@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from autosport.domain import MarketEvent
 from autosport.market_bus import MarketEventBus
-from autosport.market_mirror import MarketMirror, MirrorUpdate
+from autosport.market_mirror import MarketMirror, MarketMirrorRevisionChanged, MirrorUpdate
 from autosport.market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependencyIndex,
@@ -73,6 +73,79 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
                 self.assertFalse(batch.has_more)
             finally:
                 store.close()
+
+    def test_post_commit_apply_failure_is_retained_and_recovered_with_invalidation(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        event = self.event(sequence=1, odds="2.00")
+
+        with mirror.hold_revision(0):
+            with self.assertRaises(MarketMirrorRevisionChanged):
+                runtime.accept_persisted(event)
+
+        self.assertEqual(runtime.pending_recovery_count, 1)
+        self.assertEqual(runtime.pending_count, 0)
+        self.assertIsNone(
+            mirror.get("provider-a", "event-1", "market-1", "selection-1")
+        )
+
+        recovered = runtime.reconcile_pending()
+
+        self.assertEqual(
+            tuple(result.status for result in recovered),
+            (MirrorUpdate.APPLIED,),
+        )
+        self.assertEqual(runtime.pending_recovery_count, 0)
+        self.assertEqual(
+            mirror.get("provider-a", "event-1", "market-1", "selection-1"),
+            event,
+        )
+        self.assertEqual(
+            runtime.drain().changed_keys,
+            (("provider-a", "event-1|market-1|selection-1"),),
+        )
+
+    def test_failed_reconciliation_keeps_head_until_mirror_can_advance(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        event = self.event(sequence=1)
+
+        with mirror.hold_revision(0):
+            with self.assertRaises(MarketMirrorRevisionChanged):
+                runtime.accept_persisted(event)
+            with self.assertRaises(MarketMirrorRevisionChanged):
+                runtime.reconcile_pending()
+            self.assertEqual(runtime.pending_recovery_count, 1)
+
+        recovered = runtime.reconcile_pending()
+        self.assertEqual(recovered[0].status, MirrorUpdate.APPLIED)
+        self.assertEqual(runtime.pending_recovery_count, 0)
+
+    def test_recovery_overflow_preserves_full_refresh_fence(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=1)
+        first = self.event(selection="selection-a", sequence=1)
+        second = self.event(selection="selection-b", sequence=1)
+
+        with mirror.hold_revision(0):
+            for event in (first, second):
+                with self.assertRaises(MarketMirrorRevisionChanged):
+                    runtime.accept_persisted(event)
+
+        self.assertEqual(runtime.pending_recovery_count, 2)
+        recovered = runtime.reconcile_pending()
+
+        self.assertEqual(len(recovered), 2)
+        self.assertTrue(all(result.status is MirrorUpdate.APPLIED for result in recovered))
+        self.assertEqual(runtime.pending_recovery_count, 0)
+        self.assertTrue(runtime.full_refresh_required)
+        self.assertEqual(
+            tuple(event.selection_id for event in mirror.snapshot()),
+            ("selection-a", "selection-b"),
+        )
+        batch = runtime.drain()
+        self.assertTrue(batch.full_refresh_required)
+        self.assertEqual(batch.changed_keys, ())
 
     def test_repeated_material_updates_coalesce_one_affected_quote(self) -> None:
         mirror = MarketMirror()

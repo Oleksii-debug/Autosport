@@ -2440,9 +2440,18 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             clock.value = self.START + timedelta(seconds=3)
             self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
             loop.close()
-            self.assertEqual(
-                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
-                2,
+            ledger = JsonlDecisionLedger(workspace / "decisions.jsonl")
+            self.assertEqual(len(ledger.verified_records()), 2)
+            ledger.append(
+                DecisionRecord(
+                    replay_run_id="diagnostic:test",
+                    agent="test",
+                    observed_ts=clock.value.isoformat(),
+                    action="DIAGNOSTIC",
+                    payload={"kind": "trailing-unrelated"},
+                    context_hash="diagnostic-context",
+                    decision_id="diagnostic-after-newer-live-decision",
+                )
             )
 
             progress_path.write_bytes(first_progress)

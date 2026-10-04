@@ -22,7 +22,10 @@ from autosport.betfair_supervised_execution import (
     execute_betfair_supervised_action,
 )
 from autosport.real_execution_ledger import AttemptState
-from autosport.supervised_confirmation import SupervisedConfirmationAuthority
+from autosport.supervised_confirmation import (
+    SupervisedConfirmationAuthority,
+    SupervisedConfirmationConflictError,
+)
 
 
 _prepared = provider_tests._prepared
@@ -592,3 +595,52 @@ def test_transport_ambiguity_after_confirmation_consumption_never_retransmits() 
         after_restart = _audit_receipt(authority, review, receipt).receipt
         assert after_restart.consumed_by == consumed.consumed_by
         assert after_restart.consumed_at == consumed.consumed_at
+
+
+def test_changed_risk_evidence_cannot_rebind_same_final_send_attempt() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-risk-evidence-stability"
+        profile, bound, approval, ledger, action, _goal_store = _prepared(tmp)
+        authority, review, _receipt = _confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        changed = betfair_execution_confirmation_spec(
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            review_id="review-risk-evidence-changed",
+            risk_evidence_sha256="e" * 64,
+        )
+
+        assert changed.decision_id == review.decision_id
+        assert changed.decision_sha256 != review.decision_sha256
+        with pytest.raises(
+            SupervisedConfirmationConflictError,
+            match="decision_id is already bound to different durable decision evidence",
+        ):
+            authority.prepare_review(
+                review_id=changed.review_id,
+                decision_id=changed.decision_id,
+                bookmaker_id=changed.bookmaker_id,
+                account_id=changed.account_id,
+                decision_sha256=changed.decision_sha256,
+                approval_evidence_sha256=changed.approval_evidence_sha256,
+                risk_evidence_sha256=changed.risk_evidence_sha256,
+                review_payload=changed.review_payload,
+                ttl_seconds=30,
+            )
+
+        successor_attempt = betfair_execution_confirmation_spec(
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-risk-evidence-successor",
+            review_id="review-risk-evidence-successor",
+            risk_evidence_sha256="e" * 64,
+        )
+        assert successor_attempt.decision_id != changed.decision_id

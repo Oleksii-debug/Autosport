@@ -644,3 +644,21 @@ def test_changed_risk_evidence_cannot_rebind_same_final_send_attempt() -> None:
             risk_evidence_sha256="e" * 64,
         )
         assert successor_attempt.decision_id != changed.decision_id
+
+
+def test_final_send_review_payload_preserves_review_schema_domain() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        _profile, bound, approval, _ledger, action, _goal_store = _prepared(tmp)
+        spec = betfair_execution_confirmation_spec(
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-review-schema",
+            review_id="review-schema",
+            risk_evidence_sha256=_RISK_EVIDENCE_SHA256,
+        )
+
+        assert spec.review_payload["schema"] == "autosport.betfair_final_send_review"
+        assert spec.review_payload["schema_version"] == 1
+        assert spec.review_payload["decision_id"] == spec.decision_id
+        assert spec.review_payload["decision_sha256"] == spec.decision_sha256

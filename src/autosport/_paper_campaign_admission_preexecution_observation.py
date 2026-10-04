@@ -315,6 +315,8 @@ def _install() -> None:
                 receipt.campaign_id,
                 receipt.source_id,
                 receipt.evaluation_universe_sha256,
+                receipt.observation_not_before,
+                receipt.observation_not_after,
                 protocol_sha256,
             )
 
@@ -381,6 +383,8 @@ def _install() -> None:
                 expected_campaign_id,
                 expected_source_id,
                 expected_plan_sha256,
+                expected_observation_not_before,
+                expected_observation_not_after,
                 expected_protocol_sha256,
             ) = campaign_binding
             if (
@@ -404,6 +408,10 @@ def _install() -> None:
                 or current_receipt.source_id != expected_source_id
                 or current_receipt.evaluation_universe_sha256
                 != expected_plan_sha256
+                or current_receipt.observation_not_before
+                != expected_observation_not_before
+                or current_receipt.observation_not_after
+                != expected_observation_not_after
                 or type(campaign_forward_protocol) is not campaign_protocol_type
                 or campaign_forward_protocol.campaign_id != expected_campaign_id
                 or campaign_forward_protocol.protocol_sha256
@@ -411,6 +419,17 @@ def _install() -> None:
             ):
                 raise _origin.PaperExecutionDecisionOriginError(
                     "campaign inception/protocol authority changed before decision"
+                )
+            if _utc(
+                observed_at,
+                "decision-time learning observed_at",
+            ) < _utc(
+                current_receipt.observation_not_before,
+                "campaign observation_not_before",
+            ):
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "decision-time learning observation predates prospective "
+                    "campaign observation window"
                 )
             campaign_evidence = (
                 (campaign_id_key, current_receipt.campaign_id),

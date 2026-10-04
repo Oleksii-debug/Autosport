@@ -71,6 +71,9 @@ from autosport.provider_observation_authority import (
     CompleteGameBoardRequest,
     ProviderObservationUnsupportedError,
 )
+from autosport._paper_execution_decision_origin import (
+    PaperExecutionDecisionOriginError,
+)
 from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.paper_campaign_admission import PaperCampaignAdmissionError
 from autosport.paper_campaign_forward_admission import admit_forward_verified
@@ -1318,6 +1321,60 @@ def test_cycle_bound_structural_verifier_replaces_caller_receipts_and_fixes_scop
 
 
 
+def test_campaign_predecision_observation_rejects_preprospective_timestamp_but_allows_postwindow_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    forward_root = tmp_path / "forward-predecision-time"
+    forward_root.mkdir()
+    (
+        locator,
+        store,
+        spec,
+        _provider_store,
+        _cycle_receipt,
+        _universe_store,
+        _evidence,
+        _universe,
+        protocol,
+    ) = _forward_verification_case(forward_root, monkeypatch)
+
+    admission_root = tmp_path / "admission-predecision-time"
+    admission_root.mkdir()
+    fixture = AdmissionFixture(
+        admission_root,
+        seed_execution_decision=False,
+        campaign_precommit_locator=locator,
+        campaign_collector_store=store,
+        campaign_source_spec=spec,
+        campaign_forward_protocol=protocol,
+    )
+    issuer = getattr(
+        fixture.execution_runtime,
+        "_autosport_issue_predecision_learning_observation",
+    )
+    evidence = (("decision_context_sha256", "a" * 64),)
+
+    with pytest.raises(
+        PaperExecutionDecisionOriginError,
+        match="predates prospective campaign observation window",
+    ):
+        issuer(
+            observed_at="2099-12-31T23:59:59.999999+00:00",
+            available_at="2100-01-01T06:00:00+00:00",
+            evidence=evidence,
+        )
+
+    postwindow = issuer(
+        observed_at="2100-01-08T06:00:01+00:00",
+        available_at="2100-01-08T06:00:02+00:00",
+        evidence=evidence,
+    )
+    assert postwindow is not None
+    assert postwindow["observed_at"] == "2100-01-08T06:00:01+00:00"
+    assert postwindow["available_at"] == "2100-01-08T06:00:02+00:00"
+
+
 def test_cycle_bound_forward_verification_drives_durable_paper_admission(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1386,6 +1443,14 @@ def test_cycle_bound_forward_verification_drives_durable_paper_admission(
 
     fixture = AdmissionFixture(
         admission_root,
+        timeline=(
+            "2100-01-01T06:00:00+00:00",
+            "2100-01-01T06:00:01+00:00",
+            "2100-01-01T06:00:05+00:00",
+            "2100-01-01T06:00:06+00:00",
+            "2100-01-01T06:01:00+00:00",
+        ),
+        cutoff_ts="2100-01-01T06:02:00+00:00",
         campaign_precommit_locator=locator,
         campaign_collector_store=store,
         campaign_source_spec=spec,
@@ -1422,6 +1487,8 @@ def test_cycle_bound_forward_verification_drives_durable_paper_admission(
     mismatched_root.mkdir()
     mismatched = AdmissionFixture(
         mismatched_root,
+        timeline=fixture.timeline,
+        cutoff_ts=fixture.cutoff_ts,
         campaign_precommit_locator=locator,
         campaign_collector_store=store,
         campaign_source_spec=spec,
@@ -1445,8 +1512,8 @@ def test_cycle_bound_forward_verification_drives_durable_paper_admission(
             observation=mismatched.observation,
             action_type="PAPER_PROPOSAL",
             decision_action="OPEN_PAPER_TICKET",
-            decision_at="2026-09-20T05:00:05+00:00",
-            at="2026-09-20T05:00:05+00:00",
+            decision_at=mismatched.t2,
+            at=mismatched.t2,
             replay_run_id="protocol-mismatch-run",
             agent="admission-test",
             execution_decision_id=mismatched.execution_decision_id,
@@ -1474,8 +1541,8 @@ def test_cycle_bound_forward_verification_drives_durable_paper_admission(
         observation=fixture.observation,
         action_type="PAPER_PROPOSAL",
         decision_action="OPEN_PAPER_TICKET",
-        decision_at="2026-09-20T05:00:05+00:00",
-        at="2026-09-20T05:00:05+00:00",
+        decision_at=fixture.t2,
+        at=fixture.t2,
         replay_run_id="admission-run",
         agent="admission-test",
         execution_decision_id=fixture.execution_decision_id,

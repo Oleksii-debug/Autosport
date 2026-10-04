@@ -136,11 +136,25 @@ class AdmissionFixture:
         execution_stake: str = "10.00",
         seed_execution_decision: bool = True,
         decision_plan_fingerprint: str | None = None,
+        timeline: tuple[str, str, str, str, str] | None = None,
+        cutoff_ts: str | None = None,
         campaign_precommit_locator=None,
         campaign_collector_store=None,
         campaign_source_spec=None,
         campaign_forward_protocol=None,
     ) -> None:
+        selected_timeline = (T0, T1, T2, T3, T4) if timeline is None else timeline
+        if type(selected_timeline) is not tuple or len(selected_timeline) != 5:
+            raise TypeError("timeline must be an exact five-item tuple")
+        if any(type(value) is not str or not value for value in selected_timeline):
+            raise TypeError("timeline entries must be non-empty strings")
+        self.timeline = selected_timeline
+        self.t0, self.t1, self.t2, self.t3, self.t4 = selected_timeline
+        self.cutoff_ts = (
+            "2026-09-20T05:02:00+00:00"
+            if cutoff_ts is None
+            else cutoff_ts
+        )
         self.workspace = base / "workspace"
         self.workspace.mkdir()
         self.authority = base / "authority"
@@ -156,7 +170,7 @@ class AdmissionFixture:
             config_id="admission-config",
             data_id="admission-data",
             protocol_id="admission-protocol",
-            cutoff_ts="2026-09-20T05:02:00+00:00",
+            cutoff_ts=self.cutoff_ts,
             seed=41,
         )
         self.environment = CausalLearningEnvironment(
@@ -169,8 +183,8 @@ class AdmissionFixture:
         # Positive fixtures replace this below with exact pre-execution durable bytes.
         self.observation = Observation(
             environment_id=self.environment.environment_id,
-            observed_at=T0,
-            available_at=T1,
+            observed_at=self.t0,
+            available_at=self.t1,
             evidence=(("market_state", "admission-snapshot"),),
         )
         self.baseline = self.environment.checkpoint()
@@ -183,7 +197,7 @@ class AdmissionFixture:
             risk_fingerprint=self.risk.provenance_sha256,
             source_sha256="e" * 64,
             config_sha256="f" * 64,
-            at=T0,
+            at=self.t0,
         )
         (self.workspace / "decisions.jsonl").touch()
 
@@ -216,8 +230,8 @@ class AdmissionFixture:
                 "_autosport_issue_predecision_learning_observation",
             )
             self.learning_observation_payload = issuer(
-                observed_at=T0,
-                available_at=T1,
+                observed_at=self.t0,
+                available_at=self.t1,
                 evidence=(
                     ("decision_context_sha256", "a" * 64),
                     ("intent_evidence_sha256", "b" * 64),
@@ -251,8 +265,8 @@ class AdmissionFixture:
             requested_odds=Decimal("2.50"),
             requested_stake=Decimal("10.00"),
             quote_id="admission-quote",
-            quote_observed_at=T2,
-            expires_at=T4,
+            quote_observed_at=self.t2,
+            expires_at=self.t4,
         )
         prepared = execution_runtime._mint_prepared(
             PreparedPaperExecution(
@@ -261,7 +275,7 @@ class AdmissionFixture:
                     bookmaker_profile_version="paper-profile-v1",
                     decision_id=self.execution_decision_id,
                     approval_id="paper-only-no-real-money",
-                    created_at=T2,
+                    created_at=self.t2,
                     actions=(action,),
                 ),
                 exposure_bindings=(
@@ -294,7 +308,7 @@ class AdmissionFixture:
             side=action.side,
             quote_id=action.quote_id,
             outcome=outcome,
-            observed_at=T3,
+            observed_at=self.t3,
             evidence_grade=EvidenceGrade.CONFIGURED,
             evidence_source="admission-fixture-evidence",
             accepted_odds=(
@@ -329,7 +343,7 @@ class AdmissionFixture:
                     execution_runtime,
                     prepared=prepared,
                     trigger_id=self.execution_decision_id,
-                    started_at=T2,
+                    started_at=self.t2,
                     materialize_exposure=True,
                     observations={action.action_id: observed},
                     evidence_registry=registry,
@@ -351,7 +365,7 @@ class AdmissionFixture:
                 execution_runtime,
                 prepared=prepared,
                 trigger_id=self.execution_decision_id,
-                started_at=T2,
+                started_at=self.t2,
                 materialize_exposure=True,
                 observations={action.action_id: observed},
                 evidence_registry=registry,
@@ -371,7 +385,7 @@ class AdmissionFixture:
             DecisionRecord(
                 replay_run_id="live:admission-fixture",
                 agent="persistent-live-decision-loop",
-                observed_ts=T2,
+                observed_ts=self.t2,
                 action="LIVE_OPEN",
                 payload={
                     "schema": "autosport.persistent_live_decision",
@@ -460,8 +474,8 @@ class AdmissionFixture:
             "observation": self.observation,
             "action_type": "PAPER_PROPOSAL",
             "decision_action": "OPEN_PAPER_TICKET",
-            "decision_at": T2,
-            "at": T2,
+            "decision_at": self.t2,
+            "at": self.t2,
             "replay_run_id": "admission-run",
             "agent": "admission-test",
             "execution_decision_id": self.execution_decision_id,

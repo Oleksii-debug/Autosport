@@ -10,7 +10,11 @@ from fractions import Fraction
 
 from .domain import PaperTicket, TicketStatus
 from .market_outcomes import MarketSettlementOutcomeAuthority
-from .portfolio import PortfolioEngine, _snapshot_open_tickets_for_analysis
+from .portfolio import (
+    PortfolioEngine,
+    _PORTFOLIO_DECIMAL_CONTEXT,
+    _snapshot_open_tickets_for_analysis,
+)
 
 
 _MAX_SCENARIO_GROUPS = 256
@@ -31,7 +35,7 @@ def _scenario_conservative_bounds(
     tickets: list[PaperTicket],
 ) -> tuple[Decimal, Decimal]:
     """Derive fail-closed portfolio bounds under one canonical Decimal context."""
-    with localcontext(_SCENARIO_DECIMAL_CONTEXT):
+    with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
         floor = -sum((ticket.stake for ticket in tickets), Decimal("0"))
         ceiling = sum(
             (
@@ -515,7 +519,7 @@ class ScenarioSearchEngine:
         mapping: dict[str, int],
         assignments: dict[int, str],
     ) -> tuple[Decimal, Decimal]:
-        with localcontext(_SCENARIO_DECIMAL_CONTEXT):
+        with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
             lower = Decimal("0")
             upper = Decimal("0")
             for ticket in tickets:
@@ -544,7 +548,7 @@ class ScenarioSearchEngine:
         return lower, upper
 
     def _ordered_groups(self, tickets: list[PaperTicket], groups: list[ScenarioGroup], mapping: dict[str, int]) -> list[int]:
-        with localcontext(_SCENARIO_DECIMAL_CONTEXT):
+        with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
             impact = [Decimal("0") for _ in groups]
             for ticket in tickets:
                 potential = ticket.stake * ticket.combined_odds

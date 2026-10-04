@@ -146,12 +146,22 @@ class AttributionAuthorityRef:
         }
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "AttributionAuthorityRef":
-        _exact_keys(raw, {"family", "evidence_id", "sha256"}, "AttributionAuthorityRef")
+    def from_dict(
+        cls,
+        raw: Mapping[str, Any],
+        _exact_keys_impl=_exact_keys,
+        _text_impl=_text,
+        _sha256_impl=_sha256,
+    ) -> "AttributionAuthorityRef":
+        _exact_keys_impl(
+            raw,
+            {"family", "evidence_id", "sha256"},
+            "AttributionAuthorityRef",
+        )
         return cls(
-            family=_text(raw["family"], "authority family"),
-            evidence_id=_text(raw["evidence_id"], "authority evidence_id"),
-            sha256=_sha256(raw["sha256"], "authority sha256"),
+            family=_text_impl(raw["family"], "authority family"),
+            evidence_id=_text_impl(raw["evidence_id"], "authority evidence_id"),
+            sha256=_sha256_impl(raw["sha256"], "authority sha256"),
         )
 
 
@@ -247,33 +257,41 @@ class RewardComponentAttribution:
         }
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "RewardComponentAttribution":
-        _exact_keys(
+    def from_dict(
+        cls,
+        raw: Mapping[str, Any],
+        _exact_keys_impl=_exact_keys,
+        _text_impl=_text,
+        _component_type=RewardAttributionComponent,
+        _truth_type=AttributionTruth,
+        _ref_parser=AttributionAuthorityRef.from_dict,
+        _error_type=RewardAttributionError,
+        _list_type=list,
+        _tuple_type=tuple,
+        _type=type,
+    ) -> "RewardComponentAttribution":
+        _exact_keys_impl(
             raw,
             {"component", "truth", "authority_refs", "counterfactual_ref"},
             "RewardComponentAttribution",
         )
         refs_raw = raw["authority_refs"]
-        if type(refs_raw) is not list:
-            raise RewardAttributionError("authority_refs must be a list")
+        if _type(refs_raw) is not _list_type:
+            raise _error_type("authority_refs must be a list")
         counterfactual_raw = raw["counterfactual_ref"]
         try:
-            component = RewardAttributionComponent(
-                _text(raw["component"], "component")
-            )
-            truth = AttributionTruth(_text(raw["truth"], "truth"))
+            component = _component_type(_text_impl(raw["component"], "component"))
+            truth = _truth_type(_text_impl(raw["truth"], "truth"))
         except ValueError as exc:
-            raise RewardAttributionError("unsupported reward attribution enum") from exc
+            raise _error_type("unsupported reward attribution enum") from exc
         return cls(
             component=component,
             truth=truth,
-            authority_refs=tuple(
-                AttributionAuthorityRef.from_dict(item) for item in refs_raw
-            ),
+            authority_refs=_tuple_type(_ref_parser(item) for item in refs_raw),
             counterfactual_ref=(
                 None
                 if counterfactual_raw is None
-                else AttributionAuthorityRef.from_dict(counterfactual_raw)
+                else _ref_parser(counterfactual_raw)
             ),
         )
 
@@ -422,7 +440,21 @@ class RewardAttributionEvidence:
         return raw
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "RewardAttributionEvidence":
+    def from_dict(
+        cls,
+        raw: Mapping[str, Any],
+        _exact_keys_impl=_exact_keys,
+        _sha256_impl=_sha256,
+        _component_parser=RewardComponentAttribution.from_dict,
+        _schema=SCHEMA,
+        _schema_version=SCHEMA_VERSION,
+        _error_type=RewardAttributionError,
+        _str_type=str,
+        _int_type=int,
+        _list_type=list,
+        _tuple_type=tuple,
+        _type=type,
+    ) -> "RewardAttributionEvidence":
         expected = {
             "schema",
             "schema_version",
@@ -438,36 +470,45 @@ class RewardAttributionEvidence:
             "semantic_key",
             "evidence_id",
         }
-        _exact_keys(raw, expected, "RewardAttributionEvidence")
+        _exact_keys_impl(raw, expected, "RewardAttributionEvidence")
         if (
-            type(raw["schema"]) is not str
-            or raw["schema"] != SCHEMA
-            or type(raw["schema_version"]) is not int
-            or raw["schema_version"] != SCHEMA_VERSION
+            _type(raw["schema"]) is not _str_type
+            or raw["schema"] != _schema
+            or _type(raw["schema_version"]) is not _int_type
+            or raw["schema_version"] != _schema_version
         ):
-            raise RewardAttributionError("unsupported reward attribution schema")
-        if raw["source_resolved"] is not False or raw["policy_update_eligible"] is not False:
-            raise RewardAttributionError(
+            raise _error_type("unsupported reward attribution schema")
+        if (
+            raw["source_resolved"] is not False
+            or raw["policy_update_eligible"] is not False
+        ):
+            raise _error_type(
                 "schema v1 cannot carry positive attribution authority/eligibility"
             )
         components_raw = raw["components"]
-        if type(components_raw) is not list:
-            raise RewardAttributionError("components must be a list")
+        if _type(components_raw) is not _list_type:
+            raise _error_type("components must be a list")
         evidence = cls(
-            environment_id=_sha256(raw["environment_id"], "environment_id"),
-            episode_id=_sha256(raw["episode_id"], "episode_id"),
-            action_id=_sha256(raw["action_id"], "action_id"),
-            outcome_id=_sha256(raw["outcome_id"], "outcome_id"),
-            reward_id=_sha256(raw["reward_id"], "reward_id"),
-            transition_id=_sha256(raw["transition_id"], "transition_id"),
-            components=tuple(
-                RewardComponentAttribution.from_dict(item) for item in components_raw
+            environment_id=_sha256_impl(raw["environment_id"], "environment_id"),
+            episode_id=_sha256_impl(raw["episode_id"], "episode_id"),
+            action_id=_sha256_impl(raw["action_id"], "action_id"),
+            outcome_id=_sha256_impl(raw["outcome_id"], "outcome_id"),
+            reward_id=_sha256_impl(raw["reward_id"], "reward_id"),
+            transition_id=_sha256_impl(raw["transition_id"], "transition_id"),
+            components=_tuple_type(
+                _component_parser(item) for item in components_raw
             ),
         )
-        if _sha256(raw["semantic_key"], "semantic_key") != evidence.semantic_key:
-            raise RewardAttributionError("reward attribution semantic key mismatch")
-        if _sha256(raw["evidence_id"], "evidence_id") != evidence.evidence_id:
-            raise RewardAttributionError("reward attribution evidence digest mismatch")
+        if (
+            _sha256_impl(raw["semantic_key"], "semantic_key")
+            != evidence.semantic_key
+        ):
+            raise _error_type("reward attribution semantic key mismatch")
+        if (
+            _sha256_impl(raw["evidence_id"], "evidence_id")
+            != evidence.evidence_id
+        ):
+            raise _error_type("reward attribution evidence digest mismatch")
         return evidence
 
 

@@ -299,6 +299,46 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_reconcile_same_path_authority_rollback_rejects_retained_mirror_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self.event(selection="selection-a", sequence=1)
+            self.assertEqual(
+                MarketEventBus(store)._publish_many_live_ingestion([event]),
+                1,
+            )
+            mirror = MarketMirror.from_live_store(store)
+            runtime = BoundedMirrorInvalidationBuffer(mirror)
+            runtime.reconcile_trusted_store(store)
+            runtime.drain()
+            before = mirror.snapshot()
+            store.close()
+
+            connection = SQLiteMarketStore(path)
+            try:
+                connection.connection.execute("DELETE FROM trusted_live_current_quotes")
+                connection.connection.execute("DELETE FROM market_event_live_receipts")
+                connection.connection.execute("DELETE FROM current_quotes")
+                connection.connection.execute("DELETE FROM market_events")
+                connection.connection.commit()
+            finally:
+                connection.close()
+
+            reopened = SQLiteMarketStore(path)
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "pre-existing mirror state is not trusted",
+                ):
+                    runtime.reconcile_trusted_store(reopened)
+
+                self.assertEqual(mirror.snapshot(), before)
+                self.assertEqual(runtime.pending_count, 0)
+                self.assertFalse(runtime.full_refresh_required)
+            finally:
+                reopened.close()
+
     def test_reconcile_trusted_store_rejects_cross_workspace_reuse_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as first_directory, tempfile.TemporaryDirectory() as second_directory:
             first_store = SQLiteMarketStore(Path(first_directory) / "market.db")

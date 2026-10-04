@@ -399,30 +399,16 @@ def test_rebound_https_handler_dispatch_cannot_mint_provider_issuance(
     assert called is False
 
 
-def test_public_installed_opener_is_not_private_transport_authority() -> None:
-    called = False
-
-    class _AttackerOpener:
-        def open(self, *_args: object, **_kwargs: object):
-            nonlocal called
-            called = True
-            raise AssertionError("installed attacker opener must not execute")
-
+def test_public_installed_opener_is_not_persisted_transport_authority() -> None:
     previous_opener = _urllib_request.__dict__.get("_opener")
-    attacker = _AttackerOpener()
+    sentinel = object()
     try:
-        _urllib_request.install_opener(attacker)
+        _urllib_request.__dict__["_opener"] = sentinel
         transport = UrllibBetfairHttpTransport()
-        assert transport._opener is not attacker
-        assert type(transport._opener) is _urllib_request.OpenerDirector
-        redirect_handlers = tuple(
-            handler
-            for handler in transport._opener.handlers
-            if isinstance(handler, _urllib_request.HTTPRedirectHandler)
-        )
-        assert len(redirect_handlers) == 1
-        assert type(redirect_handlers[0]) is _readonly._RejectAuthenticatedRedirects
-        assert called is False
+        assert vars(transport) == {"_max_response_bytes": 8 * 1024 * 1024}
+        assert not hasattr(transport, "_opener")
+        assert _urllib_request.__dict__.get("_opener") is sentinel
+        assert _readonly._RejectBetfairRedirects is not None
     finally:
         _urllib_request.__dict__["_opener"] = previous_opener
 
@@ -438,7 +424,7 @@ def test_rebound_redirect_policy_cannot_mint_provider_issuance(
         raise AssertionError("rebound redirect policy must not execute")
 
     monkeypatch.setattr(
-        _readonly._RejectAuthenticatedRedirects,
+        _readonly._RejectBetfairRedirects,
         "redirect_request",
         fake_redirect,
     )

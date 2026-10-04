@@ -61,36 +61,55 @@ def _install_credential_origin_guard():
         code = getattr(function, "__code__", None)
         defaults = getattr(function, "__defaults__", None)
         kwdefaults = getattr(function, "__kwdefaults__", None)
+        closure = getattr(function, "__closure__", None)
         if code is None:
             raise RuntimeError(
                 "Betfair settlement credential-origin executable authority is unavailable"
             )
         kwitems = tuple(kwdefaults.items()) if kwdefaults is not None else ()
-        return code, defaults, kwdefaults, kwitems
+        try:
+            closure_values = (
+                tuple(cell.cell_contents for cell in closure)
+                if closure is not None
+                else ()
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                "Betfair settlement credential-origin closure authority is unavailable"
+            ) from exc
+        return code, defaults, kwdefaults, kwitems, closure, closure_values
 
     (
         resolve_identity_code,
         resolve_identity_defaults,
         resolve_identity_kwdefaults,
         resolve_identity_kwitems,
+        resolve_identity_closure,
+        resolve_identity_closure_values,
     ) = _metadata_snapshot(resolve_identity)
     (
         require_identity_code,
         require_identity_defaults,
         require_identity_kwdefaults,
         require_identity_kwitems,
+        require_identity_closure,
+        require_identity_closure_values,
     ) = _metadata_snapshot(require_identity)
     (
         qualified_read_code,
         qualified_read_defaults,
         qualified_read_kwdefaults,
         qualified_read_kwitems,
+        qualified_read_closure,
+        qualified_read_closure_values,
     ) = _metadata_snapshot(original_qualified_read)
     (
         currency_lookup_code,
         currency_lookup_defaults,
         currency_lookup_kwdefaults,
         currency_lookup_kwitems,
+        currency_lookup_closure,
+        currency_lookup_closure_values,
     ) = _metadata_snapshot(original_currency_for_capture)
 
     def _metadata_current(
@@ -100,12 +119,33 @@ def _install_credential_origin_guard():
         defaults,
         kwdefaults,
         kwitems,
+        closure,
+        closure_values,
     ) -> bool:
         current_kwdefaults = getattr(function, "__kwdefaults__", None)
+        current_closure = getattr(function, "__closure__", None)
+        try:
+            current_closure_values = (
+                tuple(cell.cell_contents for cell in current_closure)
+                if current_closure is not None
+                else ()
+            )
+        except ValueError:
+            return False
         return (
             getattr(function, "__code__", None) is code
             and getattr(function, "__defaults__", None) is defaults
             and current_kwdefaults is kwdefaults
+            and current_closure is closure
+            and len(current_closure_values) == len(closure_values)
+            and all(
+                current is expected
+                for current, expected in zip(
+                    current_closure_values,
+                    closure_values,
+                    strict=True,
+                )
+            )
             and (
                 current_kwdefaults is None
                 or (
@@ -129,6 +169,8 @@ def _install_credential_origin_guard():
                 defaults=resolve_identity_defaults,
                 kwdefaults=resolve_identity_kwdefaults,
                 kwitems=resolve_identity_kwitems,
+                closure=resolve_identity_closure,
+                closure_values=resolve_identity_closure_values,
             )
             and _metadata_current(
                 require_identity,
@@ -136,6 +178,8 @@ def _install_credential_origin_guard():
                 defaults=require_identity_defaults,
                 kwdefaults=require_identity_kwdefaults,
                 kwitems=require_identity_kwitems,
+                closure=require_identity_closure,
+                closure_values=require_identity_closure_values,
             )
         )
 
@@ -148,6 +192,8 @@ def _install_credential_origin_guard():
                 defaults=qualified_read_defaults,
                 kwdefaults=qualified_read_kwdefaults,
                 kwitems=qualified_read_kwitems,
+                closure=qualified_read_closure,
+                closure_values=qualified_read_closure_values,
             )
         )
 
@@ -161,6 +207,8 @@ def _install_credential_origin_guard():
                 defaults=currency_lookup_defaults,
                 kwdefaults=currency_lookup_kwdefaults,
                 kwitems=currency_lookup_kwitems,
+                closure=currency_lookup_closure,
+                closure_values=currency_lookup_closure_values,
             )
         )
 

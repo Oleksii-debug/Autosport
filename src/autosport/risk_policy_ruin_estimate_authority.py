@@ -244,6 +244,13 @@ def _derive_policy_estimate_material(
         or observations.iid_qualified is not True
         or observations.grants_real_money_authority is not False
         or precommit.experiment_id != observations.experiment_id
+        or precommit.protocol_sha256 != observations.research_protocol_sha256
+        or precommit.dataset_snapshot_id != observations.dataset_snapshot_id
+        or precommit.dataset_manifest_sha256 != observations.dataset_manifest_sha256
+        or precommit.sampling_manifest_sha256 != observations.sampling_manifest_sha256
+        or precommit.initial_capital_state_sha256
+        != observations.initial_capital_state_sha256
+        or precommit.stake_policy_sha256 != observations.stake_policy_sha256
         or precommit.planned_member_ids != observations.planned_member_ids
         or precommit.risk_target_scope != "FROZEN_STAKE_POLICY"
     ):

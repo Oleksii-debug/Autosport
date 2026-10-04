@@ -433,6 +433,18 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
             decision_as_of=self.DECISION_AS_OF,
         )
 
+        with patch.object(
+            scenario_search.PortfolioEngine,
+            "scenario_profit_settlements",
+            return_value=Decimal("999999"),
+        ):
+            sealed_report = ScenarioSearchEngine().analyse_authoritative(
+                [ticket_home, ticket_away],
+                [authority],
+                decision_as_of=self.DECISION_AS_OF,
+            )
+        self.assertEqual(sealed_report, report)
+
         self.assertEqual(
             report.mode,
             "authoritative-conservative-enumeration",

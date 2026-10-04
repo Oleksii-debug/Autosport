@@ -62,7 +62,7 @@ def test_paperbook_round_trip_preserves_supported_back_side_identity(tmp_path) -
     book.save(path)
 
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 7
+    assert payload["schema_version"] == 8
     assert payload["tickets"][0]["legs"][0]["exchange_side"] == "back"
 
     restored_leg = next(iter(PaperBook.load(path).tickets.values())).legs[0]
@@ -266,6 +266,7 @@ def test_schema6_snapshot_keeps_sport_and_upgrades_legacy_no_side_to_none(tmp_pa
     payload["schema_version"] = 6
     for item in payload["tickets"][0]["legs"]:
         item.pop("exchange_side")
+        item.pop("market_semantics_id")
 
     # Schema migration compatibility is a structural-parser contract. Manually
     # rewritten bytes are intentionally not trusted path authority.
@@ -282,6 +283,8 @@ def test_schema7_requires_explicit_exchange_side_field_even_when_none(tmp_path) 
     book.save(path)
 
     payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 7
+    payload["tickets"][0]["legs"][0].pop("market_semantics_id")
     payload["tickets"][0]["legs"][0].pop("exchange_side")
 
     with pytest.raises(ValueError, match="exchange_side"):

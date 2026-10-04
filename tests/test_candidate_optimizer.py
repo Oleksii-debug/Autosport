@@ -59,6 +59,22 @@ class _FixedImpactScenarioEngine(ScenarioSearchEngine):
         )
 
 
+class _MutatingOriginalScenarioEngine(ScenarioSearchEngine):
+    """Mutates the caller-owned ticket after the base report is computed."""
+
+    def __init__(self, original_ticket):
+        super().__init__()
+        self.original_ticket = original_ticket
+        self.calls = 0
+
+    def analyse(self, tickets, groups):
+        report = super().analyse(tickets, groups)
+        self.calls += 1
+        if self.calls == 1:
+            self.original_ticket.stake = Decimal("999")
+        return report
+
+
 class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
     def test_equal_standalone_ev_uses_scenario_extrema_only_as_secondary_tiebreak(self):
         book = PaperBook("1000")
@@ -199,6 +215,34 @@ class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
         self.assertFalse(impact.worst_case_change_proven)
         self.assertTrue(impact.scenario_worst_case_change_proven)
         self.assertEqual(impact.ranking_risk_truth, "conservative-floor-change")
+
+    def test_base_and_candidate_reports_share_one_detached_portfolio_snapshot(self):
+        book = PaperBook("1000")
+        existing_leg = TicketLeg("e1", "winner", "a", Decimal("2"))
+        existing = book.open_ticket([existing_leg], "10")
+        candidate_leg = CandidateLeg(
+            "e1|winner|b", "e1", Decimal("2"), Decimal("0.5")
+        )
+        groups = [
+            ScenarioGroup(
+                "e1-winner",
+                (
+                    ScenarioOutcome(existing_leg.quote_key, Decimal("0.5")),
+                    ScenarioOutcome(candidate_leg.quote_key, Decimal("0.5")),
+                ),
+            )
+        ]
+        engine = _MutatingOriginalScenarioEngine(existing)
+        impact = PortfolioAwareCandidateOptimizer(
+            scenario_engine=engine
+        ).evaluate_candidates(
+            [existing], [_single_candidate(candidate_leg)], groups, stake="10"
+        )[0]
+
+        self.assertEqual(existing.stake, Decimal("999"))
+        self.assertEqual(impact.base_report.conservative_floor, Decimal("-10"))
+        self.assertEqual(impact.with_candidate_report.conservative_floor, Decimal("-20"))
+        self.assertEqual(impact.conservative_floor_change, Decimal("-10"))
 
     def test_portfolio_impact_deltas_ignore_ambient_decimal_context(self):
         book = PaperBook("1000")

@@ -1426,11 +1426,16 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 settlement_learning_handoff=Handoff(),
             )
             try:
+                recovered = Handoff().prepared_settlement_resolutions(
+                    paper_book_path=root / "paper_book.json",
+                )
                 with self.assertRaisesRegex(
                     ContinuousSessionError,
                     "was not durably staged before P&L",
                 ):
-                    coordinator._recovered_settlement_resolutions(as_of=clock())
+                    coordinator._state.validate_recovered_settlement_evidence(
+                        settlement_evidence=recovered,
+                    )
             finally:
                 store.close()
 
@@ -1487,6 +1492,181 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     ContinuousSessionError,
                     "settlement outcome interpretation conflicts with durable evidence",
+                ):
+                    coordinator._state.validate_recovered_settlement_evidence(
+                        settlement_evidence=(handoff.resolution,),
+                    )
+            finally:
+                store.close()
+
+    def test_cleared_historical_settlement_cannot_regain_recovery_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-recovery-cleared",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:recovery-cleared",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="recovery-cleared-evidence",
+                evidence_sha256="c" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                coordinator._state.complete_pending_settlement_commit(
+                    settlement_evidence=(resolution,),
+                    retain_pending_evidence_ids=(),
+                )
+                self.assertEqual(
+                    coordinator.status().pending_settlement_evidence_ids,
+                    (),
+                )
+                self.assertIn(
+                    resolution.evidence_id,
+                    {
+                        item["evidence_id"]
+                        for item in coordinator.status().settlement_evidence
+                    },
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "no longer pending for recovery",
+                ):
+                    coordinator._state.validate_recovered_settlement_evidence(
+                        settlement_evidence=(resolution,),
+                    )
+            finally:
+                store.close()
+
+    def test_recovered_settlement_state_rejects_duplicate_evidence_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-recovery-duplicate",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:recovery-duplicate",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="recovery-duplicate-evidence",
+                evidence_sha256="d" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "repeats evidence_id",
+                ):
+                    coordinator._state.validate_recovered_settlement_evidence(
+                        settlement_evidence=(resolution, resolution),
+                    )
+            finally:
+                store.close()
+
+    def test_prepared_recovery_requires_durable_completed_lifecycle(self) -> None:
+        class Handoff:
+            def prepared_settlement_resolutions(self, *, paper_book_path):
+                del paper_book_path
+                return (
+                    SettlementResolution(
+                        event_identity="provider-a:event-1",
+                        settlement_ref="result:recovery-lifecycle",
+                        quote_outcomes={"event-1|winner|home": "win"},
+                        evidence_id="recovery-lifecycle-evidence",
+                        evidence_sha256="e" * 64,
+                        available_at="2026-09-19T21:19:30+00:00",
+                    ),
+                )
+
+            def reconcile_after_settlement(self, **_kwargs):
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-recovery-lifecycle",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+                settlement_learning_handoff=Handoff(),
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "prepared settlement recovery conflicts with durable lifecycle",
+                ):
+                    coordinator._recovered_settlement_resolutions(as_of=clock())
+            finally:
+                store.close()
+
+    def test_prepared_recovery_rechecks_sealed_collector_source_identity(self) -> None:
+        class Handoff:
+            def prepared_settlement_resolutions(self, *, paper_book_path):
+                del paper_book_path
+                return ()
+
+            def reconcile_after_settlement(self, **_kwargs):
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-recovery-source-drift",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+                settlement_learning_handoff=Handoff(),
+            )
+            try:
+                coordinator.collector.__dict__["_source_id"] = "provider-b"
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "collector source identity changed",
                 ):
                     coordinator._recovered_settlement_resolutions(as_of=clock())
             finally:

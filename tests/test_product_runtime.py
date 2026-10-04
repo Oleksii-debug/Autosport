@@ -128,6 +128,10 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 initial_bankroll="100",
             )
             try:
+                self.assertIs(
+                    runtime.coordinator.desktop_consumer._acknowledgement_clock,
+                    clock,
+                )
                 first_status = runtime.status()
                 self.assertEqual(first_status.cycles_completed, 0)
                 self.assertEqual(first_status.source_id, "provider-a")

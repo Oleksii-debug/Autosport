@@ -331,6 +331,106 @@ def test_resolver_rejects_truncated_tuple_constructor_bypass() -> None:
         resolve(forged)
 
 
+def test_resolver_uses_captured_observation_slots_against_type_setattr_bypass() -> None:
+    item = observation()
+    originals = {
+        name: BetfairProviderConstraintObservation.__dict__[name]
+        for name in (
+            "jurisdiction_scope",
+            "currency_code",
+            "min_standard_size",
+            "available_at",
+            "effective_from",
+            "review_expires_at",
+        )
+    }
+    try:
+        type.__setattr__(
+            BetfairProviderConstraintObservation,
+            "jurisdiction_scope",
+            property(lambda _self: "ES"),
+        )
+        type.__setattr__(
+            BetfairProviderConstraintObservation,
+            "currency_code",
+            property(lambda _self: "EUR"),
+        )
+        type.__setattr__(
+            BetfairProviderConstraintObservation,
+            "min_standard_size",
+            property(lambda _self: Decimal("999")),
+        )
+        type.__setattr__(
+            BetfairProviderConstraintObservation,
+            "available_at",
+            property(lambda _self: T0 + timedelta(days=99)),
+        )
+        type.__setattr__(
+            BetfairProviderConstraintObservation,
+            "effective_from",
+            property(lambda _self: T0 + timedelta(days=99)),
+        )
+        type.__setattr__(
+            BetfairProviderConstraintObservation,
+            "review_expires_at",
+            property(lambda _self: T0),
+        )
+
+        result = resolve(item)
+        assert result.state is BetfairConstraintResolutionState.CONSISTENT_UNVERIFIED
+        assert result.min_standard_size == Decimal("1")
+        assert result.currency_code == "GBP"
+        assert result.jurisdiction_scope == "UK_INTERNATIONAL"
+    finally:
+        for name, descriptor in originals.items():
+            type.__setattr__(
+                BetfairProviderConstraintObservation,
+                name,
+                descriptor,
+            )
+
+
+def test_resolution_constructor_rejects_noncanonical_digest() -> None:
+    result = resolve(observation())
+    resolution_type = type(result)
+    forged_payload = list(result)
+    forged_payload[-1] = "0" * 64
+
+    with pytest.raises(
+        BetfairProviderConstraintError,
+        match="canonical resolution content",
+    ):
+        resolution_type(*forged_payload)
+
+
+class _ChangingOffsetTz(tzinfo):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def utcoffset(self, _dt: datetime | None) -> timedelta:
+        self.calls += 1
+        if self.calls == 1:
+            return timedelta(0)
+        return timedelta(hours=-12)
+
+    def dst(self, _dt: datetime | None) -> timedelta:
+        return timedelta(0)
+
+    def tzname(self, _dt: datetime | None) -> str:
+        return "CHANGING"
+
+
+def test_datetime_normalization_uses_one_offset_observation() -> None:
+    zone = _ChangingOffsetTz()
+    item = observation(
+        retrieved_at=datetime(2026, 9, 1, 0, 0, tzinfo=zone),
+    )
+
+    assert zone.calls == 1
+    assert item.retrieved_at == T0
+    assert item.retrieved_at.tzinfo is UTC
+
+
 def test_observation_batch_is_bounded() -> None:
     item = observation()
 

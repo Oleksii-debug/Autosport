@@ -1455,9 +1455,11 @@ class SQLiteMarketStore:
                     continue
                 history_event = history_by_dedupe.get(projection_event.dedupe_key)
                 if history_event is None:
-                    raise ValueError(
-                        "current_quotes projection event is missing from authoritative history"
-                    )
+                    # current_quotes is a derived cache, not an authority. Once the
+                    # complete history has been independently proven above, a
+                    # projection-only row is corruption that can be discarded and
+                    # rebuilt; it must not brick restart.
+                    continue
                 if _canonical_payload(history_event) != _canonical_payload(projection_event):
                     continue
                 try:

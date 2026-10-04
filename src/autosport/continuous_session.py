@@ -1076,6 +1076,10 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "last_success_at predates continuous session start"
             )
+        if (cycles == 0) != (last_success_at is None):
+            raise ContinuousSessionError(
+                "cycles_completed and last_success_at are inconsistent"
+            )
         last_full_refresh_at = (
             None
             if raw["last_full_refresh_at"] is None

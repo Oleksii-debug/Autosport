@@ -132,6 +132,86 @@ def _journal_snapshot(root: Path) -> dict[str, bytes]:
 
 
 
+
+def test_checkpoint_rejects_completed_cycles_without_last_success() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        state = _state_with_history(root, 1)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["last_success_at"] = None
+        path.write_text(json.dumps(raw, sort_keys=True), encoding="utf-8")
+        journal_before = _journal_snapshot(root)
+
+        try:
+            state.operational_snapshot()
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "checkpoint accepted completed cycles without last_success_at"
+            )
+
+        assert _journal_snapshot(root) == journal_before
+
+
+def test_checkpoint_rejects_last_success_without_completed_cycle() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        state = continuous_session._ContinuousSessionState(
+            path,
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["last_success_at"] = _AT
+        path.write_text(json.dumps(raw, sort_keys=True), encoding="utf-8")
+
+        try:
+            state.operational_snapshot()
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "checkpoint accepted last_success_at without a completed cycle"
+            )
+
+
+def test_wave_m_cycle_success_mismatch_fails_before_migration_journal() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        embedded = _checkpoint_payload(1)
+        embedded["schema_version"] = 3
+        embedded["last_success_at"] = None
+        embedded["settlement_evidence"][0]["quote_outcomes_sha256"] = (
+            continuous_session._settlement_quote_outcomes_sha256(
+                {"provider-a:event-0:winner:home": "win"}
+            )
+        )
+        path.write_text(json.dumps(embedded, sort_keys=True), encoding="utf-8")
+        before = path.read_bytes()
+
+        try:
+            continuous_session._ContinuousSessionState(
+                path,
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "Wave M migration accepted cycle/success checkpoint mismatch"
+            )
+
+        assert path.read_bytes() == before
+        assert not (root / "continuous_session.settlement-evidence").exists()
+
+
 def test_success_rejects_settlement_evidence_newer_than_cycle_cutoff() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

@@ -48,6 +48,27 @@ class ScenarioSearchProbabilityTruthTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, reason):
                     ScenarioOutcome("event|winner|a", value)
 
+    def test_group_and_outcome_cardinality_resource_bounds_fail_closed(self) -> None:
+        oversized_outcomes = tuple(
+            ScenarioOutcome(f"event|winner|selection-{index}")
+            for index in range(1025)
+        )
+        with self.assertRaisesRegex(ValueError, "scenario group outcomes exceeds resource limit"):
+            ScenarioGroup("oversized-group", oversized_outcomes)
+
+        groups = [
+            ScenarioGroup(
+                f"group-{index:03d}",
+                (
+                    ScenarioOutcome(f"event-{index}|winner|a"),
+                    ScenarioOutcome(f"event-{index}|winner|b"),
+                ),
+            )
+            for index in range(257)
+        ]
+        with self.assertRaisesRegex(ValueError, "scenario groups exceeds resource limit"):
+            ScenarioSearchEngine().analyse([], groups)
+
     def test_duplicate_group_id_fails_closed_before_analysis(self) -> None:
         first = ScenarioGroup(
             "duplicate-id",

@@ -539,6 +539,100 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             ) from exc
         self._path_durable = True
 
+    def record_attempt(self, attempt: PaperLegAttempt) -> None:
+        if not isinstance(attempt, PaperLegAttempt):
+            raise TypeError("attempt must be PaperLegAttempt")
+
+        def mutate() -> None:
+            self._ensure_existing_path_durable()
+            events = self._load_unlocked()
+            run_events = [
+                event
+                for event in events
+                if event["run_id"] == attempt.run_id
+            ]
+            reservations = [
+                event
+                for event in run_events
+                if event["event_type"] == "RUN_RESERVED"
+            ]
+            if len(reservations) != 1:
+                raise PaperExecutionStateError(
+                    "attempt requires exactly one durable reservation"
+                )
+            _, existing_attempts = self._attempts_in_event_order(
+                run_events
+            )
+            if attempt.sequence < len(existing_attempts):
+                if existing_attempts[attempt.sequence] != attempt:
+                    raise PaperExecutionIntegrityError(
+                        "durable attempt sequence already has different payload"
+                    )
+                return
+            if attempt.sequence != len(existing_attempts):
+                raise PaperExecutionStateError(
+                    "attempt sequence must extend the exact durable prefix"
+                )
+            if any(
+                event["event_type"] == "RUN_COMPLETED"
+                for event in run_events
+            ):
+                raise PaperExecutionStateError(
+                    "attempt cannot be appended after RUN_COMPLETED"
+                )
+            action_ids = reservations[0]["payload"]["action_ids"]
+            if (
+                attempt.sequence >= len(action_ids)
+                or action_ids[attempt.sequence] != attempt.action_id
+            ):
+                raise PaperExecutionStateError(
+                    "attempt does not extend reserved action order"
+                )
+            if (
+                existing_attempts
+                and existing_attempts[-1].outcome
+                is not PaperAttemptOutcome.ACCEPTED
+            ):
+                raise PaperExecutionStateError(
+                    "attempt cannot follow a terminal execution outcome"
+                )
+
+            key = f"{attempt.run_id}:attempt:{attempt.sequence}"
+            sequence = len(events)
+            previous_sha256 = (
+                None if not events else events[-1]["event_sha256"]
+            )
+            event = self._event(
+                event_type="ATTEMPT_RECORDED",
+                run_id=attempt.run_id,
+                key=key,
+                payload=attempt.to_dict(),
+                sequence=sequence,
+                previous_sha256=previous_sha256,
+            )
+            encoded = _impl._canonical(event) + "\n"
+            path_existed_before = self.path.exists()
+            try:
+                with self.path.open(
+                    "a",
+                    encoding="utf-8",
+                    newline="\n",
+                ) as handle:
+                    handle.write(encoded)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if not path_existed_before or not self._path_durable:
+                    self._sync_parent_directory()
+                self._write_anchor_unlocked(events + [event])
+            except OSError as exc:
+                self._path_durable = False
+                raise PaperExecutionIntegrityError(
+                    "PAPER execution ledger durability barrier failed"
+                ) from exc
+            self._path_durable = True
+
+        self._with_writer_lock(mutate)
+
     def complete_run(
         self,
         *,

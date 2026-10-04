@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .integrity import atomic_write_json, durable_path_lock
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from .run_registry import RunRegistry
 from .run_transaction import RunTransaction, RunTransactionError
 from .risk_sampling_dependence import (
@@ -641,6 +647,7 @@ __all__ = [
 
 
 _RUN_ADMISSION_SCHEMA = "AUTOSPORT_PRODUCT_IID_RUN_ADMISSION_V1"
+_RUN_ADMISSION_AUTHORITY_DOMAIN = "autosport.risk.iid-run-admission.v1"
 _RUN_ADMISSION_PLAN = resolve_product_iid_expected_draw_plan
 _RUN_ADMISSION_PLAN_CODE = getattr(_RUN_ADMISSION_PLAN, "__code__", None)
 _RUN_ADMISSION_REGISTRY_TYPE = RunRegistry
@@ -659,6 +666,7 @@ _RUN_ADMISSION_TX_TERMINAL_CODE = getattr(
     "__code__",
     None,
 )
+_RUN_ADMISSION_AUTHORITY_TYPE = MonotonicWorkspaceAuthority
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -680,7 +688,10 @@ class ProductIidRunAdmissionReceipt:
     sampling_manifest_sha256: str
     sampling_frame_sha256: str
     horizon_sha256: str
+    workspace_instance_id: str
     state_sha256: str
+    authority_generation: int
+    authority_record_sha256: str
     receipt_sha256: str
     run_admission_bound: bool
 
@@ -740,10 +751,24 @@ def _require_run_admission_dispatch() -> None:
         or getattr(_RUN_ADMISSION_TX_TERMINAL, "__code__", None)
         is not _RUN_ADMISSION_TX_TERMINAL_CODE
         or ProductIidRunAdmissionReceipt is not _RUN_ADMISSION_TYPE
+        or MonotonicWorkspaceAuthority is not _RUN_ADMISSION_AUTHORITY_TYPE
     ):
         raise ProductIidDrawPlanError(
             "IID run-admission authority dispatch changed"
         )
+
+
+def _run_admission_authority_key(
+    *,
+    experiment_id: str,
+    member_index: int,
+) -> str:
+    return _sha_bytes(
+        (
+            "autosport-product-iid-run-admission-v1\n"
+            f"{experiment_id}\n{member_index}"
+        ).encode("utf-8")
+    )
 
 
 def _run_admission_state_path(
@@ -752,13 +777,53 @@ def _run_admission_state_path(
     experiment_id: str,
     member_index: int,
 ) -> Path:
-    key = _sha_bytes(
-        (
-            "autosport-product-iid-run-admission-v1\n"
-            f"{experiment_id}\n{member_index}"
-        ).encode("utf-8")
+    key = _run_admission_authority_key(
+        experiment_id=experiment_id,
+        member_index=member_index,
     )[:24]
     return workspace / f".risk-iid-run-admission-{key}.json"
+
+
+def _run_admission_authority(
+    workspace: Path,
+    *,
+    experiment_id: str,
+    member_index: int,
+    authority_root: str | Path | None,
+) -> MonotonicWorkspaceAuthority:
+    return _RUN_ADMISSION_AUTHORITY_TYPE(
+        workspace=workspace,
+        domain=_RUN_ADMISSION_AUTHORITY_DOMAIN,
+        key=_run_admission_authority_key(
+            experiment_id=experiment_id,
+            member_index=member_index,
+        ),
+        authority_root=authority_root,
+    )
+
+
+def _run_admission_semantic_binding_sha256(
+    *,
+    state_sha256: str,
+    state: dict[str, object],
+) -> str:
+    return _sha_bytes(
+        _canonical_json(
+            {
+                "authority_domain": _RUN_ADMISSION_AUTHORITY_DOMAIN,
+                "experiment_id": state["experiment_id"],
+                "member_id": state["member_id"],
+                "member_index": state["member_index"],
+                "expected_draw_plan_sha256": state[
+                    "expected_draw_plan_sha256"
+                ],
+                "expected_draw_transcript_sha256": state[
+                    "expected_draw_transcript_sha256"
+                ],
+                "state_sha256": state_sha256,
+            }
+        )
+    )
 
 
 def _run_admission_registry_item(
@@ -827,9 +892,23 @@ def _run_admission_core(
 def _issue_run_admission_receipt(
     state: dict[str, object],
     *,
+    authority_record,
     run_admission_bound: bool,
 ) -> ProductIidRunAdmissionReceipt:
     state_sha256 = _sha_bytes(_canonical_json(state))
+    semantic_binding = _run_admission_semantic_binding_sha256(
+        state_sha256=state_sha256,
+        state=state,
+    )
+    if (
+        authority_record is None
+        or authority_record.phase is not AuthorityPhase.COMMIT
+        or authority_record.intended_state_sha256 != state_sha256
+        or authority_record.semantic_binding_sha256 != semantic_binding
+    ):
+        raise ProductIidDrawPlanError(
+            "IID run-admission lacks committed monotonic product authority"
+        )
     receipt_payload = {
         "schema": _RUN_ADMISSION_SCHEMA,
         "state_sha256": state_sha256,
@@ -844,6 +923,9 @@ def _issue_run_admission_receipt(
         "sampling_manifest_sha256": state["sampling_manifest_sha256"],
         "sampling_frame_sha256": state["sampling_frame_sha256"],
         "horizon_sha256": state["horizon_sha256"],
+        "workspace_instance_id": state["workspace_instance_id"],
+        "authority_generation": authority_record.generation,
+        "authority_record_sha256": authority_record.record_sha256,
     }
     result = object.__new__(_RUN_ADMISSION_TYPE)
     for field_name, value in (
@@ -859,7 +941,10 @@ def _issue_run_admission_receipt(
         ("sampling_manifest_sha256", state["sampling_manifest_sha256"]),
         ("sampling_frame_sha256", state["sampling_frame_sha256"]),
         ("horizon_sha256", state["horizon_sha256"]),
+        ("workspace_instance_id", state["workspace_instance_id"]),
         ("state_sha256", state_sha256),
+        ("authority_generation", authority_record.generation),
+        ("authority_record_sha256", authority_record.record_sha256),
         ("receipt_sha256", _sha_bytes(_canonical_json(receipt_payload))),
         ("run_admission_bound", run_admission_bound),
     ):
@@ -890,10 +975,17 @@ def _resolve_run_admission_state(
         authority_root=authority_root,
     )
     _require_run_admission_dispatch()
+    authority = _run_admission_authority(
+        workspace,
+        experiment_id=plan.experiment_id,
+        member_index=member_index,
+        authority_root=authority_root,
+    )
     state_expected = _run_admission_core(
         plan,
         member_index=member_index,
     )
+    state_expected["workspace_instance_id"] = authority.workspace_instance_id
     path = _run_admission_state_path(
         workspace,
         experiment_id=plan.experiment_id,
@@ -914,8 +1006,36 @@ def _resolve_run_admission_state(
         raise ProductIidDrawPlanError(
             "IID run-admission state differs from frozen expected draws"
         )
+    state_sha256 = _sha_bytes(_canonical_json(state))
+    semantic_binding = _run_admission_semantic_binding_sha256(
+        state_sha256=state_sha256,
+        state=state,
+    )
+    try:
+        history = authority.read_history()
+        pending = (
+            history[-1]
+            if history and history[-1].phase is AuthorityPhase.PREPARE
+            else None
+        )
+        recovery = authority.recover(
+            observed_state_sha256=state_sha256,
+            tx_id=pending.tx_id if pending is not None else None,
+            semantic_binding_sha256=(
+                semantic_binding if pending is not None else None
+            ),
+        )
+    except MonotonicWorkspaceAuthorityError as exc:
+        raise ProductIidDrawPlanError(
+            "IID run-admission monotonic authority cannot be re-resolved"
+        ) from exc
+    if recovery.record is None or recovery.record.phase is not AuthorityPhase.COMMIT:
+        raise ProductIidDrawPlanError(
+            "IID run-admission lacks committed monotonic product authority"
+        )
     prepared = _issue_run_admission_receipt(
         state,
+        authority_record=recovery.record,
         run_admission_bound=False,
     )
     if not require_completed_run:
@@ -950,6 +1070,7 @@ def _resolve_run_admission_state(
     _require_run_admission_dispatch()
     return _issue_run_admission_receipt(
         state,
+        authority_record=recovery.record,
         run_admission_bound=True,
     )
 
@@ -982,10 +1103,17 @@ def issue_product_iid_run_admission(
         authority_root=authority_root,
     )
     _require_run_admission_dispatch()
+    authority = _run_admission_authority(
+        root,
+        experiment_id=plan.experiment_id,
+        member_index=member_index,
+        authority_root=authority_root,
+    )
     state = _run_admission_core(
         plan,
         member_index=member_index,
     )
+    state["workspace_instance_id"] = authority.workspace_instance_id
     member_id = str(state["member_id"])
     path = _run_admission_state_path(
         root,
@@ -1013,9 +1141,39 @@ def issue_product_iid_run_admission(
             raise ProductIidDrawPlanError(
                 "IID run-admission must be issued before RunTransaction.start"
             )
-        atomic_write_json(path, state)
+        state_sha256 = _sha_bytes(_canonical_json(state))
+        semantic_binding = _run_admission_semantic_binding_sha256(
+            state_sha256=state_sha256,
+            state=state,
+        )
+        try:
+            recovery = authority.recover(observed_state_sha256=None)
+            if recovery.committed_state_sha256 is not None:
+                raise ProductIidDrawPlanError(
+                    "committed IID run-admission state is missing from workspace"
+                )
+            tx_id = f"risk-iid-run-admission-{uuid.uuid4().hex}"
+            authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=None,
+                intended_state_sha256=state_sha256,
+                semantic_binding_sha256=semantic_binding,
+            )
+            atomic_write_json(path, state)
+            record = authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=state_sha256,
+                semantic_binding_sha256=semantic_binding,
+            )
+        except ProductIidDrawPlanError:
+            raise
+        except (MonotonicWorkspaceAuthorityError, OSError, ValueError) as exc:
+            raise ProductIidDrawPlanError(
+                "IID run-admission product authority issuance failed closed"
+            ) from exc
     return _issue_run_admission_receipt(
         state,
+        authority_record=record,
         run_admission_bound=False,
     )
 

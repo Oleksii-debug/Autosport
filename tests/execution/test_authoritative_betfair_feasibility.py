@@ -613,12 +613,16 @@ def test_price_ladder_before_durable_action_quote_cannot_satisfy_gate() -> None:
             Decimal("2.00"),
             max_evidence_age=timedelta(seconds=5),
         )
-        # _bound derives quote_at = decision_at - 1 second. Put that quote
-        # strictly after both sealed ladder decisions without sleeping; the
-        # subsequent MarketBook acquisition then occurs after the quote.
-        quote_at = second_ladder.decision_at + timedelta(microseconds=1)
-        bound = _bound(quote_at + timedelta(seconds=1))
         receipt = canonical_source.read_market_book_depth("1.234", 42)
+        # _bound derives quote_at = decision_at - 1 second. Bind that quote
+        # to the exact sealed MarketBook acquisition boundary instead of
+        # assuming a scheduler/time-resolution gap between sequential reads.
+        quote_at = betfair_account_readonly.market_book_depth_acquisition_started_at(
+            receipt
+        )
+        assert first_ladder.acquisition_started_at < quote_at
+        assert second_ladder.acquisition_started_at < quote_at
+        bound = _bound(quote_at + timedelta(seconds=1))
     finally:
         urllib_request._opener = original_opener
 

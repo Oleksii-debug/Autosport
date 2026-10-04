@@ -221,6 +221,45 @@ class LiveReceiptReconvergenceTests(unittest.TestCase):
                 )
             store.close()
 
+    def test_trusted_recovery_ignores_runtime_mirror_dispatch_rebind(self) -> None:
+        def poisoned(*_args, **_kwargs):
+            raise AssertionError("runtime mirror dispatch must not control trusted recovery")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self._ingest(store)
+
+            with (
+                patch.object(market_mirror_module, "_require_market_event", new=poisoned),
+                patch.object(MarketMirror, "__init__", new=poisoned),
+                patch.object(MarketMirror, "_key", new=poisoned),
+                patch.object(MarketMirror, "_snapshot_event", new=poisoned),
+                patch.object(MarketMirror, "_same_sequence_payload", new=poisoned),
+                patch.object(MarketMirror, "_utc_timestamp", new=poisoned),
+                patch.object(MarketMirror, "_selector", new=poisoned),
+                patch.object(MarketMirror, "_decision_boundary", new=poisoned),
+                patch.object(MarketMirror, "_decision_visible_event", new=poisoned),
+                patch.object(MarketMirror, "apply", new=poisoned),
+                patch.object(MarketMirror, "view", new=poisoned),
+                patch.object(MarketMirror, "active_view", new=poisoned),
+                patch.object(
+                    MarketMirror,
+                    "_DECISION_ELIGIBLE_STATUSES",
+                    new=frozenset(),
+                ),
+            ):
+                live = MarketMirror.from_live_store(store)
+                replay = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(2026, 10, 4, 3, 0, 3, tzinfo=timezone.utc),
+                    max_age=timedelta(seconds=30),
+                    require_live_receipt_authority=True,
+                )
+
+            self.assertEqual(live.snapshot(), (event,))
+            self.assertEqual(replay.events, (event,))
+            store.close()
+
     def test_trusted_recovery_and_current_readers_ignore_runtime_rebind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

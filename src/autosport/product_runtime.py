@@ -237,7 +237,7 @@ def _build_product_coordinator_type(
         def __getattribute__(self, name: str):
             snapshot = snapshots.get(self)
             if snapshot is not None:
-                if name in entry_methods:
+                if name in dispatch_methods:
                     require_snapshot(self)
                     return base_methods[name].__get__(self, type(self))
                 if name in snapshot_fields:
@@ -2031,13 +2031,29 @@ def _build_product_runtime_type(
         "_operation_fence",
     )
     entry_methods = ("start", "pause", "resume", "stop", "status", "tick", "close")
-    base_methods = {name: getattr(base_type, name) for name in entry_methods}
+    internal_methods = (
+        "_require_runtime_authority",
+        "_state_value",
+        "_require_start_transition_resolved",
+        "_coherent_status",
+        "_note_secondary_failure",
+        "_mark_start_recovery_required",
+        "_compensate_failed_start",
+        "_recover_interrupted_start",
+    )
+    dispatch_methods = frozenset((*entry_methods, *internal_methods))
+    base_methods = {name: getattr(base_type, name) for name in dispatch_methods}
 
     def require_snapshot(self) -> tuple[tuple[str, object], ...]:
         snapshot = snapshots.get(self)
         if snapshot is None:
             raise error_type("product runtime authority snapshot is unavailable")
         raw = object.__getattribute__(self, "__dict__")
+        for name in dispatch_methods:
+            if name in raw:
+                raise error_type(
+                    f"product runtime method {name!r} changed after composition"
+                )
         for name, expected in snapshot:
             if raw.get(name) is not expected:
                 raise error_type(
@@ -2072,7 +2088,7 @@ def _build_product_runtime_type(
             snapshot = snapshots.get(self)
             if snapshot is not None and (
                 name in snapshot_fields
-                or name in entry_methods
+                or name in dispatch_methods
                 or name in {"__class__", "_closed"}
             ):
                 raise error_type(

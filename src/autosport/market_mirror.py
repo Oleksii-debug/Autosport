@@ -114,6 +114,30 @@ class MarketMirror:
         return selected
 
     @staticmethod
+    def _quote_key_set(
+        keys: Iterable[tuple[str, str]],
+    ) -> frozenset[tuple[str, str]]:
+        if isinstance(keys, (str, bytes)):
+            raise TypeError("keys must be an iterable of (source_id, quote_key) tuples")
+        try:
+            values = tuple(keys)
+        except TypeError as exc:
+            raise TypeError(
+                "keys must be an iterable of (source_id, quote_key) tuples"
+            ) from exc
+        normalized: set[tuple[str, str]] = set()
+        for value in values:
+            if type(value) is not tuple or len(value) != 2:
+                raise ValueError("mirror key must be a (source_id, quote_key) tuple")
+            source_id, quote_key = value
+            if type(source_id) is not str or not source_id or source_id.strip() != source_id:
+                raise ValueError("mirror key source_id must be a non-empty trimmed string")
+            if type(quote_key) is not str or not quote_key or quote_key.strip() != quote_key:
+                raise ValueError("mirror key quote_key must be a non-empty trimmed string")
+            normalized.add((source_id, quote_key))
+        return frozenset(normalized)
+
+    @staticmethod
     def _decision_boundary(*, as_of: datetime, max_age: timedelta) -> tuple[datetime, timedelta]:
         if not isinstance(as_of, datetime):
             raise TypeError("as_of must be a datetime")
@@ -455,6 +479,21 @@ class MarketMirror:
             event = self._latest.get((source_id, quote_key))
             return None if event is None else self._snapshot_event(event)
 
+    def view_for_keys(
+        self,
+        keys: Iterable[tuple[str, str]],
+    ) -> MirrorSnapshot:
+        """Return one coherent latest-event view for explicit source/quote keys."""
+        normalized = self._quote_key_set(keys)
+        with self._lock:
+            revision = self._revision
+            events = tuple(
+                self._snapshot_event(self._latest[key])
+                for key in sorted(normalized)
+                if key in self._latest
+            )
+        return MirrorSnapshot(revision=revision, events=events)
+
     def active_view_for_keys(
         self,
         keys: Iterable[tuple[str, str]],
@@ -468,25 +507,7 @@ class MarketMirror:
         second market-state authority. Incremental consumers can therefore avoid a
         whole-mirror snapshot when only bounded dirty quote identities changed.
         """
-        if isinstance(keys, (str, bytes)):
-            raise TypeError("keys must be an iterable of (source_id, quote_key) tuples")
-        try:
-            values = tuple(keys)
-        except TypeError as exc:
-            raise TypeError(
-                "keys must be an iterable of (source_id, quote_key) tuples"
-            ) from exc
-        normalized: set[tuple[str, str]] = set()
-        for value in values:
-            if type(value) is not tuple or len(value) != 2:
-                raise ValueError("mirror key must be a (source_id, quote_key) tuple")
-            source_id, quote_key = value
-            if type(source_id) is not str or not source_id or source_id.strip() != source_id:
-                raise ValueError("mirror key source_id must be a non-empty trimmed string")
-            if type(quote_key) is not str or not quote_key or quote_key.strip() != quote_key:
-                raise ValueError("mirror key quote_key must be a non-empty trimmed string")
-            normalized.add((source_id, quote_key))
-
+        normalized = self._quote_key_set(keys)
         boundary, age_limit = self._decision_boundary(as_of=as_of, max_age=max_age)
         with self._lock:
             revision = self._revision

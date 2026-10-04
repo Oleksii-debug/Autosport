@@ -1095,6 +1095,32 @@ class _ContinuousSessionState:
                     "recovered settlement evidence was not durably staged before P&L"
                 )
 
+    def complete_pending_settlement_commit(
+        self,
+        *,
+        settlement_evidence: tuple[SettlementResolution, ...],
+    ) -> None:
+        """Clear replay work only after its economic/learning commit completed."""
+
+        def mutate(raw: dict[str, Any]) -> None:
+            evidence, outcome_digests, pending = self._merge_settlement_evidence(
+                raw,
+                settlement_evidence,
+            )
+            completed_ids = {
+                resolution.evidence_id
+                for resolution in settlement_evidence
+            }
+            raw["settlement_evidence"] = evidence
+            raw["settlement_outcome_digests"] = outcome_digests
+            raw["pending_settlement_resolutions"] = [
+                item
+                for item in pending
+                if item["evidence_id"] not in completed_ids
+            ]
+
+        self._update(mutate)
+
     def record_source_projection(
         self,
         *,
@@ -1950,6 +1976,43 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             cycle = self.collector.run_cycle()
             source_snapshot = self._refresh_source_state_projection()
             if cycle.provider_unavailable:
+                # Provider availability cannot revoke truth already staged before a
+                # previous crash. Recover only the durable pending commit; do not call
+                # the outcome authority or mint new settlement evidence on this path.
+                pending_resolutions = self._pending_settlement_resolutions(
+                    as_of=now,
+                )
+                recovered_resolutions: tuple[SettlementResolution, ...] = ()
+                settled: tuple[str, ...] = ()
+                evidence_ids: tuple[str, ...] = ()
+                if pending_resolutions:
+                    if self._settlement_prepare is not None:
+                        self._settlement_prepare(
+                            paper_book_path=self.paper_book_path,
+                            resolutions=pending_resolutions,
+                            at=now,
+                        )
+                    recovered_resolutions = self._recovered_settlement_resolutions(
+                        as_of=now,
+                    )
+                    recovery_resolutions = (
+                        pending_resolutions + recovered_resolutions
+                    )
+                    settled, evidence_ids = self._settle(
+                        resolutions=recovery_resolutions,
+                        settled_at=now,
+                    )
+                    if self._settlement_reconcile is not None:
+                        self._settlement_reconcile(
+                            paper_book_path=self.paper_book_path,
+                            resolutions=recovery_resolutions,
+                            settled_ticket_ids=settled,
+                            at=now,
+                        )
+                    self._state.complete_pending_settlement_commit(
+                        settlement_evidence=recovery_resolutions,
+                    )
+
                 self._state.record_failure(code="ProviderUnavailableError")
                 snapshot = self._state.snapshot()
                 return ContinuousTickResult(
@@ -1979,8 +2042,8 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         self.invalidation_buffer.pending_count > 0
                         or self.invalidation_buffer.full_refresh_required
                     ),
-                    settled_ticket_ids=(),
-                    settlement_evidence_ids=(),
+                    settled_ticket_ids=settled,
+                    settlement_evidence_ids=evidence_ids,
                     last_success_at=snapshot.last_success_at,
                 )
 

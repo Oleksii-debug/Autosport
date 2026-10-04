@@ -3809,6 +3809,42 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 )
             self.assertEqual(economics_observer.calls, 0)
 
+            execution_ledger.path.write_text(
+                "".join(
+                    json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                    for item in execution_events
+                ),
+                encoding="utf-8",
+            )
+            execution_ledger._write_anchor_unlocked(execution_events)
+            execution_ledger.events()
+
+            original_tickets = dict(resumed_book.tickets)
+            self.assertTrue(original_tickets)
+            resumed_book.tickets.clear()
+            missing_ticket_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "PaperBook does not bind exact #623 execution attempt",
+            ):
+                self._loop(
+                    workspace,
+                    observer=missing_ticket_observer,
+                    factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                    book=resumed_book,
+                    authority=authority,
+                    paper_execution=resumed_execution,
+                )
+            self.assertEqual(missing_ticket_observer.calls, 0)
+            resumed_book.tickets.update(original_tickets)
+
     def test_pending_restart_recovers_before_polling_new_quote(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

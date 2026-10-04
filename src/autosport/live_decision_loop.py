@@ -36,9 +36,11 @@ from .market_mirror_runtime import (
 from .paper import PaperBook
 from .paper_execution_adoption import (
     PaperExecutionAdoptionRuntime,
+    PaperExposureBinding,
     PreparedPaperExecution,
 )
 from .paper_execution_reality import (
+    PaperAttemptOutcome,
     PaperExecutionIntegrityError,
     PaperLegAttempt,
     RecoveryDecision,
@@ -50,6 +52,7 @@ from .portfolio_plan import (
     build_portfolio_plan,
 )
 from .providers import MarketProvider, ProviderUnavailableError
+from .real_execution_ledger import ExecutionAction, ExecutionPlan
 from .scientific_registry import ModelVersion, ScientificRegistry, StrategyVersion
 from .storage import SQLiteMarketStore
 from .workspace_lock import WorkspaceEconomicLock
@@ -3162,6 +3165,243 @@ class PersistentLiveDecisionLoop:
             raise DecisionLedgerIntegrityError(
                 "committed live decision #623 exposure scope digest is invalid"
             )
+
+        positive_inputs = tuple(
+            (index, item, stake)
+            for index, (item, stake) in enumerate(
+                zip(intent_items, durable_plan.stakes, strict=True)
+            )
+            if stake > 0
+        )
+        if len(positive_inputs) != len(action_ids):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision execution inputs conflict with plan"
+            )
+
+        actions: list[ExecutionAction] = []
+        canonical_bindings: list[PaperExposureBinding] = []
+        attempt_by_action = {
+            attempt.action_id: attempt for attempt in attempts
+        }
+        for position, (
+            original_index,
+            intent_item,
+            stake,
+        ) in enumerate(positive_inputs):
+            action_id = action_ids[position]
+            binding_raw = bindings[position]
+            if (
+                type(intent_item) is not dict
+                or type(binding_raw) is not dict
+                or set(binding_raw)
+                != {"action_id", "sport", "bankroll_id", "currency"}
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision execution input binding is invalid"
+                )
+            risk_context = intent_item.get("risk_context")
+            opportunity = intent_item.get("opportunity")
+            attempt = attempt_by_action.get(action_id)
+            if (
+                type(risk_context) is not dict
+                or type(opportunity) is not dict
+                or attempt is None
+                or type(opportunity.get("quotes")) is not list
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision execution evidence is incomplete"
+                )
+            matching_quotes = tuple(
+                quote
+                for quote in opportunity["quotes"]
+                if type(quote) is dict
+                and quote.get("market_event_hash")
+                == attempt.decision_quote_id
+            )
+            if len(matching_quotes) != 1:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision execution quote is ambiguous"
+                )
+            quote = matching_quotes[0]
+            provider_accounts = risk_context.get("provider_accounts")
+            expected_account = [quote.get("source_id"), attempt.account_id]
+            if (
+                type(provider_accounts) is not list
+                or provider_accounts != [expected_account]
+                or attempt.bookmaker_id != quote.get("source_id")
+                or attempt.event_id != quote.get("event_id")
+                or attempt.market_id != quote.get("market_id")
+                or attempt.selection_id != quote.get("selection_id")
+                or str(attempt.decision_odds) != quote.get("decimal_odds")
+                or attempt.requested_stake != stake
+                or attempt.side != "BACK"
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision #623 attempt conflicts with "
+                    "canonical intent evidence"
+                )
+
+            expected_action_id = "paper-action-v1-" + _canonical_json_sha256(
+                {
+                    "decision_id": progress.decision_id,
+                    "intent_id": intent_item.get("intent_id"),
+                    "intent_sha256": intent_item.get("intent_sha256"),
+                    "quote_market_event_hash": quote.get(
+                        "market_event_hash"
+                    ),
+                    "stake": str(stake),
+                    "index": original_index,
+                }
+            )
+            if action_id != expected_action_id:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision #623 action identity is invalid"
+                )
+
+            try:
+                quote_clock = quote.get("source_ts") or quote.get(
+                    "observed_ts"
+                )
+                _, quote_time = _canonical_timestamp(
+                    "execution quote observed time",
+                    quote_clock,
+                )
+                action = ExecutionAction(
+                    action_id=action_id,
+                    bookmaker_id=attempt.bookmaker_id,
+                    account_id=attempt.account_id,
+                    event_id=attempt.event_id,
+                    market_id=attempt.market_id,
+                    selection_id=attempt.selection_id,
+                    side="BACK",
+                    requested_odds=attempt.decision_odds,
+                    requested_stake=stake,
+                    quote_id=attempt.decision_quote_id,
+                    quote_observed_at=quote_time.isoformat(
+                        timespec="microseconds"
+                    ),
+                    expires_at=(
+                        quote_time + runtime.max_quote_age
+                    ).isoformat(timespec="microseconds"),
+                )
+                binding = PaperExposureBinding(
+                    action_id=action_id,
+                    sport=quote.get("sport"),
+                    bankroll_id=risk_context.get("bankroll_id"),
+                    currency=risk_context.get("currency"),
+                )
+            except (TypeError, ValueError) as exc:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision execution action is invalid"
+                ) from exc
+
+            if binding_raw != {
+                "action_id": binding.action_id,
+                "sport": binding.sport,
+                "bankroll_id": binding.bankroll_id,
+                "currency": binding.currency,
+            }:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision #623 exposure binding conflicts "
+                    "with canonical intent evidence"
+                )
+            actions.append(action)
+            canonical_bindings.append(binding)
+
+        expected_plan_id = "paper-plan-v1-" + _canonical_json_sha256(
+            {
+                "decision_id": progress.decision_id,
+                "portfolio_plan_sha256": durable_plan.plan_sha256,
+                "intent_evidence_json": intent_evidence_json,
+                "model_fingerprint": runtime.config.fingerprint,
+                "action_ids": action_ids,
+            }
+        )
+        try:
+            reconstructed_plan = ExecutionPlan(
+                plan_id=expected_plan_id,
+                bookmaker_profile_version=(
+                    "paper-execution-reality:"
+                    f"{runtime.config.model_id}:"
+                    f"{runtime.config.model_version}"
+                ),
+                decision_id=progress.decision_id,
+                approval_id="paper-only-no-real-money",
+                created_at=durable_plan.decision_ts,
+                actions=tuple(actions),
+            )
+        except (TypeError, ValueError) as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision execution plan is invalid"
+            ) from exc
+        if (
+            plan_id != expected_plan_id
+            or plan_fingerprint != reconstructed_plan.fingerprint
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision execution plan conflicts with "
+                "canonical plan/evidence"
+            )
+
+        action_by_id = {
+            action.action_id: action for action in actions
+        }
+        binding_by_id = {
+            binding.action_id: binding
+            for binding in canonical_bindings
+        }
+        for attempt in attempts:
+            marker = (
+                f"{PaperExecutionAdoptionRuntime._TICKET_MARKER}"
+                f"{attempt.attempt_id}"
+            )
+            matches = tuple(
+                ticket
+                for ticket in runtime.book.tickets.values()
+                if marker in ticket.strategy_reason
+            )
+            should_materialize = (
+                self.mode is LiveDecisionMode.PAPER
+                and attempt.outcome
+                in {
+                    PaperAttemptOutcome.ACCEPTED,
+                    PaperAttemptOutcome.PARTIAL,
+                }
+            )
+            if not should_materialize:
+                if matches:
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision materialized unauthorized "
+                        "#623 exposure"
+                    )
+                continue
+            action = action_by_id.get(attempt.action_id)
+            binding = binding_by_id.get(attempt.action_id)
+            if (
+                action is None
+                or binding is None
+                or len(matches) != 1
+                or not runtime._ticket_matches_attempt(
+                    ticket=matches[0],
+                    attempt=attempt,
+                    action=action,
+                    binding=binding,
+                )
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision PaperBook does not bind exact "
+                    "#623 execution attempt"
+                )
+            expected_reason = (
+                "paper execution adoption; "
+                f"decision_id={progress.decision_id}; "
+                f"run_id={run_id}; {marker}"
+            )
+            if matches[0].strategy_reason != expected_reason:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision PaperBook execution reason "
+                    "is not canonical"
+                )
 
     def _verify_committed_progress_ledger_binding(
         self,

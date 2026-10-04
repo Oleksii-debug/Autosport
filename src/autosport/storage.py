@@ -2338,37 +2338,6 @@ class SQLiteMarketStore:
             for event, _generation in self.events_with_append_generation(event_id)
         ]
 
-    def generation_zero_events(self) -> list[MarketEvent]:
-        """Read the sealed legacy baseline as audit/order state, never causal evidence.
-
-        This deliberately does not take the positive-append issuance sibling lock and
-        does not recover a pending positive append. A frozen replay must remain able to
-        reconstruct the immutable baseline sequence fence while a newer live writer is
-        between SQLite COMMIT and machine COMMIT.
-        """
-
-        authority = self._market_append_authority()
-        with self._connection_lock:
-            self.connection.execute("BEGIN")
-            try:
-                self._validate_causal_replay_state()
-                self._require_committed_append_authority_through(authority, 0)
-                qualified_columns = ",".join(
-                    f"m.{column}" for column in _HISTORY_COLUMNS
-                )
-                rows = self.connection.execute(
-                    f"""SELECT {qualified_columns}
-                        FROM market_event_commit_order AS c
-                        JOIN market_events AS m ON m.dedupe_key = c.dedupe_key
-                        WHERE c.append_generation = 0"""
-                ).fetchall()
-                events = [_event_from_history_row(tuple(row)) for row in rows]
-                self._commit_stable_database_path()
-            except BaseException:
-                self.connection.rollback()
-                raise
-        return sorted(events, key=_event_order_key)
-
     def replay_events_at_frozen_cutoff(
         self,
         *,

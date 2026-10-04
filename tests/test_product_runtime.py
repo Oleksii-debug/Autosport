@@ -197,6 +197,59 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_builder_closure_binds_canonical_composition_constructors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            forged_calls = []
+
+            def forged(name):
+                def fail(*_args, **_kwargs):
+                    forged_calls.append(name)
+                    raise AssertionError(f"{name} module rebind must be ignored")
+
+                return fail
+
+            replacements = {
+                "PaperBook": forged("PaperBook"),
+                "_ProductRuntimeLease": forged("_ProductRuntimeLease"),
+                "_settlement_authority_identity": forged("_settlement_authority_identity"),
+                "_ManifestStore": forged("_ManifestStore"),
+                "ContinuousEventLifecycle": forged("ContinuousEventLifecycle"),
+                "SQLiteMarketStore": forged("SQLiteMarketStore"),
+                "MarketMirror": forged("MarketMirror"),
+                "BoundedMirrorInvalidationBuffer": forged(
+                    "BoundedMirrorInvalidationBuffer"
+                ),
+                "MarketEventBus": forged("MarketEventBus"),
+                "SourceHealthStore": forged("SourceHealthStore"),
+                "FocusedMirrorDependencyIndex": forged(
+                    "FocusedMirrorDependencyIndex"
+                ),
+                "CollectorDeltaStore": forged("CollectorDeltaStore"),
+                "HeadlessCollectorService": forged("HeadlessCollectorService"),
+                "DesktopDeltaCheckpointStore": forged(
+                    "DesktopDeltaCheckpointStore"
+                ),
+                "ContinuousSessionCoordinator": forged(
+                    "ContinuousSessionCoordinator"
+                ),
+                "_ProductStartTransitionStore": forged(
+                    "_ProductStartTransitionStore"
+                ),
+            }
+            with patch.multiple(product_runtime_module, **replacements):
+                runtime = build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+            try:
+                self.assertEqual(forged_calls, [])
+                self.assertEqual(runtime.status().source_id, "provider-a")
+            finally:
+                runtime.close()
     def test_builder_closure_binds_canonical_application_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

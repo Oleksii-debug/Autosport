@@ -373,8 +373,6 @@ def test_caller_action_cannot_substitute_durable_plan_identity(tmp_path) -> None
         selection_id="11",
         side="LAY",
         quote_id="quote-forged",
-        requested_odds=Decimal("3.25"),
-        requested_stake=Decimal("7"),
     )
     transport.catalog_event_id = forged.event_id
     transport.cleared_event_id = forged.event_id
@@ -584,10 +582,10 @@ def test_prepare_without_local_append_is_aborted_and_retry_remains_available(
     def interrupt_before_append(revision) -> None:
         raise RuntimeError("injected before local append")
 
-    monkeypatch.setattr(store, "_append", interrupt_before_append)
-    with pytest.raises(RuntimeError, match="injected before local append"):
-        _ingest(store, ledger, plan, action, _capture(client, provider_ref))
-    monkeypatch.undo()
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_append", interrupt_before_append)
+        with pytest.raises(RuntimeError, match="injected before local append"):
+            _ingest(store, ledger, plan, action, _capture(client, provider_ref))
 
     restarted = BetfairSettlementRevisionStore(path)
     assert restarted.current("betfair", "acct-1", "bet-777") == first
@@ -624,11 +622,11 @@ def test_concurrent_constructor_cannot_abort_active_monotonic_prepare(
             BetfairSettlementRevisionStore(path)
         durable_append(revision)
 
-    monkeypatch.setattr(store, "_append", competing_open_then_append)
-    second = _ingest(
-        store, ledger, plan, action, _capture(client, provider_ref)
-    ).revision
-    monkeypatch.undo()
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_append", competing_open_then_append)
+        second = _ingest(
+            store, ledger, plan, action, _capture(client, provider_ref)
+        ).revision
 
     assert second.revision_number == 2
     assert second.provider_status == "VOIDED"
@@ -655,10 +653,10 @@ def test_local_append_before_monotonic_commit_recovers_exact_intended_tail(
         durable_append(revision)
         raise RuntimeError("injected after local append")
 
-    monkeypatch.setattr(store, "_append", append_then_interrupt)
-    with pytest.raises(RuntimeError, match="injected after local append"):
-        _ingest(store, ledger, plan, action, _capture(client, provider_ref))
-    monkeypatch.undo()
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_append", append_then_interrupt)
+        with pytest.raises(RuntimeError, match="injected after local append"):
+            _ingest(store, ledger, plan, action, _capture(client, provider_ref))
 
     # The process-local store never publishes the uncommitted successor.
     assert store.current("betfair", "acct-1", "bet-777") == first

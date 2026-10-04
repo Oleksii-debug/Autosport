@@ -2287,17 +2287,13 @@ class AutosportWebBridge:
             resolved_controller,
             controller_type,
             controller_operations,
-        )
-        object.__setattr__(self, "_controller", resolved_controller)
-        object.__setattr__(self, "_controller_witness", resolved_controller)
-        object.__setattr__(self, "_controller_record_witness", controller_record)
-        object.__setattr__(
-            self,
-            "_controller_workspace_witness",
             getattr(resolved_controller, "workspace", None)
             if controller_type is not None
             else None,
         )
+        object.__setattr__(self, "_controller", resolved_controller)
+        object.__setattr__(self, "_controller_witness", resolved_controller)
+        object.__setattr__(self, "_controller_record_witness", controller_record)
         self._trust_lock = threading.RLock()
         self._trusted_window: object | None = None
         self._trusted_url: str | None = None
@@ -2311,7 +2307,6 @@ class AutosportWebBridge:
             "_controller",
             "_controller_witness",
             "_controller_record_witness",
-            "_controller_workspace_witness",
         } and hasattr(
             self, "_controller_witness"
         ):
@@ -2328,7 +2323,12 @@ class AutosportWebBridge:
         _base_witnesses=_WEB_CONTROLLER_BASE_METHOD_WITNESSES,
         _registry=_WEB_BRIDGE_CONTROLLER_REGISTRY,
         _registry_lock=_WEB_BRIDGE_CONTROLLER_REGISTRY_LOCK,
-    ) -> tuple[object, object | None, tuple[tuple[str, object], ...]]:
+    ) -> tuple[
+        object,
+        object | None,
+        tuple[tuple[str, object], ...],
+        object,
+    ]:
         """Return and revalidate the construction-time controller authority record."""
 
         if (
@@ -2347,7 +2347,7 @@ class AutosportWebBridge:
             record = _registry.get(self)
         if (
             not isinstance(record, tuple)
-            or len(record) != 3
+            or len(record) != 4
             or not isinstance(record[2], tuple)
         ):
             self._trust_revoked = True
@@ -2359,7 +2359,7 @@ class AutosportWebBridge:
             raise WindowsWebBridgeTrustError(
                 "The WebView bridge construction-time controller authority record changed"
             )
-        controller, controller_type, operations = record
+        controller, controller_type, operations, workspace_witness = record
         if self._controller is not controller or self._controller_witness is not controller:
             self._trust_revoked = True
             raise WindowsWebBridgeTrustError(
@@ -2368,8 +2368,7 @@ class AutosportWebBridge:
 
         if controller_type is not None:
             if (
-                getattr(controller, "workspace", None)
-                is not getattr(self, "_controller_workspace_witness", None)
+                getattr(controller, "workspace", None) is not workspace_witness
             ):
                 self._trust_revoked = True
                 raise WindowsWebBridgeTrustError(
@@ -2428,7 +2427,7 @@ class AutosportWebBridge:
         return controller, controller_type, operations
 
     def _registered_controller_locked(self) -> object:
-        controller, _controller_type, _operations = (
+        controller, _controller_type, _operations, _workspace_witness = (
             self._registered_controller_record_locked()
         )
         return controller
@@ -2449,7 +2448,7 @@ class AutosportWebBridge:
     def _controller_operation_locked(self, controller: object, name: str):
         """Capture one construction-time operation before releasing the trust lock."""
 
-        registered, controller_type, operations = (
+        registered, controller_type, operations, _workspace_witness = (
             self._registered_controller_record_locked()
         )
         if registered is not controller:

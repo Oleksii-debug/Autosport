@@ -468,6 +468,8 @@ def test_external_uia_activates_packaged_durable_emergency_stop() -> None:
     assert "-AutomationId 'emergency-stop-status'" in audit
     assert "'^Аварійний STOP (активовано|активний)'" in audit
     assert "'підтверджено стійкий запис ревізії'" in audit
+    assert "Wait-ForFocusedAutomationId -AutomationId 'emergency-stop-status'" in audit
+    assert "confirmation did not retain focus on the dedicated status" in audit
     assert "packaged emergency STOP durable journal is empty" in audit
     assert "$report.emergency_stop_activation_status = 'PASS'" in audit
 

@@ -92,6 +92,7 @@ def _build_product_desktop_consumer_type(
         "_acknowledgement_clock",
         "_on_application_receipt",
     )
+    base_init = base_type.__init__
     base_drain = base_type.drain
     missing = object()
 

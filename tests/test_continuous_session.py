@@ -587,6 +587,105 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_repeated_provider_receipt_does_not_reenter_pending_prepare(self) -> None:
+        class Handoff:
+            def __init__(self) -> None:
+                self.prepare_evidence_ids = []
+
+            def prepare_settlement(self, *, resolutions, **_kwargs):
+                self.prepare_evidence_ids.append(
+                    tuple(item.evidence_id for item in resolutions)
+                )
+                return ()
+
+            def prepared_settlement_resolutions(self, **_kwargs):
+                return ()
+
+            def reconcile_after_settlement(self, **_kwargs):
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:no-restage",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-no-restage",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            book = PaperBook("100")
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a",),
+            )
+            book.save(root / "paper_book.json")
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="provider-result:no-restage",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="no-restage-evidence",
+                evidence_sha256="4" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            authority = _OutcomeAuthority(resolution)
+            handoff = Handoff()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+                settlement_learning_handoff=handoff,
+            )
+            try:
+                first = coordinator.tick()
+                self.assertEqual(first.settled_ticket_ids, (ticket.ticket_id,))
+                self.assertEqual(
+                    handoff.prepare_evidence_ids,
+                    [(resolution.evidence_id,)],
+                )
+                self.assertEqual(
+                    coordinator.status().pending_settlement_evidence_ids,
+                    (),
+                )
+
+                second = coordinator.tick()
+                self.assertEqual(second.settled_ticket_ids, ())
+                self.assertEqual(second.settlement_evidence_ids, ())
+                self.assertEqual(authority.calls, 2)
+                self.assertEqual(
+                    handoff.prepare_evidence_ids,
+                    [(resolution.evidence_id,), ()],
+                )
+                status = coordinator.status()
+                self.assertEqual(status.pending_settlement_evidence_ids, ())
+                self.assertEqual(
+                    tuple(
+                        item["evidence_id"]
+                        for item in status.settlement_evidence
+                    ),
+                    (resolution.evidence_id,),
+                )
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("110"))
+            finally:
+                store.close()
+
     def test_shared_lifecycle_foreign_source_is_outside_session_settlement_authority(
         self,
     ) -> None:
@@ -1616,6 +1715,54 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     coordinator._state.validate_recovered_settlement_evidence(
                         settlement_evidence=(resolution,),
                     )
+            finally:
+                store.close()
+
+    def test_reobserved_cleared_settlement_does_not_restage_pending_work(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-reobserve-cleared",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:reobserve-cleared",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="reobserve-cleared-evidence",
+                evidence_sha256="5" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                coordinator._state.complete_pending_settlement_commit(
+                    settlement_evidence=(resolution,),
+                    retain_pending_evidence_ids=(),
+                )
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                status = coordinator.status()
+                self.assertEqual(status.pending_settlement_evidence_ids, ())
+                self.assertEqual(
+                    tuple(
+                        item["evidence_id"]
+                        for item in status.settlement_evidence
+                    ),
+                    (resolution.evidence_id,),
+                )
             finally:
                 store.close()
 

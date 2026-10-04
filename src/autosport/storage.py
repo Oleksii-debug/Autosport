@@ -1051,7 +1051,12 @@ class SQLiteMarketStore:
             else:
                 self.connection.commit()
 
-    def _insert_one(self, event: MarketEvent) -> bool:
+    def _insert_one(
+        self,
+        event: MarketEvent,
+        *,
+        _dedupe_key=_market_event_dedupe_key,
+    ) -> bool:
         payload = _validate_incoming_event(event)
         incoming_key = _projection_order_key(event)
         cursor = self.connection.execute(

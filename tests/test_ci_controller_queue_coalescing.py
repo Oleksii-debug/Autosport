@@ -2635,6 +2635,99 @@ def test_live_pr_boundary_scoped_type_rebind_cannot_reopen_nested_request_shadow
         _trusted_live_pr_qualification(api, 303)
     assert not forged_invoked["value"]
 
+def test_historical_association_rejects_urlencode_default_rebase(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    encoder = scoped_controller.urlencode
+    defaults = encoder.__defaults__
+    assert defaults is not None and defaults
+
+    def forged_quote_via(string, safe, encoding=None, errors=None):
+        del safe, encoding, errors
+        return "page" if string == "per_page" else "2"
+
+    monkeypatch.setattr(
+        encoder,
+        "__defaults__",
+        defaults[:-1] + (forged_quote_via,),
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="historical association authority is unavailable",
+    ):
+        api._historical_associated_pr_number(HEAD)
+
+
+def test_zero_association_rejects_urlencode_default_rebase(monkeypatch) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    encoder = scoped_controller.urlencode
+    defaults = encoder.__defaults__
+    assert defaults is not None and defaults
+
+    def forged_quote_via(string, safe, encoding=None, errors=None):
+        del string, safe, encoding, errors
+        return "forged"
+
+    monkeypatch.setattr(
+        encoder,
+        "__defaults__",
+        defaults[:-1] + (forged_quote_via,),
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="historical association authority is unavailable",
+    ):
+        api._historical_head_has_no_associated_prs(HEAD)
+
+
+def test_active_run_scan_rejects_urlencode_default_rebase(monkeypatch) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    encoder = scoped_controller.urlencode
+    defaults = encoder.__defaults__
+    assert defaults is not None and defaults
+    requested: list[str] = []
+
+    def forged_quote_via(string, safe, encoding=None, errors=None):
+        del string, safe, encoding, errors
+        return "forged"
+
+    def forbidden_request(path: str, **_kwargs):
+        requested.append(path)
+        raise AssertionError("rebased query encoder must not reach transport")
+
+    monkeypatch.setattr(
+        encoder,
+        "__defaults__",
+        defaults[:-1] + (forged_quote_via,),
+    )
+    monkeypatch.setattr(api, "_request", forbidden_request)
+
+    with pytest.raises(
+        CancellationError,
+        match="active workflow pagination authority is unavailable",
+    ):
+        api._active_runs_for_status("queued")
+    assert requested == []
+
+
 def test_historical_association_pr_identity_ignores_rebound_compat_validators(
     monkeypatch,
 ) -> None:

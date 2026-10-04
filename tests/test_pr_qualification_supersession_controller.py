@@ -651,6 +651,8 @@ def test_non_pr_source_event_bootstraps_cleanup_without_event_pr_authority() -> 
 
     assert "if: github.event.workflow_run.event == 'pull_request'" not in job
     assert "|| 0 }}" in job
+    assert "--pr-number \"\${{ github.event.workflow_run.event == 'pull_request' &&" in job
+    assert "--event-pr-reference-mode \"\${{ github.event.workflow_run.event == 'pull_request' &&" in job
     assert "pull_requests[0].number && 'singleton' || 'empty'" in job
     assert '"event": "pull_request"' in source
     assert "if trigger_pr_number is not None:" in source

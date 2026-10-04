@@ -813,6 +813,17 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             original,
         )
 
+    def test_continuous_session_attribute_guard_deletion_is_sealed(self) -> None:
+        for name in ("__setattr__", "__delattr__"):
+            with self.subTest(name=name):
+                original = getattr(ContinuousSessionCoordinator, name)
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "canonical settlement consumer entry binding is immutable",
+                ):
+                    delattr(ContinuousSessionCoordinator, name)
+                self.assertIs(getattr(ContinuousSessionCoordinator, name), original)
+
     def test_continuous_session_authority_setattr_dispatch_is_sealed(self) -> None:
         original = ContinuousSessionCoordinator.__setattr__
         with self.assertRaisesRegex(

@@ -55,7 +55,9 @@ _SCENARIO_RESOLVER_CODE = getattr(_SCENARIO_RESOLVER, "__code__", None)
 
 _AUTHORITY_SHA_GETTER = MarketSettlementOutcomeAuthority.authority_sha256.fget
 _AUTHORITY_SHA_GETTER_CODE = getattr(_AUTHORITY_SHA_GETTER, "__code__", None)
-_AUTHORITY_TERMINAL_STATES_GETTER = MarketSettlementOutcomeAuthority.terminal_states.fget
+_AUTHORITY_TERMINAL_STATES_GETTER = (
+    MarketSettlementOutcomeAuthority.terminal_states.fget
+)
 _AUTHORITY_TERMINAL_STATES_GETTER_CODE = getattr(
     _AUTHORITY_TERMINAL_STATES_GETTER, "__code__", None
 )
@@ -369,7 +371,10 @@ class CanonicalTerminalScenarioBinding:
 
     def __post_init__(self) -> None:
         _sha(self.terminal_population_sha256, "terminal_population_sha256")
-        if type(self.market_group_sha256s) is not tuple or not self.market_group_sha256s:
+        if (
+            type(self.market_group_sha256s) is not tuple
+            or not self.market_group_sha256s
+        ):
             raise ProductProposalRiskTerminalStateMappingError(
                 "market_group_sha256s must be a non-empty exact tuple"
             )
@@ -416,8 +421,9 @@ class ProductProposalRiskTerminalStateMapping:
     """Deterministic positive proof of only terminal settlement mapping.
 
     The result proves that every fixed-N member's precommitted scenario identifier
-    decodes to exact provider-verified per-market terminal states and that its
-    mapping digest re-derives from the exact proposal target, stake vector, leg/quote
+    commits to the supplied exact provider-verified per-market terminal-state
+    preimage and that its mapping digest re-derives from the exact proposal target,
+    stake vector, leg/quote
     material and terminal settlements. It does not prove the scenario was sampled
     from a lawful joint distribution, that the vector is in joint support, that any
     counterfactual ticket was executed, or that risk/ticket/money authority exists.
@@ -799,6 +805,7 @@ def _require_scenario_id(
         )
     return scenario_id
 
+
 def _candidate_mapping_material(
     target: ProductProposalRiskTarget,
     precommit: ProductProposalRiskEvaluationPrecommit,
@@ -898,7 +905,8 @@ def _candidate_mapping_material(
                 )
             if leg.get("exchange_side") is not None:
                 raise ProductProposalRiskTerminalStateMappingError(
-                    "terminal mapping does not support exchange-side settlement semantics"
+                    "terminal mapping does not support exchange-side "
+                    "settlement semantics"
                 )
             selection_id = _text(
                 leg.get("selection_id"),
@@ -913,7 +921,8 @@ def _candidate_mapping_material(
                 or selection_id not in authority.selection_ids
             ):
                 raise ProductProposalRiskTerminalStateMappingError(
-                    "candidate leg no longer matches its persisted provider terminal authority"
+                    "candidate leg no longer matches its persisted provider "
+                    "terminal authority"
                 )
 
             state = groups[group_index].state_by_id[state_ids[group_index]]
@@ -1125,7 +1134,8 @@ def resolve_product_proposal_risk_terminal_state_mapping(
     )
 
     if (
-        len(scenario_population.member_scenario_ids) != len(precommit.planned_member_ids)
+        len(scenario_population.member_scenario_ids)
+        != len(precommit.planned_member_ids)
         or len(scenario_population.member_mapping_sha256s)
         != len(precommit.planned_member_ids)
     ):

@@ -384,6 +384,9 @@ $report = [ordered]@{
     keyboard_shortcuts_status = 'NOT_RUN'
     f2_focus_automation_id = $null
     f8_focus_automation_id = $null
+    emergency_stop_activation_status = 'NOT_RUN'
+    emergency_stop_status_text = $null
+    emergency_stop_journal_path = $null
     controls = @()
     failures = @()
     real_money_execution = $false
@@ -721,6 +724,59 @@ try {
 
     if ($report.controls.Count -ne $expected.Count) {
         $report.failures += "external UIA found $($report.controls.Count) of $($expected.Count) critical controls"
+    }
+
+    # Exercise the real packaged emergency STOP on this clean isolated
+    # workspace. This proves the keyboard/UIA action reaches canonical durable STOP
+    # authority and that the operator receives the confirmed semantic readback.
+    if ($report.failures.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($Workspace)) {
+        try {
+            $stopJournal = Join-Path ([System.IO.Path]::GetFullPath($Workspace)) 'execution-stop.jsonl'
+            $report.emergency_stop_journal_path = $stopJournal
+            if (Test-Path -LiteralPath $stopJournal) {
+                throw "clean packaged emergency STOP audit found a pre-existing STOP journal"
+            }
+
+            $stopButton = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId 'emergency-stop-action'
+            if ($null -eq $stopButton) {
+                throw "packaged emergency STOP action disappeared before activation"
+            }
+            Invoke-ExternalAction -Element $stopButton
+
+            $stopDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(5, $TimeoutSeconds))
+            $confirmedStopText = $null
+            while ([DateTime]::UtcNow -lt $stopDeadline) {
+                $stopStatus = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId 'emergency-stop-status'
+                if ($null -ne $stopStatus) {
+                    try {
+                        $candidateText = [string]$stopStatus.Current.Name
+                        if (
+                            $candidateText -match '^Аварійний STOP (активовано|активний)' -and
+                            $candidateText -match 'підтверджено стійкий запис ревізії'
+                        ) {
+                            $confirmedStopText = $candidateText
+                            break
+                        }
+                    } catch {}
+                }
+                Start-Sleep -Milliseconds 50
+            }
+            if ([string]::IsNullOrWhiteSpace($confirmedStopText)) {
+                throw "packaged emergency STOP did not expose confirmed durable status text"
+            }
+            if (-not (Test-Path -LiteralPath $stopJournal -PathType Leaf)) {
+                throw "packaged emergency STOP did not create the durable STOP journal"
+            }
+            $stopJournalItem = Get-Item -LiteralPath $stopJournal
+            if ($stopJournalItem.Length -le 0) {
+                throw "packaged emergency STOP durable journal is empty"
+            }
+
+            $report.emergency_stop_status_text = $confirmedStopText
+            $report.emergency_stop_activation_status = 'PASS'
+        } catch {
+            $report.failures += "packaged emergency STOP activation audit failed: $($_.Exception.Message)"
+        }
     }
 
     # Close both expanded disclosures through external UIA and prove focus

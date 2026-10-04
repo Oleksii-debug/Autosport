@@ -1495,6 +1495,7 @@ def _settlement_learning_handoff_identity_impl(
     methods: dict[str, tuple[str, str] | None] = {}
     for method_name, required in (
         ("prepare_settlement", False),
+        ("prepared_settlement_resolutions", False),
         ("reconcile_after_settlement", True),
     ):
         if type(instance_dict) is dict and method_name in instance_dict:
@@ -1593,6 +1594,7 @@ def _settlement_learning_handoff_identity_impl(
         )
 
     prepare = methods["prepare_settlement"]
+    prepared_recovery = methods["prepared_settlement_resolutions"]
     reconcile = methods["reconcile_after_settlement"]
     payload = {
         "implementation": f"{handoff_type.__module__}.{handoff_type.__qualname__}",
@@ -1601,6 +1603,12 @@ def _settlement_learning_handoff_identity_impl(
         "configuration_sha256": configuration_sha256,
         "prepare_owner": None if prepare is None else prepare[0],
         "prepare_semantic_sha256": None if prepare is None else prepare[1],
+        "prepared_recovery_owner": (
+            None if prepared_recovery is None else prepared_recovery[0]
+        ),
+        "prepared_recovery_semantic_sha256": (
+            None if prepared_recovery is None else prepared_recovery[1]
+        ),
         "reconcile_owner": reconcile[0] if reconcile is not None else None,
         "reconcile_semantic_sha256": reconcile[1] if reconcile is not None else None,
     }

@@ -123,5 +123,51 @@ class DurablePathLockTests(unittest.TestCase):
             self.assertEqual(replacement.read_bytes(), b"")
 
 
+    def test_nested_lock_reuses_sidecar_after_destination_symlink_is_replaced(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "external-authority.json"
+            destination = root / "authority.json"
+            replacement = root / "replacement-authority.json"
+            target.write_text('{"state":"old"}\n', encoding="utf-8")
+            replacement.write_text('{"state":"new"}\n', encoding="utf-8")
+            try:
+                destination.symlink_to(target)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"file symlink creation unavailable: {exc}")
+
+            real_open = integrity._open_durable_lock_handle
+            open_calls = 0
+
+            def counted_open(path: Path):
+                nonlocal open_calls
+                open_calls += 1
+                if open_calls > 1:
+                    raise AssertionError(
+                        "nested durable lock reopened its own persistent sidecar"
+                    )
+                return real_open(path)
+
+            with patch.object(
+                integrity,
+                "_open_durable_lock_handle",
+                side_effect=counted_open,
+            ):
+                with durable_path_lock(destination):
+                    os.replace(replacement, destination)
+                    with durable_path_lock(destination):
+                        self.assertEqual(
+                            destination.read_text(encoding="utf-8"),
+                            '{"state":"new"}\n',
+                        )
+
+            self.assertEqual(open_calls, 1)
+            self.assertFalse(destination.is_symlink())
+            self.assertEqual(
+                target.read_text(encoding="utf-8"),
+                '{"state":"old"}\n',
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

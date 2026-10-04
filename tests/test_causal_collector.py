@@ -2451,23 +2451,39 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertGreaterEqual(len(clock_calls), 2)
             market_store.close()
 
-    def test_canonical_application_ignores_market_publish_method_rebind(self):
+    def test_canonical_application_ignores_market_publish_rebind_from_clock(self):
         event = MarketEvent.from_dict(event_payload())
         delta = self.make_delta(payload=event.to_dict())
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             market_store = SQLiteMarketStore(root / "market.db")
+            patcher = patch.object(
+                MarketEventBus,
+                "publish",
+                lambda _self, _event: False,
+            )
+            clock_calls = []
+
+            def rebinding_clock():
+                clock_calls.append(True)
+                if len(clock_calls) == 1:
+                    patcher.start()
+                return "2026-01-01T00:00:05+00:00"
+
             application = CanonicalDesktopApplication(
                 MarketEventBus(market_store),
                 SourceHealthStore(root / "health.json"),
                 root / "canonical-application.json",
-                clock=lambda: "2026-01-01T00:00:05+00:00",
+                clock=rebinding_clock,
             )
-            with patch.object(MarketEventBus, "publish", lambda _self, _event: False):
+            try:
                 receipt = application.apply(delta, event)
+            finally:
+                patcher.stop()
 
             self.assertEqual(receipt.delta_id, delta.delta_id)
             self.assertEqual(market_store.events(event.event_id), [event])
+            self.assertGreaterEqual(len(clock_calls), 2)
             market_store.close()
 
     def test_canonical_application_completion_ignores_journal_dispatch_rebind(self):

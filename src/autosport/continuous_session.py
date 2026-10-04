@@ -72,7 +72,10 @@ def _build_settlement_callback_authority():
 
     def require_canonical_builtins(*, label: str) -> None:
         for name, expected in canonical_builtin_bindings:
-            if exact_dict_get(canonical_builtins, name, missing_callback_value) is not expected:
+            if (
+                exact_dict_get(canonical_builtins, name, missing_callback_value)
+                is not expected
+            ):
                 raise ContinuousSessionError(
                     f"settlement {label} builtin authority changed during tick"
                 )

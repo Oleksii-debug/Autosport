@@ -740,6 +740,46 @@ class PaperExecutionRealityTests(unittest.TestCase):
                 )
             self.assertFalse(path.exists())
 
+    def test_attempt_transition_requires_reservation_before_side_effect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = PaperExecutionLedger(
+                Path(tmp) / "source-execution.jsonl"
+            )
+            current = plan(action("a1"))
+            result = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-attempt-source",
+                config=config(),
+                ledger=source,
+                started_at=STARTED_AT,
+            )
+            attempt = result.attempts[0]
+
+            target_path = Path(tmp) / "target-execution.jsonl"
+            target = PaperExecutionLedger(target_path)
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "requires exactly one durable reservation",
+            ):
+                target.record_attempt(attempt)
+            self.assertFalse(target_path.exists())
+
+    def test_exact_attempt_retry_is_idempotent_after_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(
+                Path(tmp) / "paper-execution.jsonl"
+            )
+            result = execute_paper_plan(
+                plan=plan(action("a1")),
+                trigger_id="trigger-attempt-idempotency",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            event_count = len(ledger.events())
+            ledger.record_attempt(result.attempts[0])
+            self.assertEqual(len(ledger.events()), event_count)
+
     def test_writer_lock_fails_closed_instead_of_creating_parallel_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-execution.jsonl"

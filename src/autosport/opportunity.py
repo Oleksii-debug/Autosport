@@ -429,7 +429,10 @@ class PredictiveEligibilityEvidence:
     as_of: str
     valid_until: str
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _parse_iso_timestamp=parse_iso_timestamp,
+    ) -> None:
         _canonical_text(self.evaluation_id, "predictive evaluation_id")
         _canonical_hash(self.evaluation_sha256, "predictive evaluation_sha256")
         _canonical_hash(self.protocol_sha256, "predictive protocol_sha256")
@@ -464,8 +467,8 @@ class PredictiveEligibilityEvidence:
             raise OpportunityContractError(
                 "predictive maximum_uncertainty must be between 0 and 1"
             )
-        as_of = parse_iso_timestamp(self.as_of)
-        valid_until = parse_iso_timestamp(self.valid_until)
+        as_of = _parse_iso_timestamp(self.as_of)
+        valid_until = _parse_iso_timestamp(self.valid_until)
         if as_of > valid_until:
             raise OpportunityContractError(
                 "predictive eligibility as_of must not be after valid_until"
@@ -610,6 +613,7 @@ class ForecastRef:
         _predictive_evidence_type: type[PredictiveEligibilityEvidence] = (
             PredictiveEligibilityEvidence
         ),
+        _parse_iso_timestamp=parse_iso_timestamp,
     ) -> None:
         _canonical_text(self.forecast_id, "forecast_id")
         _canonical_hash(self.forecast_hash, "forecast_hash")
@@ -622,7 +626,7 @@ class ForecastRef:
                 "forecast probability must be between 0 and 1"
             )
         _canonical_text(self.input_cutoff_ts, "forecast input_cutoff_ts")
-        parse_iso_timestamp(self.input_cutoff_ts)
+        _parse_iso_timestamp(self.input_cutoff_ts)
         _canonical_hash(self.market_snapshot_hash, "market_snapshot_hash")
         _canonical_hash(
             self.quote_market_event_hash,
@@ -718,6 +722,7 @@ class ForecastRef:
         decision_time: object,
         *,
         expected_model_id: str | None,
+        _parse_iso_timestamp=parse_iso_timestamp,
     ) -> str | None:
         if (
             self.model_id is None
@@ -734,12 +739,12 @@ class ForecastRef:
             return "predictive forecast model identity does not match intent model"
         if not hasattr(decision_time, "tzinfo") or decision_time.tzinfo is None:
             return "predictive decision time must be timezone-aware"
-        cutoff = parse_iso_timestamp(self.input_cutoff_ts)
+        cutoff = _parse_iso_timestamp(self.input_cutoff_ts)
         if cutoff > decision_time:
             return "predictive forecast input cutoff is from the future"
         witness = self.predictive_eligibility
-        as_of = parse_iso_timestamp(witness.as_of)
-        valid_until = parse_iso_timestamp(witness.valid_until)
+        as_of = _parse_iso_timestamp(witness.as_of)
+        valid_until = _parse_iso_timestamp(witness.valid_until)
         if decision_time < as_of or decision_time > valid_until:
             return "predictive calibration eligibility evidence is stale"
         if not witness.support_qualified:

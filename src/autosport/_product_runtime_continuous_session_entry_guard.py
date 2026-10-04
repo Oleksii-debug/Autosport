@@ -37,20 +37,6 @@ def _install_guard() -> None:
             "continuous-session product entry must expose executable authority"
         )
 
-    def require_runtime_status_authority() -> None:
-        if (
-            runtime_dict.get("_coherent_status") is not canonical_coherent_status
-            or exact_getattr(
-                canonical_coherent_status,
-                "__code__",
-                None,
-            )
-            is not canonical_coherent_status_code
-        ):
-            raise session_error(
-                "continuous-session status authority changed"
-            )
-
     @serialized_runtime_operation
     def tick(self):
         # The product runtime consumes the exact import-time entry capability. A later
@@ -63,19 +49,52 @@ def _install_guard() -> None:
         # Product tick needs lifecycle/source coherence only. Invoke the captured
         # class method non-virtually: an instance/class shadow must not bypass either
         # lifecycle coherence or the bounded-history contract.
-        require_runtime_status_authority()
+        if (
+            runtime_dict.get("_coherent_status") is not canonical_coherent_status
+            or exact_getattr(
+                canonical_coherent_status,
+                "__code__",
+                None,
+            )
+            is not canonical_coherent_status_code
+        ):
+            raise session_error(
+                "continuous-session status authority changed"
+            )
         canonical_coherent_status(
             self,
             include_settlement_history=False,
         )
-        require_runtime_status_authority()
+        if (
+            runtime_dict.get("_coherent_status") is not canonical_coherent_status
+            or exact_getattr(
+                canonical_coherent_status,
+                "__code__",
+                None,
+            )
+            is not canonical_coherent_status_code
+        ):
+            raise session_error(
+                "continuous-session status authority changed"
+            )
         result = canonical_entry(self.coordinator)
         if (
             entry_module.tick_continuous_session is not canonical_entry
             or getattr(canonical_entry, "__code__", None) is not canonical_entry_code
         ):
             raise session_error("continuous-session product entry authority changed")
-        require_runtime_status_authority()
+        if (
+            runtime_dict.get("_coherent_status") is not canonical_coherent_status
+            or exact_getattr(
+                canonical_coherent_status,
+                "__code__",
+                None,
+            )
+            is not canonical_coherent_status_code
+        ):
+            raise session_error(
+                "continuous-session status authority changed"
+            )
         return result
 
     type.__setattr__(runtime_type, "tick", tick)

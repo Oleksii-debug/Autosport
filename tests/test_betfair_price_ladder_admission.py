@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal, localcontext
 import json
+from threading import Event, Thread
 import urllib.request as urllib_request
 
 import pytest
@@ -285,6 +286,115 @@ def test_tick_admission_is_independent_of_mutable_decimal_context(
         is BetfairPriceLadderAdmissionState.PRICE_LADDER_ADMISSIBLE
     )
     assert client is not None
+
+
+def test_out_of_order_incompatible_definition_reads_fail_closed_until_fresh_read():
+    class OutOfOrderPriceLadderTransport(PriceLadderTransport):
+        def __init__(self) -> None:
+            super().__init__("CLASSIC")
+            self.first_started = Event()
+            self.release_first = Event()
+            self.second_returned = Event()
+
+        def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            body: bytes,
+            timeout_seconds: float,
+        ) -> bytes:
+            request = json.loads(body.decode("utf-8"))
+            if request["id"] == 1:
+                self.first_started.set()
+                if not self.release_first.wait(timeout=5):
+                    raise AssertionError("timed out waiting to release first read")
+                self.ladder_type = "CLASSIC"
+                return super().post(
+                    url,
+                    headers=headers,
+                    body=body,
+                    timeout_seconds=timeout_seconds,
+                )
+
+            self.ladder_type = "FINEST"
+            payload = super().post(
+                url,
+                headers=headers,
+                body=body,
+                timeout_seconds=timeout_seconds,
+            )
+            if request["id"] == 2:
+                self.second_returned.set()
+            return payload
+
+    transport = OutOfOrderPriceLadderTransport()
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-key", "session-token"),
+        venue_id="betfair",
+        account_id="acct-1",
+    )
+    receipts: dict[str, object] = {}
+    errors: list[BaseException] = []
+
+    def read(name: str) -> None:
+        try:
+            receipts[name] = client.read_market_price_ladder("1.234")
+        except BaseException as exc:
+            errors.append(exc)
+
+    original_opener = urllib_request._opener
+    first = Thread(target=read, args=("older",))
+    second = Thread(target=read, args=("newer",))
+    try:
+        urllib_request._opener = _CanonicalUrlOpenerHarness(transport)
+        first.start()
+        assert transport.first_started.wait(timeout=5)
+        second.start()
+        assert transport.second_returned.wait(timeout=5)
+        second.join(timeout=5)
+        assert not second.is_alive()
+        transport.release_first.set()
+        first.join(timeout=5)
+        assert not first.is_alive()
+    finally:
+        transport.release_first.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        urllib_request._opener = original_opener
+
+    assert errors == []
+    older = receipts["older"]
+    newer = receipts["newer"]
+
+    # Incompatible overlapping reads have no provider revision token that can
+    # prove which response is current. Network completion order must not choose.
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="lacks canonical direct Betfair provider IO origin",
+    ):
+        _assess(older, Decimal("2.00"))
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="lacks canonical direct Betfair provider IO origin",
+    ):
+        _assess(newer, Decimal("2.01"))
+
+    fresh = _canonical_read(client, transport)
+    fresh_result = _assess(fresh, Decimal("2.01"))
+    assert fresh.ladder_type == "FINEST"
+    assert fresh_result.admissible is True
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="lacks canonical direct Betfair provider IO origin",
+    ):
+        _assess(older, Decimal("2.00"))
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="lacks canonical direct Betfair provider IO origin",
+    ):
+        _assess(newer, Decimal("2.01"))
 
 
 def test_same_market_definition_reread_preserves_current_generation():

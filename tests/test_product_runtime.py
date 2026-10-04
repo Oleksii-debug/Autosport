@@ -954,6 +954,37 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_product_coordinator_rejects_replay_helper_dispatch_shadowing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_autonomous_product_runtime(
+                workspace=Path(directory),
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            coordinator = runtime.coordinator
+            try:
+                for name in (
+                    "_require_running",
+                    "_register_input",
+                    "_retire_input",
+                    "_drain_invalidations",
+                    "_refresh_source_state_projection",
+                ):
+                    try:
+                        object.__setattr__(coordinator, name, lambda *args, **kwargs: None)
+                        with self.assertRaisesRegex(
+                            ProductCompositionError,
+                            f"product coordinator method {name!r} changed after composition",
+                        ):
+                            getattr(coordinator, name)
+                    finally:
+                        coordinator.__dict__.pop(name, None)
+                self.assertEqual(runtime.status().source_id, "provider-a")
+            finally:
+                runtime.close()
+
     def test_runtime_and_collector_type_dispatch_are_immutable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_autonomous_product_runtime(

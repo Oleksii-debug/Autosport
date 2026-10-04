@@ -919,6 +919,40 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(len(live.snapshot()), 1)
             store.close()
 
+    def test_trusted_recovery_uses_sealed_module_helpers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store)
+
+            with (
+                patch.object(
+                    market_mirror_module,
+                    "_require_market_store",
+                    side_effect=AssertionError("mutable store guard helper must not be consulted"),
+                ),
+                patch.object(
+                    market_mirror_module,
+                    "_trusted_live_events",
+                    side_effect=AssertionError("mutable trusted history helper must not be consulted"),
+                ),
+                patch.object(
+                    market_mirror_module,
+                    "_trusted_live_current_by_source",
+                    side_effect=AssertionError("mutable trusted current helper must not be consulted"),
+                ),
+            ):
+                live = MarketMirror.from_live_store(store)
+                replay = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(2026, 10, 4, 3, 0, 3, tzinfo=timezone.utc),
+                    max_age=timedelta(seconds=30),
+                    require_live_receipt_authority=True,
+                )
+
+            self.assertEqual(len(live.snapshot()), 1)
+            self.assertEqual(len(replay.events), 1)
+            store.close()
+
     def test_mirror_subclass_cannot_launder_trusted_live_authority(self) -> None:
         class ForgingMirror(MarketMirror):
             def apply(self, event):

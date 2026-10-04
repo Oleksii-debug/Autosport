@@ -44,6 +44,31 @@ class MarketEventDeliveryError(ExceptionGroup):
         return len(self.accepted_events)
 
 
+def _notify_live_subscribers(
+    bus: object,
+    events: Iterable[MarketEvent],
+    *,
+    _snapshot=_snapshot_live_event,
+    _delivery_error_type=MarketEventDeliveryError,
+) -> None:
+    """Deliver only sealed snapshots of already receipt-authoritative live events."""
+    accepted_events = tuple(_snapshot(event) for event in events)
+    subscribers = tuple(bus.subscribers)
+    failures: list[Exception] = []
+    for event in accepted_events:
+        for callback in subscribers:
+            try:
+                callback(_snapshot(event))
+            except Exception as exc:
+                failures.append(exc)
+    if failures:
+        raise _delivery_error_type(
+            "one or more market event subscribers failed after persistence",
+            failures,
+            accepted_events,
+        )
+
+
 class MarketEventBus:
     """Persist first, then attempt every subscriber once for each accepted event."""
 
@@ -81,6 +106,7 @@ class MarketEventBus:
         _store_type: type[SQLiteMarketStore] = SQLiteMarketStore,
         _live_append=SQLiteMarketStore._append_live_batch_accepted,
         _snapshot=_snapshot_live_event,
+        _notify=_notify_live_subscribers,
     ) -> int:
         """Persist through the product-owned live-receipt authority seam.
 
@@ -96,7 +122,7 @@ class MarketEventBus:
             self.store,
             (_snapshot(event) for event in events),
         )
-        __class__._notify(self, accepted, _deepcopy=_snapshot)
+        _notify(self, accepted)
         return len(accepted)
 
     def _notify(

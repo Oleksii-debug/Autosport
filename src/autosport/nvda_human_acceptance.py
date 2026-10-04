@@ -324,13 +324,18 @@ def verify_human_nvda_acceptance_structural_result(
     *,
     expected_artifact_sha256: str,
     expected_source_sha: str,
+    expected_webview2_runtime_witness_sha256: str,
 ) -> NvdaHumanAcceptanceStructuralResult:
-    """Verify live issuance and bind it to the consumer's exact artifact/source."""
+    """Rebind live issuance to exact artifact, source, and runtime witness."""
 
     expected_artifact = _require_sha256(
         "expected_artifact_sha256", expected_artifact_sha256
     )
     expected_source = _require_git_commit_sha("expected_source_sha", expected_source_sha)
+    expected_runtime_witness = _require_sha256(
+        "expected_webview2_runtime_witness_sha256",
+        expected_webview2_runtime_witness_sha256,
+    )
     if type(result) is not NvdaHumanAcceptanceStructuralResult:
         raise NvdaHumanAcceptanceError(
             "structural result must be the exact canonical result type"
@@ -352,6 +357,10 @@ def verify_human_nvda_acceptance_structural_result(
     if result.source_sha != expected_source:
         raise NvdaHumanAcceptanceError(
             "structural result does not match the expected source"
+        )
+    if result.webview2_runtime_witness_sha256 != expected_runtime_witness:
+        raise NvdaHumanAcceptanceError(
+            "structural result does not match the expected WebView2 runtime witness"
         )
     return result
 
@@ -460,13 +469,18 @@ def validate_human_nvda_acceptance_transcript(
     *,
     expected_artifact_sha256: str,
     expected_source_sha: str,
+    expected_webview2_runtime_witness_sha256: str,
 ) -> NvdaHumanAcceptanceStructuralResult:
-    """Validate one detached transcript snapshot without promoting human/NVDA truth."""
+    """Validate detached human evidence against independent exact identities."""
 
     expected_artifact = _require_sha256(
         "expected_artifact_sha256", expected_artifact_sha256
     )
     expected_source = _require_git_commit_sha("expected_source_sha", expected_source_sha)
+    expected_runtime_witness = _require_sha256(
+        "expected_webview2_runtime_witness_sha256",
+        expected_webview2_runtime_witness_sha256,
+    )
     if type(transcript) is not dict:
         raise NvdaHumanAcceptanceError("transcript must be an exact dict")
     frozen = _snapshot_json_tree(transcript, name="transcript")
@@ -491,6 +505,11 @@ def validate_human_nvda_acceptance_transcript(
     ) = _validate_webview2_runtime_witness(
         frozen["webview2_runtime_witness"]
     )
+    if webview2_runtime_witness_sha256 != expected_runtime_witness:
+        raise NvdaHumanAcceptanceError(
+            "webview2_runtime_witness does not match the independently expected "
+            "runtime-witness file"
+        )
     windows_version = _require_text("windows_version", frozen["windows_version"])
     nvda_version = _require_text("nvda_version", frozen["nvda_version"])
     _require_bool("keyboard_only", frozen["keyboard_only"], True)

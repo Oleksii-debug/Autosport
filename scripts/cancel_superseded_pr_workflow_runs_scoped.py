@@ -211,6 +211,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
         _pulls_per_page: int = _PULLS_PER_PAGE,
         _encode_query=urlencode,
         _encode_query_code=urlencode.__code__,
+        _encode_query_defaults=urlencode.__defaults__,
+        _encode_query_kwdefaults=urlencode.__kwdefaults__,
         _error_type=CancellationError,
         _absent_type=_HistoricalAssociationAbsent,
         _ambiguous_type=_HistoricalAssociationAmbiguous,
@@ -248,6 +250,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 and getattr(bound, "__self__", None) is self
                 and getattr(bound, "__func__", None) is _request_impl
                 and getattr(_encode_query, "__code__", None) is _encode_query_code
+                and getattr(_encode_query, "__defaults__", None)
+                is _encode_query_defaults
+                and getattr(_encode_query, "__kwdefaults__", None)
+                is _encode_query_kwdefaults
             )
 
         head_sha = require_sha_primitive(
@@ -260,6 +266,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
             or _pulls_per_page > 100
             or not callable(_encode_query)
             or getattr(_encode_query, "__code__", None) is not _encode_query_code
+            or getattr(_encode_query, "__defaults__", None)
+            is not _encode_query_defaults
+            or getattr(_encode_query, "__kwdefaults__", None)
+            is not _encode_query_kwdefaults
             or not request_dispatch_current()
         ):
             raise _error_type("historical association authority is unavailable")
@@ -393,6 +403,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
         _pulls_per_page: int = _PULLS_PER_PAGE,
         _encode_query=urlencode,
         _encode_query_code=urlencode.__code__,
+        _encode_query_defaults=urlencode.__defaults__,
+        _encode_query_kwdefaults=urlencode.__kwdefaults__,
         _error_type=CancellationError,
     ) -> bool:
         """Return true only for a well-formed commit association response with zero PRs."""
@@ -404,6 +416,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 and getattr(bound, "__self__", None) is self
                 and getattr(bound, "__func__", None) is _request_impl
                 and getattr(_encode_query, "__code__", None) is _encode_query_code
+                and getattr(_encode_query, "__defaults__", None)
+                is _encode_query_defaults
+                and getattr(_encode_query, "__kwdefaults__", None)
+                is _encode_query_kwdefaults
             )
 
         if type(head_sha) is not str or len(head_sha) != 40:
@@ -417,6 +433,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
             or _pulls_per_page > 100
             or not callable(_encode_query)
             or getattr(_encode_query, "__code__", None) is not _encode_query_code
+            or getattr(_encode_query, "__defaults__", None)
+            is not _encode_query_defaults
+            or getattr(_encode_query, "__kwdefaults__", None)
+            is not _encode_query_kwdefaults
             or not request_dispatch_current()
         ):
             raise _error_type("historical association authority is unavailable")
@@ -897,6 +917,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
         _runs_per_page: int = _RUNS_PER_PAGE,
         _encode_query=urlencode,
         _encode_query_code=urlencode.__code__,
+        _encode_query_defaults=urlencode.__defaults__,
+        _encode_query_kwdefaults=urlencode.__kwdefaults__,
         _run_parser=parse_run,
         _run_parser_code=parse_run.__code__,
         _workflow_run_type=WorkflowRun,
@@ -914,6 +936,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
             or _runs_per_page > 100
             or not callable(_encode_query)
             or getattr(_encode_query, "__code__", None) is not _encode_query_code
+            or getattr(_encode_query, "__defaults__", None)
+            is not _encode_query_defaults
+            or getattr(_encode_query, "__kwdefaults__", None)
+            is not _encode_query_kwdefaults
             or getattr(_run_parser, "__code__", None) is not _run_parser_code
         ):
             raise CancellationError("active workflow pagination authority is unavailable")
@@ -962,6 +988,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     )
                 )
                 and getattr(_encode_query, "__code__", None) is _encode_query_code
+                and getattr(_encode_query, "__defaults__", None)
+                is _encode_query_defaults
+                and getattr(_encode_query, "__kwdefaults__", None)
+                is _encode_query_kwdefaults
                 and getattr(_run_parser, "__code__", None) is _run_parser_code
                 and recovery_code is not None
                 and getattr(bound_recovery, "__func__", bound_recovery) is recovery_func

@@ -10,7 +10,6 @@ from autosport.bookmaker_receipt_reconciliation import (
 )
 from autosport.bookmaker_routing import (
     ExternalEffect,
-    RoutingContractError,
     RoutingState,
     VenueQuote,
 )

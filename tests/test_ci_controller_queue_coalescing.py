@@ -3123,3 +3123,38 @@ def test_scoped_main_has_no_implicit_argv_default_and_entrypoint_passes_sys_argv
     )
     assert "raise SystemExit(main(sys.argv[1:]))" in source
     assert "raise SystemExit(main())" not in source
+
+
+
+def test_scoped_main_rejects_inplace_sweep_kwdefault_rebase(monkeypatch) -> None:
+    defaults = scoped_controller.cancel_superseded_explicit_pr_runs.__kwdefaults__
+    assert defaults is not None
+    original = defaults["_cancel_effect"]
+
+    def forged_cancel_effect(*_args, **_kwargs):
+        return True
+
+    assert original is not forged_cancel_effect
+    monkeypatch.setitem(defaults, "_cancel_effect", forged_cancel_effect)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+
+    assert scoped_controller.main(_scoped_main_args()) == 2
+
+
+def test_scoped_main_rejects_replaced_trigger_kwdefault_mapping(monkeypatch) -> None:
+    defaults = (
+        scoped_controller._cancel_triggering_run_if_stale_or_nonqualifying.__kwdefaults__
+    )
+    assert defaults is not None
+
+    replacement = dict(defaults)
+    monkeypatch.setattr(
+        scoped_controller._cancel_triggering_run_if_stale_or_nonqualifying,
+        "__kwdefaults__",
+        replacement,
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+
+    assert scoped_controller.main(_scoped_main_args()) == 2

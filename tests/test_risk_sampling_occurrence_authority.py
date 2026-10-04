@@ -20,6 +20,7 @@ from autosport.risk_sampling_occurrence_authority import (
     ProductIidRunAdmissionReceipt,
     ProductIidRunExecutionReceipt,
     issue_product_iid_run_admission,
+    materialize_product_iid_member_market_events,
     resolve_product_iid_expected_draw_plan,
     resolve_product_iid_run_execution,
     verify_product_iid_expected_draw_plan,
@@ -967,6 +968,188 @@ def _frame_for_payload(payload_sha256: str) -> str:
             ],
         }
     )
+
+
+def test_iid_member_materializer_resolves_frozen_payload_to_exact_event(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(2),
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    plan = resolve_product_iid_expected_draw_plan(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        authority_root=authority_root,
+    )
+
+    materialized = materialize_product_iid_member_market_events(
+        plan,
+        member_index=0,
+        market_events=[event],
+    )
+
+    assert len(materialized) == 2
+    assert all(type(item) is MarketEvent for item in materialized)
+    assert tuple(
+        market_event_payload_sha256(item) for item in materialized
+    ) == plan.member_draws[0].draw_payload_sha256
+    assert materialized[0] is not event
+    assert materialized[0] is not materialized[1]
+
+
+def test_iid_member_materializer_rejects_missing_frame_payload(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    plan = resolve_product_iid_expected_draw_plan(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        authority_root=authority_root,
+    )
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="cannot be resolved from the product dataset",
+    ):
+        materialize_product_iid_member_market_events(
+            plan,
+            member_index=0,
+            market_events=[_market_event(event_id="other")],
+        )
+
+
+def test_iid_member_materializer_rejects_ambiguous_payload_corpus(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    plan = resolve_product_iid_expected_draw_plan(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        authority_root=authority_root,
+    )
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="payload identity is ambiguous",
+    ):
+        materialize_product_iid_member_market_events(
+            plan,
+            member_index=0,
+            market_events=[event, MarketEvent.from_dict(event.to_dict())],
+        )
+
+
+def test_iid_member_materializer_rejects_payload_digest_dispatch_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    plan = resolve_product_iid_expected_draw_plan(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        authority_root=authority_root,
+    )
+    attacker_called = False
+
+    def forged_digest(_event):
+        nonlocal attacker_called
+        attacker_called = True
+        return "0" * 64
+
+    monkeypatch.setattr(
+        draw_authority,
+        "market_event_payload_sha256",
+        forged_digest,
+    )
+
+    with pytest.raises(ProductIidDrawPlanError, match="authority dispatch changed"):
+        materialize_product_iid_member_market_events(
+            plan,
+            member_index=0,
+            market_events=[event],
+        )
+    assert attacker_called is False
 
 
 def _completed_iid_execution(

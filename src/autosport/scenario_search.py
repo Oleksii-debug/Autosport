@@ -20,6 +20,10 @@ from .portfolio import (
 )
 
 
+_MARKET_OUTCOME_AUTHORITY_TYPE = MarketSettlementOutcomeAuthority
+_ASSERT_MARKET_OUTCOME_AUTHORITY = assert_market_settlement_outcome_authoritative
+_OUTCOME_ASSERT_AVAILABLE = _MARKET_OUTCOME_AUTHORITY_TYPE.assert_available_as_of
+
 _MAX_SCENARIO_GROUPS = 256
 _MAX_SCENARIO_OUTCOMES_PER_GROUP = 1024
 _MAX_SCENARIO_PROBABILITY_COEFFICIENT_DIGITS = 4096
@@ -288,19 +292,29 @@ class ScenarioSearchEngine:
             raise ValueError(
                 "authoritative outcome analysis requires market authorities"
             )
+        source_authorities = tuple(authorities)
         if any(
-            type(authority) is not MarketSettlementOutcomeAuthority
-            for authority in authorities
+            type(authority) is not _MARKET_OUTCOME_AUTHORITY_TYPE
+            for authority in source_authorities
         ):
             raise ValueError(
                 "authoritative outcome analysis requires canonical market authorities"
             )
-        for authority in authorities:
-            assert_market_settlement_outcome_authoritative(authority)
+        for authority in source_authorities:
+            _ASSERT_MARKET_OUTCOME_AUTHORITY(authority)
+        current_authorities = tuple(authorities)
+        if (
+            len(current_authorities) != len(source_authorities)
+            or any(
+                current is not source
+                for current, source in zip(current_authorities, source_authorities)
+            )
+        ):
+            raise ValueError("market outcome authority set changed during snapshot")
 
         ordered = tuple(
             sorted(
-                authorities,
+                source_authorities,
                 key=lambda authority: (
                     authority.identity.identity_key,
                     authority.authority_sha256,
@@ -308,7 +322,18 @@ class ScenarioSearchEngine:
             )
         )
         for authority in ordered:
-            authority.assert_available_as_of(decision_as_of)
+            _OUTCOME_ASSERT_AVAILABLE(authority, decision_as_of)
+            _ASSERT_MARKET_OUTCOME_AUTHORITY(authority)
+
+        current_authorities = tuple(authorities)
+        if (
+            len(current_authorities) != len(source_authorities)
+            or any(
+                current is not source
+                for current, source in zip(current_authorities, source_authorities)
+            )
+        ):
+            raise ValueError("market outcome authority set changed during analysis boundary")
 
         open_tickets = _snapshot_open_tickets_for_analysis(tickets)
         if not open_tickets:

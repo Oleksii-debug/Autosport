@@ -167,9 +167,6 @@ class RunTransaction:
             "sealed_results_sha256": results_sha256,
             "strategy_id": strategy_id,
             "real_money_execution": False,
-            "sampling_draw_admission_receipt_sha256": (
-                sampling_draw_admission_receipt_sha256
-            ),
             "base": {
                 "paper_book_sha256": base_paper_book_sha256,
                 "decision_ledger_sha256": base_decision_ledger_sha256,
@@ -191,6 +188,10 @@ class RunTransaction:
                 "run_decisions": "run-decisions.jsonl",
             },
         }
+        if sampling_draw_admission_receipt_sha256 is not None:
+            manifest["sampling_draw_admission_receipt_sha256"] = (
+                sampling_draw_admission_receipt_sha256
+            )
         atomic_write_json(tx.manifest_path, manifest)
         try:
             tx._atomic_write_bytes(
@@ -700,9 +701,11 @@ class RunTransaction:
         summary["decision_ledger_sha256"] = ledger_hash
         summary["transaction_schema_version"] = self.SCHEMA_VERSION
         summary["transaction_run_id"] = self.run_id
-        summary["sampling_draw_admission_receipt_sha256"] = manifest.get(
+        sampling_admission = manifest.get(
             "sampling_draw_admission_receipt_sha256"
         )
+        if sampling_admission is not None:
+            summary["sampling_draw_admission_receipt_sha256"] = sampling_admission
         summary_snapshot = self._canonical_json_snapshot(
             summary,
             label="staged run summary",

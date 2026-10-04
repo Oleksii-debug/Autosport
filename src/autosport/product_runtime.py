@@ -621,7 +621,7 @@ def _bind_desktop_applied_current_for_source(implementation):
 
     event_type = MarketEvent
     receipt_type = DesktopApplicationReceipt
-    completed_receipts = CanonicalDesktopApplication.completed_receipts_for_source
+    completed_receipts = CanonicalDesktopApplication.verified_completed_receipts_for_source
     validate_receipt = DesktopApplicationReceipt.validate
     market_events = SQLiteMarketStore.events
     canonical_digest = canonical_event_digest

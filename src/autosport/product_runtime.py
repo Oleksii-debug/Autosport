@@ -1828,27 +1828,133 @@ def _build_autonomous_product_runtime_impl(
 
         dependencies = _dependency_index_type(mirror)
         collector_store = _collector_store_type(root / "collector_deltas.json")
+
+        from weakref import WeakKeyDictionary
+
+        collector_snapshots = WeakKeyDictionary()
+        collector_snapshot_fields = (
+            "delta_store",
+            "lifecycle",
+            "source",
+            "_source_identity",
+            "_source_id",
+            "config",
+            "clock",
+            "sleep",
+            "random_value",
+            "stop_requested",
+            "stop_reason",
+            "_adapter",
+            "_state",
+        )
+        base_collector_status = _collector_service_type.status
+        base_collector_resume = _collector_service_type.resume
+        base_collector_stop = _collector_service_type.stop
         base_collector_run_cycle = _collector_service_type.run_cycle
         base_bounded_provider_call = _collector_service_type._bounded_provider_call
+        collector_entry_names = frozenset(
+            {"status", "resume", "stop", "run_cycle", "_bounded_provider_call"}
+        )
+        collector_missing = object()
+
+        def require_collector_authority(self) -> None:
+            snapshot = collector_snapshots.get(self)
+            if snapshot is None:
+                raise ProductCompositionError(
+                    "product collector authority snapshot is unavailable"
+                )
+            raw = object.__getattribute__(self, "__dict__")
+            for name in collector_entry_names:
+                if name in raw:
+                    raise ProductCompositionError(
+                        f"product collector method {name!r} changed after composition"
+                    )
+            for name, expected in snapshot:
+                if raw.get(name, collector_missing) is not expected:
+                    raise ProductCompositionError(
+                        f"product collector authority field {name!r} changed after composition"
+                    )
+
+        def product_collector_status(self):
+            require_collector_authority(self)
+            return base_collector_status(self)
+
+        def product_collector_resume(self):
+            require_collector_authority(self)
+            result = base_collector_resume(self)
+            require_collector_authority(self)
+            return result
+
+        def product_collector_stop(self, reason="operator_stop"):
+            require_collector_authority(self)
+            result = base_collector_stop(self, reason)
+            require_collector_authority(self)
+            return result
+
+        def product_bounded_provider_call(self, action):
+            require_collector_authority(self)
+
+            def guarded_action():
+                require_collector_authority(self)
+                require_source_resolver_authority()
+                result = action()
+                require_source_resolver_authority()
+                require_collector_authority(self)
+                return result
+
+            result = base_bounded_provider_call(self, guarded_action)
+            require_collector_authority(self)
+            return result
+
+        def product_collector_run_cycle(self, *, _schedule_slot=None):
+            require_collector_authority(self)
+            require_source_resolver_authority()
+            result = base_collector_run_cycle(
+                self,
+                _schedule_slot=_schedule_slot,
+            )
+            require_source_resolver_authority()
+            require_collector_authority(self)
+            return result
+
+        collector_entries = {
+            "status": product_collector_status,
+            "resume": product_collector_resume,
+            "stop": product_collector_stop,
+            "run_cycle": product_collector_run_cycle,
+            "_bounded_provider_call": product_bounded_provider_call,
+        }
 
         class ProductCollectorService(_collector_service_type):
-            def _bounded_provider_call(self, action):
-                def guarded_action():
-                    require_source_resolver_authority()
-                    result = action()
-                    require_source_resolver_authority()
-                    return result
-
-                return base_bounded_provider_call(self, guarded_action)
-
-            def run_cycle(self, *, _schedule_slot=None):
-                require_source_resolver_authority()
-                result = base_collector_run_cycle(
-                    self,
-                    _schedule_slot=_schedule_slot,
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **kwargs)
+                collector_snapshots[self] = tuple(
+                    (name, object.__getattribute__(self, name))
+                    for name in collector_snapshot_fields
                 )
-                require_source_resolver_authority()
-                return result
+
+            def __getattribute__(self, name: str):
+                snapshot = collector_snapshots.get(self)
+                if snapshot is not None:
+                    if name in collector_entries:
+                        require_collector_authority(self)
+                        return collector_entries[name].__get__(self, type(self))
+                    if name in collector_snapshot_fields:
+                        for field_name, expected in snapshot:
+                            if field_name == name:
+                                return expected
+                return object.__getattribute__(self, name)
+
+            def __setattr__(self, name: str, value: object) -> None:
+                if collector_snapshots.get(self) is not None and (
+                    name in collector_snapshot_fields
+                    or name in collector_entry_names
+                    or name in {"__class__", "__dict__"}
+                ):
+                    raise ProductCompositionError(
+                        f"product collector authority field {name!r} is immutable"
+                    )
+                object.__setattr__(self, name, value)
 
         collector = ProductCollectorService(
             delta_store=collector_store,

@@ -192,6 +192,7 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
                 "conservative-floor-change",
             )
             self.assertFalse(portfolio_payload["worst_case_change_proven"])
+            self.assertTrue(portfolio_payload["scenario_reports_authoritative"])
             self.assertTrue(portfolio_payload["scenario_worst_case_change_proven"])
             self.assertFalse(portfolio_payload["best_case_change_proven"])
             self.assertTrue(portfolio_payload["scenario_best_case_change_proven"])

@@ -111,16 +111,39 @@ def test_schema8_requires_explicit_market_semantics_field_even_when_none(tmp_pat
         PaperBook.load(path)
 
 
-def test_paperbook_revalidates_market_semantics_before_durable_save(tmp_path) -> None:
+def test_paperbook_opening_authority_rejects_semantics_mutation_before_save(
+    tmp_path,
+) -> None:
     path = tmp_path / "paper-book-mutated.json"
     book = PaperBook("100")
     ticket = book.open_ticket([_leg(_S1)], "10", placed_at=_TS)
     object.__setattr__(ticket.legs[0], "market_semantics_id", "SOCCER:H2H:V1")
 
-    with pytest.raises(ValueError, match="market_semantics_id"):
+    with pytest.raises(
+        ValueError,
+        match="opening economic identity changed after admission",
+    ):
         book.save(path)
 
     assert not path.exists()
+
+
+def test_valid_semantics_revision_cannot_move_opening_authority(tmp_path) -> None:
+    path = tmp_path / "paper-book-semantics-revision.json"
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg(_S1)], "10", placed_at=_TS)
+    book.save(path)
+    durable_before = path.read_bytes()
+
+    object.__setattr__(ticket.legs[0], "market_semantics_id", _S2)
+
+    with pytest.raises(
+        ValueError,
+        match="opening economic identity changed after admission",
+    ):
+        book.save(path)
+
+    assert path.read_bytes() == durable_before
 
 
 def test_schema7_rejects_injected_market_semantics_field(tmp_path) -> None:

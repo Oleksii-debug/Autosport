@@ -747,6 +747,157 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.close()
 
+    def test_decision_frontier_leaves_post_cutoff_peer_commit_for_next_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            factory = _EmptyIntentFactory()
+            provider = _EmptyProvider()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=self._scientific_registry(
+                    workspace,
+                    self._strategy_version(),
+                ),
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            live_store = loop._default_market_store
+            self.assertIsNotNone(live_store)
+            external_change_token = live_store.external_change_token
+            token_calls = 0
+
+            def publish_after_final_token_read() -> int:
+                nonlocal token_calls
+                token = external_change_token()
+                token_calls += 1
+                if token_calls != 2:
+                    return token
+                peer_store = SQLiteMarketStore(workspace / "market.db")
+                try:
+                    MarketEventBus(peer_store).publish_many(
+                        (
+                            self._event(
+                                sequence=2,
+                                odds="2.10",
+                                observed=self.START + timedelta(seconds=2),
+                            ),
+                        )
+                    )
+                finally:
+                    peer_store.close()
+                return token
+
+            clock.value = self.START + timedelta(seconds=2)
+            with patch.object(
+                live_store,
+                "external_change_token",
+                side_effect=publish_after_final_token_read,
+            ):
+                cutoff = loop._sample_decision_market_frontier()
+
+            self.assertEqual(token_calls, 2)
+            visible_at_cutoff = loop.dependencies.decision_view(
+                "input-a",
+                as_of=cutoff,
+                max_age=timedelta(seconds=5),
+            )
+            self.assertEqual(
+                tuple(
+                    (event.selection_id, event.sequence)
+                    for event in visible_at_cutoff.events
+                ),
+                (("selection-a", 1),),
+            )
+
+            next_cycle = loop.run_cycle()
+            self.assertEqual(next_cycle.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls[-1],
+                ("input-a", (("selection-a", 2, "open"),)),
+            )
+            loop.close()
+
+    def test_decision_frontier_rejects_peer_projection_tamper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            provider = _EmptyProvider()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=self._scientific_registry(
+                    workspace,
+                    self._strategy_version(),
+                ),
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            ledger_path = workspace / "decisions.jsonl"
+            ledger_bytes = ledger_path.read_bytes()
+            progress_bytes = loop.progress_path.read_bytes()
+            refresh = loop._refresh_cycle_authorities
+            refresh_calls = 0
+
+            def refresh_and_tamper_projection() -> None:
+                nonlocal refresh_calls
+                refresh()
+                refresh_calls += 1
+                if refresh_calls != 2:
+                    return
+                peer_store = SQLiteMarketStore(workspace / "market.db")
+                try:
+                    peer_store.connection.execute("DELETE FROM current_quotes")
+                    peer_store.connection.commit()
+                finally:
+                    peer_store.close()
+
+            clock.value = self.START + timedelta(seconds=2)
+            with patch.object(
+                loop,
+                "_refresh_cycle_authorities",
+                side_effect=refresh_and_tamper_projection,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "current quote projection diverges from canonical market history",
+                ):
+                    loop.run_cycle()
+
+            self.assertEqual(refresh_calls, 2)
+            self.assertEqual(ledger_path.read_bytes(), ledger_bytes)
+            self.assertEqual(loop.progress_path.read_bytes(), progress_bytes)
+            loop.close()
+
     def test_stale_instance_cannot_overwrite_newer_pending_progress(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -5075,6 +5075,101 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_settlement_state_read_ignores_instance_validator_shadowing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-state-validator-shadow",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:state-validator-shadow",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="state-validator-shadow-evidence",
+                evidence_sha256="d" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                state_path = root / "continuous_session.json"
+                raw = json.loads(state_path.read_text(encoding="utf-8"))
+                raw["settlement_evidence"][0]["evidence_sha256"] = "forged"
+                raw["pending_settlement_resolutions"][0]["evidence_sha256"] = "forged"
+                state_path.write_text(
+                    json.dumps(raw, sort_keys=True, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+                coordinator._state._validate_settlement_evidence = (
+                    lambda candidate: tuple(candidate)
+                )
+                coordinator._state._validate_pending_settlement_resolutions = (
+                    lambda candidate: tuple(candidate)
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "lowercase SHA-256 hex digest",
+                ):
+                    coordinator.status()
+            finally:
+                coordinator._state.__dict__.pop(
+                    "_validate_settlement_evidence",
+                    None,
+                )
+                coordinator._state.__dict__.pop(
+                    "_validate_pending_settlement_resolutions",
+                    None,
+                )
+                store.close()
+
+    def test_settlement_state_read_rejects_validator_code_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-state-validator-code",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            state_type = type(coordinator._state)
+            validator = state_type.__dict__["_validate_settlement_evidence"]
+            validator_func = validator.__func__
+            original_code = validator_func.__code__
+
+            def forged_validator(_candidate):
+                return ()
+
+            try:
+                validator_func.__code__ = forged_validator.__code__
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "continuous settlement state validator authority changed",
+                ):
+                    coordinator.status()
+            finally:
+                validator_func.__code__ = original_code
+                store.close()
+
     def test_duplicate_durable_settlement_evidence_fails_closed_on_read(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

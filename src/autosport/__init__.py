@@ -209,3 +209,8 @@ from . import _risk_randomization_precommit_internal_guard as _risk_randomizatio
 # execution-evidence derivation. The latter may compute a statistical bound but
 # deliberately cannot mint proposal execution, risk approval, ticket or money truth.
 from . import _proposal_risk_evaluation_precommit_dispatch_guard as _proposal_risk_evaluation_precommit_dispatch_guard  # noqa: F401,E402
+
+# Identity tokens on valid proposal-risk DTOs are not transferable capabilities.
+# Seal hidden capability slots after the canonical issuer/deriver composition so
+# only those exact call chains may perform the one product bind.
+from . import _proposal_risk_capability_transfer_guard as _proposal_risk_capability_transfer_guard  # noqa: F401,E402

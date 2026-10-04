@@ -1029,7 +1029,7 @@ class DesktopDeltaConsumer:
                 "apply_health must be included inside the durable apply_event boundary"
             )
 
-    def _acknowledged_at(
+    def _acknowledged_at_impl(
         self,
         delta: CollectorDelta,
         receipt: DesktopApplicationReceipt,
@@ -1037,7 +1037,7 @@ class DesktopDeltaConsumer:
         cutoff: datetime,
         clock: Callable[[], str] | None,
         not_before: datetime | None = None,
-        _instant_parser=_instant,
+        _instant_parser,
     ) -> str:
         """Validate one exact operational ACK-clock sample for this handoff."""
         if clock is None:
@@ -1200,6 +1200,42 @@ class DesktopDeltaConsumer:
                 )
                 delivered.append(delta.delta_id)
         return tuple(delivered)
+
+
+def _bind_desktop_delta_consumer_acknowledged_at(implementation):
+    """Seal the ACK-time parser outside caller-writable function metadata."""
+
+    instant_parser = _instant
+
+    def acknowledged_at(
+        self: DesktopDeltaConsumer,
+        delta: CollectorDelta,
+        receipt: DesktopApplicationReceipt,
+        *,
+        cutoff: datetime,
+        clock: Callable[[], str] | None,
+        not_before: datetime | None = None,
+    ) -> str:
+        return implementation(
+            self,
+            delta,
+            receipt,
+            cutoff=cutoff,
+            clock=clock,
+            not_before=not_before,
+            _instant_parser=instant_parser,
+        )
+
+    return acknowledged_at
+
+
+DesktopDeltaConsumer._acknowledged_at = (
+    _bind_desktop_delta_consumer_acknowledged_at(
+        DesktopDeltaConsumer._acknowledged_at_impl
+    )
+)
+del DesktopDeltaConsumer._acknowledged_at_impl
+del _bind_desktop_delta_consumer_acknowledged_at
 
 
 def _bind_desktop_delta_consumer_drain(implementation):

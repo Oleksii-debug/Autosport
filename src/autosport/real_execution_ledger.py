@@ -17,6 +17,11 @@ from .monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
     MonotonicWorkspaceAuthorityError,
 )
+from .workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockBusyError,
+    WorkspaceEconomicLockError,
+)
 
 
 SCHEMA_VERSION = 1
@@ -763,55 +768,55 @@ class RealExecutionLedger:
 
     def _read_serialized(self, operation: Callable[[], _T]) -> _T:
         with self._thread_lock:
-            try:
-                fd = os.open(
-                    self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
-                )
-            except FileExistsError as exc:
-                raise ExecutionLedgerBusyError(
-                    "writer lock exists; fail closed while authoritative read is serialized"
-                ) from exc
-
+            lock = WorkspaceEconomicLock(
+                self.path.parent,
+                file_name=self._lock_path.name,
+            )
             data_fd: int | None = None
             try:
-                data_fd = self._acquire_posix_ledger_read_lock()
-                self._serialization_owner_thread_id = threading.get_ident()
-                return operation()
-            finally:
-                self._serialization_owner_thread_id = None
-                if data_fd is not None:
-                    os.close(data_fd)
-                os.close(fd)
-                try:
-                    self._lock_path.unlink()
-                except FileNotFoundError:
-                    pass
+                with lock:
+                    data_fd = self._acquire_posix_ledger_read_lock()
+                    self._serialization_owner_thread_id = threading.get_ident()
+                    try:
+                        return operation()
+                    finally:
+                        self._serialization_owner_thread_id = None
+                        if data_fd is not None:
+                            os.close(data_fd)
+            except WorkspaceEconomicLockBusyError as exc:
+                raise ExecutionLedgerBusyError(
+                    "writer lock is owned by another process; fail closed while authoritative read is serialized"
+                ) from exc
+            except WorkspaceEconomicLockError as exc:
+                raise ExecutionLedgerIntegrityError(
+                    "execution ledger crash-releasing read serialization lock failed"
+                ) from exc
 
     def _mutate(self, operation: Callable[[], _T]) -> _T:
         with self._thread_lock:
-            try:
-                fd = os.open(
-                    self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
-                )
-            except FileExistsError as exc:
-                raise ExecutionLedgerBusyError(
-                    "writer lock exists; fail closed until writer/crash ownership is resolved"
-                ) from exc
-
+            lock = WorkspaceEconomicLock(
+                self.path.parent,
+                file_name=self._lock_path.name,
+            )
             data_fd: int | None = None
             try:
-                data_fd = self._acquire_posix_ledger_lock()
-                self._serialization_owner_thread_id = threading.get_ident()
-                return operation()
-            finally:
-                self._serialization_owner_thread_id = None
-                if data_fd is not None:
-                    os.close(data_fd)
-                os.close(fd)
-                try:
-                    self._lock_path.unlink()
-                except FileNotFoundError:
-                    pass
+                with lock:
+                    data_fd = self._acquire_posix_ledger_lock()
+                    self._serialization_owner_thread_id = threading.get_ident()
+                    try:
+                        return operation()
+                    finally:
+                        self._serialization_owner_thread_id = None
+                        if data_fd is not None:
+                            os.close(data_fd)
+            except WorkspaceEconomicLockBusyError as exc:
+                raise ExecutionLedgerBusyError(
+                    "writer lock is owned by another process; fail closed until release"
+                ) from exc
+            except WorkspaceEconomicLockError as exc:
+                raise ExecutionLedgerIntegrityError(
+                    "execution ledger crash-releasing writer lock failed"
+                ) from exc
 
     @classmethod
     def _validate_event(

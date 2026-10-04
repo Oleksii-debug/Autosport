@@ -174,3 +174,72 @@ def test_k07_verifier_executable_drift_cannot_preserve_currency_after_credential
         match="authenticated identity verifier authority changed",
     ):
         origin_guard._currency_for_capture(capture)
+
+
+def test_k07_verifier_alias_rebind_is_rejected_before_rebound_execution(
+    monkeypatch,
+) -> None:
+    client, _provider = _client(monkeypatch)
+    capture = _qualified_capture(client)
+    calls: list[object] = []
+
+    def permissive_verifier(identity, *, client):
+        calls.append(client)
+        return identity
+
+    monkeypatch.setattr(origin_guard, "_REQUIRE_IDENTITY", permissive_verifier)
+
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="authenticated identity verifier authority changed",
+    ):
+        origin_guard._currency_for_capture(capture)
+
+    assert calls == []
+
+
+def test_qualified_read_alias_rebind_is_rejected_before_rebound_execution(
+    monkeypatch,
+) -> None:
+    client, _provider = _client(monkeypatch)
+    calls: list[object] = []
+
+    def hostile_read(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("rebound settlement qualified-read authority executed")
+
+    monkeypatch.setattr(origin_guard, "_ORIGINAL_QUALIFIED_READ", hostile_read)
+
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="qualified read authority changed",
+    ):
+        _qualified_capture(client)
+
+    assert calls == []
+
+
+def test_currency_lookup_alias_rebind_is_rejected_before_rebound_execution(
+    monkeypatch,
+) -> None:
+    client, _provider = _client(monkeypatch)
+    capture = _qualified_capture(client)
+    calls: list[object] = []
+
+    def hostile_lookup(value):
+        calls.append(value)
+        return "USD"
+
+    monkeypatch.setattr(
+        origin_guard,
+        "_ORIGINAL_CURRENCY_FOR_CAPTURE",
+        hostile_lookup,
+    )
+
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="evidence lookup authority changed",
+    ):
+        origin_guard._currency_for_capture(capture)
+
+    assert calls == []

@@ -223,6 +223,59 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 restored.close()
 
+    def test_product_collector_rejects_post_build_source_reassignment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_autonomous_product_runtime(
+                workspace=Path(directory),
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product collector authority field 'source' is immutable",
+                ):
+                    runtime.collector.source = object()
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product collector authority field '_source_identity' is immutable",
+                ):
+                    runtime.collector._source_identity = object()
+                self.assertEqual(runtime.status().source_id, "provider-a")
+            finally:
+                runtime.close()
+
+    def test_product_collector_detects_coordinated_direct_source_tamper_before_cycle(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_autonomous_product_runtime(
+                workspace=Path(directory),
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            raw = runtime.collector.__dict__
+            original_source = raw["source"]
+            original_identity = raw["_source_identity"]
+            forged = object()
+            try:
+                raw["source"] = forged
+                raw["_source_identity"] = forged
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product collector authority field 'source' changed after composition",
+                ):
+                    runtime.tick()
+                self.assertEqual(runtime.lifecycle.records(), ())
+            finally:
+                raw["source"] = original_source
+                raw["_source_identity"] = original_identity
+                runtime.close()
+
     def test_product_runtime_authority_graph_is_immutable_after_build(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_autonomous_product_runtime(

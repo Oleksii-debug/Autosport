@@ -1149,5 +1149,78 @@ class ProductProposalRiskScenarioPopulationTests(unittest.TestCase):
         finally:
             method.__code__ = original_code
 
+
+    def test_member_binding_type_rebind_is_rejected_before_write(self) -> None:
+        before = (self.workspace / "decisions.jsonl").read_bytes()
+        original = scenario_population_authority.CounterfactualScenarioMemberBinding
+        try:
+            scenario_population_authority.CounterfactualScenarioMemberBinding = object
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            scenario_population_authority.CounterfactualScenarioMemberBinding = original
+        self.assertEqual((self.workspace / "decisions.jsonl").read_bytes(), before)
+
+    def test_member_binding_is_revalidated_after_construction(self) -> None:
+        members = list(self._members())
+        object.__setattr__(members[0], "mapping_sha256", "not-a-sha256")
+        with self.assertRaisesRegex(
+            ProductProposalRiskScenarioPopulationError,
+            "mapping_sha256 must be lowercase SHA-256 hex",
+        ):
+            self._issue(tuple(members))
+
+    def test_protocol_constant_rebind_is_rejected_before_write(self) -> None:
+        before = (self.workspace / "decisions.jsonl").read_bytes()
+        original = scenario_population_authority._BINDING_SCOPE
+        try:
+            scenario_population_authority._BINDING_SCOPE = "FORGED_SCOPE"
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            scenario_population_authority._BINDING_SCOPE = original
+        self.assertEqual((self.workspace / "decisions.jsonl").read_bytes(), before)
+
+    def test_monotonic_authority_internal_code_mutation_is_rejected(self) -> None:
+        method = MonotonicWorkspaceAuthority._load_history
+        original_code = method.__code__
+
+        def forged_load_history(self, *args, **kwargs):
+            return None
+
+        try:
+            method.__code__ = forged_load_history.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            method.__code__ = original_code
+
+    def test_decision_ledger_internal_code_mutation_is_rejected(self) -> None:
+        ledger_type = scenario_population_authority.JsonlDecisionLedger
+        method = ledger_type._verify_bytes
+        original_code = method.__code__
+
+        def forged_verify_bytes(self, *args, **kwargs):
+            return ()
+
+        try:
+            method.__code__ = forged_verify_bytes.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            method.__code__ = original_code
+
 if __name__ == "__main__":
     unittest.main()

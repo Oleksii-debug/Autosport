@@ -1639,6 +1639,162 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_events_rejects_coherent_positive_history_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                original = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(original))
+                forged = self.event(
+                    sequence=1,
+                    odds="9.99",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                store.connection.execute(
+                    """UPDATE market_events
+                       SET decimal_odds=?, payload_json=?
+                       WHERE dedupe_key=?""",
+                    (
+                        str(forged.decimal_odds),
+                        storage_module._canonical_payload(forged),
+                        original.dedupe_key,
+                    ),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "positive market append chronology is missing, forged, or unproven",
+                ):
+                    store.events()
+            finally:
+                store.close()
+
+    def test_mirror_reapply_rejects_coherent_positive_history_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                original = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(original))
+                forged = self.event(
+                    sequence=1,
+                    odds="9.99",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                store.connection.execute(
+                    """UPDATE market_events
+                       SET decimal_odds=?, payload_json=?
+                       WHERE dedupe_key=?""",
+                    (
+                        str(forged.decimal_odds),
+                        storage_module._canonical_payload(forged),
+                        original.dedupe_key,
+                    ),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "positive market append chronology is missing, forged, or unproven",
+                ):
+                    MarketMirror.from_store(store)
+            finally:
+                store.close()
+
+    def test_events_rejects_generation_zero_membership_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            raw = sqlite3.connect(path)
+            legacy = self.event(
+                sequence=1,
+                odds="2.00",
+                observed_ts="2026-09-16T19:00:00+00:00",
+            )
+            payload = storage_module._canonical_payload(legacy)
+            raw.execute(
+                """CREATE TABLE market_events (
+                    dedupe_key TEXT PRIMARY KEY,
+                    quote_key TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    market_id TEXT NOT NULL,
+                    selection_id TEXT NOT NULL,
+                    decimal_odds TEXT NOT NULL,
+                    observed_ts TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL
+                )"""
+            )
+            raw.execute(
+                """INSERT INTO market_events
+                   (dedupe_key,quote_key,event_id,market_id,selection_id,decimal_odds,
+                    observed_ts,source_id,sequence,payload_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    legacy.dedupe_key,
+                    legacy.quote_key,
+                    legacy.event_id,
+                    legacy.market_id,
+                    legacy.selection_id,
+                    str(legacy.decimal_odds),
+                    legacy.observed_ts,
+                    legacy.source_id,
+                    legacy.sequence,
+                    payload,
+                ),
+            )
+            raw.commit()
+            raw.close()
+
+            store = SQLiteMarketStore(path)
+            try:
+                injected = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                store.connection.execute(
+                    """INSERT INTO market_events
+                       (dedupe_key,quote_key,event_id,market_id,selection_id,decimal_odds,
+                        observed_ts,source_id,sequence,payload_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        injected.dedupe_key,
+                        injected.quote_key,
+                        injected.event_id,
+                        injected.market_id,
+                        injected.selection_id,
+                        str(injected.decimal_odds),
+                        injected.observed_ts,
+                        injected.source_id,
+                        injected.sequence,
+                        storage_module._canonical_payload(injected),
+                    ),
+                )
+                store.connection.execute(
+                    """INSERT INTO market_event_commit_order
+                       (dedupe_key, append_generation)
+                       VALUES (?, 0)""",
+                    (injected.dedupe_key,),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "positive market append chronology is missing, forged, or unproven",
+                ):
+                    store.events()
+            finally:
+                store.close()
+
     def test_append_rejects_post_startup_current_projection_trigger(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

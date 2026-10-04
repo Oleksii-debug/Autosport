@@ -977,6 +977,45 @@ class PaperExecutionRealityTests(unittest.TestCase):
             ):
                 PaperExecutionLedger(path).events()
 
+    def test_completion_retry_rejects_rehashed_attempt_after_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            result = execute_paper_plan(
+                plan=plan(action("a1")),
+                trigger_id="trigger-completion-order",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            attempt_index = next(
+                index
+                for index, item in enumerate(events)
+                if item["event_type"] == "ATTEMPT_RECORDED"
+            )
+            completion_index = next(
+                index
+                for index, item in enumerate(events)
+                if item["event_type"] == "RUN_COMPLETED"
+            )
+            events[attempt_index], events[completion_index] = (
+                events[completion_index],
+                events[attempt_index],
+            )
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "completion chronology is invalid",
+            ):
+                ledger.complete_run(
+                    run_id=result.run_id,
+                    pending_action_ids=result.pending_action_ids,
+                    recovery_decision=result.recovery_decision,
+                    worst_case_exposure=result.worst_case_exposure,
+                )
+
     def test_writer_lock_fails_closed_instead_of_creating_parallel_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-execution.jsonl"

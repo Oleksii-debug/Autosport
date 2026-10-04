@@ -823,6 +823,32 @@ class PaperExecutionRealityTests(unittest.TestCase):
                 target.record_attempt(observed.attempts[0])
             self.assertEqual(len(target.events()), event_count)
 
+    def test_exact_attempt_retry_reverifies_rehashed_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            result = execute_paper_plan(
+                plan=plan(action("a1")),
+                trigger_id="trigger-retry-reservation-proof",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            reservation = next(
+                item
+                for item in events
+                if item["event_type"] == "RUN_RESERVED"
+            )
+            reservation["payload"]["plan_id"] = "forged-plan-id"
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "reserved plan/model identity",
+            ):
+                ledger.record_attempt(result.attempts[0])
+
     def test_writer_lock_fails_closed_instead_of_creating_parallel_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-execution.jsonl"

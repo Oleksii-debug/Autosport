@@ -1545,6 +1545,29 @@ def test_persisted_credential_rejection_cannot_launder_through_wait_state(
         )
 
 
+def test_renewal_due_slot_hold_cannot_undercut_retry_horizon():
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="renewal slot hold cannot undercut retry horizon",
+    ):
+        ProphetXSessionSnapshot(
+            state=ProphetXSessionState.RENEWAL_DUE,
+            generation=4,
+            credential_revision="rev-1",
+            integration_role="market-maker-primary",
+            last_transition_at=NOW,
+            session_lineage_id="a" * 64,
+            access_expires_at=NOW + timedelta(minutes=1),
+            slot_hold_started_at=NOW,
+            slot_hold_until=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
+            retry_not_before=(
+                NOW + CONSERVATIVE_SESSION_SLOT_HOLD + timedelta(seconds=1)
+            ),
+            transient_failures=1,
+            last_renewal_failure_class=ProphetXRenewalFailureClass.RETRYABLE,
+        )
+
+
 @pytest.mark.parametrize(
     ("retry_not_before", "failure"),
     [

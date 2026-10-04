@@ -2265,6 +2265,65 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertEqual(clock_calls, [True, True])
             market_store.close()
 
+    def test_canonical_application_keeps_initial_journal_across_clock_rebind(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "canonical-application.json"
+            alternate_path = root / "alternate-application.json"
+            market_store = SQLiteMarketStore(root / "market.db")
+            application = None
+            clock_calls = []
+
+            def rebinding_clock():
+                clock_calls.append(True)
+                if len(clock_calls) == 1:
+                    application._state = (
+                        causal_collector_legacy_module._CanonicalDesktopApplicationStore(
+                            alternate_path
+                        )
+                    )
+                return "2026-01-01T00:00:05+00:00"
+
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                SourceHealthStore(root / "health.json"),
+                state_path,
+                clock=rebinding_clock,
+            )
+            receipt = application.apply(delta, event)
+            self.assertEqual(receipt.delta_id, delta.delta_id)
+
+            original = json.loads(state_path.read_text(encoding="utf-8"))
+            alternate = json.loads(alternate_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                original["applications"][delta.delta_id]["completed_at"],
+                "2026-01-01T00:00:05+00:00",
+            )
+            self.assertEqual(alternate["applications"], {})
+            self.assertGreaterEqual(len(clock_calls), 2)
+            market_store.close()
+
+    def test_canonical_application_ignores_market_publish_method_rebind(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            market_store = SQLiteMarketStore(root / "market.db")
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                SourceHealthStore(root / "health.json"),
+                root / "canonical-application.json",
+                clock=lambda: "2026-01-01T00:00:05+00:00",
+            )
+            with patch.object(MarketEventBus, "publish", lambda _self, _event: False):
+                receipt = application.apply(delta, event)
+
+            self.assertEqual(receipt.delta_id, delta.delta_id)
+            self.assertEqual(market_store.events(event.event_id), [event])
+            market_store.close()
+
     def test_canonical_application_completion_ignores_journal_dispatch_rebind(self):
         event = MarketEvent.from_dict(event_payload())
         delta = self.make_delta(payload=event.to_dict())

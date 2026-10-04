@@ -642,6 +642,58 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 object.__setattr__(runtime, "coordinator", original)
                 runtime.close()
 
+    def test_runtime_and_collector_type_dispatch_are_immutable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_autonomous_product_runtime(
+                workspace=Path(directory),
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product runtime class member '__getattribute__' is immutable",
+                ):
+                    type.__setattr__(
+                        type(runtime),
+                        "__getattribute__",
+                        object.__getattribute__,
+                    )
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product runtime class identity is immutable",
+                ):
+                    object.__setattr__(
+                        runtime,
+                        "__class__",
+                        type("ForgedRuntime", (), {}),
+                    )
+
+                collector = runtime.collector
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product collector class member '__getattribute__' is immutable",
+                ):
+                    type.__setattr__(
+                        type(collector),
+                        "__getattribute__",
+                        object.__getattribute__,
+                    )
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product collector class identity is immutable",
+                ):
+                    object.__setattr__(
+                        collector,
+                        "__class__",
+                        type("ForgedCollector", (), {}),
+                    )
+                self.assertEqual(runtime.status().source_id, "provider-a")
+            finally:
+                runtime.close()
+
     def test_runtime_internal_lifecycle_helpers_cannot_be_shadowed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_autonomous_product_runtime(

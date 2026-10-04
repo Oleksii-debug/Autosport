@@ -1386,6 +1386,52 @@ class PaperSettlementLearningBridge:
                 self._write(state)
         return tuple(prepared)
 
+    def prepared_settlement_resolutions(
+        self,
+        *,
+        paper_book_path: Path,
+    ) -> tuple[SettlementResolution, ...]:
+        """Replay only already-durable settlement intent after an interrupted commit."""
+
+        if Path(paper_book_path) != self.paper_book_path:
+            raise PaperSettlementLearningBridgeError(
+                "continuous session uses another PaperBook path"
+            )
+
+        recovered: dict[str, SettlementResolution] = {}
+        event_ref_authority: dict[tuple[str, str], str] = {}
+        with WorkspaceEconomicLock(self.state_path.parent):
+            state = self._read()
+            book = PaperBook.load(self.paper_book_path)
+            for binding in state["bindings"].values():
+                if binding["status"] != BOUND:
+                    continue
+                intent = binding.get("settlement_intent")
+                if intent is None:
+                    continue
+                self._bound_ticket(book, binding)
+                for resolution in self._intent_resolutions(intent):
+                    previous = recovered.get(resolution.evidence_id)
+                    if previous is not None and previous != resolution:
+                        raise PaperSettlementLearningBridgeError(
+                            "prepared settlement evidence id has multiple authorities"
+                        )
+                    event_ref = (
+                        resolution.event_identity,
+                        resolution.settlement_ref,
+                    )
+                    previous_event_ref = event_ref_authority.get(event_ref)
+                    if (
+                        previous_event_ref is not None
+                        and previous_event_ref != resolution.evidence_id
+                    ):
+                        raise PaperSettlementLearningBridgeError(
+                            "prepared settlement event/reference has multiple authorities"
+                        )
+                    recovered[resolution.evidence_id] = resolution
+                    event_ref_authority[event_ref] = resolution.evidence_id
+        return tuple(recovered[key] for key in sorted(recovered))
+
     def _derive_outbox(
         self,
         binding: dict[str, object],

@@ -442,6 +442,17 @@ def _bind_continuous_state_settlement_integrity(method):
     canonical_datetime_type = datetime
     canonical_timezone_utc = timezone.utc
     canonical_resolution_type = SettlementResolution
+    canonical_resolution_descriptors = {
+        name: canonical_resolution_type.__dict__[name]
+        for name in (
+            "event_identity",
+            "settlement_ref",
+            "quote_outcomes",
+            "evidence_id",
+            "evidence_sha256",
+            "available_at",
+        )
+    }
     canonical_hex = frozenset("0123456789abcdef")
     canonical_outcomes = frozenset({"win", "loss", "void"})
 
@@ -467,6 +478,13 @@ def _bind_continuous_state_settlement_integrity(method):
     ) -> tuple[dict[str, str], dict[str, str], str]:
         if type(evidence) is not canonical_resolution_type:
             raise TypeError("settlement evidence must be canonical")
+        if any(
+            canonical_resolution_type.__dict__.get(name) is not descriptor
+            for name, descriptor in canonical_resolution_descriptors.items()
+        ):
+            raise ContinuousSessionError(
+                "settlement evidence authority descriptor changed"
+            )
 
         # Snapshot every caller-owned field exactly once. All durable comparison,
         # hashing and publication below consume these detached values rather than

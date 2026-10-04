@@ -1651,6 +1651,144 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             resumed.close()
 
+    def test_multiple_future_successors_schedule_each_causal_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            predecessor = self._event(sequence=1, odds="2.00")
+            first_future = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.10"),
+                observed_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                source_id="provider-a",
+                sequence=2,
+                status="open",
+                source_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=4)).isoformat(),
+            )
+            second_future = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.20"),
+                observed_ts=(self.START + timedelta(seconds=3)).isoformat(),
+                source_id="provider-a",
+                sequence=3,
+                status="open",
+                source_ts=(self.START + timedelta(seconds=3)).isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=6)).isoformat(),
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(predecessor,), (first_future, second_future), (), ()],
+                ),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            factory.calls.clear()
+            clock.value = self.START + timedelta(seconds=3)
+            loop.run_cycle()
+            self.assertEqual(factory.calls, [("input-a", (("selection-a", 1, "open"),))])
+            self.assertEqual(loop._availability_deadlines["input-a"], self.START + timedelta(seconds=4))
+
+            factory.calls.clear()
+            clock.value = self.START + timedelta(seconds=4)
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls, [("input-a", (("selection-a", 2, "open"),))])
+            self.assertEqual(loop._availability_deadlines["input-a"], self.START + timedelta(seconds=6))
+
+            factory.calls.clear()
+            clock.value = self.START + timedelta(seconds=6)
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls, [("input-a", (("selection-a", 3, "open"),))])
+            loop.close()
+
+    def test_future_suspension_invalidates_visible_predecessor_at_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            predecessor = self._event(sequence=1, odds="2.00")
+            suspended = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.00"),
+                observed_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                source_id="provider-a",
+                sequence=2,
+                status="suspended",
+                source_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=4)).isoformat(),
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(predecessor,), (suspended,), ()]),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            factory.calls.clear()
+            clock.value = self.START + timedelta(seconds=2)
+            loop.run_cycle()
+            self.assertEqual(factory.calls, [("input-a", (("selection-a", 1, "open"),))])
+            self.assertEqual(loop._availability_deadlines["input-a"], self.START + timedelta(seconds=4))
+
+            factory.calls.clear()
+            clock.value = self.START + timedelta(seconds=4)
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls, [("input-a", ())])
+            loop.close()
+
+    def test_future_source_timestamp_preserves_predecessor_until_source_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            predecessor = self._event(sequence=1, odds="2.00")
+            future_source = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.10"),
+                observed_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                source_id="provider-a",
+                sequence=2,
+                status="open",
+                source_ts=(self.START + timedelta(seconds=4)).isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=2)).isoformat(),
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(predecessor,), (future_source,), ()]),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            factory.calls.clear()
+            clock.value = self.START + timedelta(seconds=2)
+            loop.run_cycle()
+            self.assertEqual(factory.calls, [("input-a", (("selection-a", 1, "open"),))])
+            self.assertEqual(loop._availability_deadlines["input-a"], self.START + timedelta(seconds=4))
+
+            factory.calls.clear()
+            clock.value = self.START + timedelta(seconds=4)
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls, [("input-a", (("selection-a", 2, "open"),))])
+            loop.close()
+
     def test_future_local_availability_recomputes_at_exact_boundary_without_new_market_delta(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

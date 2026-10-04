@@ -189,3 +189,22 @@ def test_request_body_credentials_cannot_drift_from_account_context(monkeypatch)
         client.read_order_details(123)
 
     assert opener.calls == []
+
+
+def test_request_builder_code_identity_drift_is_rejected_before_dispatch(
+    monkeypatch,
+):
+    client, opener = _economic_client(monkeypatch)
+    builder = settlement_module._request_xml
+    original_code = builder.__code__
+    builder.__code__ = original_code.replace(co_name="drifted_betdaq_request_xml")
+    try:
+        with pytest.raises(
+            BetdaqEconomicReadbackError,
+            match="request body does not match exact economic request authority",
+        ):
+            client.read_order_details(123)
+    finally:
+        builder.__code__ = original_code
+
+    assert opener.calls == []

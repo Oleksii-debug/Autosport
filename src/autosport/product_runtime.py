@@ -241,6 +241,12 @@ def _build_product_coordinator_type(
         "tick",
         "_settlement_resolutions",
     )
+    # Keep dispatch authority local to this builder.  Resolving these names as
+    # module globals would make every sealed coordinator entrypoint depend on
+    # unrelated later module state and can fail with NameError before product
+    # lifecycle/economic authority is even consulted.
+    dispatch_methods = frozenset(entry_methods)
+    static_dispatch_methods = frozenset()
     protected_fields = frozenset(
         {
             *snapshot_fields,

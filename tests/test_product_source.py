@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from decimal import Decimal
@@ -107,6 +108,14 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             ParlayApiProductSource._quote_payload_bytes(back),
             ParlayApiProductSource._quote_payload_bytes(lay),
         )
+
+    def test_source_payload_evidence_covers_every_provider_quote_field(self) -> None:
+        payload = json.loads(
+            ParlayApiProductSource._quote_payload_bytes(
+                _quote(exchange_side="back")
+            ).decode("utf-8")
+        )
+        self.assertEqual(set(payload), set(ProviderQuote.__dataclass_fields__))
 
     def test_provider_observed_ts_rejects_nonzero_submicrosecond_precision(self) -> None:
         quote = _quote(observed_ts="2026-09-20T17:34:00.1234567+00:00")

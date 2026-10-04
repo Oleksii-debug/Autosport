@@ -782,6 +782,13 @@ def _install_execution_feasibility_result_authority():
     raw_assess_code = raw_assess.__code__
     canonical_assess = _assess_execution_feasibility
     canonical_assess_code = canonical_assess.__code__
+    request_type = ExecutionFeasibilityRequest
+    limit_type = ProviderLimitAuthority
+    snapshot_type = MarketBookSnapshot
+    result_type = ExecutionFeasibilitySnapshot
+    state_type = FeasibilityState
+    source_mode_type = SourceMode
+    projection_kind_type = ProjectionKind
     ledger_type = RealExecutionLedger
     verified_execution_view = ledger_type.verified_execution_view
     verified_execution_view_code = verified_execution_view.__code__
@@ -819,6 +826,18 @@ def _install_execution_feasibility_result_authority():
         ):
             raise RuntimeError(
                 "canonical execution feasibility assessor changed"
+            )
+        if (
+            ExecutionFeasibilityRequest is not request_type
+            or ProviderLimitAuthority is not limit_type
+            or MarketBookSnapshot is not snapshot_type
+            or ExecutionFeasibilitySnapshot is not result_type
+            or FeasibilityState is not state_type
+            or SourceMode is not source_mode_type
+            or ProjectionKind is not projection_kind_type
+        ):
+            raise RuntimeError(
+                "canonical execution feasibility semantic types changed"
             )
         if RealExecutionLedger is not ledger_type:
             raise RuntimeError("canonical execution ledger authority changed")
@@ -883,7 +902,7 @@ def _install_execution_feasibility_result_authority():
             _price_ladder_type=price_ladder_type,
             _price_ladder_admissible=price_ladder_admissible,
         )
-        if type(result) is not ExecutionFeasibilitySnapshot:
+        if type(result) is not result_type:
             raise TypeError("authoritative feasibility resolver returned invalid result type")
         result_id = id(result)
         result_fingerprint = fingerprint(result)
@@ -898,7 +917,7 @@ def _install_execution_feasibility_result_authority():
         return result
 
     def is_authoritative(result: ExecutionFeasibilitySnapshot) -> bool:
-        if type(result) is not ExecutionFeasibilitySnapshot:
+        if type(result) is not result_type:
             return False
         current = issued.get(id(result))
         if current is None or current[0]() is not result:

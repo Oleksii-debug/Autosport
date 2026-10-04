@@ -109,21 +109,18 @@ class _ProductDesktopDeltaConsumer(DesktopDeltaConsumer):
             )
         object.__setattr__(self, name, value)
 
-    def _require_authority_snapshot(self) -> None:
-        snapshot = object.__getattribute__(self, "_product_authority_snapshot")
-        for name, expected in snapshot:
-            if object.__getattribute__(self, name) is not expected:
-                raise ProductCompositionError(
-                    f"product desktop authority field {name!r} changed after composition"
-                )
-
     def drain(
         self,
         *,
         as_of: str,
         view: CausalView = CausalView.AS_KNOWN_AT_DECISION,
     ) -> tuple[str, ...]:
-        self._require_authority_snapshot()
+        snapshot = object.__getattribute__(self, "_product_authority_snapshot")
+        for name, expected in snapshot:
+            if object.__getattribute__(self, name) is not expected:
+                raise ProductCompositionError(
+                    f"product desktop authority field {name!r} changed after composition"
+                )
         return super().drain(as_of=as_of, view=view)
 
 def _serialized_runtime_operation(method):

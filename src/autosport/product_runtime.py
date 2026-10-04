@@ -572,13 +572,20 @@ class AutonomousProductRuntime:
         self,
         *,
         allow_pending_start: bool = False,
+        include_settlement_history: bool = True,
     ) -> ContinuousSessionStatus:
         """Project lifecycle truth only when collector and session durable state agree."""
 
         self._require_runtime_authority()
+        if type(include_settlement_history) is not bool:
+            raise TypeError("include_settlement_history must be boolean")
         if not allow_pending_start:
             self._require_start_transition_resolved()
-        coordinator_status = self.coordinator.status()
+        coordinator_status = (
+            self.coordinator.status()
+            if include_settlement_history
+            else self.coordinator.operational_status()
+        )
         state = self._state_value(coordinator_status)
         try:
             collector_status = self.collector.status()
@@ -801,7 +808,10 @@ class AutonomousProductRuntime:
 
     @_serialized_runtime_operation
     def tick(self) -> ContinuousTickResult:
-        self._coherent_status()
+        # The endurance path needs lifecycle/source coherence, not a materialized
+        # copy of every historical settlement receipt. Full audit status remains
+        # available through status() and operator lifecycle transitions.
+        self._coherent_status(include_settlement_history=False)
         return self.coordinator.tick()
 
     @_serialized_runtime_operation

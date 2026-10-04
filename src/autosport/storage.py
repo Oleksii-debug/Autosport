@@ -33,6 +33,50 @@ _LIVE_RECEIPT_COLUMNS_SQL = ",".join(_LIVE_RECEIPT_COLUMNS)
 _LIVE_RECEIPT_AUTHORITY = "autosport.live_ingestion_receipt.v1"
 
 
+def _decode_market_event(
+    raw: dict[str, object],
+    *,
+    _event_type: type[MarketEvent] = _SEALED_MARKET_EVENT_TYPE,
+    _from_dict=_SEALED_MARKET_EVENT_TYPE.from_dict,
+) -> MarketEvent:
+    """Decode through the import-time canonical MarketEvent codec descriptor."""
+    event = _from_dict(raw)
+    if type(event) is not _event_type:
+        raise TypeError("canonical market event decoder returned a non-canonical type")
+    return event
+
+
+def _encode_market_event(
+    event: MarketEvent,
+    *,
+    _to_dict=_SEALED_MARKET_EVENT_TYPE.to_dict,
+) -> dict[str, object]:
+    """Encode through the import-time canonical MarketEvent codec descriptor."""
+    return _to_dict(event)
+
+
+def _market_event_quote_key(
+    event: MarketEvent,
+    *,
+    _getter=_SEALED_MARKET_EVENT_TYPE.quote_key.fget,
+) -> str:
+    """Read canonical quote identity without mutable descriptor dispatch."""
+    if _getter is None:
+        raise RuntimeError("canonical MarketEvent.quote_key descriptor is unavailable")
+    return _getter(event)
+
+
+def _market_event_dedupe_key(
+    event: MarketEvent,
+    *,
+    _getter=_SEALED_MARKET_EVENT_TYPE.dedupe_key.fget,
+) -> str:
+    """Read canonical dedupe identity without mutable descriptor dispatch."""
+    if _getter is None:
+        raise RuntimeError("canonical MarketEvent.dedupe_key descriptor is unavailable")
+    return _getter(event)
+
+
 class _LiveReceiptBatch:
     """Immutable value snapshot for the one authority-bearing storage path."""
 
@@ -51,12 +95,10 @@ class _LiveReceiptBatch:
     def __iter__(
         self,
         *,
-        _market_event_type: type[MarketEvent] = MarketEvent,
+        _decode=_decode_market_event,
+        _loads=json.loads,
     ):
-        return (
-            _market_event_type.from_dict(json.loads(payload))
-            for payload in self._payloads
-        )
+        return (_decode(_loads(payload)) for payload in self._payloads)
 
 
 _LEGACY_CURRENT_COLUMNS = ("quote_key", "observed_ts", "sequence", "payload_json")
@@ -161,16 +203,16 @@ def _observed_instant(value: str) -> datetime:
 
 
 def _event_order_key(event: MarketEvent) -> tuple[datetime, int, str]:
-    return (_observed_instant(event.observed_ts), event.sequence, event.dedupe_key)
+    return (_observed_instant(event.observed_ts), event.sequence, _market_event_dedupe_key(event))
 
 
 def _projection_order_key(event: MarketEvent) -> tuple[int, str]:
     """Provider-local sequence is the live/current authority; receipt time is not."""
-    return (event.sequence, event.dedupe_key)
+    return (event.sequence, _market_event_dedupe_key(event))
 
 
-def _canonical_json(raw: object) -> str:
-    return json.dumps(
+def _canonical_json(raw: object, *, _dumps=json.dumps) -> str:
+    return _dumps(
         raw,
         ensure_ascii=False,
         sort_keys=True,
@@ -180,7 +222,7 @@ def _canonical_json(raw: object) -> str:
 
 
 def _canonical_payload(event: MarketEvent) -> str:
-    return _canonical_json(event.to_dict())
+    return _canonical_json(_encode_market_event(event))
 
 
 def _source_payload_from_raw(raw: object) -> str:
@@ -195,7 +237,7 @@ def _source_payload_from_raw(raw: object) -> str:
 
 
 def _source_payload(event: MarketEvent) -> str:
-    return _source_payload_from_raw(event.to_dict())
+    return _source_payload_from_raw(_encode_market_event(event))
 
 
 def _typed_equal(left: object, right: object) -> bool:
@@ -229,9 +271,13 @@ def _reject_non_finite_json_constant(value: str) -> object:
     raise ValueError(f"stored market event payload contains non-finite JSON number: {value}")
 
 
-def _load_history_payload(payload_json: str) -> dict[str, object]:
+def _load_history_payload(
+    payload_json: str,
+    *,
+    _loads=json.loads,
+) -> dict[str, object]:
     try:
-        raw = json.loads(
+        raw = _loads(
             payload_json,
             object_pairs_hook=_reject_duplicate_object_pairs,
             parse_constant=_reject_non_finite_json_constant,
@@ -254,19 +300,20 @@ def _validate_persistable_sequence(value: object) -> int:
 def _validate_incoming_event(
     event: MarketEvent,
     *,
-    _market_event_type: type[MarketEvent] = MarketEvent,
+    _decode=_decode_market_event,
+    _encode=_encode_market_event,
 ) -> str:
     """Prove an event survives the exact durable JSON/SQLite representation without type drift."""
     _validate_persistable_sequence(event.sequence)
     _observed_instant(event.observed_ts)
     _timezone_aware_instant(event.ingest_ts, "ingest_ts")
     try:
-        raw = event.to_dict()
+        raw = _encode(event)
         payload = _canonical_json(raw)
         persisted_raw = _load_history_payload(payload)
         if not _typed_payload_equal(raw, persisted_raw):
             raise ValueError("market event JSON representation changes payload types")
-        round_tripped = _market_event_type.from_dict(persisted_raw).to_dict()
+        round_tripped = _encode(_decode(persisted_raw))
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("market event payload is not canonical") from exc
     if not _typed_payload_equal(persisted_raw, round_tripped):
@@ -277,7 +324,7 @@ def _validate_incoming_event(
 def _event_from_history_row(
     row: tuple[object, ...],
     *,
-    _market_event_type: type[MarketEvent] = MarketEvent,
+    _decode=_decode_market_event,
 ) -> MarketEvent:
     """Decode one persisted history row while proving redundant identity columns agree."""
     if len(row) != len(_HISTORY_COLUMNS):
@@ -303,13 +350,13 @@ def _event_from_history_row(
     if payload_json != canonical_raw:
         raise ValueError("stored market event payload is not canonical JSON text")
 
-    event = _market_event_type.from_dict(raw)
+    event = _decode(raw)
     if canonical_raw != _canonical_payload(event):
         raise ValueError("stored market event payload is not canonical")
 
     expected = (
-        ("dedupe_key", dedupe_key, event.dedupe_key),
-        ("quote_key", quote_key, event.quote_key),
+        ("dedupe_key", dedupe_key, _market_event_dedupe_key(event)),
+        ("quote_key", quote_key, _market_event_quote_key(event)),
         ("event_id", event_id, event.event_id),
         ("market_id", market_id, event.market_id),
         ("selection_id", selection_id, event.selection_id),
@@ -328,14 +375,14 @@ def _event_from_history_row(
 def _event_from_current_payload(
     payload_json: object,
     *,
-    _market_event_type: type[MarketEvent] = MarketEvent,
+    _decode=_decode_market_event,
 ) -> MarketEvent:
     """Decode canonical projection payload independently of repairable redundant columns."""
     if not isinstance(payload_json, str):
         raise ValueError("current quote projection payload must be JSON text")
     raw = _load_history_payload(payload_json)
     try:
-        event = _market_event_type.from_dict(raw)
+        event = _decode(raw)
     except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("current quote projection payload is not canonical") from exc
     if _canonical_json(raw) != _canonical_payload(event):
@@ -354,7 +401,7 @@ def _event_from_current_row(row: tuple[object, ...]) -> MarketEvent:
 
     expected = (
         ("source_id", source_id, event.source_id),
-        ("quote_key", quote_key, event.quote_key),
+        ("quote_key", quote_key, _market_event_quote_key(event)),
         ("observed_ts", observed_ts, event.observed_ts),
         ("sequence", sequence, event.sequence),
     )
@@ -373,7 +420,7 @@ def _event_from_legacy_current_row(row: tuple[object, ...]) -> MarketEvent:
     quote_key, observed_ts, sequence, payload_json = row
     event = _event_from_current_payload(payload_json)
     expected = (
-        ("quote_key", quote_key, event.quote_key),
+        ("quote_key", quote_key, _market_event_quote_key(event)),
         ("observed_ts", observed_ts, event.observed_ts),
         ("sequence", sequence, event.sequence),
     )
@@ -560,7 +607,7 @@ def _validate_live_receipt_rows(connection: sqlite3.Connection) -> None:
         if not history_row or history_row[0] is None:
             raise ValueError("live receipt authority references missing market history")
         event = _event_from_history_row(history_row)
-        if event.dedupe_key != dedupe_key:
+        if _market_event_dedupe_key(event) != dedupe_key:
             raise ValueError("live receipt authority dedupe identity does not match market history")
         if event.ingest_ts != ingest_ts:
             raise ValueError("live receipt authority ingest_ts does not match market history")
@@ -641,6 +688,33 @@ def _ensure_canonical_secondary_indexes(connection: sqlite3.Connection) -> None:
             )
 
 
+def _trusted_live_events_from_connection(
+    connection: sqlite3.Connection,
+    *,
+    _decode_row=_event_from_history_row,
+    _order_key=_event_order_key,
+) -> list[MarketEvent]:
+    """Read and verify receipt-authoritative history from one locked connection."""
+    rows = connection.execute(
+        f"""SELECT {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)},
+                   r.ingest_ts,r.authority
+            FROM market_events AS m
+            INNER JOIN market_event_live_receipts AS r
+            ON r.dedupe_key=m.dedupe_key"""
+    ).fetchall()
+    events: list[MarketEvent] = []
+    for row in rows:
+        event = _decode_row(row[: len(_HISTORY_COLUMNS)])
+        receipt_ingest_ts, authority = row[-2:]
+        if (
+            receipt_ingest_ts != event.ingest_ts
+            or authority != _LIVE_RECEIPT_AUTHORITY
+        ):
+            raise ValueError("live receipt authority conflicts with market history")
+        events.append(event)
+    return sorted(events, key=_order_key)
+
+
 class SQLiteMarketStore:
     """Crash-safe append-only normalized market history plus current quote projection.
 
@@ -684,7 +758,7 @@ class SQLiteMarketStore:
             ).fetchall()
             for row in rows:
                 event = _event_from_history_row(row)
-                history_by_dedupe[event.dedupe_key] = event
+                history_by_dedupe[_market_event_dedupe_key(event)] = event
 
             projection_rows = self.connection.execute(
                 f"SELECT {_LEGACY_CURRENT_COLUMNS_SQL} FROM current_quotes"
@@ -694,7 +768,7 @@ class SQLiteMarketStore:
                     projection_event = _event_from_current_payload(projection_row[3])
                 except (KeyError, TypeError, ValueError):
                     continue
-                history_event = history_by_dedupe.get(projection_event.dedupe_key)
+                history_event = history_by_dedupe.get(_market_event_dedupe_key(projection_event))
                 if history_event is None:
                     raise ValueError(
                         "legacy current_quotes projection event is missing from authoritative history"
@@ -763,9 +837,9 @@ class SQLiteMarketStore:
             ).fetchall()
             for row in rows:
                 event = _event_from_history_row(row)
-                history_by_dedupe[event.dedupe_key] = event
+                history_by_dedupe[_market_event_dedupe_key(event)] = event
                 order_key = _projection_order_key(event)
-                projection_key = (event.source_id, event.quote_key)
+                projection_key = (event.source_id, _market_event_quote_key(event))
                 previous = latest.get(projection_key)
                 if previous is None or order_key > previous[0]:
                     latest[projection_key] = (order_key, event)
@@ -778,7 +852,7 @@ class SQLiteMarketStore:
                     projection_event = _event_from_current_payload(projection_row[4])
                 except (KeyError, TypeError, ValueError):
                     continue
-                history_event = history_by_dedupe.get(projection_event.dedupe_key)
+                history_event = history_by_dedupe.get(_market_event_dedupe_key(projection_event))
                 if history_event is None:
                     raise ValueError(
                         "current_quotes projection event is missing from authoritative history"
@@ -800,7 +874,7 @@ class SQLiteMarketStore:
                        VALUES (?,?,?,?,?)""",
                     (
                         event.source_id,
-                        event.quote_key,
+                        _market_event_quote_key(event),
                         event.observed_ts,
                         event.sequence,
                         payload,
@@ -821,8 +895,8 @@ class SQLiteMarketStore:
                VALUES (?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(dedupe_key) DO NOTHING""",
             (
-                event.dedupe_key,
-                event.quote_key,
+                _market_event_dedupe_key(event),
+                _market_event_quote_key(event),
                 event.event_id,
                 event.market_id,
                 event.selection_id,
@@ -836,7 +910,7 @@ class SQLiteMarketStore:
         if cursor.rowcount == 0:
             existing = self.connection.execute(
                 f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE dedupe_key=?",
-                (event.dedupe_key,),
+                (_market_event_dedupe_key(event),),
             ).fetchone()
             if existing is None:
                 raise RuntimeError("market event dedupe conflict row disappeared")
@@ -844,13 +918,13 @@ class SQLiteMarketStore:
             if _source_payload(existing_event) != _source_payload(event):
                 raise ValueError(
                     "conflicting duplicate market event identity: "
-                    f"{event.dedupe_key}"
+                    f"{_market_event_dedupe_key(event)}"
                 )
             return False
         previous = self.connection.execute(
             f"""SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes
                 WHERE source_id=? AND quote_key=?""",
-            (event.source_id, event.quote_key),
+            (event.source_id, _market_event_quote_key(event)),
         ).fetchone()
         previous_event = _event_from_current_row(previous) if previous is not None else None
         if previous_event is None or incoming_key > _projection_order_key(previous_event):
@@ -864,7 +938,7 @@ class SQLiteMarketStore:
                    payload_json=excluded.payload_json""",
                 (
                     event.source_id,
-                    event.quote_key,
+                    _market_event_quote_key(event),
                     event.observed_ts,
                     event.sequence,
                     payload,
@@ -878,7 +952,7 @@ class SQLiteMarketStore:
                (dedupe_key,ingest_ts,authority)
                VALUES (?,?,?)""",
             (
-                event.dedupe_key,
+                _market_event_dedupe_key(event),
                 event.ingest_ts,
                 _LIVE_RECEIPT_AUTHORITY,
             ),
@@ -953,30 +1027,30 @@ class SQLiteMarketStore:
                 preexisting: set[str] = set()
                 canonical_by_dedupe: dict[str, MarketEvent] = {}
                 for event in canonical_events:
-                    existing = canonical_by_dedupe.get(event.dedupe_key)
+                    existing = canonical_by_dedupe.get(_market_event_dedupe_key(event))
                     if existing is None:
-                        canonical_by_dedupe[event.dedupe_key] = event
+                        canonical_by_dedupe[_market_event_dedupe_key(event)] = event
                     elif _canonical_payload(existing) != _canonical_payload(event):
                         raise ValueError(
                             "conflicting duplicate live market event identity: "
-                            f"{event.dedupe_key}"
+                            f"{_market_event_dedupe_key(event)}"
                         )
 
                 for event in canonical_by_dedupe.values():
                     row = self.connection.execute(
                         f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE dedupe_key=?",
-                        (event.dedupe_key,),
+                        (_market_event_dedupe_key(event),),
                     ).fetchone()
                     if row is not None:
-                        preexisting.add(event.dedupe_key)
+                        preexisting.add(_market_event_dedupe_key(event))
 
                 expected_append_changes = 0
                 projection_state: dict[tuple[str, str], MarketEvent | None] = {}
                 for event in canonical_by_dedupe.values():
-                    if event.dedupe_key in preexisting:
+                    if _market_event_dedupe_key(event) in preexisting:
                         continue
                     expected_append_changes += 1
-                    projection_key = (event.source_id, event.quote_key)
+                    projection_key = (event.source_id, _market_event_quote_key(event))
                     if projection_key not in projection_state:
                         row = self.connection.execute(
                             f"""SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes
@@ -1059,7 +1133,7 @@ class SQLiteMarketStore:
                         """SELECT ingest_ts,authority
                            FROM market_event_live_receipts
                            WHERE dedupe_key=?""",
-                        (event.dedupe_key,),
+                        (_market_event_dedupe_key(event),),
                     ).fetchone()
                     if receipt != (event.ingest_ts, _LIVE_RECEIPT_AUTHORITY):
                         raise RuntimeError(
@@ -1121,7 +1195,7 @@ class SQLiteMarketStore:
                     INNER JOIN market_event_live_receipts AS r
                     ON r.dedupe_key=m.dedupe_key
                     WHERE m.dedupe_key=?""",
-                (event.dedupe_key,),
+                (_market_event_dedupe_key(event),),
             ).fetchone()
         if row is None:
             return False
@@ -1139,33 +1213,26 @@ class SQLiteMarketStore:
     )
     del _has_trusted_live_receipt_impl
 
-    def trusted_live_events(self) -> list[MarketEvent]:
+    def trusted_live_events(
+        self,
+        *,
+        _read=_trusted_live_events_from_connection,
+    ) -> list[MarketEvent]:
         """Return only history rows whose local receipt instant has product authority."""
         with self._connection_lock:
-            rows = self.connection.execute(
-                f"""SELECT {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)},
-                           r.ingest_ts,r.authority
-                    FROM market_events AS m
-                    INNER JOIN market_event_live_receipts AS r
-                    ON r.dedupe_key=m.dedupe_key"""
-            ).fetchall()
-            events: list[MarketEvent] = []
-            for row in rows:
-                event = _event_from_history_row(row[: len(_HISTORY_COLUMNS)])
-                receipt_ingest_ts, authority = row[-2:]
-                if (
-                    receipt_ingest_ts != event.ingest_ts
-                    or authority != _LIVE_RECEIPT_AUTHORITY
-                ):
-                    raise ValueError("live receipt authority conflicts with market history")
-                events.append(event)
-        return sorted(events, key=_event_order_key)
+            return _read(self.connection)
 
-    def trusted_live_current_by_source(self) -> dict[tuple[str, str], MarketEvent]:
+    def trusted_live_current_by_source(
+        self,
+        *,
+        _read=_trusted_live_events_from_connection,
+    ) -> dict[tuple[str, str], MarketEvent]:
         """Project latest source-local live state without retroactively trusting imports."""
+        with self._connection_lock:
+            events = _read(self.connection)
         current: dict[tuple[str, str], MarketEvent] = {}
-        for event in __class__.trusted_live_events(self):
-            key = (event.source_id, event.quote_key)
+        for event in events:
+            key = (event.source_id, _market_event_quote_key(event))
             previous = current.get(key)
             if previous is None or _projection_order_key(event) > _projection_order_key(
                 previous
@@ -1181,7 +1248,7 @@ class SQLiteMarketStore:
             current: dict[tuple[str, str], MarketEvent] = {}
             for row in rows:
                 event = _event_from_current_row(row)
-                current[(event.source_id, event.quote_key)] = event
+                current[(event.source_id, _market_event_quote_key(event))] = event
             return current
 
     def current(self) -> dict[str, MarketEvent]:

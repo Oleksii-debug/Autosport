@@ -438,6 +438,7 @@ def _bind_continuous_state_settlement_integrity(method):
     """Bind durable outcome interpretation to module-load integrity roots."""
 
     canonical_json_dumps = json.dumps
+    canonical_json_dumps_code = json.dumps.__code__
     canonical_sha256 = hashlib.sha256
     canonical_datetime_type = datetime
     canonical_timezone_utc = timezone.utc
@@ -519,6 +520,10 @@ def _bind_continuous_state_settlement_integrity(method):
                 raise ValueError("quote_outcomes contains unsupported outcome")
             normalized_outcomes[canonical_key] = outcome
         normalized_outcomes = dict(sorted(normalized_outcomes.items()))
+        if canonical_json_dumps.__code__ is not canonical_json_dumps_code:
+            raise ContinuousSessionError(
+                "settlement JSON digest authority changed"
+            )
         payload = canonical_json_dumps(
             normalized_outcomes,
             ensure_ascii=False,
@@ -556,21 +561,42 @@ def _bind_continuous_state_settlement_integrity(method):
 def _bind_continuous_state_read_settlement_integrity(method):
     """Bind pending-outcome digest reproof against later module-global rebinding."""
 
-    canonical_resolution_type = SettlementResolution
     canonical_json_dumps = json.dumps
+    canonical_json_dumps_code = json.dumps.__code__
     canonical_sha256 = hashlib.sha256
+    canonical_outcomes = frozenset({"win", "loss", "void"})
 
     def pending_outcomes_digest(item: dict[str, object]) -> str:
-        resolution = canonical_resolution_type(
-            event_identity=item["event_identity"],
-            settlement_ref=item["settlement_ref"],
-            quote_outcomes=dict(item["quote_outcomes"]),
-            evidence_id=item["evidence_id"],
-            evidence_sha256=item["evidence_sha256"],
-            available_at=item["available_at"],
-        )
+        if type(item) is not dict:
+            raise ContinuousSessionError(
+                "pending settlement digest input must be an exact dict"
+            )
+        quote_outcomes = item.get("quote_outcomes")
+        if type(quote_outcomes) is not dict or not quote_outcomes:
+            raise ContinuousSessionError(
+                "pending settlement quote_outcomes must be a non-empty exact dict"
+            )
+        normalized_outcomes: dict[str, str] = {}
+        for quote_key, outcome in quote_outcomes.items():
+            if (
+                type(quote_key) is not str
+                or not quote_key
+                or quote_key.strip() != quote_key
+            ):
+                raise ContinuousSessionError(
+                    "pending settlement quote_outcomes quote_key is invalid"
+                )
+            if type(outcome) is not str or outcome not in canonical_outcomes:
+                raise ContinuousSessionError(
+                    "pending settlement quote_outcomes contains unsupported outcome"
+                )
+            normalized_outcomes[quote_key] = outcome
+        if canonical_json_dumps.__code__ is not canonical_json_dumps_code:
+            raise ContinuousSessionError(
+                "pending settlement JSON digest authority changed"
+            )
         payload = canonical_json_dumps(
-            dict(sorted(resolution.quote_outcomes.items())),
+            dict(sorted(normalized_outcomes.items())),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

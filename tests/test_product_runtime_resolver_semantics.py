@@ -151,6 +151,53 @@ def test_canonical_parlay_product_source_resolver_is_fingerprintable_and_composa
         runtime.close()
 
 
+def test_product_runtime_rejects_low_level_parlay_authority_root_replacement(
+    tmp_path,
+) -> None:
+    class _Provider:
+        source_id = "parlayapi:table_tennis"
+
+        def read_batch(self, _max_items=1000):
+            raise AssertionError("authority-root guard must fail before provider I/O")
+
+    source = ParlayApiProductSource(
+        _Provider(),
+        workspace=tmp_path / "source-workspace",
+        authority_root=tmp_path / "authority",
+        lawful_terms_ref="terms:parlayapi:test",
+        retention_ref="retention:parlayapi:test",
+        clock=lambda: NOW,
+    )
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path / "runtime-workspace",
+        source=source,
+        clock=lambda: NOW,
+        initial_bankroll="100",
+    )
+    replacements = {
+        "provider": _Provider(),
+        "clock": lambda: "2026-09-21T10:00:00Z",
+        "normalizer": object(),
+        "state_path": tmp_path / "forged-state.json",
+        "_authority_binding_sha256": "b" * 64,
+        "_authority_fields_sealed": False,
+    }
+    try:
+        for name, value in replacements.items():
+            original = object.__getattribute__(source, name)
+            object.__setattr__(source, name, value)
+            try:
+                with pytest.raises(
+                    ProductCompositionError,
+                    match=rf"product source authority field '{name}' changed after composition",
+                ):
+                    runtime.collector.source.fetch_deltas(None, (), 1)
+            finally:
+                object.__setattr__(source, name, original)
+    finally:
+        runtime.close()
+
+
 def test_live_settlement_resolution_is_routed_through_product_authority_proxy(
     tmp_path,
 ) -> None:

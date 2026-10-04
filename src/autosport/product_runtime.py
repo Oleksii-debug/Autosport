@@ -2004,6 +2004,7 @@ def _build_autonomous_product_runtime_impl(
             source_settlement_resolve = source.resolve
 
             def require_settlement_authority() -> None:
+                require_declared_source_authority_roots()
                 current_identity = _settlement_authority_identity_fn(
                     source=source,
                     source_id=source_id,
@@ -2013,6 +2014,7 @@ def _build_autonomous_product_runtime_impl(
                     raise ProductCompositionError(
                         "settlement authority changed after product composition"
                     )
+                require_declared_source_authority_roots()
 
             class ProductSettlementOutcomeAuthorityProxy:
                 __slots__ = ()

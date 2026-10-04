@@ -662,6 +662,41 @@ class CollectorDeltaTests(unittest.TestCase):
                 consumer.drain(as_of="2026-01-01T00:00:05+00:00")
             self.assertFalse(checkpoint.has_ack("d1"))
 
+    def test_consumer_digest_rejects_wrong_event_after_market_serializer_rebind(self):
+        expected_payload = event_payload()
+        wrong_event = MarketEvent.from_dict(
+            {
+                **expected_payload,
+                "decimal_odds": "9.99",
+            }
+        )
+        forged_payload = dict(expected_payload)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = CollectorDeltaStore(Path(tmp) / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(Path(tmp) / "desktop.json")
+            collector.append(self.make_delta(payload=expected_payload))
+
+            def must_not_apply(_delta, _event):
+                raise AssertionError("digest mismatch must fail before application")
+
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda _: wrong_event,
+                apply_event=must_not_apply,
+                lookup_application_receipt=lambda _delta: None,
+            )
+
+            def forged_to_dict(_event):
+                return dict(forged_payload)
+
+            with patch.object(MarketEvent, "to_dict", forged_to_dict):
+                with self.assertRaises(DeltaConflictError):
+                    consumer.drain(as_of="2026-01-01T00:00:05+00:00")
+
+            self.assertFalse(checkpoint.has_ack("d1"))
+
     def test_revision_rejects_cross_source_even_with_same_cursor(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = CollectorDeltaStore(Path(tmp) / "collector.json")

@@ -260,6 +260,152 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 restored.close()
 
+    def test_restart_receipt_digest_ignores_runtime_event_serializer_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            applied = _event()
+            delta = _delta(applied)
+            source = _Source(resolved_event=applied)
+
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                self.assertEqual(
+                    runtime.coordinator.desktop_consumer.drain(as_of=clock.value),
+                    (delta.delta_id,),
+                )
+            finally:
+                runtime.close()
+
+            generic_newer = MarketEvent.from_dict(
+                {
+                    **applied.to_dict(),
+                    "decimal_odds": "9.99",
+                    "sequence": 99,
+                    "observed_ts": "2026-09-20T13:58:05+00:00",
+                    "ingest_ts": "2026-09-20T13:58:06+00:00",
+                    "metadata": {"origin": "generic-import"},
+                }
+            )
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                self.assertTrue(store.append(generic_newer))
+            finally:
+                store.close()
+
+            forged_payload = applied.to_dict()
+
+            def forged_to_dict(_event):
+                return dict(forged_payload)
+
+            with patch.object(MarketEvent, "to_dict", forged_to_dict):
+                restored = build_autonomous_product_runtime(
+                    workspace=root,
+                    source=source,
+                    clock=clock,
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+                try:
+                    snapshot = restored.mirror.snapshot()
+                    self.assertEqual(len(snapshot), 1)
+                    self.assertEqual(snapshot[0].dedupe_key, applied.dedupe_key)
+                    self.assertEqual(snapshot[0].sequence, 1)
+                    self.assertEqual(str(snapshot[0].decimal_odds), "1.80")
+                finally:
+                    restored.close()
+
+    def test_live_ingestion_receipt_does_not_authorize_desktop_runtime_preload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event = _event()
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                bus = MarketEventBus(store)
+                self.assertEqual(bus._publish_many_live_ingestion([event]), 1)
+                self.assertTrue(store.has_trusted_live_receipt(event))
+                self.assertEqual(
+                    store.trusted_live_current_by_source()[
+                        (event.source_id, event.quote_key)
+                    ].sequence,
+                    event.sequence,
+                )
+            finally:
+                store.close()
+
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(event.source_id),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertEqual(runtime.mirror.snapshot(), ())
+                self.assertEqual(runtime.invalidations.pending_count, 0)
+                self.assertEqual(
+                    runtime.market_store.trusted_live_current_by_source()[
+                        (event.source_id, event.quote_key)
+                    ].sequence,
+                    event.sequence,
+                )
+            finally:
+                runtime.close()
+
+    def test_completed_desktop_receipt_without_ack_authorizes_restart_preload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event()
+            delta = _delta(event)
+            source = _Source(resolved_event=event)
+
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                receipt = runtime.coordinator.desktop_consumer.apply_event(delta, event)
+                self.assertEqual(receipt.delta_id, delta.delta_id)
+                self.assertEqual(
+                    receipt.canonical_event_digest,
+                    delta.canonical_event_digest,
+                )
+                self.assertIsNone(
+                    DesktopDeltaCheckpointStore(
+                        root / "desktop_acks.json"
+                    ).application_receipt(delta)
+                )
+            finally:
+                runtime.close()
+
+            restored = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                snapshot = restored.mirror.snapshot()
+                self.assertEqual(len(snapshot), 1)
+                self.assertEqual(snapshot[0].dedupe_key, event.dedupe_key)
+                self.assertEqual(snapshot[0].sequence, event.sequence)
+                self.assertEqual(restored.invalidations.pending_count, 1)
+            finally:
+                restored.close()
+
     def test_restart_with_different_source_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -9,6 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .domain import MarketEvent
 from .workspace_lock import WorkspaceEconomicLock
 
 
@@ -75,15 +76,35 @@ def _text(value: Any, field: str) -> str:
     return value
 
 
-def canonical_event_digest(event_or_payload: Any) -> str:
-    payload = event_or_payload.to_dict() if hasattr(event_or_payload, "to_dict") else event_or_payload
+def canonical_event_digest(
+    event_or_payload: Any,
+    *,
+    _market_event_type: type[MarketEvent] = MarketEvent,
+    _market_event_to_dict=MarketEvent.to_dict,
+    _dumps=json.dumps,
+    _sha256=hashlib.sha256,
+) -> str:
+    """Hash canonical event evidence without mutable MarketEvent codec dispatch."""
+
+    if type(event_or_payload) is _market_event_type:
+        payload = _market_event_to_dict(event_or_payload)
+    else:
+        payload = (
+            event_or_payload.to_dict()
+            if hasattr(event_or_payload, "to_dict")
+            else event_or_payload
+        )
     try:
-        raw = json.dumps(
-            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        raw = _dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise ValueError("canonical event payload is not JSON-safe") from exc
-    return hashlib.sha256(raw).hexdigest()
+    return _sha256(raw).hexdigest()
 
 
 def digest_source_payload(raw_payload: bytes | bytearray | memoryview | str) -> str:

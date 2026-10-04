@@ -9,7 +9,7 @@ import autosport.risk_membership_publication as publication
 import autosport.risk_randomization_precommit as randomization
 import autosport.risk_sampling_occurrence_authority as draw_authority
 import autosport.session as session_module
-from autosport.dataset import ReplayDataset
+from autosport.dataset import ReplayDataset, load_dataset
 from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
@@ -89,13 +89,18 @@ def _horizon(draw_count: int = 4) -> str:
     )
 
 
-def _membership(*, frame_json: str, horizon_json: str) -> ResolvedFixedNRiskMembership:
+def _membership(
+    *,
+    frame_json: str,
+    horizon_json: str,
+    dataset_manifest_sha256: str = "3" * 64,
+) -> ResolvedFixedNRiskMembership:
     return ResolvedFixedNRiskMembership(
         research_protocol_id="risk-fixed-n-protocol",
         protocol_sha256="2" * 64,
         protocol_record_sha256="9" * 64,
         dataset_snapshot_id="risk-fixed-n-dataset",
-        dataset_manifest_sha256="3" * 64,
+        dataset_manifest_sha256=dataset_manifest_sha256,
         dataset_record_sha256="c" * 64,
         causal_cutoff="2026-09-01T00:00:00+00:00",
         outcome_reveal_after="2026-09-10T00:00:00+00:00",
@@ -154,10 +159,15 @@ def _product_precommit(
     horizon_json: str | None = None,
     rng_algorithm: str = "AUTOSPORT_SHA256_REJECTION_V1",
     rng_version: str = "1",
+    dataset_manifest_sha256: str = "3" * 64,
 ):
     frame_json = frame_json or _frame()
     horizon_json = horizon_json or _horizon()
-    membership = _membership(frame_json=frame_json, horizon_json=horizon_json)
+    membership = _membership(
+        frame_json=frame_json,
+        horizon_json=horizon_json,
+        dataset_manifest_sha256=dataset_manifest_sha256,
+    )
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     registry_path = workspace / "scientific-registry.json"
@@ -1156,13 +1166,14 @@ def test_iid_member_materializer_rejects_payload_digest_dispatch_rebinding(
 
 
 def _iid_replay_dataset(
-    workspace,
+    root,
     event: MarketEvent,
-) -> ReplayDataset:
-    market_path = workspace / "iid-market.jsonl"
+) -> tuple[ReplayDataset, str]:
+    root.mkdir()
+    market_path = root / "iid-market.jsonl"
     market_bytes = (_canonical(event.to_dict()) + "\n").encode("utf-8")
     market_path.write_bytes(market_bytes)
-    results_path = workspace / "iid-results.json"
+    results_path = root / "iid-results.json"
     results_bytes = _canonical(
         {
             "quote_outcomes": {},
@@ -1170,29 +1181,36 @@ def _iid_replay_dataset(
         }
     ).encode("utf-8")
     results_path.write_bytes(results_bytes)
-    return ReplayDataset(
-        root=workspace,
-        name="iid-member-fixture",
-        sport="unknown",
-        market_path=market_path,
-        results_path=results_path,
-        market_sha256=hashlib.sha256(market_bytes).hexdigest(),
-        results_sha256=hashlib.sha256(results_bytes).hexdigest(),
-        schema_version=1,
-    )
-
+    manifest_bytes = _canonical(
+        {
+            "market_file": market_path.name,
+            "market_sha256": hashlib.sha256(market_bytes).hexdigest(),
+            "name": "iid-member-fixture",
+            "results_file": results_path.name,
+            "results_sha256": hashlib.sha256(results_bytes).hexdigest(),
+            "schema_version": 1,
+            "sport": "unknown",
+        }
+    ).encode("utf-8")
+    (root / "manifest.json").write_bytes(manifest_bytes)
+    return load_dataset(root), hashlib.sha256(manifest_bytes).hexdigest()
 
 def test_session_executes_single_admitted_iid_member_and_returns_execution_proof(
     tmp_path,
     monkeypatch,
 ) -> None:
     event = _market_event()
+    dataset, dataset_manifest_sha256 = _iid_replay_dataset(
+        tmp_path / "iid-dataset",
+        event,
+    )
     frame_json = _frame_for_payload(market_event_payload_sha256(event))
     values = _product_precommit(
         tmp_path,
         monkeypatch,
         frame_json=frame_json,
         horizon_json=_horizon(1),
+        dataset_manifest_sha256=dataset_manifest_sha256,
     )
     (
         membership,
@@ -1203,8 +1221,11 @@ def test_session_executes_single_admitted_iid_member_and_returns_execution_proof
         frame_json,
         horizon_json,
     ) = values
-    dataset = _iid_replay_dataset(workspace, event)
-    session = AutosportSession(workspace, initial_bankroll="100")
+    session = AutosportSession(
+        workspace,
+        initial_bankroll="100",
+        strategy_id="observe-only-v1",
+    )
     try:
         result = session.run_iid_member_dataset(
             dataset,
@@ -1239,12 +1260,17 @@ def test_session_rejects_duplicate_iid_occurrence_before_registry_mutation(
     monkeypatch,
 ) -> None:
     event = _market_event()
+    dataset, dataset_manifest_sha256 = _iid_replay_dataset(
+        tmp_path / "iid-dataset",
+        event,
+    )
     frame_json = _frame_for_payload(market_event_payload_sha256(event))
     values = _product_precommit(
         tmp_path,
         monkeypatch,
         frame_json=frame_json,
         horizon_json=_horizon(2),
+        dataset_manifest_sha256=dataset_manifest_sha256,
     )
     (
         membership,
@@ -1255,8 +1281,11 @@ def test_session_rejects_duplicate_iid_occurrence_before_registry_mutation(
         frame_json,
         horizon_json,
     ) = values
-    dataset = _iid_replay_dataset(workspace, event)
-    session = AutosportSession(workspace, initial_bankroll="100")
+    session = AutosportSession(
+        workspace,
+        initial_bankroll="100",
+        strategy_id="observe-only-v1",
+    )
     try:
         with pytest.raises(
             ProductIidDrawPlanError,
@@ -1283,12 +1312,17 @@ def test_session_iid_runner_rejects_plan_resolver_rebinding_before_dataset_read(
     monkeypatch,
 ) -> None:
     event = _market_event()
+    dataset, dataset_manifest_sha256 = _iid_replay_dataset(
+        tmp_path / "iid-dataset",
+        event,
+    )
     frame_json = _frame_for_payload(market_event_payload_sha256(event))
     values = _product_precommit(
         tmp_path,
         monkeypatch,
         frame_json=frame_json,
         horizon_json=_horizon(1),
+        dataset_manifest_sha256=dataset_manifest_sha256,
     )
     (
         membership,
@@ -1299,8 +1333,11 @@ def test_session_iid_runner_rejects_plan_resolver_rebinding_before_dataset_read(
         frame_json,
         horizon_json,
     ) = values
-    dataset = _iid_replay_dataset(workspace, event)
-    session = AutosportSession(workspace, initial_bankroll="100")
+    session = AutosportSession(
+        workspace,
+        initial_bankroll="100",
+        strategy_id="observe-only-v1",
+    )
     attacker_called = False
 
     def forged_resolver(*_args, **_kwargs):
@@ -1340,12 +1377,17 @@ def test_session_iid_runner_rejects_replay_engine_rebinding_before_admission(
     monkeypatch,
 ) -> None:
     event = _market_event()
+    dataset, dataset_manifest_sha256 = _iid_replay_dataset(
+        tmp_path / "iid-dataset",
+        event,
+    )
     frame_json = _frame_for_payload(market_event_payload_sha256(event))
     values = _product_precommit(
         tmp_path,
         monkeypatch,
         frame_json=frame_json,
         horizon_json=_horizon(1),
+        dataset_manifest_sha256=dataset_manifest_sha256,
     )
     (
         membership,
@@ -1356,8 +1398,11 @@ def test_session_iid_runner_rejects_replay_engine_rebinding_before_admission(
         frame_json,
         horizon_json,
     ) = values
-    dataset = _iid_replay_dataset(workspace, event)
-    session = AutosportSession(workspace, initial_bankroll="100")
+    session = AutosportSession(
+        workspace,
+        initial_bankroll="100",
+        strategy_id="observe-only-v1",
+    )
     attacker_called = False
 
     class ForgedReplayEngine:

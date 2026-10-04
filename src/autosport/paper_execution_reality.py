@@ -509,6 +509,11 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         observation_evidence_ids: Mapping[str, str],
         suspended_action_ids: frozenset[str] = frozenset(),
     ) -> None:
+        if any(action.side != "BACK" for action in plan.actions):
+            raise PaperExecutionStateError(
+                "PAPER execution-reality exposure model supports BACK only "
+                "until canonical LAY liability authority exists"
+            )
         payload = self._reservation_payload(
             trigger_id=trigger_id,
             plan=plan,
@@ -557,6 +562,20 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     raise PaperExecutionStateError(
                         "reserved observation evidence does not bind exact action"
                     )
+                sequence = next(
+                    index
+                    for index, candidate in enumerate(plan.actions)
+                    if candidate.action_id == action_id
+                )
+                _impl._observed_attempt(
+                    run_id=run_id,
+                    plan=plan,
+                    action=action,
+                    sequence=sequence,
+                    config=config,
+                    observation=record.as_observation(),
+                    started_at=started_at,
+                )
         run_events = [
             event
             for event in durable_events

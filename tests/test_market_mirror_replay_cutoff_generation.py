@@ -1587,6 +1587,21 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     tuple(event.dedupe_key for event in restored.snapshot()),
                     (legacy_event.dedupe_key,),
                 )
+                self.assertEqual(
+                    restored.active_view(
+                        as_of=self.CUTOFF,
+                        max_age=timedelta(minutes=2),
+                    ).events,
+                    (),
+                )
+                self.assertEqual(
+                    restored.active_view_for_keys(
+                        ((legacy_event.source_id, legacy_event.quote_key),),
+                        as_of=self.CUTOFF,
+                        max_age=timedelta(minutes=2),
+                    ).events,
+                    (),
+                )
                 self.assertEqual(self.replay(migrated).events, ())
 
                 migrated.append(
@@ -1622,8 +1637,133 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     legacy_event.dedupe_key,
                     {event.dedupe_key for event in later.events},
                 )
+                restarted = MarketMirror.from_store(migrated)
+                self.assertEqual(
+                    tuple(event.sequence for event in restarted.snapshot()),
+                    (2,),
+                )
+                self.assertEqual(
+                    tuple(
+                        event.sequence
+                        for event in restarted.active_view(
+                            as_of=self.CUTOFF + timedelta(seconds=2),
+                            max_age=timedelta(minutes=2),
+                        ).events
+                    ),
+                    (2,),
+                )
             finally:
                 migrated.close()
+
+    def test_legacy_baseline_sequence_fence_blocks_lower_positive_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            legacy_event = self.event(
+                sequence=2,
+                odds="2.20",
+                observed_ts="2026-09-16T19:00:00+00:00",
+            )
+            payload = storage_module._canonical_payload(legacy_event)
+
+            raw = sqlite3.connect(path)
+            try:
+                raw.execute(
+                    """CREATE TABLE market_events (
+                        dedupe_key TEXT PRIMARY KEY,
+                        quote_key TEXT NOT NULL,
+                        event_id TEXT NOT NULL,
+                        market_id TEXT NOT NULL,
+                        selection_id TEXT NOT NULL,
+                        decimal_odds TEXT NOT NULL,
+                        observed_ts TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL
+                    )"""
+                )
+                raw.execute(
+                    """CREATE TABLE current_quotes (
+                        source_id TEXT NOT NULL,
+                        quote_key TEXT NOT NULL,
+                        observed_ts TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        PRIMARY KEY (source_id, quote_key)
+                    )"""
+                )
+                raw.execute(
+                    """INSERT INTO market_events
+                       (dedupe_key,quote_key,event_id,market_id,selection_id,
+                        decimal_odds,observed_ts,source_id,sequence,payload_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        legacy_event.dedupe_key,
+                        legacy_event.quote_key,
+                        legacy_event.event_id,
+                        legacy_event.market_id,
+                        legacy_event.selection_id,
+                        str(legacy_event.decimal_odds),
+                        legacy_event.observed_ts,
+                        legacy_event.source_id,
+                        legacy_event.sequence,
+                        payload,
+                    ),
+                )
+                raw.execute(
+                    """INSERT INTO current_quotes
+                       (source_id,quote_key,observed_ts,sequence,payload_json)
+                       VALUES (?,?,?,?,?)""",
+                    (
+                        legacy_event.source_id,
+                        legacy_event.quote_key,
+                        legacy_event.observed_ts,
+                        legacy_event.sequence,
+                        payload,
+                    ),
+                )
+                raw.commit()
+            finally:
+                raw.close()
+
+            store = SQLiteMarketStore(path)
+            try:
+                lower_positive = self.event(
+                    sequence=1,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:02+00:00",
+                )
+                accepted = store.append_batch_accepted((lower_positive,))
+                self.assertEqual(accepted, [lower_positive])
+                self.assertEqual(
+                    store.connection.execute(
+                        """SELECT append_generation
+                           FROM market_event_commit_order
+                           WHERE dedupe_key=?""",
+                        (lower_positive.dedupe_key,),
+                    ).fetchone(),
+                    (1,),
+                )
+
+                restored = MarketMirror.from_store(store)
+                self.assertEqual(
+                    tuple(event.sequence for event in restored.snapshot()),
+                    (2,),
+                )
+                self.assertEqual(
+                    restored.active_view(
+                        as_of=self.CUTOFF + timedelta(seconds=2),
+                        max_age=timedelta(minutes=2),
+                    ).events,
+                    (),
+                )
+
+                replayed = self.replay(
+                    store,
+                    as_of=self.CUTOFF + timedelta(seconds=2),
+                )
+                self.assertEqual(replayed.events, ())
+            finally:
+                store.close()
 
     def test_partial_causal_schema_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

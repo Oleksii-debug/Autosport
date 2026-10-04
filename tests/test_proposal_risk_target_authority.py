@@ -395,6 +395,62 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
         self.assertIs(payload["proposal_target_counterfactual_execution_proven"], False)
         self.assertIs(payload["risk_upper_bound_for_target"], False)
 
+    def test_deleted_join_record_cannot_be_recreated_from_target_and_science(self) -> None:
+        membership, registry_path, manifest = self._science_state()
+        target = self._issue()
+        joined = issue_product_proposal_risk_evaluation_precommit(
+            self.workspace,
+            target_sha256=target.target_sha256,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            authority_root=self.authority_root,
+        )
+
+        ledger_path = self.workspace / "decisions.jsonl"
+        lines = ledger_path.read_bytes().splitlines(keepends=True)
+        self.assertGreaterEqual(len(lines), 2)
+        ledger_path.write_bytes(b"".join(lines[:-1]))
+
+        with self.assertRaisesRegex(
+            ProductProposalRiskEvaluationPrecommitError,
+            "missing from the canonical Decision Ledger",
+        ):
+            resolve_product_proposal_risk_evaluation_precommit(
+                self.workspace,
+                binding_sha256=joined.binding_sha256,
+                target_sha256=target.target_sha256,
+                membership=membership,
+                registry_path=registry_path,
+                sampling_manifest_json=manifest,
+                authority_root=self.authority_root,
+            )
+
+    def test_scientific_registry_tamper_invalidates_join_after_restart(self) -> None:
+        membership, registry_path, manifest = self._science_state()
+        target = self._issue()
+        joined = issue_product_proposal_risk_evaluation_precommit(
+            self.workspace,
+            target_sha256=target.target_sha256,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            authority_root=self.authority_root,
+        )
+
+        registry_path.write_text("{}", encoding="utf-8")
+
+        with self.assertRaises(ProductProposalRiskEvaluationPrecommitError):
+            resolve_product_proposal_risk_evaluation_precommit(
+                self.workspace,
+                binding_sha256=joined.binding_sha256,
+                target_sha256=target.target_sha256,
+                membership=membership,
+                registry_path=registry_path,
+                sampling_manifest_json=manifest,
+                authority_root=self.authority_root,
+            )
+
     def test_direct_construction_is_not_authority(self) -> None:
         with self.assertRaisesRegex(TypeError, "product-issued"):
             ProductProposalRiskTarget()

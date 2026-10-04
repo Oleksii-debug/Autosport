@@ -731,6 +731,60 @@ def test_fixed_n_iid_qualification_verifier_rejects_object_new_forgery(
         )
 
 
+def test_fixed_n_iid_qualification_verifier_rejects_equality_forgery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        bridge,
+        _initial_capital_sha256,
+        _stake_policy_sha256,
+    ) = _qualified_fixed_n_fixture(tmp_path, monkeypatch)
+    canonical = resolve_product_fixed_n_iid_qualification(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+    forged = object.__new__(ProductFixedNIidQualificationAuthority)
+    for field_name in ProductFixedNIidQualificationAuthority.__dataclass_fields__:
+        object.__setattr__(forged, field_name, getattr(canonical, field_name))
+
+    class AlwaysEqual:
+        def __eq__(self, _other):
+            return True
+
+        def __ne__(self, _other):
+            return False
+
+    object.__setattr__(forged, "qualification_sha256", AlwaysEqual())
+
+    with pytest.raises(
+        ProductFixedNIidQualificationError,
+        match="qualification_sha256 must be exact text",
+    ):
+        verify_product_fixed_n_iid_qualification(
+            forged,
+            membership=membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridges=(bridge,),
+            authority_root=authority_root,
+        )
+
+
 def test_fixed_n_iid_qualification_verifier_rejects_resolver_rebinding(
     tmp_path,
     monkeypatch,

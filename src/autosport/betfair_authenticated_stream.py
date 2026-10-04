@@ -122,6 +122,102 @@ _ACTIVE_SUBSCRIPTION_BY_TRANSPORT: WeakKeyDictionary[
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, eq=False)
+class BetfairAuthenticatedMarketDefinitionEvidence:
+    """Process-local provider-origin proof for one exact Stream marketDefinition."""
+
+    market_id: str
+    provider_request_id: int
+    connection_id: str
+    connection_generation: int
+    subscription_id: str
+    market_filter_sha256: str
+    provider_publish_time_ms: int
+    observed_at_ms: int
+    market_definition_json: str
+    market_definition_sha256: str
+    transport_frame_sha256: str
+    evidence_id: str
+
+    def __post_init__(self) -> None:
+        for name in ("market_id", "connection_id", "subscription_id"):
+            value = getattr(self, name)
+            if type(value) is not str or not value or value != value.strip():
+                raise ValueError(f"{name} must be a non-empty canonical string")
+        for name in (
+            "market_filter_sha256",
+            "market_definition_sha256",
+            "transport_frame_sha256",
+            "evidence_id",
+        ):
+            value = getattr(self, name)
+            if (
+                type(value) is not str
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(f"{name} must be a lowercase SHA-256 digest")
+        if type(self.provider_request_id) is not int or not (
+            2 <= self.provider_request_id <= 2_147_483_647
+        ):
+            raise ValueError("provider_request_id must be a signed positive request id")
+        if type(self.connection_generation) is not int or self.connection_generation <= 0:
+            raise ValueError("connection_generation must be positive")
+        for name in ("provider_publish_time_ms", "observed_at_ms"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if type(self.market_definition_json) is not str or not self.market_definition_json:
+            raise ValueError("market_definition_json must be canonical JSON text")
+        encoded = self.market_definition_json.encode("utf-8", errors="strict")
+        if sha256(encoded).hexdigest() != self.market_definition_sha256:
+            raise ValueError("market_definition_sha256 does not match canonical JSON")
+        if self.evidence_id != _market_definition_evidence_fingerprint(self):
+            raise ValueError("marketDefinition evidence_id does not match canonical payload")
+
+    def assert_issued(self) -> None:
+        with _AUTHORITY_LOCK:
+            authority = _ISSUED_MARKET_DEFINITIONS.get(self)
+        if (
+            authority is None
+            or authority.fingerprint != _market_definition_evidence_fingerprint(self)
+        ):
+            raise BetfairAuthenticatedStreamError(
+                "marketDefinition evidence was not issued by authenticated Stream runtime"
+            )
+        runtime = authority.runtime_ref()
+        if (
+            runtime is None
+            or not runtime._market_definition_evidence_is_current(self)
+        ):
+            raise BetfairAuthenticatedStreamError(
+                "marketDefinition evidence is no longer current for authenticated runtime"
+            )
+
+    @property
+    def grants_provider_write_authority(self) -> bool:
+        return False
+
+    @property
+    def grants_execution_authority(self) -> bool:
+        return False
+
+    @property
+    def real_money_authorized(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True, slots=True)
+class _MarketDefinitionEvidenceAuthority:
+    fingerprint: str
+    runtime_ref: ReferenceType[Any]
+
+
+_ISSUED_MARKET_DEFINITIONS: WeakKeyDictionary[
+    BetfairAuthenticatedMarketDefinitionEvidence, _MarketDefinitionEvidenceAuthority
+] = WeakKeyDictionary()
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True, eq=False)
 class BetfairAuthenticatedFreshnessDecision:
     verdict: BetfairAuthenticatedFreshnessVerdict
     reason: str
@@ -438,6 +534,10 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
         )
         self._freshness = BetfairStreamPublishFreshnessRuntime(context)
         self._transport_by_identity: dict[BetfairQuoteIdentity, tuple[str, str]] = {}
+        self._market_definition_by_market_id: dict[
+            str,
+            BetfairAuthenticatedMarketDefinitionEvidence,
+        ] = {}
 
     @property
     def subscription(self) -> BetfairAuthenticatedMarketSubscription:
@@ -462,6 +562,12 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                     "authenticated market freshness runtime accepts only mcm frames after subscription acknowledgement"
                 )
             accepted_ms = _wall_time_ms()
+            market_definition_candidates = _prepare_market_definition_candidates(
+                raw,
+                frame=frame,
+                subscription=self._subscription,
+                observed_at_ms=accepted_ms,
+            )
             with self._state_lock:
                 self._require_current_connection()
                 issued = self._freshness.ingest_raw(
@@ -469,6 +575,17 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                     received_time_ms=accepted_ms,
                     ingested_time_ms=accepted_ms,
                 )
+                for candidate in market_definition_candidates:
+                    evidence = BetfairAuthenticatedMarketDefinitionEvidence(
+                        **candidate
+                    )
+                    _ISSUED_MARKET_DEFINITIONS[evidence] = (
+                        _MarketDefinitionEvidenceAuthority(
+                            _market_definition_evidence_fingerprint(evidence),
+                            ref(self),
+                        )
+                    )
+                    self._market_definition_by_market_id[evidence.market_id] = evidence
                 for evidence in issued:
                     identity = evidence.quote.identity
                     if (
@@ -485,6 +602,34 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                         frame.payload_sha256,
                     )
                 return issued
+
+    def resolve_market_definition(
+        self,
+        market_id: str,
+    ) -> BetfairAuthenticatedMarketDefinitionEvidence | None:
+        if type(market_id) is not str or not market_id or market_id != market_id.strip():
+            raise ValueError("market_id must be a non-empty canonical string")
+        with self._state_lock:
+            evidence = self._market_definition_by_market_id.get(market_id)
+        if evidence is not None:
+            evidence.assert_issued()
+        return evidence
+
+    def _market_definition_evidence_is_current(
+        self,
+        evidence: BetfairAuthenticatedMarketDefinitionEvidence,
+    ) -> bool:
+        if type(evidence) is not BetfairAuthenticatedMarketDefinitionEvidence:
+            return False
+        try:
+            self._require_current_connection()
+        except BetfairAuthenticatedStreamError:
+            return False
+        with self._state_lock:
+            return (
+                self._market_definition_by_market_id.get(evidence.market_id)
+                is evidence
+            )
 
     def evaluate(
         self,
@@ -610,6 +755,91 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             raise BetfairAuthenticatedStreamError(
                 "authenticated subscription is no longer bound to the live transport connection"
             )
+
+
+def _prepare_market_definition_candidates(
+    raw: dict[str, Any],
+    *,
+    frame: BetfairStreamAuthenticatedFrame,
+    subscription: BetfairAuthenticatedMarketSubscription,
+    observed_at_ms: int,
+) -> tuple[dict[str, object], ...]:
+    changes = raw.get("mc")
+    if type(changes) is not list:
+        raise BetfairAuthenticatedStreamError(
+            "authenticated market-change message mc must be a list"
+        )
+    definitions = [
+        change
+        for change in changes
+        if type(change) is dict and "marketDefinition" in change
+    ]
+    if not definitions:
+        return ()
+    if "EX_MARKET_DEF" not in subscription.market_data_fields:
+        raise BetfairAuthenticatedStreamError(
+            "marketDefinition arrived without EX_MARKET_DEF subscription authority"
+        )
+    if raw.get("id") != subscription.provider_request_id:
+        raise BetfairAuthenticatedStreamError(
+            "marketDefinition provider request id does not match active subscription"
+        )
+    publish_time_ms = raw.get("pt")
+    if type(publish_time_ms) is not int or publish_time_ms < 0:
+        raise BetfairAuthenticatedStreamError(
+            "marketDefinition frame requires non-negative integer publish time"
+        )
+    if type(observed_at_ms) is not int or observed_at_ms <= 0:
+        raise BetfairAuthenticatedStreamError(
+            "marketDefinition local observation time is unavailable"
+        )
+
+    candidates: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for change in definitions:
+        market_id = change.get("id")
+        if (
+            type(market_id) is not str
+            or not market_id
+            or market_id != market_id.strip()
+        ):
+            raise BetfairAuthenticatedStreamError(
+                "marketDefinition market id must be canonical"
+            )
+        if market_id in seen:
+            raise BetfairAuthenticatedStreamError(
+                "authenticated frame contains duplicate marketDefinition market id"
+            )
+        seen.add(market_id)
+        market_definition = change.get("marketDefinition")
+        if type(market_definition) is not dict or not market_definition:
+            raise BetfairAuthenticatedStreamError(
+                "marketDefinition must be a non-empty JSON object"
+            )
+        definition_bytes = _canonical_json_bytes(market_definition)
+        definition_json = definition_bytes.decode("utf-8")
+        definition_sha256 = sha256(definition_bytes).hexdigest()
+        payload = {
+            "schema": "autosport.betfair_authenticated_market_definition.v1",
+            "market_id": market_id,
+            "provider_request_id": subscription.provider_request_id,
+            "connection_id": subscription.connection_id,
+            "connection_generation": subscription.connection_generation,
+            "subscription_id": subscription.subscription_id,
+            "market_filter_sha256": subscription.market_filter_sha256,
+            "provider_publish_time_ms": publish_time_ms,
+            "observed_at_ms": observed_at_ms,
+            "market_definition_json": definition_json,
+            "market_definition_sha256": definition_sha256,
+            "transport_frame_sha256": frame.payload_sha256,
+        }
+        candidates.append(
+            {
+                **payload,
+                "evidence_id": sha256(_canonical_json_bytes(payload)).hexdigest(),
+            }
+        )
+    return tuple(candidates)
 
 
 def _require_subscription_for_transport(
@@ -786,6 +1016,30 @@ def _decision_fingerprint(value: BetfairAuthenticatedFreshnessDecision) -> str:
                 "subscription_id": value.subscription_id,
                 "transport_frame_sha256": value.transport_frame_sha256,
                 "evaluated_at_ms": value.evaluated_at_ms,
+            }
+        )
+    ).hexdigest()
+
+
+
+def _market_definition_evidence_fingerprint(
+    value: BetfairAuthenticatedMarketDefinitionEvidence,
+) -> str:
+    return sha256(
+        _canonical_json_bytes(
+            {
+                "schema": "autosport.betfair_authenticated_market_definition.v1",
+                "market_id": value.market_id,
+                "provider_request_id": value.provider_request_id,
+                "connection_id": value.connection_id,
+                "connection_generation": value.connection_generation,
+                "subscription_id": value.subscription_id,
+                "market_filter_sha256": value.market_filter_sha256,
+                "provider_publish_time_ms": value.provider_publish_time_ms,
+                "observed_at_ms": value.observed_at_ms,
+                "market_definition_json": value.market_definition_json,
+                "market_definition_sha256": value.market_definition_sha256,
+                "transport_frame_sha256": value.transport_frame_sha256,
             }
         )
     ).hexdigest()

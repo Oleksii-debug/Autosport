@@ -9,12 +9,28 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 
+from .betfair_authenticated_stream import (
+    BetfairAuthenticatedMarketDefinitionEvidence,
+)
+from .betfair_stream_codec import BETFAIR_STREAM_SOURCE_ID
 from .domain import MarketType, _canonical_sport_value, _quote_identity
 
 
 _CANONICAL_DATETIME_TYPE = datetime
 _CANONICAL_TIMEZONE_TYPE = timezone
 _CANONICAL_TIMEZONE_UTC = timezone.utc
+_CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_TYPE = (
+    BetfairAuthenticatedMarketDefinitionEvidence
+)
+_CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED = (
+    BetfairAuthenticatedMarketDefinitionEvidence.assert_issued
+)
+_CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED_CODE = getattr(
+    _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED,
+    "__code__",
+    None,
+)
+_CANONICAL_BETFAIR_STREAM_SOURCE_ID = BETFAIR_STREAM_SOURCE_ID
 
 
 _SHA256_HEX = frozenset("0123456789abcdef")
@@ -135,6 +151,14 @@ class OutcomeAuthorityStatus(str, Enum):
     REFUSED = "refused"
 
 
+_CANONICAL_MARKET_TYPE_ENUM = MarketType
+_CANONICAL_OUTCOME_ROSTER_BASIS_TYPE = OutcomeRosterBasis
+_CANONICAL_SETTLEMENT_SEMANTICS_TYPE = SettlementSemantics
+_CANONICAL_OUTCOME_AUTHORITY_STATUS_TYPE = OutcomeAuthorityStatus
+_CANONICAL_VERIFIED_AUTHORITY_TOKEN = _VERIFIED_AUTHORITY_TOKEN
+_CANONICAL_VERIFIED_AUTHORITY_ISSUANCE = _VERIFIED_AUTHORITY_ISSUANCE
+
+
 def _canonical_text(name: str, value: object) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise ValueError(f"{name} must be a non-empty canonical string")
@@ -199,6 +223,8 @@ def _sha256_payload(payload: object) -> str:
 
 _CANONICAL_JSON_DUMPS = json.dumps
 _CANONICAL_JSON_DUMPS_CODE = getattr(_CANONICAL_JSON_DUMPS, "__code__", None)
+_CANONICAL_JSON_LOADS = json.loads
+_CANONICAL_JSON_LOADS_CODE = getattr(_CANONICAL_JSON_LOADS, "__code__", None)
 _CANONICAL_SHA256_CONSTRUCTOR = hashlib.sha256
 _CANONICAL_SHA256_CONSTRUCTOR_CODE = getattr(
     _CANONICAL_SHA256_CONSTRUCTOR,
@@ -409,6 +435,8 @@ _CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS = (
     ("_sha256_payload", _CANONICAL_SHA256_PAYLOAD),
     ("_CANONICAL_JSON_DUMPS", _CANONICAL_JSON_DUMPS),
     ("_CANONICAL_JSON_DUMPS_CODE", _CANONICAL_JSON_DUMPS_CODE),
+    ("_CANONICAL_JSON_LOADS", _CANONICAL_JSON_LOADS),
+    ("_CANONICAL_JSON_LOADS_CODE", _CANONICAL_JSON_LOADS_CODE),
     ("_CANONICAL_JSON_ENCODER", _CANONICAL_JSON_ENCODER),
     ("_CANONICAL_JSON_ENCODER_CODE", _CANONICAL_JSON_ENCODER_CODE),
     ("_CANONICAL_SHA256_CONSTRUCTOR", _CANONICAL_SHA256_CONSTRUCTOR),
@@ -418,6 +446,51 @@ _CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS = (
     ),
     ("_CANONICAL_SHA256_PAYLOAD", _CANONICAL_SHA256_PAYLOAD),
     ("_CANONICAL_SHA256_PAYLOAD_CODE", _CANONICAL_SHA256_PAYLOAD_CODE),
+    (
+        "BetfairAuthenticatedMarketDefinitionEvidence",
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_TYPE,
+    ),
+    ("BETFAIR_STREAM_SOURCE_ID", _CANONICAL_BETFAIR_STREAM_SOURCE_ID),
+    ("MarketType", _CANONICAL_MARKET_TYPE_ENUM),
+    ("OutcomeRosterBasis", _CANONICAL_OUTCOME_ROSTER_BASIS_TYPE),
+    ("SettlementSemantics", _CANONICAL_SETTLEMENT_SEMANTICS_TYPE),
+    ("OutcomeAuthorityStatus", _CANONICAL_OUTCOME_AUTHORITY_STATUS_TYPE),
+    ("_VERIFIED_AUTHORITY_TOKEN", _CANONICAL_VERIFIED_AUTHORITY_TOKEN),
+    ("_VERIFIED_AUTHORITY_ISSUANCE", _CANONICAL_VERIFIED_AUTHORITY_ISSUANCE),
+    (
+        "_CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_TYPE",
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_TYPE,
+    ),
+    (
+        "_CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED",
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED,
+    ),
+    (
+        "_CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED_CODE",
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED_CODE,
+    ),
+    (
+        "_CANONICAL_BETFAIR_STREAM_SOURCE_ID",
+        _CANONICAL_BETFAIR_STREAM_SOURCE_ID,
+    ),
+    ("_CANONICAL_MARKET_TYPE_ENUM", _CANONICAL_MARKET_TYPE_ENUM),
+    (
+        "_CANONICAL_OUTCOME_ROSTER_BASIS_TYPE",
+        _CANONICAL_OUTCOME_ROSTER_BASIS_TYPE,
+    ),
+    (
+        "_CANONICAL_SETTLEMENT_SEMANTICS_TYPE",
+        _CANONICAL_SETTLEMENT_SEMANTICS_TYPE,
+    ),
+    (
+        "_CANONICAL_OUTCOME_AUTHORITY_STATUS_TYPE",
+        _CANONICAL_OUTCOME_AUTHORITY_STATUS_TYPE,
+    ),
+    ("_CANONICAL_VERIFIED_AUTHORITY_TOKEN", _CANONICAL_VERIFIED_AUTHORITY_TOKEN),
+    (
+        "_CANONICAL_VERIFIED_AUTHORITY_ISSUANCE",
+        _CANONICAL_VERIFIED_AUTHORITY_ISSUANCE,
+    ),
     ("MarketOutcomeIdentity", _CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE),
     ("timezone", _CANONICAL_TIMEZONE_TYPE),
     ("MarketTerminalState", _CANONICAL_MARKET_TERMINAL_STATE_TYPE),
@@ -964,12 +1037,17 @@ def _assert_canonical_market_outcome_authority_dispatch(
             )
     helper_code_checks = (
         (_CANONICAL_JSON_DUMPS, _CANONICAL_JSON_DUMPS_CODE),
+        (_CANONICAL_JSON_LOADS, _CANONICAL_JSON_LOADS_CODE),
         (_CANONICAL_JSON_ENCODER, _CANONICAL_JSON_ENCODER_CODE),
         (
             _CANONICAL_SHA256_CONSTRUCTOR,
             _CANONICAL_SHA256_CONSTRUCTOR_CODE,
         ),
         (_CANONICAL_SHA256_PAYLOAD, _CANONICAL_SHA256_PAYLOAD_CODE),
+        (
+            _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED,
+            _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED_CODE,
+        ),
     )
     for helper, expected_code in helper_code_checks:
         if getattr(helper, "__code__", None) is not expected_code:
@@ -1213,4 +1291,165 @@ def assess_betfair_historical_market_definition_authority(
         status=OutcomeAuthorityStatus.REFUSED,
         authority=None,
         refusal_reason="betfair_market_definition_provider_origin_unverified",
+    )
+
+
+def _timestamp_from_epoch_millis(value: int, *, field: str) -> str:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{field} must be a non-negative integer")
+    seconds, milliseconds = divmod(value, 1000)
+    try:
+        parsed = _CANONICAL_DATETIME_TYPE.fromtimestamp(
+            seconds,
+            tz=_CANONICAL_TIMEZONE_UTC,
+        ).replace(microsecond=milliseconds * 1000)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise ValueError(f"{field} is outside representable UTC range") from exc
+    return parsed.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def assess_betfair_authenticated_market_definition_authority(
+    evidence: BetfairAuthenticatedMarketDefinitionEvidence,
+) -> MarketOutcomeAuthorityAssessment:
+    """Mint conservative outcome authority only from authenticated Stream evidence."""
+
+    _assert_canonical_market_outcome_authority_dispatch()
+    if type(evidence) is not _CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_TYPE:
+        raise TypeError(
+            "evidence must be exact BetfairAuthenticatedMarketDefinitionEvidence"
+        )
+    current_assert = vars(
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_TYPE
+    ).get("assert_issued")
+    if (
+        current_assert is not _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED
+        or getattr(current_assert, "__code__", None)
+        is not _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED_CODE
+    ):
+        raise ValueError(
+            "authenticated marketDefinition evidence dispatch was replaced"
+        )
+    _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED(evidence)
+
+    try:
+        market_definition = _CANONICAL_JSON_LOADS(evidence.market_definition_json)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            "authenticated marketDefinition evidence JSON is invalid"
+        ) from exc
+    if type(market_definition) is not dict:
+        raise ValueError("authenticated marketDefinition must be a JSON object")
+    if _canonical_json(market_definition) != evidence.market_definition_json:
+        raise ValueError("authenticated marketDefinition JSON is not canonical")
+    if _sha256_payload(market_definition) != evidence.market_definition_sha256:
+        raise ValueError("authenticated marketDefinition digest mismatch")
+
+    provider_publish_at = _timestamp_from_epoch_millis(
+        evidence.provider_publish_time_ms,
+        field="provider_publish_time_ms",
+    )
+    observed_at = _timestamp_from_epoch_millis(
+        evidence.observed_at_ms,
+        field="observed_at_ms",
+    )
+    structural = assess_betfair_historical_market_definition_authority(
+        market_id=evidence.market_id,
+        market_definition=market_definition,
+        provider_publish_at=provider_publish_at,
+        observed_at=observed_at,
+    )
+    live_identity = _CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE(
+        sport=structural.identity.sport,
+        event_id=structural.identity.event_id,
+        market_id=structural.identity.market_id,
+        source_id=_CANONICAL_BETFAIR_STREAM_SOURCE_ID,
+        market_type=structural.identity.market_type,
+    )
+    if structural.refusal_reason != (
+        "betfair_market_definition_provider_origin_unverified"
+    ):
+        return MarketOutcomeAuthorityAssessment(
+            identity=live_identity,
+            status=_CANONICAL_OUTCOME_AUTHORITY_STATUS_TYPE.REFUSED,
+            authority=None,
+            refusal_reason=structural.refusal_reason,
+        )
+
+    runners = market_definition["runners"]
+    selection_ids = tuple(
+        sorted(
+            _canonical_betfair_runner_id(
+                f"marketDefinition.runners[{index}].id",
+                runner["id"],
+            )
+            for index, runner in enumerate(runners)
+        )
+    )
+    roster_provenance_sha256 = _sha256_payload(
+        {
+            "protocol": (
+                "autosport.betfair_authenticated_complete_market_definition_roster.v1"
+            ),
+            "evidence_id": evidence.evidence_id,
+            "transport_frame_sha256": evidence.transport_frame_sha256,
+            "market_definition_sha256": evidence.market_definition_sha256,
+            "market_id": evidence.market_id,
+            "provider_publish_time_ms": evidence.provider_publish_time_ms,
+            "selection_ids": list(selection_ids),
+        }
+    )
+    settlement_rules_sha256 = _sha256_payload(
+        {
+            "protocol": "autosport.canonical_win_loss_void_superset.v1",
+            "claim": "conservative_exhaustive_terminal_superset_not_exact_rules",
+            "results": ["loss", "void", "win"],
+        }
+    )
+    verification_protocol_sha256 = _sha256_payload(
+        {
+            "protocol": (
+                "autosport.betfair_authenticated_market_definition_outcome.v1"
+            ),
+            "requires_authenticated_stream_evidence": True,
+            "requires_ex_market_def_subscription": True,
+            "requires_open_market": True,
+            "requires_complete_runner_roster": True,
+            "supported_event_type_id": _BETFAIR_TABLE_TENNIS_EVENT_TYPE_ID,
+            "supported_market_type": _BETFAIR_MATCH_ODDS_TYPE,
+            "terminal_semantics": (
+                _CANONICAL_SETTLEMENT_SEMANTICS_TYPE
+                .CANONICAL_WIN_LOSS_VOID_SUPERSET.value
+            ),
+            "terminal_space_exact": False,
+        }
+    )
+
+    issuance = _CANONICAL_VERIFIED_AUTHORITY_ISSUANCE.set(True)
+    try:
+        authority = _CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE(
+            identity=live_identity,
+            selection_ids=selection_ids,
+            roster_basis=(
+                _CANONICAL_OUTCOME_ROSTER_BASIS_TYPE.PROVIDER_MARKET_DEFINITION
+            ),
+            settlement_semantics=(
+                _CANONICAL_SETTLEMENT_SEMANTICS_TYPE
+                .CANONICAL_WIN_LOSS_VOID_SUPERSET
+            ),
+            source_revision=f"stream-market-definition:{evidence.evidence_id}",
+            causal_cutoff=provider_publish_at,
+            observed_at=observed_at,
+            roster_provenance_sha256=roster_provenance_sha256,
+            settlement_rules_sha256=settlement_rules_sha256,
+            verification_protocol_sha256=verification_protocol_sha256,
+            _verification_token=_CANONICAL_VERIFIED_AUTHORITY_TOKEN,
+        )
+    finally:
+        _CANONICAL_VERIFIED_AUTHORITY_ISSUANCE.reset(issuance)
+
+    return MarketOutcomeAuthorityAssessment(
+        identity=live_identity,
+        status=_CANONICAL_OUTCOME_AUTHORITY_STATUS_TYPE.PROVEN_EXHAUSTIVE,
+        authority=authority,
+        refusal_reason=None,
     )

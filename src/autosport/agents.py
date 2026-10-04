@@ -222,6 +222,11 @@ class PaperBaselineAgent:
             return
         if event.metadata.get("paper_signal") is not True or self.stake > context.paper_book.balance:
             return
+        # The baseline may preserve an explicit BACK identity because current
+        # PaperBook economics are BACK-compatible. Explicit LAY must remain
+        # fail-closed until canonical LAY liability/settlement authority exists.
+        if event.exchange_side == "lay":
+            return
         ticket = context.paper_book.open_ticket(
             [TicketLeg(
                 event.event_id,
@@ -229,6 +234,8 @@ class PaperBaselineAgent:
                 event.selection_id,
                 event.decimal_odds,
                 sport=event.sport,
+                exchange_side=event.exchange_side,
+                market_semantics_id=event.market_semantics_id,
             )],
             self.stake,
             reason=f"fixture baseline signal {signal_id}",

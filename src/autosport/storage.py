@@ -7,6 +7,7 @@ import re
 import sqlite3
 import stat
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
@@ -2067,17 +2068,32 @@ class SQLiteMarketStore:
         authority = self._replay_cutoff_authority()
         append_authority = self._market_append_authority()
 
-        # A cutoff resolver must never recover the PREPARE of a still-live append
-        # writer from another SQLiteMarketStore instance.  Append commits SQLite
-        # before machine COMMIT, so BEGIN IMMEDIATE alone leaves a real
-        # SQLite-COMMIT -> machine-COMMIT window.  Respect the same global lock order
-        # as trusted history readers: append issuance before this instance's SQLite
-        # connection lock.  The sibling replay-cutoff lock is outermost; append
-        # writers never acquire it, so this adds no reverse dependency.  All locks
-        # are released before MarketEvent decoding, preserving live ingestion during
-        # potentially expensive replay decoding.
+        # Existing independently issued cutoffs never depend on later append-machine
+        # progress, so keep them readable while another store is publishing a newer
+        # append.  A first-time cutoff, however, must own the append sibling lock:
+        # append commits SQLite before machine COMMIT, and BEGIN IMMEDIATE alone
+        # therefore leaves a real SQLite-COMMIT -> machine-COMMIT window in which a
+        # resolver could otherwise recover a still-live writer's PREPARE.
+        with self._connection_lock:
+            preexisting_cutoff = (
+                self.connection.execute(
+                    "SELECT 1 FROM market_replay_cutoffs WHERE cutoff_id=? LIMIT 1",
+                    (cutoff_id,),
+                ).fetchone()
+                is not None
+            )
+        append_guard = (
+            nullcontext()
+            if preexisting_cutoff
+            else self._market_append_issuance_lock(append_authority)
+        )
+
+        # Lock order for first issuance is replay-cutoff sibling -> append sibling ->
+        # this instance's SQLite connection. Append writers never acquire the replay
+        # sibling, so there is no reverse dependency. All locks are released before
+        # MarketEvent decoding.
         with self._replay_cutoff_issuance_lock(authority):
-            with self._market_append_issuance_lock(append_authority):
+            with append_guard:
                 with self._connection_lock:
                     self._validate_causal_replay_state()
                     cutoff_rows = self._validated_replay_cutoff_rows()
@@ -2098,6 +2114,11 @@ class SQLiteMarketStore:
                         ),
                         None,
                     )
+
+                    if current_row is None and preexisting_cutoff:
+                        raise MonotonicAuthorityRollbackError(
+                            "pre-existing causal replay cutoff disappeared before proof"
+                        )
 
                     if current_row is None:
                         # Serialize only cutoff issuance against canonical appends. The

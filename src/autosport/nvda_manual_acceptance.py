@@ -896,11 +896,16 @@ class ManualNvdaAcceptanceLedger:
         if not self.path.exists():
             return (), (), None
         try:
-            raw_lines = self.path.read_text(encoding="utf-8").splitlines()
+            raw = self.path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise NvdaManualAcceptanceIntegrityError(
                 "cannot read manual NVDA ledger"
             ) from exc
+        if raw and not raw.endswith("\n"):
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger lacks canonical trailing newline"
+            )
+        raw_lines = raw.splitlines()
         if any(not line for line in raw_lines):
             raise NvdaManualAcceptanceIntegrityError(
                 "manual NVDA ledger contains a blank event line"

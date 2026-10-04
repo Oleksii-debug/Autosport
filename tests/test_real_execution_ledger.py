@@ -2395,5 +2395,84 @@ class RealExecutionLedgerTests(unittest.TestCase):
 
 
 
+
+    def test_generic_plan_reservation_does_not_mint_supervised_issuance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            witness = "a" * 64
+            current = plan(action(), plan_id=f"supervised-v2-{witness}")
+            ledger.reserve_plan(current)
+
+            self.assertFalse(
+                ledger.supervised_plan_issuance_is_current(
+                    plan_id=current.plan_id,
+                    bound_plan_witness=witness,
+                    plan_fingerprint=current.fingerprint,
+                )
+            )
+
+    def test_separate_supervised_plan_issuance_writer_is_not_exposed(self):
+        self.assertFalse(
+            hasattr(RealExecutionLedger, "_bind_supervised_plan_issuance")
+        )
+
+    def test_atomic_supervised_plan_issuance_schema_is_valid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            witness = "b" * 64
+            current = plan(action(), plan_id=f"supervised-v2-{witness}")
+            ledger.reserve_plan(current)
+            event = json.loads(json.dumps(ledger._events()[0]))
+            event["payload"]["supervised_plan_issuance"] = {
+                "bound_plan_witness": witness,
+                "plan_fingerprint": current.fingerprint,
+            }
+
+            RealExecutionLedger._validate_semantics([event])
+
+    def test_atomic_and_legacy_supervised_issuance_cannot_coexist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            witness = "c" * 64
+            current = plan(action(), plan_id=f"supervised-v2-{witness}")
+            ledger.reserve_plan(current)
+            reservation = json.loads(json.dumps(ledger._events()[0]))
+            reservation["payload"]["supervised_plan_issuance"] = {
+                "bound_plan_witness": witness,
+                "plan_fingerprint": current.fingerprint,
+            }
+            legacy = json.loads(json.dumps(reservation))
+            legacy["event_id"] = "legacy-supervised-issuance"
+            legacy["event_type"] = EventType.SUPERVISED_PLAN_ISSUED.value
+            legacy["payload"] = {
+                "bound_plan_witness": witness,
+                "plan_fingerprint": current.fingerprint,
+            }
+
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "multiple supervised plan issuance bindings",
+            ):
+                RealExecutionLedger._validate_semantics([reservation, legacy])
+
+    def test_atomic_supervised_issuance_rejects_witness_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            witness = "d" * 64
+            current = plan(action(), plan_id=f"supervised-v2-{witness}")
+            ledger.reserve_plan(current)
+            event = json.loads(json.dumps(ledger._events()[0]))
+            event["payload"]["supervised_plan_issuance"] = {
+                "bound_plan_witness": "0" * 64,
+                "plan_fingerprint": current.fingerprint,
+            }
+
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "witness mismatches plan identity",
+            ):
+                RealExecutionLedger._validate_semantics([event])
+
+
 if __name__ == "__main__":
     unittest.main()

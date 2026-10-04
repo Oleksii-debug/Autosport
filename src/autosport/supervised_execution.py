@@ -4,10 +4,11 @@ import hashlib
 import json
 import threading
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
+from types import MappingProxyType
 
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
@@ -32,6 +33,7 @@ from .real_execution_ledger import (
     ExecutionAction,
     ExecutionAttempt,
     ExecutionPlan,
+    EventType,
     ExternalAcknowledgement,
     ExternalEffectReconciliation,
     RealExecutionLedger,
@@ -280,6 +282,12 @@ class BoundSupervisedExecutionPlan:
     approval_fingerprint: str
     profile_bindings: tuple[ProfileBinding, ...]
     constraints: tuple[ExecutionLegConstraint, ...]
+    _product_issuance_token: object | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         self.verify_binding()
@@ -377,6 +385,25 @@ def _bound_plan_witness(value: BoundSupervisedExecutionPlan) -> str:
         value.profile_bindings,
         value.constraints,
     )
+
+
+_BOUND_PLAN_WITNESS = _bound_plan_witness
+_BOUND_PLAN_WITNESS_CODE = getattr(_BOUND_PLAN_WITNESS, "__code__", None)
+
+
+def _canonical_bound_plan_witness(
+    value: BoundSupervisedExecutionPlan,
+    _witness=_BOUND_PLAN_WITNESS,
+    _witness_code=_BOUND_PLAN_WITNESS_CODE,
+) -> str:
+    if (
+        globals().get("_bound_plan_witness") is not _witness
+        or getattr(_witness, "__code__", None) is not _witness_code
+    ):
+        raise SupervisedExecutionError(
+            "canonical bound supervised execution plan witness changed"
+        )
+    return _witness(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -728,12 +755,40 @@ def build_supervised_execution_plan(
 
 
 def _install_bound_supervised_execution_plan_authority() -> None:
-    lock = threading.RLock()
-    issued: dict[
-        int,
-        tuple[weakref.ReferenceType[BoundSupervisedExecutionPlan], str],
-    ] = {}
     raw_build = build_supervised_execution_plan
+    raw_build_code = getattr(raw_build, "__code__", None)
+    witness_fn = _canonical_bound_plan_witness
+    witness_code = getattr(witness_fn, "__code__", None)
+    token_guard = object()
+    registry_lock = threading.RLock()
+    immutable_mapping_type = MappingProxyType
+    issued = immutable_mapping_type({})
+
+    class IssuanceToken:
+        __slots__ = ("reference", "witness")
+
+        def __init__(
+            self,
+            guard: object,
+            value: BoundSupervisedExecutionPlan,
+            witness: str,
+        ) -> None:
+            if guard is not token_guard:
+                raise TypeError("bound plan issuance token is product-internal")
+            self.reference = weakref.ref(value)
+            self.witness = witness
+
+    token_type = IssuanceToken
+
+    def require_internal_dispatch() -> None:
+        if (
+            getattr(raw_build, "__code__", None) is not raw_build_code
+            or globals().get("_canonical_bound_plan_witness") is not witness_fn
+            or getattr(witness_fn, "__code__", None) is not witness_code
+        ):
+            raise SupervisedExecutionError(
+                "canonical bound supervised execution plan issuer internals changed"
+            )
 
     def authoritative_build(
         portfolio_plan: PortfolioPlan,
@@ -745,6 +800,8 @@ def _install_bound_supervised_execution_plan_authority() -> None:
         *,
         created_at: str,
     ) -> BoundSupervisedExecutionPlan:
+        nonlocal issued
+        require_internal_dispatch()
         value = raw_build(
             portfolio_plan,
             intents,
@@ -754,7 +811,10 @@ def _install_bound_supervised_execution_plan_authority() -> None:
             constraints,
             created_at=created_at,
         )
-        witness = _bound_plan_witness(value)
+        require_internal_dispatch()
+        witness = witness_fn(value)
+        token = token_type(token_guard, value, witness)
+        object.__setattr__(value, "_product_issuance_token", token)
         identity = id(value)
 
         def clear(
@@ -762,24 +822,39 @@ def _install_bound_supervised_execution_plan_authority() -> None:
             *,
             _identity: int = identity,
         ) -> None:
-            with lock:
+            nonlocal issued
+            with registry_lock:
                 record = issued.get(_identity)
                 if record is not None and record[0] is reference:
-                    issued.pop(_identity, None)
+                    updated = dict(issued)
+                    updated.pop(_identity, None)
+                    issued = immutable_mapping_type(updated)
 
         reference = weakref.ref(value, clear)
-        with lock:
-            issued[identity] = (reference, witness)
+        with registry_lock:
+            updated = dict(issued)
+            updated[identity] = (reference, witness)
+            issued = immutable_mapping_type(updated)
         return value
 
     def assert_authoritative(value: BoundSupervisedExecutionPlan) -> None:
+        require_internal_dispatch()
         try:
-            witness = _bound_plan_witness(value)
-        except SupervisedExecutionError as exc:
+            witness = witness_fn(value)
+            token = object.__getattribute__(value, "_product_issuance_token")
+        except (SupervisedExecutionError, AttributeError, TypeError, ValueError) as exc:
             raise SupervisedExecutionError(
                 "bound supervised execution plan is not current canonical product issuance"
             ) from exc
-        with lock:
+        if (
+            type(token) is not token_type
+            or token.reference() is not value
+            or token.witness != witness
+        ):
+            raise SupervisedExecutionError(
+                "bound supervised execution plan is not current canonical product issuance"
+            )
+        with registry_lock:
             record = issued.get(id(value))
         if (
             record is None
@@ -835,13 +910,89 @@ def _canonical_bound_plan_authority_dispatch(
     return _build, _assert
 
 
+def _canonical_supervised_issuance_ledger_dispatch(
+    ledger: RealExecutionLedger,
+    *,
+    _ledger_type=RealExecutionLedger,
+    _surface=tuple(
+        (name, method, getattr(method, "__code__", None))
+        for name, method in (
+            ("_mutate", RealExecutionLedger._mutate),
+            ("_events", RealExecutionLedger._events),
+            ("_append", RealExecutionLedger._append),
+            ("saga", RealExecutionLedger.saga),
+            (
+                "supervised_plan_issuance_is_current",
+                RealExecutionLedger.supervised_plan_issuance_is_current,
+            ),
+            ("bind_supervised_approval", RealExecutionLedger.bind_supervised_approval),
+            (
+                "supervised_approval_is_active",
+                RealExecutionLedger.supervised_approval_is_active,
+            ),
+            ("begin_attempt", RealExecutionLedger.begin_attempt),
+            (
+                "revoke_supervised_approval",
+                RealExecutionLedger.revoke_supervised_approval,
+            ),
+            (
+                "provider_order_reference",
+                RealExecutionLedger.provider_order_reference,
+            ),
+            (
+                "provider_evidence_binding",
+                RealExecutionLedger.provider_evidence_binding,
+            ),
+            ("acknowledge", RealExecutionLedger.acknowledge),
+            ("reconcile_found", RealExecutionLedger.reconcile_found),
+            ("bind_provider_evidence", RealExecutionLedger.bind_provider_evidence),
+            ("attempt_state", RealExecutionLedger.attempt_state),
+            ("reconcile_not_found", RealExecutionLedger.reconcile_not_found),
+        )
+    ),
+):
+    if RealExecutionLedger is not _ledger_type or type(ledger) is not _ledger_type:
+        raise SupervisedExecutionError("canonical real execution ledger authority changed")
+    bound = {}
+    for name, expected, expected_code in _surface:
+        current = vars(_ledger_type).get(name)
+        if (
+            current is not expected
+            or getattr(current, "__code__", None) is not expected_code
+        ):
+            raise SupervisedExecutionError(
+                "canonical real execution ledger authority changed"
+            )
+        bound[name] = expected.__get__(ledger, _ledger_type)
+    return bound
+
+
+def _require_bound_plan_structure(
+    bound: BoundSupervisedExecutionPlan,
+    _witness=_canonical_bound_plan_witness,
+    _witness_code=getattr(_canonical_bound_plan_witness, "__code__", None),
+) -> None:
+    if (
+        globals().get("_canonical_bound_plan_witness") is not _witness
+        or getattr(_witness, "__code__", None) is not _witness_code
+    ):
+        raise SupervisedExecutionError(
+            "canonical bound supervised execution plan witness changed"
+        )
+    try:
+        _witness(bound)
+    except (SupervisedExecutionError, AttributeError, TypeError, ValueError) as exc:
+        raise SupervisedExecutionError(
+            "bound supervised execution plan is not a canonical structural binding"
+        ) from exc
+
+
 def _require_approval(
     bound: BoundSupervisedExecutionPlan,
     approval: SupervisedApproval,
     at: str,
 ) -> None:
-    _, assert_bound = _canonical_bound_plan_authority_dispatch()
-    assert_bound(bound)
+    _require_bound_plan_structure(bound)
     approval.require_active(at)
     if (
         approval.portfolio_plan_sha256 != bound.portfolio_plan_sha256
@@ -857,7 +1008,10 @@ def _require_durable_approval(
     bound: BoundSupervisedExecutionPlan,
     approval: SupervisedApproval,
 ) -> None:
-    if not ledger.supervised_approval_is_active(
+    approval_is_active = _canonical_supervised_issuance_ledger_dispatch(ledger)[
+        "supervised_approval_is_active"
+    ]
+    if not approval_is_active(
         plan_id=bound.execution_plan.plan_id,
         approval_id=approval.ledger_identity,
         approval_fingerprint=approval.fingerprint,
@@ -867,15 +1021,34 @@ def _require_durable_approval(
         )
 
 
-def _require_reserved(ledger: RealExecutionLedger, bound: BoundSupervisedExecutionPlan) -> None:
-    _, assert_bound = _canonical_bound_plan_authority_dispatch()
-    assert_bound(bound)
+def _durable_reserved_plan_fingerprint(
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+) -> str | None:
+    _require_bound_plan_structure(bound)
+    _canonical_bound_plan_authority_dispatch()
+    methods = _canonical_supervised_issuance_ledger_dispatch(ledger)
     try:
-        saga = ledger.saga(bound.execution_plan.plan_id)
-    except KeyError as exc:
-        raise SupervisedExecutionError("execution plan is not reserved") from exc
+        saga = methods["saga"](bound.execution_plan.plan_id)
+    except KeyError:
+        return None
     if saga.plan_fingerprint != bound.execution_plan.fingerprint:
         raise SupervisedExecutionError("durable execution-plan fingerprint mismatch")
+    witness = _canonical_bound_plan_witness(bound)
+    if not methods["supervised_plan_issuance_is_current"](
+        plan_id=bound.execution_plan.plan_id,
+        bound_plan_witness=witness,
+        plan_fingerprint=saga.plan_fingerprint,
+    ):
+        return None
+    return saga.plan_fingerprint
+
+
+def _require_reserved(ledger: RealExecutionLedger, bound: BoundSupervisedExecutionPlan) -> None:
+    if _durable_reserved_plan_fingerprint(ledger, bound) is None:
+        raise SupervisedExecutionError(
+            "execution plan is not durably product-issued and reserved"
+        )
 
 
 def reserve_supervised_plan(
@@ -885,8 +1058,66 @@ def reserve_supervised_plan(
 ) -> str:
     now = _trusted_now()
     _require_approval(bound, approval, now)
-    fingerprint = ledger.reserve_plan(bound.execution_plan)
-    ledger.bind_supervised_approval(
+    _, assert_bound = _canonical_bound_plan_authority_dispatch()
+    methods = _canonical_supervised_issuance_ledger_dispatch(ledger)
+    fingerprint = _durable_reserved_plan_fingerprint(ledger, bound)
+    if fingerprint is None:
+        # First durable product issuance still requires the live product issuer.
+        # Reservation + issuance are one PLAN_RESERVED append/monotonic transaction.
+        assert_bound(bound)
+        plan = bound.execution_plan
+        witness = _canonical_bound_plan_witness(bound)
+        fingerprint = plan.fingerprint
+        issuance = {
+            "bound_plan_witness": witness,
+            "plan_fingerprint": fingerprint,
+        }
+
+        def reserve_atomically() -> str:
+            events = methods["_events"]()
+            prior = [
+                event
+                for event in events
+                if event["plan_id"] == plan.plan_id
+                and event["event_type"] == EventType.PLAN_RESERVED.value
+            ]
+            if prior:
+                if len(prior) != 1:
+                    raise SupervisedExecutionError(
+                        "durable execution plan has ambiguous reservations"
+                    )
+                if prior[0]["payload"]["plan_fingerprint"] != fingerprint:
+                    raise SupervisedExecutionError(
+                        "durable execution-plan fingerprint mismatch"
+                    )
+                if prior[0]["payload"].get("supervised_plan_issuance") == issuance:
+                    return fingerprint
+                raise SupervisedExecutionError(
+                    "existing plan reservation lacks atomic supervised product issuance"
+                )
+            methods["_append"](
+                EventType.PLAN_RESERVED,
+                plan.plan_id,
+                None,
+                None,
+                {
+                    "plan_fingerprint": fingerprint,
+                    "plan": plan.to_dict(),
+                    "supervised_plan_issuance": issuance,
+                },
+            )
+            return fingerprint
+
+        fingerprint = methods["_mutate"](reserve_atomically)
+        if not methods["supervised_plan_issuance_is_current"](
+            plan_id=plan.plan_id,
+            bound_plan_witness=witness,
+            plan_fingerprint=fingerprint,
+        ):
+            raise SupervisedExecutionError(
+                "supervised plan issuance was not durably recorded"
+            )
+    methods["bind_supervised_approval"](
         plan_id=bound.execution_plan.plan_id,
         approval_id=approval.ledger_identity,
         approval_fingerprint=approval.fingerprint,
@@ -910,7 +1141,10 @@ def revoke_supervised_approval(
         or approval.ledger_identity != bound.execution_plan.approval_id
     ):
         raise SupervisedExecutionError("approval identity mismatches bound plan")
-    ledger.revoke_supervised_approval(
+    revoke_approval = _canonical_supervised_issuance_ledger_dispatch(ledger)[
+        "revoke_supervised_approval"
+    ]
+    revoke_approval(
         plan_id=bound.execution_plan.plan_id,
         approval_id=approval.ledger_identity,
         approval_fingerprint=approval.fingerprint,
@@ -936,7 +1170,10 @@ def begin_supervised_attempt(
     action = bound.action_for(action_id)
     if _time(now, "trusted current time") >= _time(action.expires_at, "expires_at"):
         raise SupervisedExecutionError("attempt is at/after quote expiry")
-    return ledger.begin_attempt(
+    begin_attempt = _canonical_supervised_issuance_ledger_dispatch(ledger)[
+        "begin_attempt"
+    ]
+    return begin_attempt(
         plan_id=bound.execution_plan.plan_id,
         action_id=action_id,
         attempt_id=attempt_id,
@@ -950,7 +1187,8 @@ def _attempt_action(
     attempt_id: str,
 ) -> tuple[ExecutionAction, AttemptState]:
     _require_reserved(ledger, bound)
-    saga = ledger.saga(bound.execution_plan.plan_id)
+    saga_reader = _canonical_supervised_issuance_ledger_dispatch(ledger)["saga"]
+    saga = saga_reader(bound.execution_plan.plan_id)
     action_id = saga.attempt_action_ids.get(attempt_id)
     if action_id is None:
         raise SupervisedExecutionError("attempt does not belong to bound plan")
@@ -966,7 +1204,10 @@ def _require_attempt_provider_order_reference(
 ) -> None:
     """Fail closed when #561 evidence is not bound to the attempt's durable provider ref."""
 
-    expected = ledger.provider_order_reference(
+    provider_order_reference = _canonical_supervised_issuance_ledger_dispatch(ledger)[
+        "provider_order_reference"
+    ]
+    expected = provider_order_reference(
         attempt_id=attempt_id,
         provider_id=action.bookmaker_id,
     )
@@ -1087,7 +1328,10 @@ def reconcile_provider_readback(
         readback.accepted_odds,
     )
 
-    direct_binding = ledger.provider_evidence_binding(attempt_id)
+    provider_evidence_binding = _canonical_supervised_issuance_ledger_dispatch(ledger)[
+        "provider_evidence_binding"
+    ]
+    direct_binding = provider_evidence_binding(attempt_id)
     reconciliation_evidence_id = (
         None if direct_binding is not None else readback.evidence_id
     )
@@ -1109,9 +1353,13 @@ def reconcile_provider_readback(
             raise SupervisedExecutionError(
                 "durable direct-ACK provider evidence conflicts on replay"
             )
-        ledger.acknowledge(acknowledgement)
+        acknowledge = _canonical_supervised_issuance_ledger_dispatch(ledger)["acknowledge"]
+        acknowledge(acknowledgement)
     elif state is AttemptState.UNKNOWN:
-        ledger.reconcile_found(
+        reconcile_found = _canonical_supervised_issuance_ledger_dispatch(ledger)[
+            "reconcile_found"
+        ]
+        reconcile_found(
             ExternalEffectReconciliation(
                 attempt_id=attempt_id,
                 evidence_id=readback.evidence_id,
@@ -1129,9 +1377,13 @@ def reconcile_provider_readback(
             accepted_stake=readback.accepted_stake,
             reconciliation_evidence_id=readback.evidence_id,
         )
-        ledger.acknowledge(acknowledgement)
+        acknowledge = _canonical_supervised_issuance_ledger_dispatch(ledger)["acknowledge"]
+        acknowledge(acknowledgement)
     elif state is AttemptState.SUBMITTED:
-        ledger.bind_provider_evidence(
+        bind_provider_evidence = _canonical_supervised_issuance_ledger_dispatch(ledger)[
+            "bind_provider_evidence"
+        ]
+        bind_provider_evidence(
             attempt_id=attempt_id,
             evidence_id=readback.evidence_id,
             observed_at=readback.observed_at,
@@ -1146,12 +1398,16 @@ def reconcile_provider_readback(
             accepted_stake=readback.accepted_stake,
             reconciliation_evidence_id=None,
         )
-        ledger.acknowledge(acknowledgement)
+        acknowledge = _canonical_supervised_issuance_ledger_dispatch(ledger)["acknowledge"]
+        acknowledge(acknowledgement)
     else:
         raise SupervisedExecutionError(
             "readback requires SUBMITTED/UNKNOWN or exact terminal replay"
         )
-    final = ledger.attempt_state(attempt_id)
+    attempt_state = _canonical_supervised_issuance_ledger_dispatch(ledger)[
+        "attempt_state"
+    ]
+    final = attempt_state(attempt_id)
     outcome = {
         AttemptState.ACCEPTED: ReadbackOutcome.ACCEPTED,
         AttemptState.PARTIAL: ReadbackOutcome.PARTIAL,
@@ -1221,7 +1477,10 @@ def reconcile_provider_not_found(
         adapter_version=readback.adapter_version,
         profile_version=readback.profile_version,
     )
-    ledger.reconcile_not_found(
+    reconcile_not_found = _canonical_supervised_issuance_ledger_dispatch(ledger)[
+        "reconcile_not_found"
+    ]
+    reconcile_not_found(
         ReconciliationSnapshot(
             attempt_id=attempt_id,
             evidence_id=readback.evidence_id,
@@ -1236,7 +1495,9 @@ def reconcile_provider_not_found(
     )
     return ReconciliationResult(
         ReadbackOutcome.NOT_FOUND,
-        ledger.attempt_state(attempt_id),
+        _canonical_supervised_issuance_ledger_dispatch(ledger)["attempt_state"](
+            attempt_id
+        ),
         readback.evidence_id,
     )
 

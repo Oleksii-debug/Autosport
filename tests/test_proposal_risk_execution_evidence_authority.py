@@ -1766,7 +1766,7 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
         finally:
             cell.cell_contents = original
 
-    def test_mapping_resolver_ignores_module_global_core_rebind(self) -> None:
+    def test_mapping_resolver_rejects_module_global_core_rebind(self) -> None:
         bindings = self._bindings()
         self._issue(bindings)
         original = (
@@ -1779,9 +1779,11 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
                     "workspace_instance_id": "forged",
                 }
             )
-            result = self._resolve(bindings)
-            self.assertTrue(result.mapping_identity_proven)
-            self.assertTrue(result.terminal_mapping_proven)
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "helper root changed",
+            ):
+                self._resolve(bindings)
         finally:
             terminal_mapping_authority._resolve_product_proposal_risk_terminal_state_mapping_values = (
                 original

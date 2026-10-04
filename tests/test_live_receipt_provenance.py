@@ -83,6 +83,21 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(store.trusted_live_events(), [])
             store.close()
 
+    def test_public_batch_cannot_mint_receipt_from_mutable_pending_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+            batch = (event,)
+
+            store._pending_live_receipt_batch = batch
+            accepted = store.append_batch_accepted(batch)
+
+            self.assertEqual(accepted, [event])
+            self.assertFalse(store.has_trusted_live_receipt(event))
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
     def test_live_receipt_authority_does_not_leak_into_reentrant_generic_batch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

@@ -181,6 +181,25 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(store.trusted_live_events(), [])
             store.close()
 
+    def test_private_live_receipt_seam_rejects_store_subclass(self) -> None:
+        class StoreSubclass(SQLiteMarketStore):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = StoreSubclass(path)
+            event = self._direct_event(sequence=1)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "live receipt authority requires an exact SQLiteMarketStore",
+            ):
+                SQLiteMarketStore._append_live_batch_accepted(store, [event])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
     def test_live_ingestion_rejects_store_subclass_receipt_override(self) -> None:
         class ForgingStore(SQLiteMarketStore):
             def _append_live_batch_accepted(self, events):

@@ -156,6 +156,7 @@ _ProductDesktopDeltaConsumer = _build_product_desktop_consumer_type(
 )
 del _build_product_desktop_consumer_type
 
+
 def _serialized_runtime_operation(method):
     """Hold one runtime-local fence across an admitted public lifecycle operation."""
 

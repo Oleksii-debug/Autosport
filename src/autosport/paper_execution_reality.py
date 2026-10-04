@@ -674,6 +674,121 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             ) from exc
         self._path_durable = True
 
+    @staticmethod
+    def _validated_exposure_scope_payload(
+        payload: object,
+    ) -> dict[str, Any]:
+        expected_keys = {
+            "schema",
+            "schema_version",
+            "plan_id",
+            "plan_fingerprint",
+            "intent_evidence_sha256",
+            "bindings",
+            "binding_sha256",
+        }
+        if type(payload) is not dict or set(payload) != expected_keys:
+            raise PaperExecutionStateError(
+                "exposure scope payload schema is invalid"
+            )
+        if (
+            payload["schema"]
+            != "autosport.paper_execution.exposure_scope_binding"
+            or type(payload["schema_version"]) is not int
+            or payload["schema_version"] != 1
+        ):
+            raise PaperExecutionStateError(
+                "exposure scope payload schema is invalid"
+            )
+        try:
+            _impl._text(payload["plan_id"], "plan_id")
+            _sha256_text(
+                payload["plan_fingerprint"],
+                "plan_fingerprint",
+            )
+            _sha256_text(
+                payload["intent_evidence_sha256"],
+                "intent_evidence_sha256",
+            )
+            supplied_binding_sha256 = _sha256_text(
+                payload["binding_sha256"],
+                "binding_sha256",
+            )
+        except (TypeError, ValueError) as exc:
+            raise PaperExecutionStateError(
+                "exposure scope identity is invalid"
+            ) from exc
+
+        raw_bindings = payload["bindings"]
+        if type(raw_bindings) is not list or not raw_bindings:
+            raise PaperExecutionStateError(
+                "exposure scope bindings are invalid"
+            )
+        action_ids: list[str] = []
+        for raw_binding in raw_bindings:
+            if type(raw_binding) is not dict or set(raw_binding) != {
+                "action_id",
+                "sport",
+                "bankroll_id",
+                "currency",
+            }:
+                raise PaperExecutionStateError(
+                    "exposure scope bindings are invalid"
+                )
+            try:
+                action_id = _impl._text(
+                    raw_binding["action_id"],
+                    "action_id",
+                )
+                sport = raw_binding["sport"]
+                if sport is not None:
+                    _impl._text(sport, "sport")
+                bankroll_id = raw_binding["bankroll_id"]
+                currency = raw_binding["currency"]
+                if (bankroll_id is None) != (currency is None):
+                    raise ValueError(
+                        "bankroll_id and currency must be paired"
+                    )
+                if bankroll_id is not None:
+                    _impl._text(bankroll_id, "bankroll_id")
+                    canonical_currency = _impl._text(
+                        currency,
+                        "currency",
+                    )
+                    if (
+                        len(canonical_currency) != 3
+                        or not canonical_currency.isascii()
+                        or not canonical_currency.isalpha()
+                        or canonical_currency != canonical_currency.upper()
+                    ):
+                        raise ValueError("currency is not canonical")
+            except (TypeError, ValueError) as exc:
+                raise PaperExecutionStateError(
+                    "exposure scope bindings are invalid"
+                ) from exc
+            action_ids.append(action_id)
+        if len(action_ids) != len(set(action_ids)):
+            raise PaperExecutionStateError(
+                "exposure scope bindings contain duplicate action_id"
+            )
+
+        body = {
+            key: payload[key]
+            for key in (
+                "schema",
+                "schema_version",
+                "plan_id",
+                "plan_fingerprint",
+                "intent_evidence_sha256",
+                "bindings",
+            )
+        }
+        if _impl._digest(body) != supplied_binding_sha256:
+            raise PaperExecutionStateError(
+                "exposure scope binding digest is invalid"
+            )
+        return payload
+
     def publish_exposure_scope(
         self,
         *,
@@ -681,15 +796,30 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         payload: dict[str, Any],
     ) -> None:
         """Publish the adoption exposure scope before run state, atomically."""
-        if type(payload) is not dict:
-            raise TypeError("payload must be a dict")
-        key = f"{run_id}:exposure-scope"
+        try:
+            canonical_run_id = _impl._text(run_id, "run_id")
+            if not canonical_run_id.startswith("paper-exec-v2-"):
+                raise ValueError("run_id prefix is invalid")
+            _sha256_text(
+                canonical_run_id.removeprefix("paper-exec-v2-"),
+                "run_id digest",
+            )
+        except (TypeError, ValueError) as exc:
+            raise PaperExecutionStateError(
+                "exposure scope run_id is invalid"
+            ) from exc
+        validated_payload = self._validated_exposure_scope_payload(
+            payload
+        )
+        key = f"{canonical_run_id}:exposure-scope"
 
         def mutate() -> None:
             self._ensure_existing_path_durable()
             events = self._load_unlocked()
             run_events = [
-                event for event in events if event["run_id"] == run_id
+                event
+                for event in events
+                if event["run_id"] == canonical_run_id
             ]
             scope_events = [
                 event
@@ -699,7 +829,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             if scope_events:
                 if (
                     len(scope_events) != 1
-                    or scope_events[0]["payload"] != payload
+                    or scope_events[0]["payload"] != validated_payload
                 ):
                     raise PaperExecutionStateError(
                         "durable exposure scope conflicts with prepared execution"
@@ -712,9 +842,9 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             self._append_event_unlocked(
                 events=events,
                 event_type="PAPER_EXPOSURE_SCOPE_BOUND",
-                run_id=run_id,
+                run_id=canonical_run_id,
                 key=key,
-                payload=payload,
+                payload=validated_payload,
             )
 
         self._with_writer_lock(mutate)

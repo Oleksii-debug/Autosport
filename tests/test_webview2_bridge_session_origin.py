@@ -331,6 +331,59 @@ class _NativeClosingWebview(_FakeWebview):
         assert self.destroyed.wait(1.0)
 
 
+class _LaunchFailureWebview(_FakeWebview):
+    def start(self, *, gui: str, **kwargs) -> None:
+        del gui, kwargs
+        raise RuntimeError("SECRET_PRIMARY_WEBVIEW_START_FAILURE")
+
+
+class _AlwaysFailCloseController(_Controller):
+    def close(self) -> None:
+        self.events.append(("close", None))
+        raise RuntimeError("SECRET_SECONDARY_TEARDOWN_FAILURE")
+
+
+def test_primary_webview_failure_is_not_masked_by_secondary_teardown_failure(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    fake = _LaunchFailureWebview()
+    controller = _AlwaysFailCloseController()
+    bridge = AutosportWebBridge(controller)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    with pytest.raises(
+        WindowsWebViewUnavailable,
+        match="could not start the Autosport semantic shell",
+    ) as captured:
+        launch_windows_shell(bridge, storage_path=tmp_path / "webview")
+
+    assert isinstance(captured.value.__cause__, RuntimeError)
+    assert str(captured.value.__cause__) == "SECRET_PRIMARY_WEBVIEW_START_FAILURE"
+    assert "SECRET_SECONDARY_TEARDOWN_FAILURE" not in str(captured.value)
+    assert controller.events == [("close", None)]
+
+
+def test_successful_webview_return_with_failed_finalizer_is_bounded(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    fake = _FakeWebview()
+    controller = _AlwaysFailCloseController()
+    bridge = AutosportWebBridge(controller)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    with pytest.raises(
+        WindowsWebViewUnavailable,
+        match="could not safely finalize the semantic shell",
+    ) as captured:
+        launch_windows_shell(bridge, storage_path=tmp_path / "webview")
+
+    assert isinstance(captured.value.__cause__, RuntimeError)
+    assert str(captured.value.__cause__) == "SECRET_SECONDARY_TEARDOWN_FAILURE"
+    assert controller.events == [("state", None), ("close", None)]
+
+
 def test_native_window_close_vetoes_first_close_until_canonical_teardown_finishes(
     monkeypatch,
     tmp_path,

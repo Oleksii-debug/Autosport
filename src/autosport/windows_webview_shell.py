@@ -2601,16 +2601,34 @@ def launch_windows_shell(
                 "The Autosport semantic shell has no actual WebView2 runtime witness"
             )
     except WindowsWebViewUnavailable:
+        try:
+            api._close_from_host()
+        except BaseException:
+            # Never let teardown replace the already-bounded primary launch failure.
+            pass
         raise
     except Exception as exc:
+        try:
+            api._close_from_host()
+        except BaseException:
+            # Preserve the actual startup/runtime failure as the causal root.
+            pass
         raise WindowsWebViewUnavailable(
             "Microsoft Edge WebView2 could not start the Autosport semantic shell"
         ) from exc
-    finally:
-        if canonical_bridge:
+    except BaseException:
+        try:
             api._close_from_host()
-        else:
-            api.close()
+        except BaseException:
+            pass
+        raise
+
+    try:
+        api._close_from_host()
+    except Exception as exc:
+        raise WindowsWebViewUnavailable(
+            "Autosport could not safely finalize the semantic shell"
+        ) from exc
     return 0
 
 

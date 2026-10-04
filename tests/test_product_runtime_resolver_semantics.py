@@ -18,6 +18,7 @@ from autosport.resolver_semantics import (
 
 
 SHA_A = "a" * 64
+SHA_B = "b" * 64
 NOW = "2026-09-20T10:00:00Z"
 
 
@@ -61,6 +62,14 @@ def _replacement_settlement_helper(record: EventLifecycleRecord, as_of: str):
     if as_of == "never":
         raise AssertionError("replacement helper executable semantics")
     return None
+
+
+class _MutatingSettlementSource(_ProductSource):
+    settlement_resolver_implementation_id = "provider-a-mutating-results-resolver-v1"
+
+    def resolve(self, record: EventLifecycleRecord, *, as_of: str):
+        self.settlement_configuration_sha256 = SHA_B
+        return None
 
 
 class _HelperProductSource(_ProductSource):
@@ -136,6 +145,88 @@ def test_canonical_parlay_product_source_resolver_is_fingerprintable_and_composa
     )
     try:
         assert runtime.manifest.source_resolver_identity is not None
+    finally:
+        runtime.close()
+
+
+def test_live_settlement_resolution_is_routed_through_product_authority_proxy(
+    tmp_path,
+) -> None:
+    source = _ProductSource()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=source,
+        clock=lambda: NOW,
+        outcome_authority=source,
+    )
+    try:
+        assert runtime.coordinator.outcome_authority is not source
+        assert runtime.coordinator.outcome_authority.resolve(object(), as_of=NOW) is None
+    finally:
+        runtime.close()
+
+
+def test_live_settlement_resolution_rejects_post_build_configuration_mutation(
+    tmp_path,
+) -> None:
+    source = _ProductSource()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=source,
+        clock=lambda: NOW,
+        outcome_authority=source,
+    )
+    try:
+        source.settlement_configuration_sha256 = SHA_B
+        with pytest.raises(
+            ProductCompositionError,
+            match="settlement authority changed after product composition",
+        ):
+            runtime.coordinator.outcome_authority.resolve(object(), as_of=NOW)
+    finally:
+        runtime.close()
+
+
+def test_live_settlement_resolution_rejects_post_build_resolver_rebind(
+    tmp_path,
+) -> None:
+    source = _ProductSource()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=source,
+        clock=lambda: NOW,
+        outcome_authority=source,
+    )
+    original_resolve = _ProductSource.resolve
+    try:
+        _ProductSource.resolve = _replacement_resolve
+        with pytest.raises(
+            ProductCompositionError,
+            match="settlement authority changed after product composition",
+        ):
+            runtime.coordinator.outcome_authority.resolve(object(), as_of=NOW)
+    finally:
+        _ProductSource.resolve = original_resolve
+        runtime.close()
+
+
+def test_live_settlement_result_is_not_released_after_in_call_authority_mutation(
+    tmp_path,
+) -> None:
+    source = _MutatingSettlementSource()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=source,
+        clock=lambda: NOW,
+        outcome_authority=source,
+    )
+    try:
+        with pytest.raises(
+            ProductCompositionError,
+            match="settlement authority changed after product composition",
+        ):
+            runtime.coordinator.outcome_authority.resolve(object(), as_of=NOW)
+        assert source.settlement_configuration_sha256 == SHA_B
     finally:
         runtime.close()
 

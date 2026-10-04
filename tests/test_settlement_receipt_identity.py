@@ -181,6 +181,39 @@ class SettlementReceiptIdentityTests(unittest.TestCase):
                 settlement_evidence=(reordered,)
             )
 
+    def test_journal_outcome_fingerprint_tamper_blocks_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "continuous_session.json"
+            state = _state(path)
+            state.record_success(
+                at=_AT,
+                full_refresh=False,
+                settlement_evidence=(_resolution(outcome="win"),),
+            )
+            journal = path.with_name(
+                f"{path.stem}.settlement-evidence"
+            )
+            records = [
+                record
+                for record in journal.iterdir()
+                if record.suffix == ".json"
+            ]
+            self.assertEqual(len(records), 1)
+            raw = json.loads(records[0].read_text(encoding="utf-8"))
+            self.assertEqual(raw["schema_version"], 2)
+            raw["quote_outcomes_sha256"] = "f" * 64
+            records[0].write_text(
+                json.dumps(raw, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ContinuousSessionError,
+                "record digest mismatch",
+            ):
+                _state(path)
+
+
     def test_duplicate_durable_receipt_alias_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "continuous_session.json"

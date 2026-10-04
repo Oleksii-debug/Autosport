@@ -286,7 +286,11 @@ def _sha256(value: object, field: str) -> str:
 class _ContinuousSessionState:
     _SCHEMA = "autosport.continuous_session"
     _V2_VERSION = 2
-    _VERSION = 3
+    # Wave M / PR #2013 already owns continuous-session schema v4 for
+    # settlement outcome-fingerprint binding. This bounded journal split is
+    # intentionally v4 so two incompatible durable layouts can never share
+    # one schema identity during later reconvergence.
+    _VERSION = 4
     _EVIDENCE_SCHEMA = "autosport.continuous_session.settlement_evidence"
     _EVIDENCE_VERSION = 1
     _EMPTY_EVIDENCE_TIP = "0" * 64
@@ -1118,7 +1122,7 @@ class _ContinuousSessionState:
         persisted = self._read_file()
         if persisted["schema_version"] != self._VERSION:
             raise ContinuousSessionError(
-                "continuous session migration did not publish schema v3"
+                "continuous session migration did not publish schema v4"
             )
         self._load_evidence_history(persisted)
         return persisted

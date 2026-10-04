@@ -6,6 +6,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from market_outcome_test_support import issue_synthetic_market_outcome_authority
 
 from autosport._evaluation_universe_structural_gate import (
     _authorize_structural_intake_for_tests,

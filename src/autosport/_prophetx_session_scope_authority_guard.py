@@ -1,7 +1,7 @@
 """Seal ProphetX lifecycle scope/path authority against instance rebinding.
 
 The lifecycle deliberately copies a caller-owned frozen scope into private primitive
-fields.  Those fields, plus the derived pool directory and state path, are still
+fields. Those fields, plus the derived pool directory and state path, are still
 ordinary Python instance attributes and can be reassigned with ``object.__setattr__``.
 This composition guard keeps the canonical values in closure-hidden process-local
 state and validates the complete scope/path tuple before any authority-bearing field
@@ -78,9 +78,18 @@ def _install_scope_authority_guard() -> None:
         with records_lock:
             record = records.get(id(instance))
         if record is None:
-            # Canonical __init__ legitimately accesses these attributes before its
-            # post-construction anchor has been registered by guarded_init.
-            return
+            # Canonical __init__ reads protected scope/path attributes before the
+            # post-construction anchor is registered.  Its final initialization
+            # marker, _thread_lock, is created only after the last such protected
+            # read.  Once that marker exists, a missing record can only mean the
+            # authority registry was deleted/corrupted and must fail closed.
+            try:
+                state = original_getattribute(instance, "__dict__")
+            except (AttributeError, TypeError) as exc:
+                raise error_type("session scope authority changed") from exc
+            if type(state) is dict and "_thread_lock" not in state:
+                return
+            raise error_type("session scope authority changed")
         if record[0]() is not instance:
             raise error_type("session scope authority changed")
         current = _snapshot(instance)

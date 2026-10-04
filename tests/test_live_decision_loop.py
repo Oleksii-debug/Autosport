@@ -47,7 +47,7 @@ from autosport.portfolio_plan import (
     PortfolioDependencyGraph,
     PortfolioPlan,
 )
-from autosport.providers import ProviderUnavailableError
+from autosport.providers import ProviderBatch, ProviderUnavailableError
 from autosport.scientific_registry import ScientificRegistry, StrategyVersion
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 from autosport.storage import SQLiteMarketStore
@@ -89,6 +89,18 @@ class _DurableObserver:
         finally:
             store.close()
         return object()
+
+
+class _EmptyProvider:
+    source_id = "provider-a"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+        del max_items
+        self.calls += 1
+        return ProviderBatch(source_id=self.source_id, quotes=())
 
 
 class _EmptyIntentFactory:
@@ -306,6 +318,65 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             catalog_source_id=catalog_source_id,
             catalog_required_history=catalog_required_history,
         )
+
+    def test_long_lived_default_observer_reconciles_cross_process_market_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            factory = _EmptyIntentFactory()
+            provider = _EmptyProvider()
+            strategy = self._strategy_version()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=self._scientific_registry(workspace, strategy),
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+            self.assertEqual(first.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls[-1],
+                ("input-a", (("selection-a", 1, "open"),)),
+            )
+
+            peer_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(peer_store).publish_many(
+                    (
+                        self._event(
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START + timedelta(seconds=2),
+                        ),
+                    )
+                )
+            finally:
+                peer_store.close()
+
+            clock.value = self.START + timedelta(seconds=2)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(provider.calls, 2)
+            self.assertEqual(
+                factory.calls[-1],
+                ("input-a", (("selection-a", 2, "open"),)),
+            )
+            loop.close()
 
     def test_stale_instance_cannot_overwrite_newer_pending_progress(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

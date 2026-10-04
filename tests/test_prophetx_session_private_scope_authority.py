@@ -22,6 +22,27 @@ def _scope() -> ProphetXSessionScope:
     )
 
 
+def _scope_authority_records() -> dict[int, tuple[object, ...]]:
+    guarded_getattribute = ProphetXSessionLifecycle.__getattribute__
+    closure = guarded_getattribute.__closure__
+    assert closure is not None
+    require_current = next(
+        cell.cell_contents
+        for cell in closure
+        if callable(cell.cell_contents)
+        and getattr(cell.cell_contents, "__name__", None) == "_require_current"
+    )
+    inner_closure = require_current.__closure__
+    assert inner_closure is not None
+    records = [
+        cell.cell_contents
+        for cell in inner_closure
+        if isinstance(cell.cell_contents, dict)
+    ]
+    assert len(records) == 1
+    return records[0]
+
+
 def test_private_scope_primitive_rebind_cannot_poison_original_pool_state(tmp_path):
     lifecycle = ProphetXSessionLifecycle(tmp_path, scope=_scope())
     original_state_path = lifecycle.state_path
@@ -72,6 +93,35 @@ def test_scope_directory_rebind_cannot_move_pool_lock_or_state_authority(tmp_pat
     lifecycle = ProphetXSessionLifecycle(tmp_path, scope=_scope())
     original_state_path = lifecycle.state_path
     redirected_dir = tmp_path / "foreign-pool"
+
+    object.__setattr__(lifecycle, "_scope_dir", redirected_dir)
+    object.__setattr__(
+        lifecycle,
+        "_state_path",
+        redirected_dir / "prophetx-session-state.json",
+    )
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="session scope authority changed",
+    ):
+        lifecycle.begin_login(
+            now=NOW,
+            access_token_available=False,
+        )
+
+    assert not redirected_dir.exists()
+    assert not original_state_path.exists()
+
+
+def test_deleting_closure_scope_anchor_cannot_reenable_unanchored_scope(tmp_path):
+    lifecycle = ProphetXSessionLifecycle(tmp_path, scope=_scope())
+    original_state_path = lifecycle.state_path
+    redirected_dir = tmp_path / "registry-deletion-poisoned-pool"
+
+    records = _scope_authority_records()
+    issued = records.pop(id(lifecycle))
+    assert issued[0]() is lifecycle
 
     object.__setattr__(lifecycle, "_scope_dir", redirected_dir)
     object.__setattr__(

@@ -245,6 +245,45 @@ def _build_coordinator(
 
 class ContinuousSessionCoordinatorTests(unittest.TestCase):
 
+
+    def test_tick_rejects_cycle_time_validator_retarget_before_collector(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            canonical = type.__getattribute__(
+                _ContinuousSessionState,
+                "__dict__",
+            )["validate_cycle_time"]
+            try:
+                type.__setattr__(
+                    _ContinuousSessionState,
+                    "validate_cycle_time",
+                    lambda self, *, at: None,
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "cycle-time authority changed",
+                ):
+                    coordinator.tick()
+                self.assertEqual(source.catalog_calls, 0)
+            finally:
+                type.__setattr__(
+                    _ContinuousSessionState,
+                    "validate_cycle_time",
+                    canonical,
+                )
+                store.close()
+
     def test_tick_clock_rollback_fails_before_collector_and_outcome_effects(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

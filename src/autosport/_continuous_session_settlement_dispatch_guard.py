@@ -602,6 +602,18 @@ def _install() -> None:
     canonical_tick_code = exact_getattr(canonical_tick, "__code__", None)
     if canonical_tick_code is None:
         raise exact_type_error("canonical continuous-session tick must expose executable code")
+    state_type = session_module._ContinuousSessionState
+    state_dict = type.__getattribute__(state_type, "__dict__")
+    canonical_cycle_time_validator = state_dict["validate_cycle_time"]
+    canonical_cycle_time_validator_code = exact_getattr(
+        canonical_cycle_time_validator,
+        "__code__",
+        None,
+    )
+    if canonical_cycle_time_validator_code is None:
+        raise exact_type_error(
+            "canonical continuous-session cycle-time validator must expose executable code"
+        )
 
     def require_target_graph_authority() -> None:
         for target, expected_code, expected_cells in expected_targets.values():
@@ -657,6 +669,19 @@ def _install() -> None:
         if exact_getattr(canonical_tick, "__code__", None) is not canonical_tick_code:
             raise session_module.ContinuousSessionError(
                 "canonical continuous-session tick executable changed"
+            )
+        if (
+            state_dict.get("validate_cycle_time")
+            is not canonical_cycle_time_validator
+            or exact_getattr(
+                canonical_cycle_time_validator,
+                "__code__",
+                None,
+            )
+            is not canonical_cycle_time_validator_code
+        ):
+            raise session_module.ContinuousSessionError(
+                "canonical continuous-session cycle-time authority changed"
             )
         if (
             post_callback_descriptor_get is None

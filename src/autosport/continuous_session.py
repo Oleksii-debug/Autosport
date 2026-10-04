@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass, replace
@@ -280,28 +281,47 @@ def _sha256(value: object, field: str) -> str:
     return value
 
 
+def _settlement_outcomes_sha256(evidence: SettlementResolution) -> str:
+    payload = json.dumps(
+        dict(sorted(evidence.quote_outcomes.items())),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 class _ContinuousSessionState:
     _SCHEMA = "autosport.continuous_session"
-    _VERSION = 2
-    _FIELDS = {
-        "schema",
-        "schema_version",
-        "session_id",
-        "source_id",
-        "state",
-        "started_at",
-        "cycles_completed",
-        "last_success_at",
-        "last_error_code",
-        "last_full_refresh_at",
-        "settlement_evidence",
-        "source_gap_state",
-        "source_sync_state",
-        "source_state_delta_id",
-        "source_unresolved_gap_delta_ids",
-        "source_projection_stream_epoch",
-        "source_state_projection_backlog",
-    }
+    _VERSION = 3
+    _V2_FIELDS = frozenset(
+        {
+            "schema",
+            "schema_version",
+            "session_id",
+            "source_id",
+            "state",
+            "started_at",
+            "cycles_completed",
+            "last_success_at",
+            "last_error_code",
+            "last_full_refresh_at",
+            "settlement_evidence",
+            "source_gap_state",
+            "source_sync_state",
+            "source_state_delta_id",
+            "source_unresolved_gap_delta_ids",
+            "source_projection_stream_epoch",
+            "source_state_projection_backlog",
+        }
+    )
+    _FIELDS = frozenset(
+        {
+            *_V2_FIELDS,
+            "settlement_outcome_digests",
+        }
+    )
 
     def __init__(
         self,
@@ -350,6 +370,7 @@ class _ContinuousSessionState:
                     "last_error_code": None,
                     "last_full_refresh_at": None,
                     "settlement_evidence": [],
+                    "settlement_outcome_digests": {},
                     "source_gap_state": None,
                     "source_sync_state": None,
                     "source_state_delta_id": None,
@@ -385,15 +406,38 @@ class _ContinuousSessionState:
             _text(item["evidence_id"], "settlement_evidence evidence_id")
             _sha256(item["evidence_sha256"], "settlement_evidence evidence_sha256")
             _instant(item["available_at"], "settlement_evidence available_at")
-            values.append(
-                {
-                    "event_identity": item["event_identity"],
-                    "settlement_ref": item["settlement_ref"],
-                    "evidence_id": item["evidence_id"],
-                    "evidence_sha256": item["evidence_sha256"],
-                    "available_at": item["available_at"],
-                }
-            )
+            normalized = {
+                "event_identity": item["event_identity"],
+                "settlement_ref": item["settlement_ref"],
+                "evidence_id": item["evidence_id"],
+                "evidence_sha256": item["evidence_sha256"],
+                "available_at": item["available_at"],
+            }
+            if any(
+                prior["evidence_id"] == normalized["evidence_id"]
+                and prior != normalized
+                for prior in values
+            ):
+                raise ContinuousSessionError(
+                    "durable settlement evidence id is conflicting"
+                )
+            if any(
+                (
+                    prior["event_identity"],
+                    prior["settlement_ref"],
+                )
+                == (
+                    normalized["event_identity"],
+                    normalized["settlement_ref"],
+                )
+                and prior != normalized
+                for prior in values
+            ):
+                raise ContinuousSessionError(
+                    "durable settlement event/reference evidence is conflicting"
+                )
+            if normalized not in values:
+                values.append(normalized)
         return tuple(values)
 
     def _read(self) -> dict[str, Any]:
@@ -403,13 +447,16 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "cannot verify continuous session state"
             ) from exc
-        if (
-            type(raw) is not dict
-            or set(raw) != self._FIELDS
-            or raw["schema"] != self._SCHEMA
-            or raw["schema_version"] != self._VERSION
-            or raw["source_id"] != self.source_id
-        ):
+        if type(raw) is not dict or raw.get("schema") != self._SCHEMA:
+            raise ContinuousSessionError("continuous session state schema/identity mismatch")
+        version = raw.get("schema_version")
+        if version == 2 and set(raw) == self._V2_FIELDS:
+            legacy_v2 = True
+        elif version == self._VERSION and set(raw) == self._FIELDS:
+            legacy_v2 = False
+        else:
+            raise ContinuousSessionError("continuous session state schema/identity mismatch")
+        if raw["source_id"] != self.source_id:
             raise ContinuousSessionError("continuous session state schema/identity mismatch")
         _text(raw["session_id"], "session_id")
         _instant(raw["started_at"], "started_at")
@@ -426,6 +473,26 @@ class _ContinuousSessionState:
         if raw["last_error_code"] is not None:
             _text(raw["last_error_code"], "last_error_code")
         evidence = self._validate_settlement_evidence(raw["settlement_evidence"])
+        if legacy_v2:
+            outcome_digests: dict[str, str | None] = {
+                item["evidence_id"]: None for item in evidence
+            }
+            raw["schema_version"] = self._VERSION
+            raw["settlement_outcome_digests"] = outcome_digests
+        else:
+            outcome_digests = raw["settlement_outcome_digests"]
+            if (
+                type(outcome_digests) is not dict
+                or set(outcome_digests)
+                != {item["evidence_id"] for item in evidence}
+            ):
+                raise ContinuousSessionError(
+                    "settlement outcome digest index does not match durable evidence"
+                )
+            for evidence_id, digest in outcome_digests.items():
+                _text(evidence_id, "settlement outcome evidence_id")
+                if digest is not None:
+                    _sha256(digest, "settlement outcome digest")
         gap_state = raw["source_gap_state"]
         sync_state = raw["source_sync_state"]
         if (gap_state is None) != (sync_state is None):
@@ -547,14 +614,37 @@ class _ContinuousSessionState:
             item["evidence_id"]: item
             for item in raw["settlement_evidence"]
         }
+        known_pairs = {
+            (item["event_identity"], item["settlement_ref"]): item
+            for item in raw["settlement_evidence"]
+        }
+        outcome_digests = dict(raw["settlement_outcome_digests"])
         for evidence in settlement_evidence:
             normalized = self._normalized_settlement_evidence(evidence)
+            outcomes_digest = _settlement_outcomes_sha256(evidence)
             existing = known.get(evidence.evidence_id)
             if existing is not None and existing != normalized:
                 raise ContinuousSessionError(
                     "settlement evidence id conflicts with durable evidence"
                 )
+            pair = (evidence.event_identity, evidence.settlement_ref)
+            pair_existing = known_pairs.get(pair)
+            if pair_existing is not None and pair_existing != normalized:
+                raise ContinuousSessionError(
+                    "settlement event/reference conflicts with durable evidence"
+                )
+            previous_digest = outcome_digests.get(evidence.evidence_id)
+            if existing is not None and previous_digest is None:
+                raise ContinuousSessionError(
+                    "legacy settlement evidence lacks durable outcome interpretation"
+                )
+            if previous_digest is not None and previous_digest != outcomes_digest:
+                raise ContinuousSessionError(
+                    "settlement outcome interpretation conflicts with durable evidence"
+                )
             known[evidence.evidence_id] = normalized
+            known_pairs[pair] = normalized
+            outcome_digests[evidence.evidence_id] = outcomes_digest
 
     def record_source_projection(
         self,
@@ -625,18 +715,42 @@ class _ContinuousSessionState:
                 item["evidence_id"]: item
                 for item in raw["settlement_evidence"]
             }
+            known_pairs = {
+                (item["event_identity"], item["settlement_ref"]): item
+                for item in raw["settlement_evidence"]
+            }
+            outcome_digests = dict(raw["settlement_outcome_digests"])
             for evidence in settlement_evidence:
                 existing = known.get(evidence.evidence_id)
                 normalized = self._normalized_settlement_evidence(evidence)
-                if existing is not None:
-                    if existing != normalized:
-                        raise ContinuousSessionError(
-                            "settlement evidence id conflicts with durable evidence"
-                        )
-                    continue
+                outcomes_digest = _settlement_outcomes_sha256(evidence)
+                if existing is not None and existing != normalized:
+                    raise ContinuousSessionError(
+                        "settlement evidence id conflicts with durable evidence"
+                    )
+                pair = (evidence.event_identity, evidence.settlement_ref)
+                pair_existing = known_pairs.get(pair)
+                if pair_existing is not None and pair_existing != normalized:
+                    raise ContinuousSessionError(
+                        "settlement event/reference conflicts with durable evidence"
+                    )
+                previous_digest = outcome_digests.get(evidence.evidence_id)
+                if existing is not None and previous_digest is None:
+                    raise ContinuousSessionError(
+                        "legacy settlement evidence lacks durable outcome interpretation"
+                    )
+                if previous_digest is not None and previous_digest != outcomes_digest:
+                    raise ContinuousSessionError(
+                        "settlement outcome interpretation conflicts with durable evidence"
+                    )
                 known[evidence.evidence_id] = normalized
+                known_pairs[pair] = normalized
+                outcome_digests[evidence.evidence_id] = outcomes_digest
             raw["settlement_evidence"] = list(
                 sorted(known.values(), key=lambda item: item["evidence_id"])
+            )
+            raw["settlement_outcome_digests"] = dict(
+                sorted(outcome_digests.items())
             )
 
         self._update(mutate)

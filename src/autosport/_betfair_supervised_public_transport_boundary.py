@@ -46,6 +46,55 @@ _VERIFIED_EXECUTION_VIEW = _impl.RealExecutionLedger.verified_execution_view
 _VERIFIED_EXECUTION_VIEW_CODE = getattr(_VERIFIED_EXECUTION_VIEW, "__code__", None)
 _SUBMITTED_STATE = _impl.AttemptState.SUBMITTED
 
+# The outer transport boundary seals not only the public consume function but every
+# transitive authority-bearing helper it calls.  Otherwise a post-import replacement
+# of (for example) the exact binding validator could leave the outer function/code
+# object unchanged while weakening final-send admission.
+_CONFIRMATION_AUTHORITY_GRAPH = _confirmation._authority_graph_unchanged
+_CONFIRMATION_REQUIRE_BOUND_ACTION = _confirmation._require_bound_action
+_CONFIRMATION_REQUIRE_BINDING = _confirmation._require_confirmation_binding
+_CONFIRMATION_SPEC = _confirmation.betfair_execution_confirmation_spec
+_CONFIRMATION_DECISION_MATERIAL = _confirmation._decision_material
+_CONFIRMATION_CONSUMER_KEY = _confirmation._consumer_key
+_CONFIRMATION_DOMAIN_DIGEST = _confirmation._domain_digest
+_CONFIRMATION_CANONICAL_BYTES = _confirmation._canonical_bytes
+_CONFIRMATION_INSTANT = _confirmation._instant
+_CONFIRMATION_SHA = _confirmation._sha
+_CONFIRMATION_TEXT = _confirmation._text
+_CONFIRMATION_WITNESS_TYPE = _confirmation.BetfairExecutionConfirmationWitness
+_CONFIRMATION_WITNESS_POST_INIT = _CONFIRMATION_WITNESS_TYPE.__post_init__
+_CONFIRMATION_WITNESS_MATERIAL = _CONFIRMATION_WITNESS_TYPE._material
+_CONFIRMATION_SPEC_TYPE = _confirmation.BetfairExecutionConfirmationSpec
+_CONFIRMATION_GENERIC_MODULE = _confirmation._confirmation
+_CONFIRMATION_HASHLIB = _confirmation.hashlib
+_CONFIRMATION_JSON = _confirmation.json
+_CONFIRMATION_DATETIME = _confirmation.datetime
+_CONFIRMATION_PATH = _confirmation.Path
+_CONFIRMATION_EXECUTION_ACTION = _confirmation.ExecutionAction
+_CONFIRMATION_BOUND_PLAN = _confirmation.BoundSupervisedExecutionPlan
+_CONFIRMATION_APPROVAL = _confirmation.SupervisedApproval
+_CONFIRMATION_EXECUTION_ERROR = _confirmation.SupervisedExecutionError
+_CONFIRMATION_FILENAME = _confirmation.CONFIRMATION_FILENAME
+_CONFIRMATION_REVIEW_PAYLOAD_DOMAIN = _confirmation._REVIEW_PAYLOAD_DOMAIN
+_CONFIRMATION_DECISION_DOMAIN = _confirmation._DECISION_DOMAIN
+_CONFIRMATION_CONSUMER_DOMAIN = _confirmation._CONSUMER_DOMAIN
+_CONFIRMATION_WITNESS_DOMAIN = _confirmation._WITNESS_DOMAIN
+_CONFIRMATION_TRANSITIVE_FUNCTIONS = (
+    (_CONFIRMATION_AUTHORITY_GRAPH, _CONFIRMATION_AUTHORITY_GRAPH.__code__),
+    (_CONFIRMATION_REQUIRE_BOUND_ACTION, _CONFIRMATION_REQUIRE_BOUND_ACTION.__code__),
+    (_CONFIRMATION_REQUIRE_BINDING, _CONFIRMATION_REQUIRE_BINDING.__code__),
+    (_CONFIRMATION_SPEC, _CONFIRMATION_SPEC.__code__),
+    (_CONFIRMATION_DECISION_MATERIAL, _CONFIRMATION_DECISION_MATERIAL.__code__),
+    (_CONFIRMATION_CONSUMER_KEY, _CONFIRMATION_CONSUMER_KEY.__code__),
+    (_CONFIRMATION_DOMAIN_DIGEST, _CONFIRMATION_DOMAIN_DIGEST.__code__),
+    (_CONFIRMATION_CANONICAL_BYTES, _CONFIRMATION_CANONICAL_BYTES.__code__),
+    (_CONFIRMATION_INSTANT, _CONFIRMATION_INSTANT.__code__),
+    (_CONFIRMATION_SHA, _CONFIRMATION_SHA.__code__),
+    (_CONFIRMATION_TEXT, _CONFIRMATION_TEXT.__code__),
+    (_CONFIRMATION_WITNESS_POST_INIT, _CONFIRMATION_WITNESS_POST_INIT.__code__),
+    (_CONFIRMATION_WITNESS_MATERIAL, _CONFIRMATION_WITNESS_MATERIAL.__code__),
+)
+
 # Reuse the exact canonical #1891 process-local authority graph. These are not new
 # mirrors; identity checks fail closed if the owning module replaces live authority.
 _TRUSTED_PROFILE_TYPE = _runtime_profile.TrustedRuntimeCodeProfile
@@ -122,6 +171,40 @@ def _confirmation_graph_unchanged() -> bool:
         and _confirmation.consume_betfair_execution_confirmation is _CONSUME_CONFIRMATION
         and getattr(_CONSUME_CONFIRMATION, "__code__", None)
         is _CONSUME_CONFIRMATION_CODE
+        and _confirmation._authority_graph_unchanged is _CONFIRMATION_AUTHORITY_GRAPH
+        and _confirmation._require_bound_action is _CONFIRMATION_REQUIRE_BOUND_ACTION
+        and _confirmation._require_confirmation_binding is _CONFIRMATION_REQUIRE_BINDING
+        and _confirmation.betfair_execution_confirmation_spec is _CONFIRMATION_SPEC
+        and _confirmation._decision_material is _CONFIRMATION_DECISION_MATERIAL
+        and _confirmation._consumer_key is _CONFIRMATION_CONSUMER_KEY
+        and _confirmation._domain_digest is _CONFIRMATION_DOMAIN_DIGEST
+        and _confirmation._canonical_bytes is _CONFIRMATION_CANONICAL_BYTES
+        and _confirmation._instant is _CONFIRMATION_INSTANT
+        and _confirmation._sha is _CONFIRMATION_SHA
+        and _confirmation._text is _CONFIRMATION_TEXT
+        and _confirmation.BetfairExecutionConfirmationWitness is _CONFIRMATION_WITNESS_TYPE
+        and _CONFIRMATION_WITNESS_TYPE.__post_init__ is _CONFIRMATION_WITNESS_POST_INIT
+        and _CONFIRMATION_WITNESS_TYPE._material is _CONFIRMATION_WITNESS_MATERIAL
+        and _confirmation.BetfairExecutionConfirmationSpec is _CONFIRMATION_SPEC_TYPE
+        and _confirmation._confirmation is _CONFIRMATION_GENERIC_MODULE
+        and _confirmation.hashlib is _CONFIRMATION_HASHLIB
+        and _confirmation.json is _CONFIRMATION_JSON
+        and _confirmation.datetime is _CONFIRMATION_DATETIME
+        and _confirmation.Path is _CONFIRMATION_PATH
+        and _confirmation.ExecutionAction is _CONFIRMATION_EXECUTION_ACTION
+        and _confirmation.BoundSupervisedExecutionPlan is _CONFIRMATION_BOUND_PLAN
+        and _confirmation.SupervisedApproval is _CONFIRMATION_APPROVAL
+        and _confirmation.SupervisedExecutionError is _CONFIRMATION_EXECUTION_ERROR
+        and _confirmation.CONFIRMATION_FILENAME == _CONFIRMATION_FILENAME
+        and _confirmation._REVIEW_PAYLOAD_DOMAIN == _CONFIRMATION_REVIEW_PAYLOAD_DOMAIN
+        and _confirmation._DECISION_DOMAIN == _CONFIRMATION_DECISION_DOMAIN
+        and _confirmation._CONSUMER_DOMAIN == _CONFIRMATION_CONSUMER_DOMAIN
+        and _confirmation._WITNESS_DOMAIN == _CONFIRMATION_WITNESS_DOMAIN
+        and all(
+            getattr(function, "__code__", None) is code
+            for function, code in _CONFIRMATION_TRANSITIVE_FUNCTIONS
+        )
+        and _CONFIRMATION_AUTHORITY_GRAPH()
         and _impl.RealExecutionLedger.verified_execution_view is _VERIFIED_EXECUTION_VIEW
         and getattr(_VERIFIED_EXECUTION_VIEW, "__code__", None)
         is _VERIFIED_EXECUTION_VIEW_CODE

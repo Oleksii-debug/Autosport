@@ -220,6 +220,34 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertTrue(store.has_trusted_live_receipt(event))
             store.close()
 
+    def test_live_batch_payload_slot_rebind_cannot_redirect_authority(self) -> None:
+        class PoisonPayloadSlot:
+            def __set__(self, instance, value) -> None:
+                # Swallow the retry-view write. Durable authority must not depend on it.
+                return None
+
+            def __get__(self, instance, owner=None):
+                raise AssertionError(
+                    "runtime live-batch payload slot must not be read for durable authority"
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self._direct_event(sequence=1)
+            capability_type = storage_module._LiveReceiptBatch
+
+            with patch.object(
+                capability_type,
+                "_payloads",
+                PoisonPayloadSlot(),
+            ):
+                accepted = store._append_live_batch_accepted([event])
+
+            self.assertEqual(accepted, [event])
+            self.assertEqual(store.trusted_live_events(), [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
     def test_live_retry_keeps_canonical_market_event_type_after_module_rebind(self) -> None:
         class PoisonMarketEvent(MarketEvent):
             @classmethod
@@ -957,7 +985,12 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             # Neither the private wrapper nor a caller-authored legacy depth marker
             # can grant live receipt authority through the public append seam.
             store._live_receipt_write_depth = 1
-            accepted = store.append_batch_accepted(_LiveReceiptBatch((event,)))
+            accepted = store.append_batch_accepted(
+                _LiveReceiptBatch(
+                    (event,),
+                    _payload=storage_module._canonical_payload,
+                )
+            )
 
             self.assertEqual(accepted, [event])
             self.assertFalse(store.has_trusted_live_receipt(event))

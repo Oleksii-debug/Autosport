@@ -361,12 +361,12 @@ class BanditPolicyState:
         reward: RewardEvidence,
         transition: Transition,
     ) -> tuple["BanditPolicyState", "PolicyUpdateEvidence"]:
-        if not isinstance(action, Action):
-            raise TypeError("action must be Action")
-        if not isinstance(reward, RewardEvidence):
-            raise TypeError("reward must be RewardEvidence")
-        if not isinstance(transition, Transition):
-            raise TypeError("transition must be Transition")
+        if type(action) is not Action:
+            raise TypeError("action must be exact Action")
+        if type(reward) is not RewardEvidence:
+            raise TypeError("reward must be exact RewardEvidence")
+        if type(transition) is not Transition:
+            raise TypeError("transition must be exact Transition")
         if action.environment_id != self.environment_id:
             raise LearningEnvironmentError("action belongs to another policy environment")
         if reward.environment_id != self.environment_id or transition.environment_id != self.environment_id:
@@ -473,12 +473,18 @@ class PolicyUpdateEvidence:
         if any(item is not None for item in witnesses):
             if not all(item is not None for item in witnesses):
                 raise LearningEnvironmentError("policy update causal witnesses must be complete")
-            if not isinstance(self.action, Action):
-                raise LearningEnvironmentError("policy update action witness must be Action")
-            if not isinstance(self.reward, RewardEvidence):
-                raise LearningEnvironmentError("policy update reward witness must be RewardEvidence")
-            if not isinstance(self.transition, Transition):
-                raise LearningEnvironmentError("policy update transition witness must be Transition")
+            if type(self.action) is not Action:
+                raise LearningEnvironmentError(
+                    "policy update action witness must be exact Action"
+                )
+            if type(self.reward) is not RewardEvidence:
+                raise LearningEnvironmentError(
+                    "policy update reward witness must be exact RewardEvidence"
+                )
+            if type(self.transition) is not Transition:
+                raise LearningEnvironmentError(
+                    "policy update transition witness must be exact Transition"
+                )
             if self.action.environment_id != self.environment_id:
                 raise LearningEnvironmentError("policy update action witness environment mismatch")
             if self.reward.environment_id != self.environment_id:

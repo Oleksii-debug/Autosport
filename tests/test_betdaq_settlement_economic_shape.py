@@ -101,6 +101,20 @@ def test_order_readback_rejects_impossible_provider_money_shape(
         _observation(**{field: value})
 
 
+@pytest.mark.parametrize(
+    "sequence_number",
+    [-1, 9_223_372_036_854_775_808],
+)
+def test_order_readback_rejects_sequence_outside_provider_xsd_long(
+    sequence_number: int,
+) -> None:
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="sequence_number must fit non-negative provider xsd:long",
+    ):
+        _observation(sequence_number=sequence_number)
+
+
 def test_unmatched_order_can_preserve_zero_matched_stake_and_average_price() -> None:
     value = _observation(
         order_status_code=3,

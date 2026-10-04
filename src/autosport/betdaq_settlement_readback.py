@@ -405,7 +405,7 @@ class BetdaqOrderSettlementObservation:
         for field in ("order_id", "market_id", "selection_id", "punter_reference_number"):
             _provider_id(getattr(self, field), field)
         _unsigned_byte(self.order_status_code, "order_status_code")
-        _nonnegative_int(self.sequence_number, "sequence_number")
+        _provider_id(self.sequence_number, "sequence_number")
         _unsigned_byte(self.polarity_code, "polarity_code")
         for field in ("issued_at", "last_changed_at", "matching_timestamp"):
             value = getattr(self, field)

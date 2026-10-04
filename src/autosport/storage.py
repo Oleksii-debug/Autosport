@@ -339,6 +339,8 @@ def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
     event = MarketEvent.from_dict(raw)
     if canonical_raw != _canonical_payload(event):
         raise ValueError("stored market event payload is not canonical")
+    _observed_instant(event.observed_ts)
+    _timezone_aware_instant(event.ingest_ts, "ingest_ts")
 
     expected = (
         ("dedupe_key", dedupe_key, event.dedupe_key),

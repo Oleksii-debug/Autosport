@@ -393,7 +393,7 @@ def observe_workspace_once(
     try:
         health_store = SourceHealthStore(root / "source_health.json")
         if mirror_updates is None:
-            mirror = MarketMirror.from_store(store)
+            mirror = MarketMirror.from_live_store(store)
             mirror_updates = BoundedMirrorInvalidationBuffer(mirror)
         else:
             if not isinstance(mirror_updates, BoundedMirrorInvalidationBuffer):
@@ -402,7 +402,7 @@ def observe_workspace_once(
             # Reconcile the non-durable mirror from canonical append-only history at
             # each observation boundary. Re-applying identical/stale events is
             # idempotent and deliberately does not enqueue downstream invalidations.
-            for persisted_event in store.events():
+            for persisted_event in store.trusted_live_events():
                 mirror.apply(persisted_event)
 
         bus = MarketEventBus(store)

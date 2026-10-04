@@ -1149,6 +1149,31 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     "collector_bounded"
                 ]
 
+    def test_runtime_close_ignores_market_store_close_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            original = product_runtime_module.SQLiteMarketStore.close
+            forged_calls = []
+
+            def forged(_store):
+                forged_calls.append(True)
+                raise AssertionError("rebound market-store close must not execute")
+
+            try:
+                product_runtime_module.SQLiteMarketStore.close = forged
+                runtime.close()
+                self.assertEqual(forged_calls, [])
+                self.assertFalse(runtime._runtime_lease.authority_active)
+            finally:
+                product_runtime_module.SQLiteMarketStore.close = original
+
     def test_builder_ignores_durable_state_constructor_rebinding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

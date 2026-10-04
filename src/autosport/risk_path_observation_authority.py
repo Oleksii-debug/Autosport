@@ -30,6 +30,11 @@ from .risk_sampling_dependence import (
     resolve_fixed_n_iid_precommit_authority,
 )
 from .risk_sampling_membership import ResolvedFixedNRiskMembership
+from .risk_sampling_occurrence_authority import (
+    ProductIidDrawPlanError,
+    ProductIidExpectedDrawPlan,
+    resolve_product_iid_expected_draw_plan,
+)
 from .run_transaction import RunTransaction, RunTransactionError
 
 
@@ -81,6 +86,9 @@ _PRECOMMIT = resolve_fixed_n_iid_precommit_authority
 _PRECOMMIT_CODE = getattr(_PRECOMMIT, "__code__", None)
 _STRUCTURE = inspect_fixed_n_iid_sampling_structure
 _STRUCTURE_CODE = getattr(_STRUCTURE, "__code__", None)
+_DRAW_PLAN_TYPE = ProductIidExpectedDrawPlan
+_DRAW_PLAN = resolve_product_iid_expected_draw_plan
+_DRAW_PLAN_CODE = getattr(_DRAW_PLAN, "__code__", None)
 
 
 class ProductRunCapitalPathError(RuntimeError):
@@ -333,6 +341,9 @@ def _require_dispatch() -> None:
         or getattr(_PRECOMMIT, "__code__", None) is not _PRECOMMIT_CODE
         or inspect_fixed_n_iid_sampling_structure is not _STRUCTURE
         or getattr(_STRUCTURE, "__code__", None) is not _STRUCTURE_CODE
+        or ProductIidExpectedDrawPlan is not _DRAW_PLAN_TYPE
+        or resolve_product_iid_expected_draw_plan is not _DRAW_PLAN
+        or getattr(_DRAW_PLAN, "__code__", None) is not _DRAW_PLAN_CODE
     ):
         raise ProductRunCapitalPathError(
             "risk-path occurrence authority dispatch changed"
@@ -597,6 +608,8 @@ class ProductRunCapitalPathEvidence:
     changed_ticket_ids: tuple[str, ...]
     minimum_equity: Decimal
     outcome_available_at: str
+    expected_draw_plan_sha256: str
+    expected_draw_transcript_sha256: str
     settlement_effects_sha256: str
     replay_source_evidence_sha256: str
     source_evidence_sha256: str
@@ -624,6 +637,14 @@ class ProductRunCapitalPathEvidence:
         return True
 
     @property
+    def sampling_frame_materialized(self) -> bool:
+        return True
+
+    @property
+    def expected_draw_product_derived(self) -> bool:
+        return True
+
+    @property
     def sampling_occurrence_ancestry_proven(self) -> bool:
         return False
 
@@ -644,6 +665,8 @@ def resolve_product_run_capital_path_evidence(
     membership: ResolvedFixedNRiskMembership,
     registry_path: str | Path,
     sampling_manifest_json: str,
+    sampling_frame_json: str,
+    horizon_json: str,
     settlement_bridge: PaperSettlementLearningBridge,
     authority_root: str | Path | None = None,
 ) -> ProductRunCapitalPathEvidence:
@@ -669,7 +692,21 @@ def resolve_product_run_capital_path_evidence(
             membership,
             sampling_manifest_json=sampling_manifest_json,
         )
-    except (OSError, RuntimeError, ValueError) as exc:
+        draw_plan = _DRAW_PLAN(
+            membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=sampling_manifest_json,
+            sampling_frame_json=sampling_frame_json,
+            horizon_json=horizon_json,
+            authority_root=authority_root,
+        )
+    except (
+        ProductIidDrawPlanError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
         raise ProductRunCapitalPathError(
             "product fixed-N precommit authority cannot be re-resolved"
         ) from exc
@@ -680,6 +717,16 @@ def resolve_product_run_capital_path_evidence(
         or precommit.iid_qualified is not False
         or precommit.planned_member_ids != structure.planned_member_ids
         or precommit.sampling_manifest_sha256 != structure.manifest_sha256
+        or type(draw_plan) is not _DRAW_PLAN_TYPE
+        or draw_plan.product_precommit_bound is not True
+        or draw_plan.sampling_frame_materialized is not True
+        or draw_plan.expected_draws_product_derived is not True
+        or draw_plan.occurrence_ancestry_proven is not False
+        or draw_plan.iid_qualified is not False
+        or draw_plan.sampling_manifest_sha256 != structure.manifest_sha256
+        or draw_plan.sampling_frame_sha256 != structure.sampling_frame_sha256
+        or draw_plan.horizon_sha256 != structure.horizon_sha256
+        or len(draw_plan.member_draws) != structure.planned_n
     ):
         raise ProductRunCapitalPathError(
             "product fixed-N precommit truth boundary is inconsistent"
@@ -691,6 +738,18 @@ def resolve_product_run_capital_path_evidence(
     if structure.planned_member_ids[member_index] != run_id:
         raise ProductRunCapitalPathError(
             "run_id is not the frozen member at member_index"
+        )
+    expected_draw = draw_plan.member_draws[member_index]
+    if (
+        expected_draw.member_id != run_id
+        or type(expected_draw.member_index) is not int
+        or expected_draw.member_index != member_index
+        or expected_draw.stream_sha256 != structure.member_stream_sha256[member_index]
+        or expected_draw.execution_consumption_proven is not False
+        or expected_draw.grants_real_money_authority is not False
+    ):
+        raise ProductRunCapitalPathError(
+            "expected IID draw does not bind the exact fixed-N member"
         )
     if type(settlement_bridge) is not _BRIDGE_TYPE:
         raise TypeError(
@@ -806,10 +865,20 @@ def resolve_product_run_capital_path_evidence(
         "changed_ticket_ids": list(changed),
         "minimum_equity": _decimal_text(minimum, "minimum_equity"),
         "outcome_available_at": latest,
+        "expected_draw_plan_sha256": _sha(
+            draw_plan.plan_sha256,
+            "expected_draw_plan_sha256",
+        ),
+        "expected_draw_transcript_sha256": _sha(
+            expected_draw.draw_transcript_sha256,
+            "expected_draw_transcript_sha256",
+        ),
         "settlement_effects_sha256": effects_sha,
         "replay_source_evidence_sha256": replay.source_evidence_sha256,
         "product_precommit_bound": True,
         "run_path_ancestry_proven": True,
+        "sampling_frame_materialized": True,
+        "expected_draw_product_derived": True,
         "sampling_occurrence_ancestry_proven": False,
         "iid_qualified": False,
         "grants_real_money_authority": False,
@@ -828,6 +897,17 @@ def resolve_product_run_capital_path_evidence(
         ("changed_ticket_ids", changed),
         ("minimum_equity", minimum),
         ("outcome_available_at", latest),
+        (
+            "expected_draw_plan_sha256",
+            _sha(draw_plan.plan_sha256, "expected_draw_plan_sha256"),
+        ),
+        (
+            "expected_draw_transcript_sha256",
+            _sha(
+                expected_draw.draw_transcript_sha256,
+                "expected_draw_transcript_sha256",
+            ),
+        ),
         ("settlement_effects_sha256", effects_sha),
         (
             "replay_source_evidence_sha256",
@@ -861,6 +941,8 @@ def _seal_product_run_capital_path_resolver() -> None:
         membership: ResolvedFixedNRiskMembership,
         registry_path: str | Path,
         sampling_manifest_json: str,
+        sampling_frame_json: str,
+        horizon_json: str,
         settlement_bridge: PaperSettlementLearningBridge,
         authority_root: str | Path | None = None,
     ) -> ProductRunCapitalPathEvidence:
@@ -881,6 +963,8 @@ def _seal_product_run_capital_path_resolver() -> None:
             membership=membership,
             registry_path=registry_path,
             sampling_manifest_json=sampling_manifest_json,
+            sampling_frame_json=sampling_frame_json,
+            horizon_json=horizon_json,
             settlement_bridge=settlement_bridge,
             authority_root=authority_root,
         )
@@ -926,6 +1010,8 @@ def _build_product_run_capital_path_evidence_verifier(
         "changed_ticket_ids",
         "minimum_equity",
         "outcome_available_at",
+        "expected_draw_plan_sha256",
+        "expected_draw_transcript_sha256",
         "settlement_effects_sha256",
         "replay_source_evidence_sha256",
         "source_evidence_sha256",
@@ -941,6 +1027,8 @@ def _build_product_run_capital_path_evidence_verifier(
         membership: ResolvedFixedNRiskMembership,
         registry_path: str | Path,
         sampling_manifest_json: str,
+        sampling_frame_json: str,
+        horizon_json: str,
         settlement_bridge: PaperSettlementLearningBridge,
         authority_root: str | Path | None = None,
     ) -> ProductRunCapitalPathEvidence:
@@ -965,6 +1053,8 @@ def _build_product_run_capital_path_evidence_verifier(
             membership=membership,
             registry_path=registry_path,
             sampling_manifest_json=sampling_manifest_json,
+            sampling_frame_json=sampling_frame_json,
+            horizon_json=horizon_json,
             settlement_bridge=settlement_bridge,
             authority_root=authority_root,
         )

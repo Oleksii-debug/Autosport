@@ -878,6 +878,15 @@ class ProphetXSessionLifecycle:
                     self._require_monotonic_transition(current, timestamp)
                     if (
                         admission.action
+                        is ProphetXLoginAdmissionAction.CREATE_LOGIN
+                        and (
+                            current.slot_hold_until is None
+                            or timestamp >= current.slot_hold_until
+                        )
+                    ):
+                        return False
+                    if (
+                        admission.action
                         is ProphetXLoginAdmissionAction.START_RENEWAL
                         and (
                             current.access_expires_at is None

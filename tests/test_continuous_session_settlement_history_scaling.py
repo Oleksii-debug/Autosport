@@ -323,6 +323,22 @@ def test_restart_detects_non_tip_history_deletion() -> None:
             )
 
 
+def test_operational_status_exposes_unmaterialized_history_count_truth() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+
+        full = state.snapshot()
+        assert full.settlement_evidence_materialized is True
+        assert full.settlement_evidence_count == _SMALL_HISTORY
+        assert len(full.settlement_evidence) == _SMALL_HISTORY
+
+        operational = state.operational_snapshot()
+        assert operational.settlement_evidence_materialized is False
+        assert operational.settlement_evidence_count == _SMALL_HISTORY
+        assert operational.settlement_evidence == ()
+
+
 def test_empty_settlement_validation_does_not_scan_history() -> None:
     with tempfile.TemporaryDirectory() as directory:
         state = _state_with_history(Path(directory), _LARGE_HISTORY)

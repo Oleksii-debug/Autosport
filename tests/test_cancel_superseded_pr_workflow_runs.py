@@ -637,6 +637,64 @@ def test_commit_association_rejects_urlencode_default_rebase(monkeypatch) -> Non
     assert requested == []
 
 
+def test_commit_association_rejects_inflight_request_default_rebase(
+    monkeypatch,
+) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    request_impl = controller_module.GitHubApi._request
+    defaults = request_impl.__kwdefaults__
+    assert defaults is not None
+    requested: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return self.body
+
+    page_one = (
+        b'['
+        + b','.join(
+            b'{"number":2008,"head":{"sha":"' + HEAD_A.encode("ascii") + b'"}}'
+            for _ in range(100)
+        )
+        + b']'
+    )
+
+    def mutating_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        requested.append(request.full_url)
+        assert "page=1" in request.full_url
+        monkeypatch.setitem(defaults, "_json_parse_int", str)
+        return FakeResponse(page_one)
+
+    monkeypatch.setitem(
+        request_impl.__globals__,
+        "urlopen",
+        mutating_urlopen,
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="commit association request dispatch changed",
+    ):
+        api.associated_pr_number(HEAD_A)
+
+    assert len(requested) == 1
+
+
 def test_commit_association_page_bound_cannot_hide_second_pr(monkeypatch) -> None:
     api = controller_module.GitHubApi(
         repository="owner/repo",

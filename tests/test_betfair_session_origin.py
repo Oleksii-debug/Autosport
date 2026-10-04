@@ -113,28 +113,13 @@ def test_caller_constructed_bound_jurisdiction_is_never_authoritative():
     ],
 )
 def test_origin_negative_authority_semantics_cannot_be_rebound(
-    monkeypatch, tmp_path, attribute
+    monkeypatch, attribute
 ):
-    monkeypatch.setattr(
-        BetfairSessionOrigin,
-        attribute,
-        property(lambda _self: True),
-    )
-    secrets = BetfairNonInteractiveLoginSecrets(
-        "app",
-        "user",
-        "password",
-        tmp_path / "client.crt",
-        tmp_path / "client.key",
-    )
-
-    with pytest.raises(
-        BetfairSessionOriginError,
-        match="canonical Betfair login authority binding changed",
-    ):
-        login_betfair_noninteractive(
-            secrets,
-            jurisdiction=BetfairLoginJurisdiction.GLOBAL_COM,
+    with pytest.raises(TypeError, match="authority surface is sealed"):
+        monkeypatch.setattr(
+            BetfairSessionOrigin,
+            attribute,
+            property(lambda _self: True),
         )
 
 
@@ -149,20 +134,11 @@ def test_origin_negative_authority_semantics_cannot_be_rebound(
 def test_bound_negative_authority_semantics_cannot_be_rebound(
     monkeypatch, attribute
 ):
-    monkeypatch.setattr(
-        BetfairAuthenticatedJurisdiction,
-        attribute,
-        property(lambda _self: True),
-    )
-
-    with pytest.raises(
-        BetfairSessionOriginError,
-        match="canonical K07 identity verifier binding changed",
-    ):
-        subject.bind_betfair_authenticated_jurisdiction(
-            None,
-            None,
-            client=None,
+    with pytest.raises(TypeError, match="authority surface is sealed"):
+        monkeypatch.setattr(
+            BetfairAuthenticatedJurisdiction,
+            attribute,
+            property(lambda _self: True),
         )
 
 
@@ -523,3 +499,42 @@ def test_product_login_route_binds_to_exact_current_k07_context(monkeypatch, tmp
         bound,
         client=client,
     )
+
+
+def test_public_authority_false_getters_are_non_python_and_sealed():
+    origin = BetfairSessionOrigin(
+        venue_id="betfair",
+        login_method="NON_INTERACTIVE_CERT",
+        jurisdiction=BetfairLoginJurisdiction.GLOBAL_COM,
+        login_endpoint=cert_login_endpoint(BetfairLoginJurisdiction.GLOBAL_COM),
+        issued_at=datetime(2026, 9, 22, 9, 0, tzinfo=UTC),
+        response_sha256="a" * 64,
+    )
+    bound = BetfairAuthenticatedJurisdiction(
+        venue_id="betfair",
+        jurisdiction=BetfairLoginJurisdiction.GLOBAL_COM,
+        session_context_id="betfair-session-context:" + "b" * 64,
+        account_identity_id="c" * 64,
+        session_origin_id="d" * 64,
+    )
+
+    for cls, value in (
+        (BetfairSessionOrigin, origin),
+        (BetfairAuthenticatedJurisdiction, bound),
+    ):
+        for name in (
+            "remote_provider_origin_proven",
+            "remote_provider_jurisdiction_proven",
+            "execution_authorized",
+        ):
+            descriptor = cls.__dict__[name]
+            assert isinstance(descriptor, property)
+            assert descriptor.fget is not None
+            assert not hasattr(descriptor.fget, "__code__")
+            assert getattr(value, name) is False
+
+        with pytest.raises(TypeError, match="authority surface is sealed"):
+            cls._execution_authorized_constant = True
+
+        with pytest.raises(AttributeError):
+            object.__setattr__(value, "execution_authorized", True)

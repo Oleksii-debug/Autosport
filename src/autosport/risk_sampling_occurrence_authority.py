@@ -22,6 +22,9 @@ _SUPPORTED_RNG_ALGORITHM = "AUTOSPORT_SHA256_REJECTION_V1"
 _SUPPORTED_RNG_VERSION = "1"
 _MAX_FRAME_UNITS = 65536
 _MAX_DRAW_COUNT = 1000000
+_MAX_TOTAL_DRAWS = 1000000
+_MAX_FRAME_JSON_BYTES = 16 * 1024 * 1024
+_MAX_HORIZON_JSON_BYTES = 4096
 _HEX = frozenset("0123456789abcdef")
 
 _PRECOMMIT = resolve_fixed_n_iid_precommit_authority
@@ -125,7 +128,7 @@ class SamplingFrameUnit:
         raise TypeError("SamplingFrameUnit must not be subclassed")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ProductIidExpectedMemberDraw:
     member_id: str
     member_index: int
@@ -135,6 +138,16 @@ class ProductIidExpectedMemberDraw:
     draw_unit_ids: tuple[str, ...]
     draw_payload_sha256: tuple[str, ...]
     draw_transcript_sha256: str
+
+    def __new__(
+        cls,
+        *args: object,
+        **kwargs: object,
+    ) -> "ProductIidExpectedMemberDraw":
+        raise TypeError(
+            "ProductIidExpectedMemberDraw is product-issued; "
+            "use resolve_product_iid_expected_draw_plan"
+        )
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         raise TypeError("ProductIidExpectedMemberDraw must not be subclassed")
@@ -148,7 +161,7 @@ class ProductIidExpectedMemberDraw:
         return False
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ProductIidExpectedDrawPlan:
     experiment_id: str
     sampling_manifest_sha256: str
@@ -157,6 +170,16 @@ class ProductIidExpectedDrawPlan:
     frame_units: tuple[SamplingFrameUnit, ...]
     member_draws: tuple[ProductIidExpectedMemberDraw, ...]
     plan_sha256: str
+
+    def __new__(
+        cls,
+        *args: object,
+        **kwargs: object,
+    ) -> "ProductIidExpectedDrawPlan":
+        raise TypeError(
+            "ProductIidExpectedDrawPlan is product-issued; "
+            "use resolve_product_iid_expected_draw_plan"
+        )
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         raise TypeError("ProductIidExpectedDrawPlan must not be subclassed")
@@ -186,11 +209,23 @@ class ProductIidExpectedDrawPlan:
         return False
 
 
+_FRAME_UNIT_TYPE = SamplingFrameUnit
+_MEMBER_DRAW_TYPE = ProductIidExpectedMemberDraw
+_PLAN_TYPE = ProductIidExpectedDrawPlan
+
+
 def _parse_frame(
     sampling_frame_json: str,
     *,
     expected_sha256: str,
 ) -> tuple[SamplingFrameUnit, ...]:
+    if (
+        type(sampling_frame_json) is not str
+        or len(sampling_frame_json.encode("utf-8")) > _MAX_FRAME_JSON_BYTES
+    ):
+        raise ProductIidDrawPlanError(
+            "sampling frame exceeds supported serialized size"
+        )
     payload = _parse_canonical_json(
         sampling_frame_json,
         label="sampling_frame_json",
@@ -213,6 +248,7 @@ def _parse_frame(
 
     units: list[SamplingFrameUnit] = []
     seen_ids: set[str] = set()
+    seen_payloads: set[str] = set()
     for index, raw in enumerate(raw_units):
         if type(raw) is not dict or set(raw) != {"payload_sha256", "unit_id"}:
             raise ProductIidDrawPlanError(
@@ -227,7 +263,12 @@ def _parse_frame(
             raise ProductIidDrawPlanError(
                 "sampling frame unit ids must be unique; implicit weighting is forbidden"
             )
+        if payload_sha256 in seen_payloads:
+            raise ProductIidDrawPlanError(
+                "sampling frame payloads must be unique; implicit weighting is forbidden"
+            )
         seen_ids.add(unit_id)
+        seen_payloads.add(payload_sha256)
         units.append(
             SamplingFrameUnit(
                 unit_id=unit_id,
@@ -242,6 +283,13 @@ def _parse_horizon(
     *,
     expected_sha256: str,
 ) -> int:
+    if (
+        type(horizon_json) is not str
+        or len(horizon_json.encode("utf-8")) > _MAX_HORIZON_JSON_BYTES
+    ):
+        raise ProductIidDrawPlanError(
+            "horizon exceeds supported serialized size"
+        )
     payload = _parse_canonical_json(
         horizon_json,
         label="horizon_json",
@@ -300,10 +348,63 @@ def _require_dispatch() -> None:
         or getattr(_STRUCTURE, "__code__", None) is not _STRUCTURE_CODE
         or ResolvedFixedNRiskMembership is not _MEMBERSHIP_TYPE
         or ResolvedFixedNIidSamplingStructure is not _STRUCTURE_TYPE
+        or SamplingFrameUnit is not _FRAME_UNIT_TYPE
+        or ProductIidExpectedMemberDraw is not _MEMBER_DRAW_TYPE
+        or ProductIidExpectedDrawPlan is not _PLAN_TYPE
     ):
         raise ProductIidDrawPlanError(
             "IID draw-plan authority dispatch changed"
         )
+
+
+def _issue_member_draw(
+    *,
+    member_id: str,
+    member_index: int,
+    stream_sha256: str,
+    draw_count: int,
+    draw_indices: tuple[int, ...],
+    draw_unit_ids: tuple[str, ...],
+    draw_payload_sha256: tuple[str, ...],
+    draw_transcript_sha256: str,
+) -> ProductIidExpectedMemberDraw:
+    result = object.__new__(_MEMBER_DRAW_TYPE)
+    for field_name, value in (
+        ("member_id", member_id),
+        ("member_index", member_index),
+        ("stream_sha256", stream_sha256),
+        ("draw_count", draw_count),
+        ("draw_indices", draw_indices),
+        ("draw_unit_ids", draw_unit_ids),
+        ("draw_payload_sha256", draw_payload_sha256),
+        ("draw_transcript_sha256", draw_transcript_sha256),
+    ):
+        object.__setattr__(result, field_name, value)
+    return result
+
+
+def _issue_plan(
+    *,
+    experiment_id: str,
+    sampling_manifest_sha256: str,
+    sampling_frame_sha256: str,
+    horizon_sha256: str,
+    frame_units: tuple[SamplingFrameUnit, ...],
+    member_draws: tuple[ProductIidExpectedMemberDraw, ...],
+    plan_sha256: str,
+) -> ProductIidExpectedDrawPlan:
+    result = object.__new__(_PLAN_TYPE)
+    for field_name, value in (
+        ("experiment_id", experiment_id),
+        ("sampling_manifest_sha256", sampling_manifest_sha256),
+        ("sampling_frame_sha256", sampling_frame_sha256),
+        ("horizon_sha256", horizon_sha256),
+        ("frame_units", frame_units),
+        ("member_draws", member_draws),
+        ("plan_sha256", plan_sha256),
+    ):
+        object.__setattr__(result, field_name, value)
+    return result
 
 
 def resolve_product_iid_expected_draw_plan(
@@ -374,6 +475,10 @@ def resolve_product_iid_expected_draw_plan(
         horizon_json,
         expected_sha256=structure.horizon_sha256,
     )
+    if draw_count * structure.planned_n > _MAX_TOTAL_DRAWS:
+        raise ProductIidDrawPlanError(
+            "fixed-N IID draw plan exceeds supported total-work bound"
+        )
 
     member_draws: list[ProductIidExpectedMemberDraw] = []
     for member_index, member_id in enumerate(structure.planned_member_ids):
@@ -402,13 +507,16 @@ def resolve_product_iid_expected_draw_plan(
                 for ordinal, frame_index in enumerate(indices)
             ],
             "experiment_id": structure.experiment_id,
+            "horizon_sha256": structure.horizon_sha256,
             "member_id": member_id,
             "member_index": member_index,
+            "rng_algorithm": structure.rng_algorithm,
+            "rng_version": structure.rng_version,
             "sampling_frame_sha256": structure.sampling_frame_sha256,
             "stream_sha256": stream,
         }
         member_draws.append(
-            ProductIidExpectedMemberDraw(
+            _issue_member_draw(
                 member_id=member_id,
                 member_index=member_index,
                 stream_sha256=stream,
@@ -435,11 +543,13 @@ def resolve_product_iid_expected_draw_plan(
             }
             for draw in member_draws
         ],
+        "rng_algorithm": structure.rng_algorithm,
+        "rng_version": structure.rng_version,
         "sampling_frame_sha256": structure.sampling_frame_sha256,
         "sampling_manifest_sha256": structure.manifest_sha256,
         "schema": _PLAN_SCHEMA,
     }
-    result = ProductIidExpectedDrawPlan(
+    result = _issue_plan(
         experiment_id=structure.experiment_id,
         sampling_manifest_sha256=structure.manifest_sha256,
         sampling_frame_sha256=structure.sampling_frame_sha256,
@@ -452,35 +562,69 @@ def resolve_product_iid_expected_draw_plan(
     return result
 
 
-def verify_product_iid_expected_draw_plan(
-    candidate: ProductIidExpectedDrawPlan,
-    *,
-    membership: ResolvedFixedNRiskMembership,
-    registry_path: str | Path,
-    workspace: str | Path,
-    sampling_manifest_json: str,
-    sampling_frame_json: str,
-    horizon_json: str,
-    authority_root: str | Path | None = None,
-) -> ProductIidExpectedDrawPlan:
-    """Re-resolve and compare every field; the dataclass is not a bearer capability."""
+def _build_draw_plan_verifier(
+    resolver,
+    plan_type: type[ProductIidExpectedDrawPlan],
+):
+    module_globals = globals()
+    resolver_code = getattr(resolver, "__code__", None)
 
-    if type(candidate) is not ProductIidExpectedDrawPlan:
-        raise TypeError("candidate must be an exact ProductIidExpectedDrawPlan")
-    canonical = resolve_product_iid_expected_draw_plan(
-        membership,
-        registry_path=registry_path,
-        workspace=workspace,
-        sampling_manifest_json=sampling_manifest_json,
-        sampling_frame_json=sampling_frame_json,
-        horizon_json=horizon_json,
-        authority_root=authority_root,
-    )
-    if candidate != canonical:
-        raise ProductIidDrawPlanError(
-            "IID expected draw plan differs from canonical frozen evidence"
+    def verifier(
+        candidate: ProductIidExpectedDrawPlan,
+        *,
+        membership: ResolvedFixedNRiskMembership,
+        registry_path: str | Path,
+        workspace: str | Path,
+        sampling_manifest_json: str,
+        sampling_frame_json: str,
+        horizon_json: str,
+        authority_root: str | Path | None = None,
+    ) -> ProductIidExpectedDrawPlan:
+        if (
+            module_globals.get("resolve_product_iid_expected_draw_plan")
+            is not resolver
+            or getattr(resolver, "__code__", None) is not resolver_code
+            or module_globals.get("ProductIidExpectedDrawPlan") is not plan_type
+        ):
+            raise ProductIidDrawPlanError(
+                "IID draw-plan verifier authority dispatch changed"
+            )
+        if type(candidate) is not plan_type:
+            raise TypeError("candidate must be an exact ProductIidExpectedDrawPlan")
+        canonical = resolver(
+            membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=sampling_manifest_json,
+            sampling_frame_json=sampling_frame_json,
+            horizon_json=horizon_json,
+            authority_root=authority_root,
         )
-    return canonical
+        if (
+            module_globals.get("resolve_product_iid_expected_draw_plan")
+            is not resolver
+            or getattr(resolver, "__code__", None) is not resolver_code
+            or module_globals.get("ProductIidExpectedDrawPlan") is not plan_type
+        ):
+            raise ProductIidDrawPlanError(
+                "IID draw-plan verifier authority dispatch changed"
+            )
+        if candidate != canonical:
+            raise ProductIidDrawPlanError(
+                "IID expected draw plan differs from canonical frozen evidence"
+            )
+        return canonical
+
+    verifier.__name__ = "verify_product_iid_expected_draw_plan"
+    verifier.__qualname__ = "verify_product_iid_expected_draw_plan"
+    return verifier
+
+
+verify_product_iid_expected_draw_plan = _build_draw_plan_verifier(
+    resolve_product_iid_expected_draw_plan,
+    ProductIidExpectedDrawPlan,
+)
+del _build_draw_plan_verifier
 
 
 __all__ = [

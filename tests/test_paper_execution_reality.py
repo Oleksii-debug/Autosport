@@ -783,6 +783,20 @@ class PaperExecutionRealityTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 PaperExecutionStateError,
+                "supports BACK only",
+            ):
+                ledger.reserve_run(
+                    run_id=run_id,
+                    trigger_id="trigger-invalid-reservation",
+                    plan=plan(action("a1", side="LAY")),
+                    config=model,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={},
+                )
+            self.assertFalse(path.exists())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
                 "both observed and synthetically suspended",
             ):
                 ledger.reserve_run(
@@ -827,6 +841,41 @@ class PaperExecutionRealityTests(unittest.TestCase):
                     },
                 )
             self.assertFalse(path.exists())
+
+    def test_direct_reservation_rejects_invalid_observed_timing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = plan(action("a1"))
+            observation, _registry = registered_observation(
+                ledger,
+                current.actions[0],
+                PaperAttemptOutcome.REJECTED,
+                at=EXPIRES_AT,
+            )
+            event_count = len(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "at/after action expiry",
+            ):
+                ledger.reserve_run(
+                    run_id="paper-exec-v2-" + "3" * 64,
+                    trigger_id="trigger-direct-expired-evidence",
+                    plan=current,
+                    config=config(),
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={
+                        "a1": observation.evidence_id
+                    },
+                )
+            self.assertEqual(len(ledger.events()), event_count)
+            self.assertFalse(
+                any(
+                    event["event_type"] == "RUN_RESERVED"
+                    for event in ledger.events()
+                )
+            )
 
     def test_reservation_evidence_must_bind_exact_action(self):
         with tempfile.TemporaryDirectory() as tmp:

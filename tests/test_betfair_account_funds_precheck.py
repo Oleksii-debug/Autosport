@@ -180,7 +180,13 @@ def test_happy_path_is_bound_to_exact_product_issued_k07_client(
 
     result = _evaluate(client=client)
 
-    assert result.passed is True
+    assert result.numeric_sufficient is True
+    assert result.stable_account_identity_proven is False
+    assert result.remote_provider_origin_proven is False
+    assert result.provider_account_details_origin_proven is False
+    assert result.provider_funds_origin_proven is False
+    assert result.liability_unit_proven is False
+    assert result.passed is False
     assert result.execution_authorized is False
     assert result.account_context_id.startswith("betfair-session-context:")
     assert len(result.account_identity_id) == 64
@@ -188,7 +194,7 @@ def test_happy_path_is_bound_to_exact_product_issued_k07_client(
     assert len(result.account_funds_sha256) == 64
     assert result.currency_code == "EUR"
     assert not hasattr(result, "account_id")
-    assert subject._ISSUED[id(result)].client is client
+    assert not hasattr(subject, "_ISSUED")
     assert subject.is_authoritative_funds_precheck(result)
     assert subject.require_authoritative_funds_precheck(result) is result
     assert methods == [
@@ -255,7 +261,7 @@ def test_direct_unissued_readonly_client_cannot_mint_funds_authority(
     assert methods == []
 
 
-def test_k07_session_rotation_revokes_existing_positive_funds_authority(
+def test_k07_session_rotation_revokes_existing_structural_funds_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_provider(monkeypatch, balance=100)
@@ -268,7 +274,8 @@ def test_k07_session_rotation_revokes_existing_positive_funds_authority(
         "rotated-session-token",
     )
 
-    assert result.passed is True  # immutable audit fact remains inspectable
+    assert result.numeric_sufficient is True
+    assert result.passed is False
     assert not subject.is_authoritative_funds_precheck(result)
     with pytest.raises(subject.BetfairAccountFundsPrecheckError, match="authority"):
         subject.require_authoritative_funds_precheck(result)
@@ -287,7 +294,7 @@ def test_k07_transport_origin_rotation_revokes_existing_authority(
     assert not subject.is_authoritative_funds_precheck(result)
 
 
-def test_equal_balance_passes_and_one_cent_over_fails(
+def test_numeric_balance_boundary_is_exact_but_never_promoted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_provider(monkeypatch, balance=25)
@@ -295,7 +302,9 @@ def test_equal_balance_passes_and_one_cent_over_fails(
     equal = _evaluate(required=Decimal("25"))
     over = _evaluate(required=Decimal("25.01"))
 
-    assert equal.passed is True
+    assert equal.numeric_sufficient is True
+    assert over.numeric_sufficient is False
+    assert equal.passed is False
     assert over.passed is False
     assert subject.is_authoritative_funds_precheck(equal)
     assert subject.is_authoritative_funds_precheck(over)
@@ -424,20 +433,24 @@ def test_caller_copy_replace_pickle_and_reconstruction_lack_authority(
             subject.require_authoritative_funds_precheck(candidate)
 
 
-def test_authority_expires_at_use_time(
+def test_observed_staleness_revokes_authority_monotonically(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_provider(monkeypatch)
     result = _evaluate()
     assert subject.is_authoritative_funds_precheck(result)
 
-    checked_at = (
-        result.funds_observed_at
-        + subject.MAX_FUNDS_EVIDENCE_AGE
-        + timedelta(microseconds=1)
+    original = result.funds_observed_at
+    object.__setattr__(
+        result,
+        "funds_observed_at",
+        result.evaluated_at
+        - subject.MAX_FUNDS_EVIDENCE_AGE
+        - timedelta(seconds=1),
     )
-    monkeypatch.setattr(subject, "_utc_now", lambda: checked_at)
+    assert not subject.is_authoritative_funds_precheck(result)
 
+    object.__setattr__(result, "funds_observed_at", original)
     assert not subject.is_authoritative_funds_precheck(result)
 
 
@@ -462,8 +475,12 @@ def test_same_object_authority_field_mutation_revokes_precheck(
     result = _evaluate(required=Decimal("125"))
     assert subject.is_authoritative_funds_precheck(result)
 
+    original = getattr(result, field)
     object.__setattr__(result, field, replacement)
 
+    assert not subject.is_authoritative_funds_precheck(result)
+
+    object.__setattr__(result, field, original)
     assert not subject.is_authoritative_funds_precheck(result)
 
 
@@ -493,3 +510,87 @@ def test_wrong_client_type_rejected_before_provider_read(
         )
 
     assert methods == []
+
+
+def test_caller_currency_relabel_cannot_mint_positive_funds_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A bare amount can be caller-labelled EUR even if its true upstream unit
+    # was GBP. The local same-number comparison remains diagnostic only.
+    _install_provider(monkeypatch, currency_code="EUR", balance=100)
+    result = _evaluate(required=Decimal("90"), currency="EUR")
+
+    assert result.currency_code == "EUR"
+    assert result.numeric_sufficient is True
+    assert result.liability_unit_proven is False
+    assert result.passed is False
+    assert result.remote_provider_origin_proven is False
+    assert result.provider_account_details_origin_proven is False
+    assert result.provider_funds_origin_proven is False
+    assert result.execution_authorized is False
+    assert subject.is_authoritative_funds_precheck(result)
+
+
+def test_import_surface_has_no_writable_funds_issuance_registry_or_mint() -> None:
+    for name in (
+        "_ISSUED",
+        "_remember_issued",
+        "_make_authority",
+    ):
+        assert not hasattr(subject, name), name
+
+
+def test_hard_false_funds_authority_surface_is_non_python_and_sealed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_provider(monkeypatch)
+    result = _evaluate()
+    for name in (
+        "stable_account_identity_proven",
+        "remote_provider_origin_proven",
+        "provider_account_details_origin_proven",
+        "provider_funds_origin_proven",
+        "liability_unit_proven",
+        "passed",
+        "execution_authorized",
+    ):
+        descriptor = subject.BetfairAccountFundsPrecheck.__dict__[name]
+        assert isinstance(descriptor, property)
+        assert descriptor.fget is not None
+        assert not hasattr(descriptor.fget, "__code__")
+        assert getattr(result, name) is False
+
+    with pytest.raises(TypeError, match="authority surface is sealed"):
+        subject.BetfairAccountFundsPrecheck._passed_constant = True
+    with pytest.raises(TypeError, match="authority surface is sealed"):
+        subject.BetfairAccountFundsPrecheck.passed = property(
+            lambda _self: True
+        )
+    with pytest.raises(AttributeError):
+        object.__setattr__(result, "passed", True)
+
+
+def test_funds_semantic_descriptors_cannot_be_class_rebound() -> None:
+    for name in (
+        "venue_id",
+        "account_context_id",
+        "account_identity_id",
+        "adapter_id",
+        "adapter_version",
+        "required_liability",
+        "available_to_bet_balance",
+        "currency_code",
+        "account_observed_at",
+        "funds_observed_at",
+        "evaluated_at",
+        "account_details_sha256",
+        "account_funds_sha256",
+        "numeric_sufficient",
+        "precheck_id",
+    ):
+        with pytest.raises(TypeError, match="authority surface is sealed"):
+            setattr(
+                subject.BetfairAccountFundsPrecheck,
+                name,
+                property(lambda _self: None),
+            )

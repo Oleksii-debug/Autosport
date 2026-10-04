@@ -1473,5 +1473,86 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
                 )
 
 
+    def test_outcome_input_mapping_guard_helper_and_descriptor_rebinding_fail_closed(
+        self,
+    ) -> None:
+        target, market_input, _store = self._winner_target_market_fixture()
+
+        original_guard = outcome_input_authority._require_dispatch
+        with patch.object(
+            outcome_input_authority,
+            "_require_dispatch",
+            lambda: None,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskOutcomeInputMappingError,
+                "dispatch guard root changed",
+            ):
+                issue_product_proposal_risk_outcome_input_mapping(
+                    self.workspace,
+                    target_sha256=target.target_sha256,
+                    market_inputs=(market_input,),
+                )
+        self.assertIs(outcome_input_authority._require_dispatch, original_guard)
+
+        original_rows = outcome_input_authority._market_rows
+
+        def fake_rows(*args: object, **kwargs: object) -> object:
+            return original_rows(*args, **kwargs)
+
+        with patch.object(outcome_input_authority, "_market_rows", fake_rows):
+            with self.assertRaisesRegex(
+                ProductProposalRiskOutcomeInputMappingError,
+                "dispatch authority changed",
+            ):
+                issue_product_proposal_risk_outcome_input_mapping(
+                    self.workspace,
+                    target_sha256=target.target_sha256,
+                    market_inputs=(market_input,),
+                )
+
+        original_evidence_to_dict = (
+            outcome_input_authority.MarketImpliedBaselineEvidence.to_dict
+        )
+
+        def fake_evidence_to_dict(self: object) -> object:
+            return original_evidence_to_dict(self)
+
+        with patch.object(
+            outcome_input_authority.MarketImpliedBaselineEvidence,
+            "to_dict",
+            fake_evidence_to_dict,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskOutcomeInputMappingError,
+                "dispatch authority changed",
+            ):
+                issue_product_proposal_risk_outcome_input_mapping(
+                    self.workspace,
+                    target_sha256=target.target_sha256,
+                    market_inputs=(market_input,),
+                )
+
+        original_record_to_dict = outcome_input_authority.DecisionRecord.to_dict
+
+        def fake_record_to_dict(self: object) -> object:
+            return original_record_to_dict(self)
+
+        with patch.object(
+            outcome_input_authority.DecisionRecord,
+            "to_dict",
+            fake_record_to_dict,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskOutcomeInputMappingError,
+                "dispatch authority changed",
+            ):
+                issue_product_proposal_risk_outcome_input_mapping(
+                    self.workspace,
+                    target_sha256=target.target_sha256,
+                    market_inputs=(market_input,),
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

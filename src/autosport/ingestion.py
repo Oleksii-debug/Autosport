@@ -276,11 +276,13 @@ class IngestionEngine:
         _stamp=_stamp_live_event,
         _publish=_publish_normalized_live_batch,
         _parse_timestamp=parse_source_timestamp,
+        _market_bus_type=MarketEventBus,
     ) -> IngestionStats:
         # Freeze one operator-owned dependency snapshot before provider-controlled
         # acquisition. Reentrant provider code must not be able to swap receive-time,
         # normalization, publication, policy or health authority mid-poll.
         bus = self.bus
+        live_store = bus.store if type(bus) is _market_bus_type else None
         normalizer = self.normalizer
         policy = self.policy
         health_store = self.health_store
@@ -401,6 +403,10 @@ class IngestionEngine:
         # acquisition/validation/normalization already succeeded.
         ordered_flags = tuple(sorted(flags))
         try:
+            if live_store is not None and bus.store is not live_store:
+                raise RuntimeError(
+                    "live ingestion store authority changed during provider I/O"
+                )
             accepted = _publish(bus, normalized)
         except MarketEventDeliveryError as delivery_error:
             # MarketEventDeliveryError can only be raised after transactional

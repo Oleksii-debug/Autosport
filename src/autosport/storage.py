@@ -853,6 +853,28 @@ class SQLiteMarketStore:
         if cursor.rowcount != 1:
             raise RuntimeError("live receipt authority insert did not persist exactly one row")
 
+    def _append_batch_accepted_canonical(
+        self,
+        events: Iterable[MarketEvent],
+    ) -> list[MarketEvent]:
+        accepted: list[MarketEvent] = []
+        with self._connection_lock:
+            owns_transaction = not self.connection.in_transaction
+            if owns_transaction:
+                self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                for event in events:
+                    if self._insert_one(event):
+                        accepted.append(event)
+            except Exception:
+                if owns_transaction:
+                    self.connection.rollback()
+                raise
+            else:
+                if owns_transaction:
+                    self.connection.commit()
+        return accepted
+
     def _before_live_append_attempt(self, events: Iterable[MarketEvent]) -> None:
         """Non-authoritative pre-transaction retry/fault-injection seam."""
 
@@ -861,6 +883,7 @@ class SQLiteMarketStore:
         events: Iterable[MarketEvent],
         *,
         _market_event_type: type[MarketEvent] = MarketEvent,
+        _canonical_append=_append_batch_accepted_canonical,
     ) -> list[MarketEvent]:
         """Persist one live-ingestion batch and its receipt witnesses atomically.
 
@@ -939,10 +962,7 @@ class SQLiteMarketStore:
                         projection_state[projection_key] = event
 
                 changes_before = self.connection.total_changes
-                accepted = __class__._append_batch_accepted_canonical(
-                    self,
-                    batch,
-                )
+                accepted = _canonical_append(self, batch)
                 if not self.connection.in_transaction:
                     raise RuntimeError(
                         "live append hook relinquished transaction ownership"
@@ -988,8 +1008,16 @@ class SQLiteMarketStore:
                         "live append hook returned events outside the canonical inserted set"
                     )
 
+                receipt_changes_before = self.connection.total_changes
                 for event in expected:
                     self._insert_live_receipt_authority(event)
+                if (
+                    self.connection.total_changes - receipt_changes_before
+                    != len(expected)
+                ):
+                    raise RuntimeError(
+                        "live receipt writer changed authority outside the canonical batch"
+                    )
                 for event in expected:
                     receipt = self.connection.execute(
                         """SELECT ingest_ts,authority
@@ -1012,28 +1040,6 @@ class SQLiteMarketStore:
         with self._connection_lock:
             with self.connection:
                 return self._insert_one(event)
-
-    def _append_batch_accepted_canonical(
-        self,
-        events: Iterable[MarketEvent],
-    ) -> list[MarketEvent]:
-        accepted: list[MarketEvent] = []
-        with self._connection_lock:
-            owns_transaction = not self.connection.in_transaction
-            if owns_transaction:
-                self.connection.execute("BEGIN IMMEDIATE")
-            try:
-                for event in events:
-                    if self._insert_one(event):
-                        accepted.append(event)
-            except Exception:
-                if owns_transaction:
-                    self.connection.rollback()
-                raise
-            else:
-                if owns_transaction:
-                    self.connection.commit()
-        return accepted
 
     def append_batch_accepted(self, events: Iterable[MarketEvent]) -> list[MarketEvent]:
         """Insert one normalized batch and return newly accepted events."""

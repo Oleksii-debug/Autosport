@@ -1491,12 +1491,43 @@ class DesktopDeltaCheckpointStore(_JsonAtomicStore):
                 "application timing must satisfy desktop_available_at <= applied_at <= acknowledged_at"
             )
         raw = self._read()
-        existing = next((item for item in raw["acks"] if item.get("delta_id") == delta.delta_id), None)
+        acks = raw.get("acks")
+        if type(acks) is not list:
+            raise ApplicationReceiptError("desktop acknowledgement index is malformed")
+        existing_matches = []
+        for item in acks:
+            if type(item) is not dict:
+                raise ApplicationReceiptError("desktop acknowledgement entry is malformed")
+            if item.get("delta_id") == delta.delta_id:
+                existing_matches.append(item)
+        if len(existing_matches) > 1:
+            raise AckConflictError(
+                f"multiple desktop acknowledgements exist for delta {delta.delta_id}"
+            )
+        existing = existing_matches[0] if existing_matches else None
         if existing is not None:
             if existing.get("canonical_event_digest") != delta.canonical_event_digest:
                 raise AckConflictError("existing desktop ack disagrees with applied event")
             if existing.get("application_receipt_id") != application_receipt.receipt_id:
                 raise ApplicationReceiptError("existing desktop receipt disagrees with applied effect")
+            if existing.get("applied_at") != application_receipt.applied_at:
+                raise ApplicationReceiptError(
+                    "existing desktop receipt timestamp disagrees with applied effect"
+                )
+            try:
+                existing_applied = _instant(existing.get("applied_at"), "applied_at")
+                existing_acknowledged = _instant(
+                    existing.get("acknowledged_at"),
+                    "acknowledged_at",
+                )
+            except (TypeError, ValueError) as exc:
+                raise ApplicationReceiptError(
+                    "existing desktop acknowledgement timing is malformed"
+                ) from exc
+            if not (desktop_available <= existing_applied <= existing_acknowledged):
+                raise ApplicationReceiptError(
+                    "existing desktop acknowledgement timing is invalid"
+                )
             return False
         raw["acks"].append({
             "delta_id": delta.delta_id,

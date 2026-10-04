@@ -26,11 +26,28 @@ from __future__ import annotations
 from contextvars import ContextVar
 from dataclasses import dataclass
 from decimal import Decimal
+from importlib import import_module
 from threading import Lock
 from weakref import ref
 
 from . import betfair_account_readonly as _adapter
 from . import betfair_settlement_revisions as _settlement
+
+
+# #1496 installs a final route/credential-stability wrapper around the canonical
+# execution-readback method.  When both lineages are present in one product image,
+# install that successor before snapshotting the read dispatch below; a later wrapper
+# would otherwise (correctly) look like authority drift and permanently disable
+# currency-qualified settlement.  On standalone #1272/current main the module does not
+# exist, so absence is the only ignored case.  Import failures inside an existing
+# successor module remain fatal rather than silently degrading the authority graph.
+_ROUTE_GUARD_MODULE = f"{__package__}._betfair_execution_readback_route_authority_guard"
+try:
+    _readback_route_authority_guard = import_module(_ROUTE_GUARD_MODULE)
+except ModuleNotFoundError as exc:
+    if exc.name != _ROUTE_GUARD_MODULE:
+        raise
+    _readback_route_authority_guard = None
 
 
 _BASE_ORDER = _adapter.BetfairClearedOrderObservation

@@ -4214,6 +4214,60 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_existing_cutoff_ignores_later_market_row_without_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(first))
+                frozen = self.replay(store)
+                self.assertEqual(self.semantic_events(frozen), (first.to_dict(),))
+
+                tail = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:00.500000+00:00",
+                )
+                payload = storage_module._canonical_payload(tail)
+                store.connection.execute(
+                    "INSERT INTO market_events "
+                    "(dedupe_key,quote_key,event_id,market_id,selection_id,"
+                    "decimal_odds,observed_ts,source_id,sequence,payload_json) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        tail.dedupe_key,
+                        tail.quote_key,
+                        tail.event_id,
+                        tail.market_id,
+                        tail.selection_id,
+                        str(tail.decimal_odds),
+                        tail.observed_ts,
+                        tail.source_id,
+                        tail.sequence,
+                        payload,
+                    ),
+                )
+                store.connection.commit()
+
+                self.assertEqual(
+                    self.semantic_events(self.replay(store)),
+                    (first.to_dict(),),
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "append-generation authority does not exactly cover history",
+                ):
+                    self.replay(
+                        store,
+                        as_of=self.CUTOFF + timedelta(seconds=1),
+                    )
+            finally:
+                store.close()
+
     def test_existing_cutoff_ignores_later_orphan_generation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

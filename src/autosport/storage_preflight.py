@@ -39,7 +39,6 @@ def probe_workspace_writable(workspace: str | Path) -> None:
             delete=False,
         ) as reservation:
             destination = Path(reservation.name)
-        destination.unlink()
         lock_path = destination.with_name(f".{destination.name}.lock")
 
         atomic_write_json(destination, _WORKSPACE_PROBE_PAYLOAD)

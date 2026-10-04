@@ -29,6 +29,7 @@ from autosport.paper_settlement_learning import (
 )
 from autosport.risk import PaperRiskPolicy
 from autosport.settlement import SettlementEngine
+from autosport.product_runtime import _settlement_learning_handoff_identity
 from autosport.continuous_session import SettlementResolution
 
 
@@ -204,6 +205,64 @@ def _settle(
 
 
 class PaperSettlementLearningBridgeTests(unittest.TestCase):
+    def test_canonical_bridge_configuration_and_product_identity_survive_reopen(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            goal, risk, _ticket, _decision, _environment, _baseline, runtime, _observation, _action, bridge = _fixture(
+                root,
+                legs=(leg,),
+            )
+            first_config = bridge.settlement_learning_configuration_sha256
+            first_identity = _settlement_learning_handoff_identity(handoff=bridge)
+
+            reopened = PaperSettlementLearningBridge(
+                root / "paper_learning_bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            self.assertEqual(
+                reopened.settlement_learning_configuration_sha256,
+                first_config,
+            )
+            self.assertEqual(
+                _settlement_learning_handoff_identity(handoff=reopened),
+                first_identity,
+            )
+            self.assertIsNotNone(runtime.snapshot().state_sha256)
+
+    def test_canonical_bridge_authority_roots_are_immutable_after_construction(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            *_prefix, bridge = _fixture(root, legs=(leg,))
+            original_loop = bridge.agent_loop
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "settlement learning authority field agent_loop is immutable",
+            ):
+                bridge.agent_loop = AgentLoopRuntime(root / "agent-loop.json")
+            self.assertIs(bridge.agent_loop, original_loop)
+
     def test_outbox_survives_failure_before_agent_loop_ack(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -373,6 +373,16 @@ class PaperSettlementLearningBridge:
         self.economic_goal = economic_goal
         self.risk_policy = risk_policy
         agent_loop_snapshot = self.agent_loop.snapshot()
+        owner_goal_fingerprint = provenance_for(self.economic_goal).contract_sha256
+        owner_risk_fingerprint = self.risk_policy.provenance_sha256
+        if agent_loop_snapshot.economic_goal_fingerprint != owner_goal_fingerprint:
+            raise PaperSettlementLearningBridgeError(
+                "AgentLoop economic-goal fingerprint differs from bridge owner contract"
+            )
+        if agent_loop_snapshot.risk_fingerprint != owner_risk_fingerprint:
+            raise PaperSettlementLearningBridgeError(
+                "AgentLoop risk fingerprint differs from bridge owner policy"
+            )
         self.settlement_learning_configuration_sha256 = _digest(
             {
                 "implementation_id": self.settlement_learning_handoff_implementation_id,
@@ -395,10 +405,8 @@ class PaperSettlementLearningBridge:
                     "config_sha256": agent_loop_snapshot.config_sha256,
                     "activation_binding_id": agent_loop_snapshot.activation_binding_id,
                 },
-                "economic_goal_fingerprint": provenance_for(
-                    self.economic_goal
-                ).contract_sha256,
-                "risk_fingerprint": self.risk_policy.provenance_sha256,
+                "economic_goal_fingerprint": owner_goal_fingerprint,
+                "risk_fingerprint": owner_risk_fingerprint,
             }
         )
         self.state_path.parent.mkdir(parents=True, exist_ok=True)

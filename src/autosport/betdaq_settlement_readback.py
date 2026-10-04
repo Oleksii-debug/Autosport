@@ -552,8 +552,13 @@ class BetdaqPostingObservation:
             raise BetdaqEconomicReadbackError(
                 "posted_at must use canonical UTC timestamp spelling"
             )
-        if type(self.description) is not str:
-            raise BetdaqEconomicReadbackError("description must be text")
+        if (
+            type(self.description) is not str
+            or self.description != self.description.strip()
+        ):
+            raise BetdaqEconomicReadbackError(
+                "description must be trimmed provider text"
+            )
         _finite_decimal(self.amount, "amount")
         _finite_decimal(self.resulting_balance, "resulting_balance")
         _unsigned_byte(self.posting_category, "posting_category")

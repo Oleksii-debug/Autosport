@@ -1590,6 +1590,21 @@ def test_cross_response_currency_drift_is_economic_conflict(monkeypatch):
         coalesce_posting_replays(euro, usd)
 
 
+@pytest.mark.parametrize("description", [" leading", "trailing ", " both "])
+def test_reconstructed_posting_rejects_untrimmed_provider_description(
+    monkeypatch,
+    description,
+):
+    client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    readback = client.read_account_postings_by_id(9000)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="description must be trimmed provider text",
+    ):
+        replace(readback.postings[0], description=description)
+
+
 def test_posting_replay_coalescence_rejects_account_context_mixing(monkeypatch):
     payload = postings_by_id(posting(9001))
     first_client, _ = economic_client(

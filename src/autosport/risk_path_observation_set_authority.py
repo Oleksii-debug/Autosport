@@ -219,6 +219,8 @@ def resolve_product_fixed_n_risk_observations(
         or qualification.grants_real_money_authority is not False
         or qualification.planned_member_ids != structure.planned_member_ids
         or qualification.sampling_manifest_sha256 != structure.manifest_sha256
+        or type(qualification.member_path_evidence_sha256) is not tuple
+        or len(qualification.member_path_evidence_sha256) != structure.planned_n
         or len(settlement_bridges) != structure.planned_n
     ):
         raise ProductFixedNRiskObservationSetError(
@@ -273,6 +275,13 @@ def resolve_product_fixed_n_risk_observations(
             path.source_evidence_sha256,
             "path source evidence sha256",
         )
+        if (
+            source_evidence_sha256
+            != qualification.member_path_evidence_sha256[member_index]
+        ):
+            raise ProductFixedNRiskObservationSetError(
+                "qualified path evidence root differs from re-resolved path"
+            )
         if source_evidence_sha256 in seen_sources:
             raise ProductFixedNRiskObservationSetError(
                 "fixed-N member source evidence identities must be unique"
@@ -368,12 +377,147 @@ _OBSERVATION_FIELDS = (
 def _build_observation_set_verifier(
     resolver,
     set_type: type[ProductFixedNRiskObservationSet],
+    observation_type: type[RiskPathObservation],
 ):
     module_globals = globals()
     resolver_code = getattr(resolver, "__code__", None)
     if resolver_code is None:
         raise RuntimeError("risk observation cohort resolver is unavailable")
-    fields = _OBSERVATION_SET_FIELDS
+
+    set_field_names = (
+        "experiment_id",
+        "planned_member_ids",
+        "qualification_sha256",
+        "occurrence_root_sha256",
+        "observations",
+        "observation_manifest_sha256",
+        "source_evidence_sha256",
+    )
+    observation_field_names = (
+        "independent_unit_id",
+        "dependence_group_id",
+        "minimum_equity",
+        "outcome_available_at",
+        "source_evidence_sha256",
+    )
+    set_descriptors = tuple(
+        (name, set_type.__dict__[name]) for name in set_field_names
+    )
+    observation_descriptors = tuple(
+        (name, observation_type.__dict__[name])
+        for name in observation_field_names
+    )
+
+    def require_verifier_dispatch() -> None:
+        if (
+            module_globals.get("resolve_product_fixed_n_risk_observations")
+            is not resolver
+            or getattr(resolver, "__code__", None) is not resolver_code
+            or module_globals.get("ProductFixedNRiskObservationSet")
+            is not set_type
+            or module_globals.get("_SET_TYPE") is not set_type
+            or module_globals.get("RiskPathObservation") is not observation_type
+            or module_globals.get("_OBSERVATION_TYPE") is not observation_type
+            or any(
+                set_type.__dict__.get(name) is not descriptor
+                for name, descriptor in set_descriptors
+            )
+            or any(
+                observation_type.__dict__.get(name) is not descriptor
+                for name, descriptor in observation_descriptors
+            )
+        ):
+            raise ProductFixedNRiskObservationSetError(
+                "risk observation cohort verifier authority dispatch changed"
+            )
+
+    def descriptor_value(
+        descriptor: object,
+        instance: object,
+        owner: type[object],
+    ) -> object:
+        get = getattr(descriptor, "__get__", None)
+        if get is None:
+            raise ProductFixedNRiskObservationSetError(
+                "risk observation cohort field descriptor is unavailable"
+            )
+        return get(instance, owner)
+
+    def exact_text(value: object, name: str) -> str:
+        if type(value) is not str:
+            raise ProductFixedNRiskObservationSetError(
+                f"{name} must be exact text"
+            )
+        return value
+
+    def exact_text_tuple(value: object, name: str) -> tuple[str, ...]:
+        if type(value) is not tuple or any(type(item) is not str for item in value):
+            raise ProductFixedNRiskObservationSetError(
+                f"{name} must be an exact text tuple"
+            )
+        return value
+
+    def observation_snapshot(
+        observation: object,
+    ) -> tuple[object, ...]:
+        if type(observation) is not observation_type:
+            raise ProductFixedNRiskObservationSetError(
+                "risk observation cohort contains non-canonical observation type"
+            )
+        values = {
+            name: descriptor_value(
+                descriptor,
+                observation,
+                observation_type,
+            )
+            for name, descriptor in observation_descriptors
+        }
+        minimum_equity = values["minimum_equity"]
+        from decimal import Decimal
+
+        if type(minimum_equity) is not Decimal or not minimum_equity.is_finite():
+            raise ProductFixedNRiskObservationSetError(
+                "risk observation minimum_equity must be an exact finite Decimal"
+            )
+        return (
+            exact_text(values["independent_unit_id"], "independent_unit_id"),
+            exact_text(values["dependence_group_id"], "dependence_group_id"),
+            minimum_equity.as_tuple(),
+            exact_text(values["outcome_available_at"], "outcome_available_at"),
+            exact_text(
+                values["source_evidence_sha256"],
+                "source_evidence_sha256",
+            ),
+        )
+
+    def set_snapshot(
+        value: ProductFixedNRiskObservationSet,
+    ) -> tuple[object, ...]:
+        if type(value) is not set_type:
+            raise TypeError(
+                "candidate must be an exact ProductFixedNRiskObservationSet"
+            )
+        values = {
+            name: descriptor_value(descriptor, value, set_type)
+            for name, descriptor in set_descriptors
+        }
+        observations = values["observations"]
+        if type(observations) is not tuple:
+            raise ProductFixedNRiskObservationSetError(
+                "risk observation cohort observations must be an exact tuple"
+            )
+        return (
+            exact_text(values["experiment_id"], "experiment_id"),
+            exact_text_tuple(values["planned_member_ids"], "planned_member_ids"),
+            exact_text(values["qualification_sha256"], "qualification_sha256"),
+            exact_text(values["occurrence_root_sha256"], "occurrence_root_sha256"),
+            tuple(observation_snapshot(item) for item in observations),
+            exact_text(
+                values["observation_manifest_sha256"],
+                "observation_manifest_sha256",
+            ),
+            exact_text(values["source_evidence_sha256"], "source_evidence_sha256"),
+        )
 
     def verifier(
         candidate: ProductFixedNRiskObservationSet,
@@ -387,24 +531,9 @@ def _build_observation_set_verifier(
         settlement_bridges: tuple[PaperSettlementLearningBridge, ...],
         authority_root: str | Path | None = None,
     ) -> ProductFixedNRiskObservationSet:
-        def require_verifier_dispatch() -> None:
-            if (
-                module_globals.get("resolve_product_fixed_n_risk_observations")
-                is not resolver
-                or getattr(resolver, "__code__", None) is not resolver_code
-                or module_globals.get("ProductFixedNRiskObservationSet")
-                is not set_type
-            ):
-                raise ProductFixedNRiskObservationSetError(
-                    "risk observation cohort verifier authority dispatch changed"
-                )
-
         require_verifier_dispatch()
         _require_dispatch()
-        if type(candidate) is not set_type:
-            raise TypeError(
-                "candidate must be an exact ProductFixedNRiskObservationSet"
-            )
+        candidate_snapshot = set_snapshot(candidate)
         canonical = resolver(
             membership,
             registry_path=registry_path,
@@ -421,54 +550,7 @@ def _build_observation_set_verifier(
             raise ProductFixedNRiskObservationSetError(
                 "risk observation cohort resolver returned invalid type"
             )
-        try:
-            differs = any(
-                object.__getattribute__(candidate, field_name)
-                != object.__getattribute__(canonical, field_name)
-                for field_name in fields
-            )
-            candidate_observations = object.__getattribute__(
-                candidate,
-                "observations",
-            )
-            canonical_observations = object.__getattribute__(
-                canonical,
-                "observations",
-            )
-            if (
-                type(candidate_observations) is not tuple
-                or type(canonical_observations) is not tuple
-                or len(candidate_observations) != len(canonical_observations)
-            ):
-                differs = True
-            else:
-                for candidate_observation, canonical_observation in zip(
-                    candidate_observations,
-                    canonical_observations,
-                    strict=True,
-                ):
-                    if (
-                        type(candidate_observation) is not _OBSERVATION_TYPE
-                        or type(canonical_observation) is not _OBSERVATION_TYPE
-                        or any(
-                            object.__getattribute__(
-                                candidate_observation,
-                                field_name,
-                            )
-                            != object.__getattribute__(
-                                canonical_observation,
-                                field_name,
-                            )
-                            for field_name in _OBSERVATION_FIELDS
-                        )
-                    ):
-                        differs = True
-                        break
-        except (AttributeError, TypeError) as exc:
-            raise ProductFixedNRiskObservationSetError(
-                "risk observation cohort differs from canonical durable evidence"
-            ) from exc
-        if differs:
+        if set_snapshot(canonical) != candidate_snapshot:
             raise ProductFixedNRiskObservationSetError(
                 "risk observation cohort differs from canonical durable evidence"
             )
@@ -484,6 +566,7 @@ def _build_observation_set_verifier(
 verify_product_fixed_n_risk_observations = _build_observation_set_verifier(
     resolve_product_fixed_n_risk_observations,
     ProductFixedNRiskObservationSet,
+    RiskPathObservation,
 )
 del _build_observation_set_verifier
 

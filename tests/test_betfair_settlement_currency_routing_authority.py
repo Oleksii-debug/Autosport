@@ -219,18 +219,17 @@ def test_k07_resolver_alias_rebind_is_rejected_before_rebound_execution(
     assert calls == []
 
 
-def test_k07_resolver_executable_drift_is_rejected_before_execution(
+def test_k07_resolver_executable_identity_drift_is_rejected_before_execution(
     monkeypatch,
 ) -> None:
     client, _provider = _client(monkeypatch)
-
-    def hostile_resolver(value):
-        raise AssertionError("mutated K07 identity resolver executed")
+    original_code = origin_guard._RESOLVE_IDENTITY.__code__
+    drifted_code = original_code.replace(co_name="drifted_k07_resolver")
 
     monkeypatch.setattr(
         origin_guard._RESOLVE_IDENTITY,
         "__code__",
-        hostile_resolver.__code__,
+        drifted_code,
     )
 
     with pytest.raises(

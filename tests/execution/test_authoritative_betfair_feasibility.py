@@ -16,6 +16,10 @@ from autosport.betfair_account_readonly import (
     BetfairReadOnlyError,
     BetfairSessionCredentials,
 )
+from autosport.betfair_price_ladder_admission import (
+    BetfairPriceLadderAdmissionState,
+    assess_betfair_price_ladder_admission,
+)
 from autosport.execution.feasibility import (
     FeasibilityState,
     assess_authoritative_betfair_execution_feasibility,
@@ -246,6 +250,48 @@ def _canonical_client() -> BetfairReadOnlyClient:
     )
 
 
+class MarketBookAndPriceLadderTransport(MarketBookTransport):
+    def __init__(
+        self,
+        *,
+        ladder_type: str = "CLASSIC",
+        **market_book_kwargs,
+    ) -> None:
+        super().__init__(**market_book_kwargs)
+        self.ladder_type = ladder_type
+
+    def post(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        request = json.loads(body.decode("utf-8"))
+        if request["method"] != "SportsAPING/v1.0/listMarketCatalogue":
+            return super().post(
+                url,
+                headers=headers,
+                body=body,
+                timeout_seconds=timeout_seconds,
+            )
+        self.calls.append(request)
+        assert request["params"] == {
+            "filter": {"marketIds": ["1.234"]},
+            "marketProjection": ["MARKET_DESCRIPTION"],
+            "maxResults": 1,
+        }
+        return (
+            '{"jsonrpc":"2.0","id":'
+            + str(request["id"])
+            + ',"result":[{"marketId":"1.234","description":'
+            + '{"priceLadderDescription":{"type":"'
+            + self.ladder_type
+            + '"}}]}'
+        ).encode("utf-8")
+
+
 class _BytesResponse:
     def __init__(self, payload: bytes) -> None:
         self._payload = payload
@@ -297,6 +343,29 @@ def _synthetic_authoritative_receipt(
     finally:
         urllib_request._opener = original_opener
     return receipt, canonical_source
+
+
+def _synthetic_authoritative_market_and_ladder(
+    transport: MarketBookAndPriceLadderTransport,
+    *,
+    price: Decimal,
+):
+    original_opener = urllib_request._opener
+    try:
+        urllib_request._opener = _CanonicalUrlOpenerHarness(transport)
+        canonical_source = _canonical_client()
+        receipt = canonical_source.read_market_book_depth("1.234", 42)
+        ladder_observation = canonical_source.read_market_price_ladder(
+            "1.234"
+        )
+        ladder_admission = assess_betfair_price_ladder_admission(
+            ladder_observation,
+            price,
+            max_evidence_age=timedelta(seconds=5),
+        )
+    finally:
+        urllib_request._opener = original_opener
+    return receipt, ladder_admission, canonical_source
 
 
 def _client(transport: MarketBookTransport) -> BetfairReadOnlyClient:
@@ -362,6 +431,147 @@ def test_authenticated_market_book_receipt_cannot_bypass_provider_limit_authorit
     assert transport.calls
 
 
+def test_authoritative_price_ladder_witness_is_bound_but_not_sufficient() -> None:
+    transport = MarketBookAndPriceLadderTransport()
+    receipt, ladder, canonical_source = (
+        _synthetic_authoritative_market_and_ladder(
+            transport,
+            price=Decimal("2.00"),
+        )
+    )
+    assert ladder.state is BetfairPriceLadderAdmissionState.PRICE_LADDER_ADMISSIBLE
+    assert ladder.admissible is True
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        result = assess_authoritative_betfair_execution_feasibility(
+            _reserved_ledger(tmp, bound),
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+            price_ladder_admission=ladder,
+        )
+
+    assert "PRICE_LADDER_AUTHORITY_UNPROVEN" not in result.reasons
+    assert "PRICE_LADDER_EVIDENCE_AFTER_DECISION" not in result.reasons
+    assert "LIMIT_AUTHORITY_REJECTED" in result.reasons
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+    assert result.sufficient is False
+
+
+def test_off_tick_price_ladder_witness_remains_fail_closed() -> None:
+    transport = MarketBookAndPriceLadderTransport(
+        back_sizes=(("2.02", "100"), ("2.00", "100")),
+    )
+    receipt, ladder, canonical_source = (
+        _synthetic_authoritative_market_and_ladder(
+            transport,
+            price=Decimal("2.01"),
+        )
+    )
+    assert ladder.state is BetfairPriceLadderAdmissionState.PRICE_LADDER_INVALID
+    assert ladder.admissible is False
+    bound = _bound(
+        datetime.now(timezone.utc),
+        requested_odds=Decimal("2.01"),
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        result = assess_authoritative_betfair_execution_feasibility(
+            _reserved_ledger(tmp, bound),
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+            price_ladder_admission=ladder,
+        )
+
+    assert "PRICE_LADDER_AUTHORITY_UNPROVEN" in result.reasons
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+
+
+def test_structurally_copied_price_ladder_witness_cannot_cross_consumer_gate() -> None:
+    transport = MarketBookAndPriceLadderTransport()
+    receipt, ladder, canonical_source = (
+        _synthetic_authoritative_market_and_ladder(
+            transport,
+            price=Decimal("2.00"),
+        )
+    )
+    forged = replace(ladder)
+    assert forged.admissible is False
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        result = assess_authoritative_betfair_execution_feasibility(
+            _reserved_ledger(tmp, bound),
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+            price_ladder_admission=forged,
+        )
+
+    assert "PRICE_LADDER_AUTHORITY_UNPROVEN" in result.reasons
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+
+
+def test_price_ladder_witness_must_match_exact_durable_action() -> None:
+    transport = MarketBookAndPriceLadderTransport()
+    receipt, ladder, canonical_source = (
+        _synthetic_authoritative_market_and_ladder(
+            transport,
+            price=Decimal("2.00"),
+        )
+    )
+    bound = _bound(
+        datetime.now(timezone.utc),
+        requested_odds=Decimal("2.02"),
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(
+            ValueError,
+            match="price-ladder admission does not match durable execution action",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                _reserved_ledger(tmp, bound),
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+                price_ladder_admission=ladder,
+            )
+
+
+def test_price_ladder_consumer_rejects_module_alias_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+    monkeypatch.setattr(
+        feasibility_module,
+        "BetfairPriceLadderAdmission",
+        object,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(
+            RuntimeError,
+            match="canonical Betfair price-ladder authority changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                _reserved_ledger(tmp, bound),
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
 def test_unknown_market_price_ladder_cannot_mint_positive_admissibility() -> None:
     transport = MarketBookTransport(
         back_sizes=(("2.02", "100"), ("2.00", "100")),
@@ -390,6 +600,7 @@ def test_unknown_market_price_ladder_cannot_mint_positive_admissibility() -> Non
     assert result.sufficient is False
     assert result.displayed_acceptable_depth == Decimal("100")
     assert "LIMIT_AUTHORITY_REJECTED" in result.reasons
+    assert "PRICE_LADDER_AUTHORITY_UNPROVEN" in result.reasons
 
 
 def test_unknown_currency_jurisdiction_minimum_rule_cannot_mint_positive_admissibility() -> None:

@@ -1075,6 +1075,57 @@ def test_orphan_recovery_cancel_effect_global_rebind_during_reread_cannot_redire
     assert api._zero_association_recovered_runs == {}
 
 
+def test_orphan_recovery_qualification_global_rebind_cannot_starve_cleanup(
+    monkeypatch,
+) -> None:
+    forged_calls: list[int] = []
+
+    def forged_qualification(_api, pr_number: int):
+        forged_calls.append(pr_number)
+        return (STALE_HEAD, True)
+
+    class OrphanQualificationRebindApi:
+        def __init__(self) -> None:
+            self._unbound_active_runs = {
+                7017: (STALE_HEAD, "feature/stale"),
+            }
+            self._recovered_runs: dict[int, tuple[int, str]] = {}
+            self._zero_association_recovered_runs: dict[int, tuple[str, str]] = {}
+            self.cancelled: list[int] = []
+
+        def _historical_associated_pr_number(self, head_sha: str) -> int:
+            assert head_sha == STALE_HEAD
+            monkeypatch.setattr(
+                scoped_controller,
+                "_trusted_live_pr_qualification",
+                forged_qualification,
+            )
+            return 303
+
+        def live_pr_qualification(
+            self,
+            pr_number: int,
+        ) -> PullRequestQualification:
+            assert pr_number == 303
+            return PullRequestQualification(
+                head_sha=HEAD,
+                integration_capable=True,
+            )
+
+        def cancel(self, run_id: int) -> None:
+            self.cancelled.append(run_id)
+
+    api = OrphanQualificationRebindApi()
+
+    assert WorkflowScopedGitHubApi.cancel_historical_unbound_runs(
+        api,  # type: ignore[arg-type]
+    ) == (7017,)
+    assert api.cancelled == [7017]
+    assert forged_calls == []
+    assert api._recovered_runs == {}
+    assert api._zero_association_recovered_runs == {}
+
+
 def test_explicit_run_boundary_requires_exact_workflow_head_and_singleton(
     monkeypatch,
 ) -> None:

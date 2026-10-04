@@ -867,15 +867,20 @@ class SQLiteMarketStore:
             raise TypeError("event must be a MarketEvent")
         with self._connection_lock:
             row = self.connection.execute(
-                """SELECT ingest_ts,authority
-                   FROM market_event_live_receipts
-                   WHERE dedupe_key=?""",
+                f"""SELECT {_HISTORY_COLUMNS_SQL},r.ingest_ts,r.authority
+                    FROM market_events AS m
+                    INNER JOIN market_event_live_receipts AS r
+                    ON r.dedupe_key=m.dedupe_key
+                    WHERE m.dedupe_key=?""",
                 (event.dedupe_key,),
             ).fetchone()
         if row is None:
             return False
-        ingest_ts, authority = row
-        if ingest_ts != event.ingest_ts or authority != _LIVE_RECEIPT_AUTHORITY:
+        stored = _event_from_history_row(row[: len(_HISTORY_COLUMNS)])
+        receipt_ingest_ts, authority = row[-2:]
+        if _canonical_payload(stored) != _canonical_payload(event):
+            raise ValueError("live receipt authority does not bind the supplied market event")
+        if receipt_ingest_ts != stored.ingest_ts or authority != _LIVE_RECEIPT_AUTHORITY:
             raise ValueError("live receipt authority conflicts with market event")
         return True
 
@@ -883,21 +888,22 @@ class SQLiteMarketStore:
         """Return only history rows whose local receipt instant has product authority."""
         with self._connection_lock:
             rows = self.connection.execute(
-                f"""SELECT {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)}
+                f"""SELECT {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)},
+                           r.ingest_ts,r.authority
                     FROM market_events AS m
                     INNER JOIN market_event_live_receipts AS r
                     ON r.dedupe_key=m.dedupe_key"""
             ).fetchall()
-            events = [_event_from_history_row(row) for row in rows]
-            for event in events:
-                receipt = self.connection.execute(
-                    """SELECT ingest_ts,authority
-                       FROM market_event_live_receipts
-                       WHERE dedupe_key=?""",
-                    (event.dedupe_key,),
-                ).fetchone()
-                if receipt != (event.ingest_ts, _LIVE_RECEIPT_AUTHORITY):
+            events: list[MarketEvent] = []
+            for row in rows:
+                event = _event_from_history_row(row[: len(_HISTORY_COLUMNS)])
+                receipt_ingest_ts, authority = row[-2:]
+                if (
+                    receipt_ingest_ts != event.ingest_ts
+                    or authority != _LIVE_RECEIPT_AUTHORITY
+                ):
                     raise ValueError("live receipt authority conflicts with market history")
+                events.append(event)
         return sorted(events, key=_event_order_key)
 
     def trusted_live_current_by_source(self) -> dict[tuple[str, str], MarketEvent]:

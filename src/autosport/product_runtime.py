@@ -863,46 +863,54 @@ _source_resolver_identity = _bind_source_resolver_identity(
 del _source_resolver_identity_impl
 del _bind_source_resolver_identity
 
-def _settlement_authority_identity(
+def _settlement_authority_identity_impl(
     *,
     source: ProductCollectorSource,
     source_id: str,
     outcome_authority: SettlementOutcomeAuthority | None,
+    _text,
+    _semantic_sha256,
+    _semantic_error_type,
+    _error_type,
+    _function_type,
+    _dumps,
+    _sha256,
 ) -> str | None:
     if outcome_authority is None:
         return None
     if outcome_authority is not source:
-        raise ProductCompositionError(
+        raise _error_type(
             "settlement outcome authority must be owned by the configured product source"
         )
+    source_id = _text(source_id, "source_id")
     instance_dict = getattr(source, "__dict__", None)
     if type(instance_dict) is dict and "resolve" in instance_dict:
-        raise ProductCompositionError(
+        raise _error_type(
             "source-owned settlement authority forbids per-instance resolve shadowing"
         )
     resolver = getattr(type(source), "resolve", None)
-    if type(resolver) is not FunctionType:
-        raise ProductCompositionError(
+    if type(resolver) is not _function_type:
+        raise _error_type(
             "source-owned settlement authority must use a concrete class resolve method"
         )
     if resolver.__defaults__ is not None or resolver.__kwdefaults__ not in (None, {}):
-        raise ProductCompositionError(
+        raise _error_type(
             "source-owned settlement resolve method cannot use mutable call defaults"
         )
     if resolver.__closure__ is not None:
-        raise ProductCompositionError(
+        raise _error_type(
             "source-owned settlement resolve method cannot close over mutable authority"
         )
     try:
-        resolver_semantic_sha256 = function_semantic_sha256(
+        resolver_semantic_sha256 = _semantic_sha256(
             resolver,
             runtime_owner=type(source),
         )
-    except ResolverSemanticIdentityError as exc:
-        raise ProductCompositionError(
+    except _semantic_error_type as exc:
+        raise _error_type(
             "source-owned settlement resolve semantics cannot be fingerprinted safely"
         ) from exc
-    resolver_owner = _ManifestStore._text(
+    resolver_owner = _text(
         f"{resolver.__module__}.{resolver.__qualname__}",
         "settlement resolver owner",
     )
@@ -912,25 +920,25 @@ def _settlement_authority_identity(
         None,
     )
     if declared_implementation_id is None:
-        raise ProductCompositionError(
+        raise _error_type(
             "source-owned settlement authority must declare stable settlement_resolver_implementation_id"
         )
     if (
         type(instance_dict) is dict
         and "settlement_resolver_implementation_id" in instance_dict
     ):
-        raise ProductCompositionError(
+        raise _error_type(
             "source-owned settlement authority forbids per-instance implementation identity shadowing"
         )
-    resolver_implementation_id = _ManifestStore._text(
+    resolver_implementation_id = _text(
         declared_implementation_id,
         "settlement_resolver_implementation_id",
     )
-    authority_id = _ManifestStore._text(
+    authority_id = _text(
         getattr(source, "settlement_authority_id", None),
         "settlement_authority_id",
     )
-    configuration_sha256 = _ManifestStore._text(
+    configuration_sha256 = _text(
         getattr(source, "settlement_configuration_sha256", None),
         "settlement_configuration_sha256",
     )
@@ -942,7 +950,7 @@ def _settlement_authority_identity(
             for character in configuration_sha256
         )
     ):
-        raise ProductCompositionError(
+        raise _error_type(
             "settlement_configuration_sha256 must be lowercase SHA-256 hex"
         )
     implementation = f"{type(source).__module__}.{type(source).__qualname__}"
@@ -955,15 +963,52 @@ def _settlement_authority_identity(
         "resolver_implementation_id": resolver_implementation_id,
         "resolver_semantic_sha256": resolver_semantic_sha256,
     }
-    encoded = json.dumps(
+    encoded = _dumps(
         payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return _sha256(encoded).hexdigest()
 
+
+def _bind_settlement_authority_identity(implementation):
+    text = _ManifestStore._text
+    semantic_sha256 = function_semantic_sha256
+    semantic_error_type = ResolverSemanticIdentityError
+    error_type = ProductCompositionError
+    function_type = FunctionType
+    dumps = json.dumps
+    sha256 = hashlib.sha256
+
+    def bound(
+        *,
+        source: ProductCollectorSource,
+        source_id: str,
+        outcome_authority: SettlementOutcomeAuthority | None,
+    ) -> str | None:
+        return implementation(
+            source=source,
+            source_id=source_id,
+            outcome_authority=outcome_authority,
+            _text=text,
+            _semantic_sha256=semantic_sha256,
+            _semantic_error_type=semantic_error_type,
+            _error_type=error_type,
+            _function_type=function_type,
+            _dumps=dumps,
+            _sha256=sha256,
+        )
+
+    return bound
+
+
+_settlement_authority_identity = _bind_settlement_authority_identity(
+    _settlement_authority_identity_impl
+)
+del _settlement_authority_identity_impl
+del _bind_settlement_authority_identity
 
 def _desktop_applied_current_for_source_impl(
     *,

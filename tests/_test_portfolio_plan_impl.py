@@ -1630,6 +1630,35 @@ class PortfolioPlanTests(unittest.TestCase):
                 verified_terminal_economics=plan.terminal_economics,
             )
 
+        policy = self._policy(goal)
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "authoritative-terminal-plan.jsonl"
+            first = persist_portfolio_plan_decision(
+                JsonlDecisionLedger(ledger_path),
+                plan,
+                intents,
+                policy,
+                initialize_ledger=True,
+                replay_run_id="replay-authoritative-terminal-plan",
+                material_action_id="authoritative-terminal-plan",
+                verified_outcome_authorities=(authority,),
+            )
+            retry = persist_portfolio_plan_decision(
+                JsonlDecisionLedger(ledger_path),
+                plan,
+                intents,
+                policy,
+                initialize_ledger=False,
+                replay_run_id="replay-authoritative-terminal-plan",
+                material_action_id="authoritative-terminal-plan",
+                verified_outcome_authorities=(authority,),
+            )
+            self.assertEqual(retry.decision_id, first.decision_id)
+            self.assertEqual(
+                len(JsonlDecisionLedger(ledger_path).verified_records()),
+                1,
+            )
+
     def test_verified_terminal_model_with_nonpositive_minimum_fails_closed(self) -> None:
         goal = self._goal()
         base_intents = (

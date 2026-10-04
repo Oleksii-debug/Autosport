@@ -2304,7 +2304,11 @@ class AutosportWebBridge:
 
         self._assert_canonical_controller_surface_locked(controller)
         if type(controller) is _controller_type:
-            for method_name, expected, _expected_code in _witnesses:
+            for (
+                method_name,
+                expected,
+                _expected_code,
+            ) in _witnesses:
                 if method_name == name:
                     return expected.__get__(controller, _controller_type)
             self._trust_revoked = True
@@ -2339,6 +2343,7 @@ class AutosportWebBridge:
     def _trusted_controller_operation_locked(self, name: str):
         controller = self._trusted_controller_locked()
         return controller, self._controller_operation_locked(controller, name)
+
     @staticmethod
     def _current_window_url(window: object) -> str:
         getter = getattr(window, "get_current_url", None)
@@ -2457,7 +2462,9 @@ class AutosportWebBridge:
         # by AutosportWebController._lock; releasing this outer lock also keeps a
         # trusted emergency STOP from queueing behind an unrelated slow command.
         with self._trust_lock:
-            _controller, dispatch = self._trusted_controller_operation_locked("dispatch")
+            _controller, dispatch = self._trusted_controller_operation_locked(
+                "dispatch"
+            )
         return dispatch(raw)
 
     def get_state(self) -> dict[str, Any]:

@@ -234,9 +234,16 @@ def test_process_kill_after_submitted_releases_writer_for_restart_recovery(
             restarted.attempt_state("attempt-crash-after-submitted")
             is AttemptState.UNKNOWN
         )
+        events = restarted._events()
+        attempt_events = [
+            event
+            for event in events
+            if event["attempt_id"] == "attempt-crash-after-submitted"
+        ]
+        assert attempt_events
         assert not restarted.can_retry_action(
-            plan_id="plan-1",
-            action_id="action-1",
+            plan_id=attempt_events[0]["plan_id"],
+            action_id=attempt_events[0]["action_id"],
         )
 
 

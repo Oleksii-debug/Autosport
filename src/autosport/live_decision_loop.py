@@ -920,6 +920,9 @@ class PersistentLiveDecisionLoop:
         self._freshness_deadlines: dict[str, datetime | None] = {}
         self._freshness_generations: dict[str, int] = {}
         self._freshness_heap: list[tuple[datetime, str, int]] = []
+        self._availability_deadlines: dict[str, datetime | None] = {}
+        self._availability_generations: dict[str, int] = {}
+        self._availability_heap: list[tuple[datetime, str, int]] = []
 
     def close(self) -> None:
         """Release the optional long-lived default market-store connection."""
@@ -1022,6 +1025,10 @@ class PersistentLiveDecisionLoop:
         self._freshness_generations[normalized_id] = (
             self._freshness_generations.get(normalized_id, 0) + 1
         )
+        self._availability_deadlines.pop(normalized_id, None)
+        self._availability_generations[normalized_id] = (
+            self._availability_generations.get(normalized_id, 0) + 1
+        )
         return True
 
     def pause(self) -> None:
@@ -1117,9 +1124,12 @@ class PersistentLiveDecisionLoop:
             )
 
         freshness_expired_inputs = self._expire_freshness_inputs(now)
-        for input_id in freshness_expired_inputs:
+        availability_reached_inputs = self._activate_available_inputs(now)
+        for input_id in (*freshness_expired_inputs, *availability_reached_inputs):
             self._pending_affected[input_id] = None
-        freshness_expired = bool(freshness_expired_inputs)
+        freshness_expired = bool(
+            freshness_expired_inputs or availability_reached_inputs
+        )
 
         registered_input_ids = self.dependencies.input_ids
         if self._needs_cache_rebuild:
@@ -1552,6 +1562,7 @@ class PersistentLiveDecisionLoop:
                 [event.to_dict() for event in snapshot.events]
             )
             self._record_freshness_deadline(input_id, snapshot)
+            self._record_availability_deadline(input_id, as_of)
         return snapshots
 
     def _refresh_intents_from_snapshots(
@@ -1595,6 +1606,69 @@ class PersistentLiveDecisionLoop:
                 self._freshness_heap,
                 (deadline, input_id, generation),
             )
+
+    def _record_availability_deadline(
+        self,
+        input_id: str,
+        as_of: datetime,
+    ) -> None:
+        """Schedule reevaluation when currently future causal evidence becomes usable."""
+
+        boundary = as_of.astimezone(timezone.utc)
+        deadlines: list[datetime] = []
+        causal = self.dependencies.causal_view(input_id)
+        for event in causal.events:
+            if event.status not in MarketMirror._DECISION_ELIGIBLE_STATUSES:
+                continue
+            source_time = MarketMirror._utc_timestamp(
+                event.source_ts or event.observed_ts
+            )
+            observed_time = MarketMirror._utc_timestamp(event.observed_ts)
+            ingest_time = MarketMirror._utc_timestamp(event.ingest_ts)
+            if (
+                source_time is None
+                or observed_time is None
+                or ingest_time is None
+            ):
+                continue
+            available_at = max(source_time, observed_time, ingest_time)
+            expires_at = source_time + self.max_quote_age
+            if boundary < available_at <= expires_at:
+                deadlines.append(available_at)
+
+        deadline = min(deadlines) if deadlines else None
+        generation = self._availability_generations.get(input_id, 0) + 1
+        self._availability_generations[input_id] = generation
+        self._availability_deadlines[input_id] = deadline
+        if deadline is not None:
+            heapq.heappush(
+                self._availability_heap,
+                (deadline, input_id, generation),
+            )
+
+    def _activate_available_inputs(
+        self,
+        now: datetime,
+    ) -> tuple[str, ...]:
+        """Invalidate inputs exactly when future causal evidence becomes available."""
+
+        activated: list[str] = []
+        while self._availability_heap:
+            deadline, input_id, generation = self._availability_heap[0]
+            current_generation = self._availability_generations.get(input_id)
+            current_deadline = self._availability_deadlines.get(input_id)
+            if (
+                current_generation != generation
+                or current_deadline != deadline
+            ):
+                heapq.heappop(self._availability_heap)
+                continue
+            if now < deadline:
+                break
+            heapq.heappop(self._availability_heap)
+            self._availability_deadlines[input_id] = None
+            activated.append(input_id)
+        return tuple(activated)
 
     def _expire_freshness_inputs(
         self,

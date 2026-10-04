@@ -984,6 +984,73 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertTrue(store.has_trusted_live_receipt(event))
             store.close()
 
+    def test_live_bus_ignores_class_notify_descriptor_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            bus = MarketEventBus(store)
+            delivered = []
+            bus.subscribe(delivered.append)
+            event = self._direct_event(sequence=1)
+
+            with patch.object(
+                MarketEventBus,
+                "_notify",
+                side_effect=AssertionError("mutable notify descriptor must not control live delivery"),
+            ):
+                accepted = MarketEventBus._publish_many_live_ingestion(bus, [event])
+
+            self.assertEqual(accepted, 1)
+            self.assertEqual(delivered, [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_live_bus_uses_sealed_live_delivery_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            bus = MarketEventBus(store)
+            delivered = []
+            bus.subscribe(delivered.append)
+            event = self._direct_event(sequence=1)
+
+            with patch.object(
+                market_bus_module,
+                "_notify_live_subscribers",
+                side_effect=AssertionError("mutable live delivery helper must not be consulted"),
+            ):
+                accepted = MarketEventBus._publish_many_live_ingestion(bus, [event])
+
+            self.assertEqual(accepted, 1)
+            self.assertEqual(delivered, [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_live_delivery_error_type_survives_module_rebind(self) -> None:
+        canonical_error = market_bus_module.MarketEventDeliveryError
+
+        class PoisonDeliveryError(RuntimeError):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            bus = MarketEventBus(store)
+            event = self._direct_event(sequence=1)
+
+            def fail(_event):
+                raise RuntimeError("subscriber failed")
+
+            bus.subscribe(fail)
+            with patch.object(
+                market_bus_module,
+                "MarketEventDeliveryError",
+                PoisonDeliveryError,
+            ):
+                with self.assertRaises(canonical_error) as raised:
+                    MarketEventBus._publish_many_live_ingestion(bus, [event])
+
+            self.assertEqual(raised.exception.accepted_count, 1)
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
     def test_live_bus_deepcopy_authority_survives_module_rebind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

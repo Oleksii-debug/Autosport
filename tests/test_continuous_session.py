@@ -3493,6 +3493,146 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_partial_void_then_win_preserves_exact_multileg_payout_across_ticks(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event_one = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:void-first",
+                event_id="event-1",
+            )
+            event_two = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:win-second",
+                event_id="event-2",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-void-win",
+                    position=1,
+                    events=(event_one, event_two),
+                )
+            )
+            legs = (
+                TicketLeg(
+                    event_id="event-1",
+                    market_id="winner",
+                    selection_id="home",
+                    locked_odds=Decimal("2.00"),
+                    sport="table_tennis",
+                ),
+                TicketLeg(
+                    event_id="event-2",
+                    market_id="winner",
+                    selection_id="away",
+                    locked_odds=Decimal("1.80"),
+                    sport="table_tennis",
+                ),
+            )
+            book = PaperBook("100")
+            ticket = book.open_ticket(
+                legs,
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:10+00:00",
+                provider_source_ids=("provider-a",),
+            )
+            book.save(root / "paper_book.json")
+            void_resolution = SettlementResolution(
+                event_identity=event_one.identity,
+                settlement_ref="provider-result:void-first",
+                quote_outcomes={legs[0].quote_key: "void"},
+                evidence_id="void-first-evidence",
+                evidence_sha256="a" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            win_resolution = SettlementResolution(
+                event_identity=event_two.identity,
+                settlement_ref="provider-result:win-second",
+                quote_outcomes={legs[1].quote_key: "win"},
+                evidence_id="win-second-evidence",
+                evidence_sha256="b" * 64,
+                available_at="2026-09-19T21:19:40+00:00",
+            )
+            authority = _MappedOutcomeAuthority(
+                {event_one.identity: void_resolution}
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                first = coordinator.tick()
+                self.assertEqual(first.settled_ticket_ids, ())
+                self.assertEqual(
+                    coordinator.status().pending_settlement_evidence_ids,
+                    (void_resolution.evidence_id,),
+                )
+
+                authority.resolutions = {
+                    event_two.identity: win_resolution,
+                }
+                second = coordinator.tick()
+                self.assertEqual(second.settled_ticket_ids, (ticket.ticket_id,))
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(
+                    durable.tickets[ticket.ticket_id].status.value,
+                    "won",
+                )
+                self.assertEqual(durable.balance, Decimal("108"))
+                self.assertEqual(
+                    coordinator.status().pending_settlement_evidence_ids,
+                    (),
+                )
+            finally:
+                store.close()
+
+    def test_pending_settlement_recovery_rejects_clock_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:clock-rollback",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-clock-rollback",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="provider-result:clock-rollback",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="clock-rollback-evidence",
+                evidence_sha256="c" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                coordinator.collector.run_cycle()
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                clock.value = "2026-09-19T21:19:20+00:00"
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "pending settlement recovery failed canonical validation",
+                ):
+                    coordinator._pending_settlement_resolutions(as_of=clock())
+            finally:
+                store.close()
+
     def test_staged_pending_settlement_recovers_before_learning_prepare(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -129,6 +129,130 @@ def test_bridge_controller_authority_is_immutable_after_construction() -> None:
     assert replacement.events == []
 
 
+def test_launch_rejects_autosport_controller_subclass_before_window_creation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class ExpandedController(AutosportWebController):
+        def dispatch(self, raw):
+            return {"request_id": raw.get("request_id", "forged"), "status": "forged"}
+
+    fake = _FakeWebview()
+    controller = ExpandedController(tmp_path / "workspace")
+    bridge = AutosportWebBridge(controller)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    with pytest.raises(
+        WindowsWebViewUnavailable,
+        match="runtime witness workspace",
+    ) as captured:
+        launch_windows_shell(bridge, storage_path=tmp_path / "webview")
+
+    assert isinstance(captured.value.__cause__, WindowsWebBridgeTrustError)
+    assert "non-canonical controller surface" in str(captured.value.__cause__)
+    assert bridge._trust_revoked is True
+    assert fake.api is None
+
+
+def test_bridge_rejects_canonical_controller_instance_method_shadow(tmp_path) -> None:
+    controller = AutosportWebController(tmp_path / "workspace")
+    bridge = AutosportWebBridge(controller)
+    window = _Window()
+    bridge._bind_trusted_window(window)
+
+    controller.__dict__["dispatch"] = lambda raw: {
+        "request_id": raw.get("request_id", "forged"),
+        "status": "forged",
+    }
+    with pytest.raises(
+        WindowsWebBridgeTrustError,
+        match="rebound canonical controller method",
+    ):
+        bridge.dispatch(
+            {"request_id": "r-shadow", "action_id": "noop", "payload": {}}
+        )
+
+    assert bridge._trust_revoked is True
+    controller.__dict__.pop("dispatch")
+    bridge._close_from_host()
+
+
+def test_bridge_rejects_canonical_controller_class_method_rebind(tmp_path) -> None:
+    controller = AutosportWebController(tmp_path / "workspace")
+    bridge = AutosportWebBridge(controller)
+    window = _Window()
+    bridge._bind_trusted_window(window)
+    original_dispatch = AutosportWebController.__dict__["dispatch"]
+
+    try:
+        AutosportWebController.dispatch = lambda self, raw: {  # type: ignore[method-assign]
+            "request_id": raw.get("request_id", "forged"),
+            "status": "forged",
+        }
+        with pytest.raises(
+            WindowsWebBridgeTrustError,
+            match="rebound canonical controller method",
+        ):
+            bridge.dispatch(
+                {"request_id": "r-class-rebind", "action_id": "noop", "payload": {}}
+            )
+    finally:
+        AutosportWebController.dispatch = original_dispatch  # type: ignore[method-assign]
+
+    assert bridge._trust_revoked is True
+    bridge._close_from_host()
+
+
+def test_bridge_rechecks_controller_surface_after_document_trust_proof(tmp_path) -> None:
+    controller = AutosportWebController(tmp_path / "workspace")
+    bridge = AutosportWebBridge(controller)
+    window = _Window()
+    bridge._bind_trusted_window(window)
+    original_get_current_url = window.get_current_url
+
+    def mutating_get_current_url():
+        controller.__dict__["state"] = lambda: {"status": "forged"}
+        return original_get_current_url()
+
+    window.get_current_url = mutating_get_current_url  # type: ignore[method-assign]
+    try:
+        with pytest.raises(
+            WindowsWebBridgeTrustError,
+            match="rebound canonical controller method",
+        ):
+            bridge.get_state()
+    finally:
+        controller.__dict__.pop("state", None)
+        window.get_current_url = original_get_current_url  # type: ignore[method-assign]
+
+    assert bridge._trust_revoked is True
+    bridge._close_from_host()
+
+
+def test_bridge_captures_exact_controller_operation_before_unlock(tmp_path) -> None:
+    controller = AutosportWebController(tmp_path / "workspace")
+    bridge = AutosportWebBridge(controller)
+    window = _Window()
+    bridge._bind_trusted_window(window)
+
+    with bridge._trust_lock:
+        _controller, canonical_state = bridge._trusted_controller_operation_locked("state")
+
+    controller.__dict__["state"] = lambda: {"status": "forged"}
+    try:
+        captured_state = canonical_state()
+        assert captured_state.get("status") != "forged"
+        with pytest.raises(
+            WindowsWebBridgeTrustError,
+            match="rebound canonical controller method",
+        ):
+            bridge.get_state()
+    finally:
+        controller.__dict__.pop("state", None)
+
+    bridge._close_from_host()
+
+
 def test_runtime_witness_path_rejects_prelaunch_controller_rebind(tmp_path) -> None:
     original = AutosportWebController(tmp_path / "original")
     replacement = AutosportWebController(tmp_path / "replacement")

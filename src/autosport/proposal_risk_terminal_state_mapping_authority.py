@@ -1108,14 +1108,14 @@ def derive_product_proposal_terminal_scenario_binding(
     )
 
 
-def resolve_product_proposal_risk_terminal_state_mapping(
+def _resolve_product_proposal_risk_terminal_state_mapping_values(
     workspace: Path,
     *,
     precommit: ProductProposalRiskEvaluationPrecommit,
     authorities: tuple[MarketSettlementOutcomeAuthority, ...],
     member_market_state_ids: tuple[tuple[str, ...], ...],
-) -> ProductProposalRiskTerminalStateMapping:
-    """Prove only that the durable fixed-N scenario strings map to terminal states."""
+) -> dict[str, object]:
+    """Re-derive validated mapping values without minting positive authority."""
 
     _require_dispatch()
     workspace = _workspace_path(workspace)
@@ -1268,26 +1268,45 @@ def resolve_product_proposal_risk_terminal_state_mapping(
         "member_state_vector_sha256s": tuple(member_state_vector_sha256s),
         "resolution_sha256": resolution_sha256,
     }
-    return _mint_result(values)
+    return values
 
 
-def _mint_result(
-    values: dict[str, object],
-    *,
-    _bind_mapping=_BIND_MAPPING,
-) -> ProductProposalRiskTerminalStateMapping:
-    instance = object.__new__(_RESULT_TYPE)
-    for name in _RESULT_FIELDS:
-        object.__setattr__(instance, name, values[name])
-    _bind_mapping(instance)
-    return instance
+def _make_public_resolver(_bind_mapping):
+    def resolver(
+        workspace: Path,
+        *,
+        precommit: ProductProposalRiskEvaluationPrecommit,
+        authorities: tuple[MarketSettlementOutcomeAuthority, ...],
+        member_market_state_ids: tuple[tuple[str, ...], ...],
+    ) -> ProductProposalRiskTerminalStateMapping:
+        values = _resolve_product_proposal_risk_terminal_state_mapping_values(
+            workspace,
+            precommit=precommit,
+            authorities=authorities,
+            member_market_state_ids=member_market_state_ids,
+        )
+        instance = object.__new__(_RESULT_TYPE)
+        for name in _RESULT_FIELDS_EXPECTED:
+            object.__setattr__(instance, name, values[name])
+        _bind_mapping(instance)
+        return instance
+
+    resolver.__name__ = "resolve_product_proposal_risk_terminal_state_mapping"
+    resolver.__qualname__ = resolver.__name__
+    resolver.__doc__ = (
+        "Prove only that the durable fixed-N scenario commitments map to "
+        "separately verified terminal-state vectors."
+    )
+    return resolver
 
 
-_MINT_RESULT = _mint_result
-_MINT_RESULT_CODE = getattr(_MINT_RESULT, "__code__", None)
-_MINT_RESULT_KWDEFAULTS = getattr(_MINT_RESULT, "__kwdefaults__", None)
-_MINT_BINDER = _MINT_RESULT_KWDEFAULTS["_bind_mapping"]
-_MINT_BINDER_CODE = getattr(_MINT_BINDER, "__code__", None)
+resolve_product_proposal_risk_terminal_state_mapping = _make_public_resolver(
+    _BIND_MAPPING
+)
+_PUBLIC_RESOLVER = resolve_product_proposal_risk_terminal_state_mapping
+_PUBLIC_RESOLVER_CODE = getattr(_PUBLIC_RESOLVER, "__code__", None)
+_PUBLIC_RESOLVER_CLOSURE = getattr(_PUBLIC_RESOLVER, "__closure__", None)
+del _make_public_resolver
 
 
 def _require_dispatch() -> None:
@@ -1371,15 +1390,23 @@ def _require_dispatch() -> None:
             )
 
     if (
-        _mint_result is not _MINT_RESULT
-        or getattr(_mint_result, "__code__", None) is not _MINT_RESULT_CODE
-        or getattr(_mint_result, "__kwdefaults__", None)
-        is not _MINT_RESULT_KWDEFAULTS
-        or _MINT_RESULT_KWDEFAULTS.get("_bind_mapping") is not _MINT_BINDER
-        or getattr(_MINT_BINDER, "__code__", None) is not _MINT_BINDER_CODE
+        resolve_product_proposal_risk_terminal_state_mapping
+        is not _PUBLIC_RESOLVER
+        or getattr(
+            resolve_product_proposal_risk_terminal_state_mapping,
+            "__code__",
+            None,
+        )
+        is not _PUBLIC_RESOLVER_CODE
+        or getattr(
+            resolve_product_proposal_risk_terminal_state_mapping,
+            "__closure__",
+            None,
+        )
+        is not _PUBLIC_RESOLVER_CLOSURE
     ):
         raise ProductProposalRiskTerminalStateMappingError(
-            "terminal mapping result mint capability changed"
+            "terminal mapping public resolver root changed"
         )
 
     for name, expected, code in _HELPER_WITNESSES_EXPECTED:
@@ -1415,7 +1442,7 @@ _HELPER_WITNESSES_EXPECTED = tuple(
         "_candidate_mapping_material",
         "_derive_binding_from_parents",
         "_resolve_terminal_parents",
-        "_mint_result",
+        "_resolve_product_proposal_risk_terminal_state_mapping_values",
     )
 )
 

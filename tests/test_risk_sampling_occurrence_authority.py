@@ -8,6 +8,7 @@ import pytest
 import autosport.risk_membership_publication as publication
 import autosport.risk_randomization_precommit as randomization
 import autosport.risk_sampling_occurrence_authority as draw_authority
+from autosport.dataset import ReplayDataset
 from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
@@ -29,6 +30,7 @@ from autosport.risk_sampling_occurrence_authority import (
 )
 from autosport.run_registry import RunRegistry
 from autosport.run_transaction import RunTransaction
+from autosport.session import AutosportSession, IidMemberSessionResult
 
 
 RUN_ID = "run-001"
@@ -1150,6 +1152,129 @@ def test_iid_member_materializer_rejects_payload_digest_dispatch_rebinding(
             market_events=[event],
         )
     assert attacker_called is False
+
+
+def _iid_replay_dataset(
+    workspace,
+    event: MarketEvent,
+) -> ReplayDataset:
+    market_path = workspace / "iid-market.jsonl"
+    market_bytes = (_canonical(event.to_dict()) + "\n").encode("utf-8")
+    market_path.write_bytes(market_bytes)
+    results_path = workspace / "iid-results.json"
+    results_bytes = _canonical(
+        {
+            "quote_outcomes": {},
+            "schema_version": 1,
+        }
+    ).encode("utf-8")
+    results_path.write_bytes(results_bytes)
+    return ReplayDataset(
+        root=workspace,
+        name="iid-member-fixture",
+        sport="unknown",
+        market_path=market_path,
+        results_path=results_path,
+        market_sha256=hashlib.sha256(market_bytes).hexdigest(),
+        results_sha256=hashlib.sha256(results_bytes).hexdigest(),
+        schema_version=1,
+    )
+
+
+def test_session_executes_single_admitted_iid_member_and_returns_execution_proof(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    dataset = _iid_replay_dataset(workspace, event)
+    session = AutosportSession(workspace, initial_bankroll="100")
+    try:
+        result = session.run_iid_member_dataset(
+            dataset,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=frame_json,
+            horizon_json=horizon_json,
+            member_index=0,
+            authority_root=authority_root,
+        )
+    finally:
+        session.close()
+
+    assert type(result) is IidMemberSessionResult
+    assert result.session.replay.run_id == RUN_ID
+    assert result.session.replay.event_count == 1
+    assert result.execution.member_id == RUN_ID
+    assert result.execution.execution_consumption_proven is True
+    assert result.execution.occurrence_ancestry_proven is True
+    completed = RunRegistry(workspace / "run_registry.json").verified_completed_summary_for_run(
+        RUN_ID
+    )[0]
+    assert (
+        completed["sampling_draw_admission_receipt_sha256"]
+        == result.execution.run_admission_receipt_sha256
+    )
+
+
+def test_session_rejects_duplicate_iid_occurrence_before_registry_mutation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(2),
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    dataset = _iid_replay_dataset(workspace, event)
+    session = AutosportSession(workspace, initial_bankroll="100")
+    try:
+        with pytest.raises(
+            ProductIidDrawPlanError,
+            match="not replay-compatible",
+        ):
+            session.run_iid_member_dataset(
+                dataset,
+                membership=membership,
+                registry_path=registry_path,
+                sampling_manifest_json=manifest,
+                sampling_frame_json=frame_json,
+                horizon_json=horizon_json,
+                member_index=0,
+                authority_root=authority_root,
+            )
+    finally:
+        session.close()
+
+    assert RunRegistry(workspace / "run_registry.json")._read()["runs"] == {}
 
 
 def _completed_iid_execution(

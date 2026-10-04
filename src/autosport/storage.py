@@ -9,7 +9,10 @@ from threading import RLock
 from typing import Iterable
 
 from .domain import MarketEvent
-from .market_state_identity import same_semantic_market_state
+from .market_state_identity import (
+    same_semantic_market_state,
+    semantic_market_state_identity,
+)
 
 
 _HISTORY_COLUMNS = (
@@ -686,6 +689,10 @@ class SQLiteMarketStore:
     def _insert_one(self, event: MarketEvent) -> bool:
         payload = _validate_incoming_event(event)
         incoming_key = _projection_order_key(event)
+        # Validate any explicit semantic-state contract even for the first event in
+        # a scope. A malformed/unknown claimed contract may not become durable merely
+        # because there is no prior state to compare against yet.
+        semantic_market_state_identity(event)
 
         # INSERT is deliberately first. On SQLite this enters the write transaction
         # before semantic-current comparison, so two connections cannot both observe

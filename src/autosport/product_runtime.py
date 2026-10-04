@@ -2039,6 +2039,121 @@ def _build_autonomous_product_runtime_impl(
                 )
             require_declared_source_authority_roots()
 
+        def build_sealed_product_proxy_type(
+            type_name: str,
+            *,
+            methods: dict[str, Callable],
+            properties: dict[str, Callable[[], object]] | None = None,
+            authority_label: str,
+        ):
+            property_getters = {} if properties is None else dict(properties)
+
+            class ProxyMethod:
+                __slots__ = ("method", "name")
+
+                def __init__(self, name: str, method: Callable) -> None:
+                    self.name = name
+                    self.method = method
+
+                def __get__(self, instance, owner=None):
+                    if instance is None:
+                        return self
+                    return self.method.__get__(instance, owner)
+
+                def __set__(self, _instance, _value) -> None:
+                    raise ProductCompositionError(
+                        f"{authority_label} proxy method {self.name!r} is immutable"
+                    )
+
+                def __delete__(self, _instance) -> None:
+                    raise ProductCompositionError(
+                        f"{authority_label} proxy method {self.name!r} is immutable"
+                    )
+
+            class ProxyProperty:
+                __slots__ = ("getter", "name")
+
+                def __init__(self, name: str, getter: Callable[[], object]) -> None:
+                    self.name = name
+                    self.getter = getter
+
+                def __get__(self, instance, owner=None):
+                    if instance is None:
+                        return self
+                    return self.getter()
+
+                def __set__(self, _instance, _value) -> None:
+                    raise ProductCompositionError(
+                        f"{authority_label} proxy property {self.name!r} is immutable"
+                    )
+
+                def __delete__(self, _instance) -> None:
+                    raise ProductCompositionError(
+                        f"{authority_label} proxy property {self.name!r} is immutable"
+                    )
+
+            class ProxyClassIdentity:
+                __slots__ = ()
+
+                def __get__(self, _instance, owner=None):
+                    return owner
+
+                def __set__(self, _instance, _value) -> None:
+                    raise ProductCompositionError(
+                        f"{authority_label} proxy class identity is immutable"
+                    )
+
+                def __delete__(self, _instance) -> None:
+                    raise ProductCompositionError(
+                        f"{authority_label} proxy class identity is immutable"
+                    )
+
+            class ProxyClassGuard:
+                __slots__ = ("descriptor", "name")
+
+                def __init__(self, name: str, descriptor: object) -> None:
+                    self.name = name
+                    self.descriptor = descriptor
+
+                def __get__(self, _instance, _owner=None):
+                    return self.descriptor
+
+                def __set__(self, _instance, _value) -> None:
+                    raise ProductCompositionError(
+                        f"{authority_label} proxy class member {self.name!r} is immutable"
+                    )
+
+                def __delete__(self, _instance) -> None:
+                    raise ProductCompositionError(
+                        f"{authority_label} proxy class member {self.name!r} is immutable"
+                    )
+
+            class ProxyMeta(type):
+                pass
+
+            namespace: dict[str, object] = {
+                "__slots__": (),
+                "__class__": ProxyClassIdentity(),
+            }
+            protected: dict[str, object] = {}
+            for name, method in methods.items():
+                descriptor = ProxyMethod(name, method)
+                namespace[name] = descriptor
+                protected[name] = descriptor
+            for name, getter in property_getters.items():
+                descriptor = ProxyProperty(name, getter)
+                namespace[name] = descriptor
+                protected[name] = descriptor
+
+            proxy_type = ProxyMeta(type_name, (), namespace)
+            for name, descriptor in protected.items():
+                type.__setattr__(
+                    ProxyMeta,
+                    name,
+                    ProxyClassGuard(name, descriptor),
+                )
+            return proxy_type
+
         product_outcome_authority: SettlementOutcomeAuthority | None = None
         if outcome_authority is not None:
             source_settlement_resolve = source.resolve
@@ -2056,15 +2171,17 @@ def _build_autonomous_product_runtime_impl(
                     )
                 require_declared_source_authority_roots()
 
-            class ProductSettlementOutcomeAuthorityProxy:
-                __slots__ = ()
+            def product_settlement_resolve(_proxy, record, *, as_of: str):
+                require_settlement_authority()
+                resolution = source_settlement_resolve(record, as_of=as_of)
+                require_settlement_authority()
+                return resolution
 
-                def resolve(self, record, *, as_of: str):
-                    require_settlement_authority()
-                    resolution = source_settlement_resolve(record, as_of=as_of)
-                    require_settlement_authority()
-                    return resolution
-
+            ProductSettlementOutcomeAuthorityProxy = build_sealed_product_proxy_type(
+                "ProductSettlementOutcomeAuthorityProxy",
+                methods={"resolve": product_settlement_resolve},
+                authority_label="settlement outcome",
+            )
             product_outcome_authority = ProductSettlementOutcomeAuthorityProxy()
 
         product_settlement_learning_handoff: SettlementLearningHandoff | None = None
@@ -2133,103 +2250,96 @@ def _build_autonomous_product_runtime_impl(
                             f"settlement learning authority field {name!r} changed after composition"
                         )
 
-            if learning_prepare is None:
-                class ProductSettlementLearningHandoffProxy:
-                    __slots__ = ()
+            def product_learning_reconcile(
+                _proxy,
+                *,
+                paper_book_path,
+                resolutions,
+                settled_ticket_ids,
+                at,
+            ):
+                require_settlement_learning_authority()
+                result = learning_reconcile(
+                    paper_book_path=paper_book_path,
+                    resolutions=resolutions,
+                    settled_ticket_ids=settled_ticket_ids,
+                    at=at,
+                )
+                require_settlement_learning_authority()
+                return result
 
-                    def reconcile_after_settlement(
-                        self,
-                        *,
-                        paper_book_path,
-                        resolutions,
-                        settled_ticket_ids,
-                        at,
-                    ):
-                        require_settlement_learning_authority()
-                        result = learning_reconcile(
-                            paper_book_path=paper_book_path,
-                            resolutions=resolutions,
-                            settled_ticket_ids=settled_ticket_ids,
-                            at=at,
-                        )
-                        require_settlement_learning_authority()
-                        return result
-            else:
-                class ProductSettlementLearningHandoffProxy:
-                    __slots__ = ()
+            learning_proxy_methods = {
+                "reconcile_after_settlement": product_learning_reconcile,
+            }
+            if learning_prepare is not None:
+                def product_learning_prepare(
+                    _proxy,
+                    *,
+                    paper_book_path,
+                    resolutions,
+                    at,
+                ):
+                    require_settlement_learning_authority()
+                    result = learning_prepare(
+                        paper_book_path=paper_book_path,
+                        resolutions=resolutions,
+                        at=at,
+                    )
+                    require_settlement_learning_authority()
+                    return result
 
-                    def prepare_settlement(
-                        self,
-                        *,
-                        paper_book_path,
-                        resolutions,
-                        at,
-                    ):
-                        require_settlement_learning_authority()
-                        result = learning_prepare(
-                            paper_book_path=paper_book_path,
-                            resolutions=resolutions,
-                            at=at,
-                        )
-                        require_settlement_learning_authority()
-                        return result
+                learning_proxy_methods["prepare_settlement"] = product_learning_prepare
 
-                    def reconcile_after_settlement(
-                        self,
-                        *,
-                        paper_book_path,
-                        resolutions,
-                        settled_ticket_ids,
-                        at,
-                    ):
-                        require_settlement_learning_authority()
-                        result = learning_reconcile(
-                            paper_book_path=paper_book_path,
-                            resolutions=resolutions,
-                            settled_ticket_ids=settled_ticket_ids,
-                            at=at,
-                        )
-                        require_settlement_learning_authority()
-                        return result
-
+            ProductSettlementLearningHandoffProxy = build_sealed_product_proxy_type(
+                "ProductSettlementLearningHandoffProxy",
+                methods=learning_proxy_methods,
+                authority_label="settlement learning",
+            )
             product_settlement_learning_handoff = ProductSettlementLearningHandoffProxy()
 
         source_fetch_catalog_page = source.fetch_catalog_page
         source_fetch_deltas = source.fetch_deltas
 
-        class ProductCollectorSourceProxy:
-            __slots__ = ()
+        def product_source_id() -> str:
+            return source_id
 
-            @property
-            def source_id(self) -> str:
-                return source_id
+        def product_stream_epoch() -> str:
+            return getattr(source, "stream_epoch")
 
-            @property
-            def stream_epoch(self) -> str:
-                return getattr(source, "stream_epoch")
+        def product_fetch_catalog_page(proxy, checkpoint):
+            expected_stream_epoch = proxy.stream_epoch
+            require_source_resolver_authority()
+            page = source_fetch_catalog_page(checkpoint)
+            require_source_resolver_authority()
+            if proxy.stream_epoch != expected_stream_epoch:
+                raise ProductCompositionError(
+                    "source stream_epoch changed during catalog acquisition"
+                )
+            return page
 
-            def fetch_catalog_page(self, checkpoint):
-                expected_stream_epoch = self.stream_epoch
-                require_source_resolver_authority()
-                page = source_fetch_catalog_page(checkpoint)
-                require_source_resolver_authority()
-                if self.stream_epoch != expected_stream_epoch:
-                    raise ProductCompositionError(
-                        "source stream_epoch changed during catalog acquisition"
-                    )
-                return page
+        def product_fetch_deltas(proxy, checkpoint, records, max_items):
+            expected_stream_epoch = proxy.stream_epoch
+            require_source_resolver_authority()
+            deltas = source_fetch_deltas(checkpoint, records, max_items)
+            require_source_resolver_authority()
+            if proxy.stream_epoch != expected_stream_epoch:
+                raise ProductCompositionError(
+                    "source stream_epoch changed during delta acquisition"
+                )
+            return deltas
 
-            def fetch_deltas(self, checkpoint, records, max_items):
-                expected_stream_epoch = self.stream_epoch
-                require_source_resolver_authority()
-                deltas = source_fetch_deltas(checkpoint, records, max_items)
-                require_source_resolver_authority()
-                if self.stream_epoch != expected_stream_epoch:
-                    raise ProductCompositionError(
-                        "source stream_epoch changed during delta acquisition"
-                    )
-                return deltas
-
+        ProductCollectorSourceProxy = build_sealed_product_proxy_type(
+            "ProductCollectorSourceProxy",
+            methods={
+                "fetch_catalog_page": product_fetch_catalog_page,
+                "fetch_deltas": product_fetch_deltas,
+            },
+            properties={
+                "source_id": product_source_id,
+                "stream_epoch": product_stream_epoch,
+            },
+            authority_label="collector source",
+        )
         collector_source = ProductCollectorSourceProxy()
 
         lifecycle = _lifecycle_type(root / "catalog.json")

@@ -419,6 +419,14 @@ class EmpiricalExecutionEvidence:
             self.reconciliation_evidence_observed_at,
             self.reconciliation_external_effect_found,
         )
+        if (
+            reconciliation_present
+            and self.attempt_state == AttemptState.RECONCILED_NOT_FOUND.value
+            and self.reconciliation_external_effect_found is not False
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "unverified RECONCILED_NOT_FOUND requires external_effect_found=false"
+            )
         if not reconciliation_present:
             if self.reconciliation_external_receipt_id is not None:
                 raise EmpiricalExecutionEvidenceError(

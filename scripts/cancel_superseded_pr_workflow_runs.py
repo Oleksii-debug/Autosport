@@ -899,8 +899,38 @@ class GitHubApi:
         cancellation_accepted,
     ):
         request_impl_code = getattr(request_impl, "__code__", None)
+        request_impl_defaults = getattr(request_impl, "__defaults__", None)
+        request_impl_kwdefaults = getattr(request_impl, "__kwdefaults__", None)
+        request_impl_kwdefault_items = (
+            tuple(request_impl_kwdefaults.items())
+            if request_impl_kwdefaults is not None
+            else ()
+        )
         if request_impl_code is None:
             raise RuntimeError("canonical cancellation request executable is unavailable")
+
+        def request_authority_current(self) -> bool:
+            bound_request = getattr(self, "_request", None)
+            current_kwdefaults = getattr(request_impl, "__kwdefaults__", None)
+            return (
+                getattr(request_impl, "__code__", None) is request_impl_code
+                and getattr(request_impl, "__defaults__", None)
+                is request_impl_defaults
+                and current_kwdefaults is request_impl_kwdefaults
+                and (
+                    current_kwdefaults is None
+                    or (
+                        len(current_kwdefaults) == len(request_impl_kwdefault_items)
+                        and all(
+                            key in current_kwdefaults
+                            and current_kwdefaults[key] is value
+                            for key, value in request_impl_kwdefault_items
+                        )
+                    )
+                )
+                and getattr(bound_request, "__self__", None) is self
+                and getattr(bound_request, "__func__", None) is request_impl
+            )
 
         def cancel(self, run_id: int) -> None:
             # The run id is the irreversible effect coordinate. Validate the primitive
@@ -908,12 +938,7 @@ class GitHubApi:
             # module-level compatibility helper cannot redirect a trusted cancellation.
             if type(run_id) is not int or run_id <= 0:
                 raise CancellationError("invalid run id")
-            bound_request = getattr(self, "_request", None)
-            if (
-                getattr(request_impl, "__code__", None) is not request_impl_code
-                or getattr(bound_request, "__self__", None) is not self
-                or getattr(bound_request, "__func__", None) is not request_impl
-            ):
+            if not request_authority_current(self):
                 raise CancellationError(
                     "workflow run cancellation request dispatch changed"
                 )
@@ -928,12 +953,7 @@ class GitHubApi:
                     raise CancellationError(
                         "unexpected allowed cancellation HTTP status"
                     )
-                rebound_request = getattr(self, "_request", None)
-                if (
-                    getattr(request_impl, "__code__", None) is not request_impl_code
-                    or getattr(rebound_request, "__self__", None) is not self
-                    or getattr(rebound_request, "__func__", None) is not request_impl
-                ):
+                if not request_authority_current(self):
                     raise CancellationError(
                         "workflow run cancellation request dispatch changed"
                     )
@@ -941,6 +961,10 @@ class GitHubApi:
                     self,
                     f"/actions/runs/{run_id}",
                 )
+                if not request_authority_current(self):
+                    raise CancellationError(
+                        "workflow run cancellation request dispatch changed"
+                    )
                 if not isinstance(status_payload, dict):
                     raise CancellationError("invalid workflow-run response")
                 status = status_payload.get("status")
@@ -950,6 +974,10 @@ class GitHubApi:
                     raise CancellationError("invalid workflow-run status")
                 raise CancellationError(
                     "workflow run cancellation conflicted while run remains active"
+                )
+            if not request_authority_current(self):
+                raise CancellationError(
+                    "workflow run cancellation request dispatch changed"
                 )
             if payload is not cancellation_accepted:
                 raise CancellationError(

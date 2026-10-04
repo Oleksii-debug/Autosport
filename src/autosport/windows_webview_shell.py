@@ -2213,13 +2213,38 @@ class AutosportWebBridge:
     """Minimal pywebview API bound to one trusted launch document."""
 
     def __init__(self, controller: AutosportWebController | None = None) -> None:
-        self._controller = controller or AutosportWebController()
+        resolved_controller = controller or AutosportWebController()
+        object.__setattr__(self, "_controller", resolved_controller)
+        object.__setattr__(self, "_controller_witness", resolved_controller)
         self._trust_lock = threading.RLock()
         self._trusted_window: object | None = None
         self._trusted_url: str | None = None
         self._trust_revoked = False
         self._host_shutdown = False
 
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in {"_controller", "_controller_witness"} and hasattr(
+            self, "_controller_witness"
+        ):
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge controller authority is immutable"
+            )
+        object.__setattr__(self, name, value)
+
+    def _trusted_controller_locked(self) -> AutosportWebController:
+        controller = self._controller_witness
+        if self._controller is not controller:
+            self._trust_revoked = True
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge controller authority changed"
+            )
+        self._assert_trusted_session_locked()
+        if self._controller is not controller:
+            self._trust_revoked = True
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge controller authority changed during trust proof"
+            )
+        return controller
     @staticmethod
     def _current_window_url(window: object) -> str:
         getter = getattr(window, "get_current_url", None)
@@ -2321,16 +2346,16 @@ class AutosportWebBridge:
         # by AutosportWebController._lock; releasing this outer lock also keeps a
         # trusted emergency STOP from queueing behind an unrelated slow command.
         with self._trust_lock:
-            self._assert_trusted_session_locked()
-        return self._controller.dispatch(raw)
+            controller = self._trusted_controller_locked()
+        return controller.dispatch(raw)
 
     def get_state(self) -> dict[str, Any]:
         # State reads may wait for the ordinary controller lock. They must not
         # monopolize the document-trust lock while doing so, otherwise a trusted
         # emergency STOP call could be delayed behind a polling request.
         with self._trust_lock:
-            self._assert_trusted_session_locked()
-        return {"ok": True, "state": self._controller.state()}
+            controller = self._trusted_controller_locked()
+        return {"ok": True, "state": controller.state()}
 
     def close(self) -> None:
         # Validate the initiating document under the trust lock, then release it
@@ -2338,9 +2363,14 @@ class AutosportWebBridge:
         # backend operation must not monopolize the document-trust lane or delay
         # safety/state traffic from the still-visible trusted window.
         with self._trust_lock:
-            self._assert_trusted_session_locked()
-        self._controller.close()
+            controller = self._trusted_controller_locked()
+        controller.close()
         with self._trust_lock:
+            if self._controller is not controller:
+                self._trust_revoked = True
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge controller authority changed during close"
+                )
             self._host_shutdown = True
             self._trust_revoked = True
 
@@ -2350,8 +2380,19 @@ class AutosportWebBridge:
         with self._trust_lock:
             if self._host_shutdown:
                 return
-        self._controller.close()
+            controller = self._controller_witness
+            if self._controller is not controller:
+                self._trust_revoked = True
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge controller authority changed"
+                )
+        controller.close()
         with self._trust_lock:
+            if self._controller is not controller:
+                self._trust_revoked = True
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge controller authority changed during host close"
+                )
             self._host_shutdown = True
             self._trust_revoked = True
 

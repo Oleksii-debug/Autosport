@@ -1432,6 +1432,18 @@ class PersistentLiveDecisionLoop:
                 raise LiveDecisionProgressError(
                     "append-pending durable PortfolioPlan identity changed"
                 )
+            live_records = tuple(
+                record
+                for record in self.decision_ledger.verified_records()
+                if record.replay_run_id == f"live:{self.loop_id}"
+            )
+            if (
+                not live_records
+                or live_records[-1].decision_id != durable_record.decision_id
+            ):
+                raise LiveDecisionProgressError(
+                    "append-pending live progress is not the latest durable live decision"
+                )
             if (
                 tuple(getattr(intent, "intent_id", None) for intent in intents)
                 != plan.intent_ids
@@ -1466,6 +1478,27 @@ class PersistentLiveDecisionLoop:
                 dependency_graph=graph,
                 market_outcome_authorities=(),
             )
+
+        if (
+            progress.phase == _PHASE_PENDING
+            and self.decision_ledger.path.exists()
+        ):
+            existing_recovery_action = (
+                self.decision_ledger.verified_economic_decision_for_material_action(
+                    self._prospective_decision_id(
+                        plan=plan,
+                        market_state_sha256=progress.market_state_sha256,
+                        gate=progress.gate,
+                        decision_context_sha256=progress.decision_context_sha256,
+                    ),
+                    self.authority.contract,
+                    risk_policy=self.authority.risk_policy,
+                )
+            )
+            if existing_recovery_action is not None:
+                raise LiveDecisionProgressError(
+                    "pending live progress predates an already durable live decision"
+                )
 
         result = self._persist_plan(
             plan=plan,
@@ -1795,6 +1828,30 @@ class PersistentLiveDecisionLoop:
             detail=result.detail,
         )
 
+    def _prospective_decision_id(
+        self,
+        *,
+        plan: PortfolioPlan,
+        market_state_sha256: str,
+        gate: str,
+        decision_context_sha256: str,
+    ) -> str:
+        provenance = self.intent_provenance
+        context_payload = {
+            "schema": "autosport.live_decision_context",
+            "schema_version": 2,
+            "loop_id": self.loop_id,
+            "mode": self.mode.value,
+            "gate": gate,
+            "market_state_sha256": market_state_sha256,
+            "decision_context_sha256": decision_context_sha256,
+            "intent_strategy_version_id": provenance.strategy_version_id,
+            "intent_model_version_id": provenance.model_version_id,
+            "intent_provenance_sha256": provenance.provenance_sha256,
+            "plan_sha256": plan.plan_sha256,
+        }
+        return f"live-{_canonical_json_sha256(context_payload)}"
+
     def _persist_plan(
         self,
         *,
@@ -1828,7 +1885,12 @@ class PersistentLiveDecisionLoop:
             "plan_sha256": plan.plan_sha256,
         }
         context_hash = _canonical_json_sha256(context_payload)
-        decision_id = f"live-{context_hash}"
+        decision_id = self._prospective_decision_id(
+            plan=plan,
+            market_state_sha256=market_state_sha256,
+            gate=gate,
+            decision_context_sha256=decision_context_sha256,
+        )
         prepared_execution: PreparedPaperExecution | None = None
         expected_execution_payload = None
         has_positive_execution_stake = any(stake > 0 for stake in plan.stakes)

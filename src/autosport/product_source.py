@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -165,6 +166,13 @@ class ParlayApiProductSource:
             raise ProductSourcePayloadError(f"{field} must be valid ISO-8601") from exc
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             raise ProductSourcePayloadError(f"{field} must be timezone-aware ISO-8601")
+        fractional = re.search(r"\\d{2}:?\\d{2}:?\\d{2}[.,](\\d+)", raw)
+        if fractional is not None:
+            digits = fractional.group(1)
+            if len(digits) > 6 and any(digit != "0" for digit in digits[6:]):
+                raise ProductSourcePayloadError(
+                    f"{field} has non-zero precision finer than microseconds"
+                )
         return parsed.astimezone(timezone.utc)
 
     @staticmethod
@@ -691,6 +699,9 @@ class ParlayApiProductSource:
             raise ProductSourcePayloadError(
                 "provider quote uses non-canonical acquisition value types"
             )
+        cls._instant(quote.observed_ts, "provider quote observed_ts")
+        if quote.source_ts is not None:
+            cls._instant(quote.source_ts, "provider quote source_ts")
         try:
             metadata = cls._snapshot_provider_metadata(quote.metadata)
             if type(metadata) is not dict:

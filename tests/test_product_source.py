@@ -43,17 +43,19 @@ def _quote(
     odds: str = "1.80",
     sequence: int = 1,
     exchange_side: str | None = None,
+    observed_ts: str = "2026-09-20T17:34:00+00:00",
+    source_ts: str | None = "2026-09-20T17:33:59+00:00",
 ) -> ProviderQuote:
     return ProviderQuote(
         provider_event_id="event-1",
         provider_market_id="book:h2h",
         provider_selection_id="player-a",
         decimal_odds=Decimal(odds),
-        observed_ts="2026-09-20T17:34:00+00:00",
+        observed_ts=observed_ts,
         sequence=sequence,
         market_type=MarketType.WINNER,
         status="open",
-        source_ts="2026-09-20T17:33:59+00:00",
+        source_ts=source_ts,
         metadata={
             "provider": "parlayapi",
             "sport_key": "table_tennis",
@@ -105,6 +107,47 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             ParlayApiProductSource._quote_payload_bytes(back),
             ParlayApiProductSource._quote_payload_bytes(lay),
         )
+
+    def test_provider_observed_ts_rejects_nonzero_submicrosecond_precision(self) -> None:
+        quote = _quote(observed_ts="2026-09-20T17:34:00.1234567+00:00")
+        batch = ProviderBatch(source_id=_SOURCE_ID, quotes=(quote,), cursor="snapshot-1")
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([batch]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "precision finer than microseconds",
+            ):
+                source.fetch_catalog_page(None)
+
+    def test_provider_source_ts_rejects_nonzero_submicrosecond_precision(self) -> None:
+        quote = _quote(source_ts="2026-09-20T17:33:59.9999999+00:00")
+        batch = ProviderBatch(source_id=_SOURCE_ID, quotes=(quote,), cursor="snapshot-1")
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([batch]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "precision finer than microseconds",
+            ):
+                source.fetch_catalog_page(None)
+
+    def test_exact_submicrosecond_zero_tail_remains_representable(self) -> None:
+        instant = ParlayApiProductSource._instant(
+            "2026-09-20T17:34:00.1234560+00:00",
+            "test instant",
+        )
+        self.assertEqual(instant.microsecond, 123456)
 
     def test_snapshot_becomes_restart_safe_catalog_delta_and_event(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

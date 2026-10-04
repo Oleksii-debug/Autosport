@@ -467,6 +467,77 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_shared_lifecycle_foreign_source_is_outside_session_settlement_authority(
+        self,
+    ) -> None:
+        class _RecordingAuthority:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def resolve(self, record, *, as_of: str):
+                self.calls.append(record.identity)
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            foreign_event = CatalogEvent(
+                source_id="provider-b",
+                sport="table_tennis",
+                event_id="event-foreign",
+                phase=EventPhase.COMPLETED,
+                available_at="2026-09-19T21:19:00+00:00",
+                scheduled_start_at="2026-09-19T21:00:00+00:00",
+                settlement_ref="provider-b-result:foreign",
+            )
+            foreign_page = CatalogPage(
+                source_id="provider-b",
+                stream_epoch="epoch-b",
+                cursor="cursor-b",
+                position=1,
+                events=(foreign_event,),
+            )
+            leg = TicketLeg(
+                event_id="event-foreign",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+            )
+            book.save(root / "paper_book.json")
+            authority = _RecordingAuthority()
+            coordinator, store, lifecycle, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                lifecycle.apply_page(foreign_page, discovered_at=clock())
+                result = coordinator.tick()
+                self.assertEqual(authority.calls, [])
+                self.assertEqual(result.settled_ticket_ids, ())
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("90"))
+                self.assertEqual(durable.tickets[ticket.ticket_id].status.value, "open")
+            finally:
+                store.close()
+
     def test_explicit_ticket_provider_provenance_fences_foreign_settlement(
         self,
     ) -> None:

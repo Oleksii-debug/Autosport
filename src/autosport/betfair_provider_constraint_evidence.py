@@ -265,6 +265,8 @@ class BetfairProviderConstraintObservation(
         _canonical_text_fn=_canonical_text,
         _sha256_fn=_sha256,
         _utc_fn=_utc,
+        _canonical_sha256_fn=_canonical_sha256,
+        _decimal_text_fn=_decimal_text,
         _error_type=BetfairProviderConstraintError,
     ):
         if provider_id != _provider_id:
@@ -312,6 +314,44 @@ class BetfairProviderConstraintObservation(
                 "schema_version must be the product-owned current version"
             )
 
+        semantic_sha256 = _canonical_sha256_fn(
+            {
+                "schema": "autosport.betfair_standard_limit_constraint_semantics",
+                "schema_version": schema_version,
+                "provider_id": provider_id,
+                "jurisdiction_scope": jurisdiction_scope,
+                "currency_code": currency_code,
+                "order_family": order_family,
+                "min_standard_size": _decimal_text_fn(min_standard_size),
+                "min_payout": (
+                    None
+                    if min_payout is None
+                    else _decimal_text_fn(min_payout)
+                ),
+                "lower_minimum_payout_enabled": lower_minimum_payout_enabled,
+            }
+        )
+        generation_sha256 = _canonical_sha256_fn(
+            {
+                "schema": "autosport.betfair_standard_limit_constraint_generation",
+                "schema_version": schema_version,
+                "semantic_sha256": semantic_sha256,
+                "source_ref": source_ref,
+                "source_revision": source_revision,
+                "source_sha256": source_sha256,
+                "retrieved_at": retrieved.isoformat(),
+                "reviewed_at": reviewed.isoformat(),
+                "available_at": available.isoformat(),
+                "effective_from": effective_start.isoformat(),
+                "effective_until": (
+                    None
+                    if effective_until is None
+                    else _utc_fn(effective_until, "effective_until").isoformat()
+                ),
+                "review_expires_at": review_expiry.isoformat(),
+            }
+        )
+
         return tuple.__new__(
             cls,
             (
@@ -332,6 +372,8 @@ class BetfairProviderConstraintObservation(
                 review_expires_at,
                 order_family,
                 schema_version,
+                semantic_sha256,
+                generation_sha256,
             ),
         )
 
@@ -353,62 +395,8 @@ class BetfairProviderConstraintObservation(
     order_family = property(itemgetter(15))
     schema_version = property(itemgetter(16))
 
-    @property
-    def semantic_sha256(
-        self,
-        _canonical_sha256_fn=_canonical_sha256,
-        _decimal_text_fn=_decimal_text,
-    ) -> str:
-        return _canonical_sha256_fn(
-            {
-                "schema": "autosport.betfair_standard_limit_constraint_semantics",
-                "schema_version": self.schema_version,
-                "provider_id": self.provider_id,
-                "jurisdiction_scope": self.jurisdiction_scope,
-                "currency_code": self.currency_code,
-                "order_family": self.order_family,
-                "min_standard_size": _decimal_text_fn(self.min_standard_size),
-                "min_payout": (
-                    None
-                    if self.min_payout is None
-                    else _decimal_text_fn(self.min_payout)
-                ),
-                "lower_minimum_payout_enabled": self.lower_minimum_payout_enabled,
-            }
-        )
-
-    @property
-    def generation_sha256(
-        self,
-        _canonical_sha256_fn=_canonical_sha256,
-        _utc_fn=_utc,
-    ) -> str:
-        return _canonical_sha256_fn(
-            {
-                "schema": "autosport.betfair_standard_limit_constraint_generation",
-                "schema_version": self.schema_version,
-                "semantic_sha256": self.semantic_sha256,
-                "source_ref": self.source_ref,
-                "source_revision": self.source_revision,
-                "source_sha256": self.source_sha256,
-                "retrieved_at": _utc_fn(self.retrieved_at, "retrieved_at").isoformat(),
-                "reviewed_at": _utc_fn(self.reviewed_at, "reviewed_at").isoformat(),
-                "available_at": _utc_fn(self.available_at, "available_at").isoformat(),
-                "effective_from": _utc_fn(
-                    self.effective_from, "effective_from"
-                ).isoformat(),
-                "effective_until": (
-                    None
-                    if self.effective_until is None
-                    else _utc_fn(
-                        self.effective_until, "effective_until"
-                    ).isoformat()
-                ),
-                "review_expires_at": _utc_fn(
-                    self.review_expires_at, "review_expires_at"
-                ).isoformat(),
-            }
-        )
+    semantic_sha256 = property(itemgetter(17))
+    generation_sha256 = property(itemgetter(18))
 
     _provider_origin_proven_constant = False
     _current_constraint_authority_constant = False
@@ -423,7 +411,7 @@ class BetfairProviderConstraintObservation(
     real_money_execution = property(attrgetter("_real_money_execution_constant"))
 
     def __getnewargs__(self):
-        return tuple(self)
+        return tuple(self[:17])
 
 
 _BetfairConstraintEvidenceMeta.seal(BetfairProviderConstraintObservation)

@@ -343,7 +343,7 @@ class IngestionEngine:
         # acquisition/validation/normalization already succeeded.
         ordered_flags = tuple(sorted(flags))
         try:
-            accepted = self.bus.publish_many(normalized)
+            accepted = self.bus._publish_many_live_ingestion(normalized)
         except MarketEventDeliveryError as delivery_error:
             # MarketEventDeliveryError can only be raised after transactional
             # persistence succeeds. Preserve the exact storage-derived outcome in

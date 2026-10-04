@@ -2212,16 +2212,39 @@ class AutosportWebController:
 
 _WEB_CONTROLLER_AUTHORITY_CLASS = AutosportWebController
 _WEB_CONTROLLER_AUTHORITY_METHOD_NAMES = ("close", "dispatch", "state")
-_WEB_CONTROLLER_AUTHORITY_METHOD_WITNESSES = tuple(
-    (
-        name,
-        AutosportWebController.__dict__[name],
-        getattr(AutosportWebController.__dict__[name], "__code__", None),
-    )
-    for name in _WEB_CONTROLLER_AUTHORITY_METHOD_NAMES
-)
 _WEB_BRIDGE_CONTROLLER_REGISTRY = weakref.WeakKeyDictionary()
 _WEB_BRIDGE_CONTROLLER_REGISTRY_LOCK = threading.RLock()
+
+
+def _canonical_product_controller_type(
+    controller: object,
+    *,
+    _base_type=_WEB_CONTROLLER_AUTHORITY_CLASS,
+):
+    """Resolve the only product controller classes authorized for WebView launch."""
+
+    if not isinstance(controller, _base_type):
+        return None
+    if (
+        AutosportWebController is not _base_type
+        or _WEB_CONTROLLER_AUTHORITY_CLASS is not _base_type
+    ):
+        raise WindowsWebBridgeTrustError(
+            "The WebView bridge canonical controller class authority changed"
+        )
+    if type(controller) is _base_type:
+        return _base_type
+
+    # The packaged Windows path intentionally extends the base controller with one
+    # durable emergency-STOP lane. Import lazily to avoid the module cycle:
+    # windows_webview_emergency_stop imports this module to define that subclass.
+    from .windows_webview_emergency_stop import EmergencyStopWebController
+
+    if type(controller) is not EmergencyStopWebController:
+        raise WindowsWebBridgeTrustError(
+            "The WebView bridge refused a non-canonical controller subclass"
+        )
+    return EmergencyStopWebController
 
 
 class AutosportWebBridge:
@@ -2229,6 +2252,16 @@ class AutosportWebBridge:
 
     def __init__(self, controller: AutosportWebController | None = None) -> None:
         resolved_controller = controller or AutosportWebController()
+        controller_type = _canonical_product_controller_type(resolved_controller)
+        controller_operations = tuple(
+            (name, getattr(resolved_controller, name, None))
+            for name in _WEB_CONTROLLER_AUTHORITY_METHOD_NAMES
+        )
+        if any(not callable(operation) for _name, operation in controller_operations):
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge controller does not expose its required operations"
+            )
+
         object.__setattr__(self, "_controller", resolved_controller)
         object.__setattr__(self, "_controller_witness", resolved_controller)
         self._trust_lock = threading.RLock()
@@ -2237,7 +2270,11 @@ class AutosportWebBridge:
         self._trust_revoked = False
         self._host_shutdown = False
         with _WEB_BRIDGE_CONTROLLER_REGISTRY_LOCK:
-            _WEB_BRIDGE_CONTROLLER_REGISTRY[self] = resolved_controller
+            _WEB_BRIDGE_CONTROLLER_REGISTRY[self] = (
+                resolved_controller,
+                controller_type,
+                controller_operations,
+            )
 
     def __setattr__(self, name: str, value: object) -> None:
         if name in {"_controller", "_controller_witness"} and hasattr(
@@ -2248,16 +2285,21 @@ class AutosportWebBridge:
             )
         object.__setattr__(self, name, value)
 
-    def _registered_controller_locked(
+    def _registered_controller_record_locked(
         self,
         *,
+        _base_type=_WEB_CONTROLLER_AUTHORITY_CLASS,
+        _names=_WEB_CONTROLLER_AUTHORITY_METHOD_NAMES,
         _registry=_WEB_BRIDGE_CONTROLLER_REGISTRY,
         _registry_lock=_WEB_BRIDGE_CONTROLLER_REGISTRY_LOCK,
-    ) -> object:
-        """Return the construction-time controller independently of instance attrs."""
+    ) -> tuple[object, object | None, tuple[tuple[str, object], ...]]:
+        """Return and revalidate the construction-time controller authority record."""
 
         if (
-            _WEB_BRIDGE_CONTROLLER_REGISTRY is not _registry
+            AutosportWebController is not _base_type
+            or _WEB_CONTROLLER_AUTHORITY_CLASS is not _base_type
+            or _WEB_CONTROLLER_AUTHORITY_METHOD_NAMES is not _names
+            or _WEB_BRIDGE_CONTROLLER_REGISTRY is not _registry
             or _WEB_BRIDGE_CONTROLLER_REGISTRY_LOCK is not _registry_lock
         ):
             self._trust_revoked = True
@@ -2265,91 +2307,105 @@ class AutosportWebBridge:
                 "The WebView bridge controller registry authority changed"
             )
         with _registry_lock:
-            controller = _registry.get(self)
-        if controller is None:
+            record = _registry.get(self)
+        if (
+            not isinstance(record, tuple)
+            or len(record) != 3
+            or not isinstance(record[2], tuple)
+        ):
             self._trust_revoked = True
             raise WindowsWebBridgeTrustError(
                 "The WebView bridge lost its construction-time controller authority"
             )
+        controller, controller_type, operations = record
         if self._controller is not controller or self._controller_witness is not controller:
             self._trust_revoked = True
             raise WindowsWebBridgeTrustError(
                 "The WebView bridge controller authority changed"
             )
-        return controller
 
-    def _assert_canonical_controller_surface_locked(
-        self,
-        controller: object,
-        *,
-        _controller_type=_WEB_CONTROLLER_AUTHORITY_CLASS,
-        _names=_WEB_CONTROLLER_AUTHORITY_METHOD_NAMES,
-        _witnesses=_WEB_CONTROLLER_AUTHORITY_METHOD_WITNESSES,
-    ) -> None:
-        """Seal canonical controller behavior when the product controller is in use."""
-
-        if isinstance(controller, _controller_type):
-            if (
-                AutosportWebController is not _controller_type
-                or _WEB_CONTROLLER_AUTHORITY_CLASS is not _controller_type
-                or type(controller) is not _controller_type
-                or _WEB_CONTROLLER_AUTHORITY_METHOD_NAMES is not _names
-                or _WEB_CONTROLLER_AUTHORITY_METHOD_WITNESSES is not _witnesses
-            ):
+        if controller_type is not None:
+            if type(controller) is not controller_type:
                 self._trust_revoked = True
                 raise WindowsWebBridgeTrustError(
-                    "The WebView bridge refused a non-canonical controller surface"
+                    "The WebView bridge canonical controller type changed"
                 )
-            for name, expected, expected_code in _witnesses:
-                current = _controller_type.__dict__.get(name)
-                bound = getattr(controller, name, None)
+            if controller_type is not _base_type:
+                from .windows_webview_emergency_stop import EmergencyStopWebController
+
+                if EmergencyStopWebController is not controller_type:
+                    self._trust_revoked = True
+                    raise WindowsWebBridgeTrustError(
+                        "The WebView bridge emergency controller authority changed"
+                    )
+            if tuple(name for name, _operation in operations) != _names:
+                self._trust_revoked = True
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge canonical controller operation set changed"
+                )
+            for name, captured in operations:
+                current = getattr(controller, name, None)
                 if (
-                    current is not expected
-                    or getattr(current, "__code__", None) is not expected_code
-                    or getattr(bound, "__func__", None) is not expected
+                    not callable(current)
+                    or getattr(current, "__func__", None)
+                    is not getattr(captured, "__func__", None)
+                    or getattr(
+                        getattr(current, "__func__", current),
+                        "__code__",
+                        None,
+                    )
+                    is not getattr(
+                        getattr(captured, "__func__", captured),
+                        "__code__",
+                        None,
+                    )
                 ):
                     self._trust_revoked = True
                     raise WindowsWebBridgeTrustError(
                         "The WebView bridge refused a rebound canonical controller method"
                     )
-            return
 
-        # Minimal test doubles are intentionally supported by bridge unit tests, but
-        # rebinding the canonical class name must not turn a real product controller
-        # into an unchecked generic object.
-        if (
-            type(controller) is _controller_type
-            or AutosportWebController is not _controller_type
-            or _WEB_CONTROLLER_AUTHORITY_CLASS is not _controller_type
-        ):
-            self._trust_revoked = True
-            raise WindowsWebBridgeTrustError(
-                "The WebView bridge refused a non-canonical controller surface"
-            )
+        return controller, controller_type, operations
 
-    def _controller_operation_locked(
+    def _registered_controller_locked(self) -> object:
+        controller, _controller_type, _operations = (
+            self._registered_controller_record_locked()
+        )
+        return controller
+
+    def _assert_canonical_controller_surface_locked(
         self,
         controller: object,
-        name: str,
-        *,
-        _controller_type=_WEB_CONTROLLER_AUTHORITY_CLASS,
-        _witnesses=_WEB_CONTROLLER_AUTHORITY_METHOD_WITNESSES,
-    ):
-        """Capture one exact controller operation before releasing the trust lock."""
+    ) -> None:
+        """Revalidate the exact construction-time controller surface."""
 
-        self._assert_canonical_controller_surface_locked(controller)
-        if type(controller) is _controller_type:
-            for (
-                method_name,
-                expected,
-                _expected_code,
-            ) in _witnesses:
+        registered = self._registered_controller_locked()
+        if registered is not controller:
+            self._trust_revoked = True
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge controller authority changed"
+            )
+
+    def _controller_operation_locked(self, controller: object, name: str):
+        """Capture one construction-time operation before releasing the trust lock."""
+
+        registered, controller_type, operations = (
+            self._registered_controller_record_locked()
+        )
+        if registered is not controller:
+            self._trust_revoked = True
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge controller authority changed"
+            )
+        if controller_type is not None:
+            for method_name, operation in operations:
                 if method_name == name:
-                    return expected.__get__(controller, _controller_type)
+                    return operation
             self._trust_revoked = True
             raise WindowsWebBridgeTrustError(
                 "The WebView bridge requested an unknown canonical controller method"
             )
+
         operation = getattr(controller, name, None)
         if not callable(operation):
             self._trust_revoked = True

@@ -18,6 +18,7 @@ _store_type = _settlement.BetfairSettlementRevisionStore
 _original_ensure_monotonic_current = _store_type._ensure_monotonic_current
 _error = _settlement.BetfairSettlementRevisionError
 _authority_error = _settlement.MonotonicWorkspaceAuthorityError
+_authority_type = _settlement.MonotonicWorkspaceAuthority
 
 _state_digest_descriptor = vars(_store_type).get("_monotonic_state_digest")
 _authority_descriptor = vars(_store_type).get("_monotonic_authority")
@@ -28,6 +29,24 @@ _authority_code = getattr(_authority_descriptor, "__code__", None)
 if _state_digest_code is None or _authority_code is None:
     raise RuntimeError("Betfair settlement monotonic authority code is unavailable")
 
+_authority_method_names = (
+    "read_history",
+    "prepare",
+    "commit",
+    "recover",
+)
+_authority_methods = {
+    name: vars(_authority_type).get(name) for name in _authority_method_names
+}
+_authority_method_codes = {
+    name: getattr(method, "__code__", None)
+    for name, method in _authority_methods.items()
+}
+if any(not callable(method) for method in _authority_methods.values()) or any(
+    code is None for code in _authority_method_codes.values()
+):
+    raise RuntimeError("Betfair settlement monotonic transition authority is unavailable")
+
 
 def _require_canonical_monotonic_dispatch() -> None:
     current_digest = vars(_store_type).get("_monotonic_state_digest")
@@ -37,6 +56,13 @@ def _require_canonical_monotonic_dispatch() -> None:
         or getattr(current_digest, "__code__", None) is not _state_digest_code
         or current_authority is not _authority_descriptor
         or getattr(current_authority, "__code__", None) is not _authority_code
+        or _settlement.MonotonicWorkspaceAuthority is not _authority_type
+        or any(
+            vars(_authority_type).get(name) is not expected
+            or getattr(expected, "__code__", None)
+            is not _authority_method_codes[name]
+            for name, expected in _authority_methods.items()
+        )
     ):
         raise _error("settlement monotonic authority dispatch changed")
 

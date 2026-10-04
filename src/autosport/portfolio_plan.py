@@ -1596,6 +1596,7 @@ def _install_authoritative_terminal_economics_issuance():
     _issue_authoritative_terminal_economics,
     _assert_authoritative_terminal_economics,
 ) = _install_authoritative_terminal_economics_issuance()
+del _install_authoritative_terminal_economics_issuance
 del _VERIFIED_TERMINAL_AUTHORITY_TOKEN
 
 

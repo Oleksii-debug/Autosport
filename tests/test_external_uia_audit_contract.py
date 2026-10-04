@@ -405,9 +405,14 @@ def test_external_uia_exercises_packaged_f2_and_f8_focus_contract() -> None:
     assert "f8_focus_automation_id = $null" in audit
     assert "[System.Windows.Forms.SendKeys]::SendWait('{F2}')" in audit
     assert "[System.Windows.Forms.SendKeys]::SendWait('{F8}')" in audit
+    assert "function Wait-ForFocusedAutomationId" in audit
     assert "[System.Windows.Automation.AutomationElement]::FocusedElement" in audit
-    assert "$report.f2_focus_automation_id -ne '301'" in audit
-    assert "$report.f8_focus_automation_id -ne '204'" in audit
+    assert "Start-Sleep -Milliseconds 50" in audit
+    assert "Wait-ForFocusedAutomationId -AutomationId '301'" in audit
+    assert "Wait-ForFocusedAutomationId -AutomationId '204'" in audit
+    assert "$null -eq $focusedF2" in audit
+    assert "$null -eq $focusedF8" in audit
+    assert "Start-Sleep -Milliseconds 150" not in audit
     assert "$report.keyboard_shortcuts_status = 'PASS'" in audit
 
 

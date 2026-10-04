@@ -163,7 +163,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as opened_directory, tempfile.TemporaryDirectory() as later_directory:
             try:
                 os.chdir(opened_directory)
-                expected_path = (Path(opened_directory) / "market.db").absolute()
+                expected_path = (Path(opened_directory) / "market.db").resolve(strict=False)
                 store = SQLiteMarketStore("market.db")
                 try:
                     store.append(

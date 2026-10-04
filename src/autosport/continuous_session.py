@@ -485,7 +485,7 @@ def _bind_continuous_state_settlement_integrity(method):
 
 class _ContinuousSessionState:
     _SCHEMA = "autosport.continuous_session"
-    _VERSION = 3
+    _VERSION = 4
     _V2_FIELDS = frozenset(
         {
             "schema",
@@ -507,10 +507,16 @@ class _ContinuousSessionState:
             "source_state_projection_backlog",
         }
     )
-    _FIELDS = frozenset(
+    _V3_FIELDS = frozenset(
         {
             *_V2_FIELDS,
             "settlement_outcome_digests",
+        }
+    )
+    _FIELDS = frozenset(
+        {
+            *_V3_FIELDS,
+            "pending_settlement_resolutions",
         }
     )
 
@@ -567,6 +573,7 @@ class _ContinuousSessionState:
                         "last_full_refresh_at": None,
                         "settlement_evidence": [],
                         "settlement_outcome_digests": {},
+                        "pending_settlement_resolutions": [],
                         "source_gap_state": None,
                         "source_sync_state": None,
                         "source_state_delta_id": None,
@@ -636,6 +643,87 @@ class _ContinuousSessionState:
                 values.append(normalized)
         return tuple(values)
 
+    @staticmethod
+    def _validate_pending_settlement_resolutions(
+        raw: object,
+    ) -> tuple[dict[str, object], ...]:
+        if type(raw) is not list:
+            raise ContinuousSessionError(
+                "pending_settlement_resolutions must be a list"
+            )
+        values: list[dict[str, object]] = []
+        for item in raw:
+            if type(item) is not dict or set(item) != {
+                "event_identity",
+                "settlement_ref",
+                "quote_outcomes",
+                "evidence_id",
+                "evidence_sha256",
+                "available_at",
+            }:
+                raise ContinuousSessionError(
+                    "pending settlement resolution fields mismatch"
+                )
+            _text(item["event_identity"], "pending settlement event_identity")
+            _text(item["settlement_ref"], "pending settlement settlement_ref")
+            _text(item["evidence_id"], "pending settlement evidence_id")
+            _sha256(item["evidence_sha256"], "pending settlement evidence_sha256")
+            _instant(item["available_at"], "pending settlement available_at")
+            quote_outcomes = item["quote_outcomes"]
+            if type(quote_outcomes) is not dict or not quote_outcomes:
+                raise ContinuousSessionError(
+                    "pending settlement quote_outcomes must be a non-empty exact dict"
+                )
+            normalized_outcomes: dict[str, str] = {}
+            for quote_key, outcome in quote_outcomes.items():
+                canonical_key = _text(
+                    quote_key,
+                    "pending settlement quote_outcomes quote_key",
+                )
+                if type(outcome) is not str or outcome not in {
+                    "win",
+                    "loss",
+                    "void",
+                }:
+                    raise ContinuousSessionError(
+                        "pending settlement quote_outcomes contains unsupported outcome"
+                    )
+                normalized_outcomes[canonical_key] = outcome
+            normalized = {
+                "event_identity": item["event_identity"],
+                "settlement_ref": item["settlement_ref"],
+                "quote_outcomes": dict(sorted(normalized_outcomes.items())),
+                "evidence_id": item["evidence_id"],
+                "evidence_sha256": item["evidence_sha256"],
+                "available_at": item["available_at"],
+            }
+            if any(
+                prior["evidence_id"] == normalized["evidence_id"]
+                and prior != normalized
+                for prior in values
+            ):
+                raise ContinuousSessionError(
+                    "pending settlement evidence id is conflicting"
+                )
+            if any(
+                (
+                    prior["event_identity"],
+                    prior["settlement_ref"],
+                )
+                == (
+                    normalized["event_identity"],
+                    normalized["settlement_ref"],
+                )
+                and prior != normalized
+                for prior in values
+            ):
+                raise ContinuousSessionError(
+                    "pending settlement event/reference is conflicting"
+                )
+            if normalized not in values:
+                values.append(normalized)
+        return tuple(values)
+
     def _read(self) -> dict[str, Any]:
         try:
             raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
@@ -648,8 +736,13 @@ class _ContinuousSessionState:
         version = raw.get("schema_version")
         if version == 2 and set(raw) == self._V2_FIELDS:
             legacy_v2 = True
+            legacy_v3 = False
+        elif version == 3 and set(raw) == self._V3_FIELDS:
+            legacy_v2 = False
+            legacy_v3 = True
         elif version == self._VERSION and set(raw) == self._FIELDS:
             legacy_v2 = False
+            legacy_v3 = False
         else:
             raise ContinuousSessionError("continuous session state schema/identity mismatch")
         if raw["source_id"] != self.source_id:
@@ -675,6 +768,7 @@ class _ContinuousSessionState:
             }
             raw["schema_version"] = self._VERSION
             raw["settlement_outcome_digests"] = outcome_digests
+            raw["pending_settlement_resolutions"] = []
         else:
             outcome_digests = raw["settlement_outcome_digests"]
             if (
@@ -689,6 +783,32 @@ class _ContinuousSessionState:
                 _text(evidence_id, "settlement outcome evidence_id")
                 if digest is not None:
                     _sha256(digest, "settlement outcome digest")
+            if legacy_v3:
+                raw["schema_version"] = self._VERSION
+                raw["pending_settlement_resolutions"] = []
+
+        pending = self._validate_pending_settlement_resolutions(
+            raw["pending_settlement_resolutions"]
+        )
+        evidence_by_id = {
+            item["evidence_id"]: item
+            for item in evidence
+        }
+        for item in pending:
+            durable = evidence_by_id.get(item["evidence_id"])
+            if durable is None or any(
+                durable[field] != item[field]
+                for field in (
+                    "event_identity",
+                    "settlement_ref",
+                    "evidence_id",
+                    "evidence_sha256",
+                    "available_at",
+                )
+            ):
+                raise ContinuousSessionError(
+                    "pending settlement resolution is not bound to durable evidence"
+                )
         gap_state = raw["source_gap_state"]
         sync_state = raw["source_sync_state"]
         if (gap_state is None) != (sync_state is None):
@@ -739,6 +859,13 @@ class _ContinuousSessionState:
             )
         raw["state"] = state.value
         raw["settlement_evidence"] = [dict(item) for item in evidence]
+        raw["pending_settlement_resolutions"] = [
+            {
+                **item,
+                "quote_outcomes": dict(item["quote_outcomes"]),
+            }
+            for item in pending
+        ]
         return raw
 
     def snapshot(self) -> ContinuousSessionStatus:
@@ -813,7 +940,11 @@ class _ContinuousSessionState:
         *,
         _settlement_instant: Callable[[object, str], datetime],
         _settlement_outcomes_digest: Callable[[SettlementResolution], str],
-    ) -> tuple[list[dict[str, str]], dict[str, str | None]]:
+    ) -> tuple[
+        list[dict[str, str]],
+        dict[str, str | None],
+        list[dict[str, object]],
+    ]:
         known = {
             item["evidence_id"]: item
             for item in raw["settlement_evidence"]
@@ -823,6 +954,17 @@ class _ContinuousSessionState:
             for item in raw["settlement_evidence"]
         }
         outcome_digests = dict(raw["settlement_outcome_digests"])
+        pending = {
+            item["evidence_id"]: {
+                **item,
+                "quote_outcomes": dict(item["quote_outcomes"]),
+            }
+            for item in raw["pending_settlement_resolutions"]
+        }
+        pending_pairs = {
+            (item["event_identity"], item["settlement_ref"]): item
+            for item in pending.values()
+        }
         for evidence in settlement_evidence:
             normalized = {
                 "event_identity": evidence.event_identity,
@@ -855,12 +997,32 @@ class _ContinuousSessionState:
                 raise ContinuousSessionError(
                     "settlement outcome interpretation conflicts with durable evidence"
                 )
+            pending_payload = {
+                **normalized,
+                "quote_outcomes": dict(sorted(evidence.quote_outcomes.items())),
+            }
+            existing_pending = pending.get(evidence.evidence_id)
+            if existing_pending is not None and existing_pending != pending_payload:
+                raise ContinuousSessionError(
+                    "pending settlement evidence id conflicts with durable resolution"
+                )
+            pending_pair_existing = pending_pairs.get(pair)
+            if (
+                pending_pair_existing is not None
+                and pending_pair_existing != pending_payload
+            ):
+                raise ContinuousSessionError(
+                    "pending settlement event/reference conflicts with durable resolution"
+                )
             known[evidence.evidence_id] = normalized
             known_pairs[pair] = normalized
             outcome_digests[evidence.evidence_id] = outcomes_digest
+            pending[evidence.evidence_id] = pending_payload
+            pending_pairs[pair] = pending_payload
         return (
             list(sorted(known.values(), key=lambda item: item["evidence_id"])),
             dict(sorted(outcome_digests.items())),
+            list(sorted(pending.values(), key=lambda item: item["evidence_id"])),
         )
 
     def validate_settlement_evidence(
@@ -870,6 +1032,26 @@ class _ContinuousSessionState:
     ) -> None:
         self._merge_settlement_evidence(self._read(), settlement_evidence)
 
+    def pending_settlement_resolutions(
+        self,
+    ) -> tuple[SettlementResolution, ...]:
+        raw = self._read()
+        pending = tuple(
+            SettlementResolution(
+                event_identity=item["event_identity"],
+                settlement_ref=item["settlement_ref"],
+                quote_outcomes=dict(item["quote_outcomes"]),
+                evidence_id=item["evidence_id"],
+                evidence_sha256=item["evidence_sha256"],
+                available_at=item["available_at"],
+            )
+            for item in raw["pending_settlement_resolutions"]
+        )
+        # Re-prove exact metadata/outcome-digest authority through the closure-bound
+        # settlement integrity root before exposing pending truth for recovery.
+        self._merge_settlement_evidence(raw, pending)
+        return pending
+
     def record_settlement_evidence(
         self,
         *,
@@ -878,12 +1060,13 @@ class _ContinuousSessionState:
         """Durably bind settlement interpretation before any PAPER economic commit."""
 
         def mutate(raw: dict[str, Any]) -> None:
-            evidence, outcome_digests = self._merge_settlement_evidence(
+            evidence, outcome_digests, pending = self._merge_settlement_evidence(
                 raw,
                 settlement_evidence,
             )
             raw["settlement_evidence"] = evidence
             raw["settlement_outcome_digests"] = outcome_digests
+            raw["pending_settlement_resolutions"] = pending
 
         self._update(mutate)
 
@@ -974,12 +1157,21 @@ class _ContinuousSessionState:
             if full_refresh:
                 raw["last_full_refresh_at"] = timestamp.isoformat()
 
-            evidence, outcome_digests = self._merge_settlement_evidence(
+            evidence, outcome_digests, pending = self._merge_settlement_evidence(
                 raw,
                 settlement_evidence,
             )
+            completed_ids = {
+                evidence.evidence_id
+                for evidence in settlement_evidence
+            }
             raw["settlement_evidence"] = evidence
             raw["settlement_outcome_digests"] = outcome_digests
+            raw["pending_settlement_resolutions"] = [
+                item
+                for item in pending
+                if item["evidence_id"] not in completed_ids
+            ]
 
         self._update(mutate)
 

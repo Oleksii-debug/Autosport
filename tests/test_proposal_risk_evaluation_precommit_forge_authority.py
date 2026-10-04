@@ -80,6 +80,52 @@ class ProductProposalRiskEvaluationPrecommitForgeTests(unittest.TestCase):
                 finally:
                     setattr(authority, name, original)
 
+    def test_json_and_sha_dispatch_rebinding_fails_closed(self) -> None:
+        original_json_dumps = authority.json.dumps
+        original_sha256 = authority.hashlib.sha256
+        try:
+            authority.json.dumps = lambda *args, **kwargs: "{}"
+            with self.assertRaisesRegex(
+                authority.ProductProposalRiskEvaluationPrecommitError,
+                "dispatch changed",
+            ):
+                authority._REQUIRE_DISPATCH_ORIGINAL()
+        finally:
+            authority.json.dumps = original_json_dumps
+
+        try:
+            authority.hashlib.sha256 = lambda *args, **kwargs: object()
+            with self.assertRaisesRegex(
+                authority.ProductProposalRiskEvaluationPrecommitError,
+                "dispatch changed",
+            ):
+                authority._REQUIRE_DISPATCH_ORIGINAL()
+        finally:
+            authority.hashlib.sha256 = original_sha256
+
+    def test_decision_record_and_ledger_internal_rebinding_fails_closed(self) -> None:
+        original_record = authority.DecisionRecord.to_dict
+        try:
+            authority.DecisionRecord.to_dict = lambda self: {}
+            with self.assertRaisesRegex(
+                authority.ProductProposalRiskEvaluationPrecommitError,
+                "DecisionRecord authority changed",
+            ):
+                authority._REQUIRE_DISPATCH_ORIGINAL()
+        finally:
+            authority.DecisionRecord.to_dict = original_record
+
+        original_ledger = authority.JsonlDecisionLedger._canonical_record
+        try:
+            authority.JsonlDecisionLedger._canonical_record = lambda *args, **kwargs: b"{}"
+            with self.assertRaisesRegex(
+                authority.ProductProposalRiskEvaluationPrecommitError,
+                "Decision Ledger authority changed",
+            ):
+                authority._REQUIRE_DISPATCH_ORIGINAL()
+        finally:
+            authority.JsonlDecisionLedger._canonical_record = original_ledger
+
     def test_internal_helper_witness_root_rebinding_fails_closed(self) -> None:
         original = authority._PROPOSAL_RISK_EVALUATION_PRECOMMIT_HELPER_WITNESSES
         try:

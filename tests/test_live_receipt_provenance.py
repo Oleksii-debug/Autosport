@@ -267,11 +267,64 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             trusted = store.trusted_live_events()[0]
             forged = ForgingEvent.from_dict(trusted.to_dict())
 
-            with self.assertRaisesRegex(TypeError, "type override is not allowed"):
+            with self.assertRaisesRegex(TypeError, "_market_event_type"):
                 store.has_trusted_live_receipt(
                     forged,
                     _market_event_type=ForgingEvent,
                 )
+
+            self.assertTrue(store.has_trusted_live_receipt(trusted))
+            store.close()
+
+    def test_live_writer_ignores_mutable_sealed_event_type_alias(self) -> None:
+        class ForgingEvent(MarketEvent):
+            def to_dict(self):
+                raise AssertionError(
+                    "subclass serialization must not enter live receipt authority"
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            canonical = self._direct_event(sequence=1)
+            forged = ForgingEvent.from_dict(canonical.to_dict())
+
+            with patch.object(
+                storage_module,
+                "_SEALED_MARKET_EVENT_TYPE",
+                ForgingEvent,
+            ):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "live receipt authority requires exact MarketEvent values",
+                ):
+                    store._append_live_batch_accepted([forged])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
+    def test_receipt_checker_ignores_alias_plus_private_type_override(self) -> None:
+        class ForgingEvent(MarketEvent):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            self._ingest(store)
+            trusted = store.trusted_live_events()[0]
+            forged = ForgingEvent.from_dict(trusted.to_dict())
+
+            with patch.object(
+                storage_module,
+                "_SEALED_MARKET_EVENT_TYPE",
+                ForgingEvent,
+            ):
+                with self.assertRaisesRegex(TypeError, "_market_event_type"):
+                    store.has_trusted_live_receipt(
+                        forged,
+                        _market_event_type=ForgingEvent,
+                    )
 
             self.assertTrue(store.has_trusted_live_receipt(trusted))
             store.close()

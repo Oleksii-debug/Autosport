@@ -58,6 +58,31 @@ class ProductProposalRiskExecutionEvidenceDispatchGuardTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             evidence_authority._mint({})
 
+    def test_module_minter_cannot_accept_a_caller_selected_capability(self) -> None:
+        caller_capability = object()
+        self.assertIsNone(evidence_authority._mint.__kwdefaults__)
+        with self.assertRaisesRegex(
+            ProductProposalRiskExecutionEvidenceError,
+            "mint capability is invalid",
+        ):
+            evidence_authority._mint(
+                {},
+                mint_capability=caller_capability,
+            )
+
+        original_defaults = evidence_authority._mint.__kwdefaults__
+        try:
+            evidence_authority._mint.__kwdefaults__ = {
+                "mint_capability": caller_capability,
+            }
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "mint capability is invalid",
+            ):
+                evidence_authority._mint({})
+        finally:
+            evidence_authority._mint.__kwdefaults__ = original_defaults
+
     def test_precommit_positive_identity_descriptor_rebinding_is_rejected(self) -> None:
         precommit_type = evidence_authority.ProductProposalRiskEvaluationPrecommit
         original = precommit_type.__dict__["binding_identity_proven"]

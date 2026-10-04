@@ -312,6 +312,12 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     ),
                     ("prepared",),
                 )
+                self.assertEqual(
+                    proxy.prepared_settlement_resolutions(
+                        paper_book_path=root / "paper_book.json",
+                    ),
+                    (),
+                )
                 original_target = handoff.target
                 object.__setattr__(handoff, "target", [])
                 with self.assertRaisesRegex(
@@ -382,6 +388,34 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     )
             finally:
                 _LearningHandoff.reconcile_after_settlement = original
+                runtime.close()
+
+    def test_product_learning_recovery_rejects_class_method_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            handoff = _LearningHandoff()
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+                settlement_learning_handoff=handoff,
+            )
+            original = _LearningHandoff.prepared_settlement_resolutions
+            try:
+                _LearningHandoff.prepared_settlement_resolutions = (
+                    _replacement_learning_prepared_resolutions
+                )
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "settlement learning handoff authority changed after product composition",
+                ):
+                    runtime.coordinator.settlement_learning_handoff.prepared_settlement_resolutions(
+                        paper_book_path=root / "paper_book.json",
+                    )
+            finally:
+                _LearningHandoff.prepared_settlement_resolutions = original
                 runtime.close()
 
     def test_settlement_learning_handoff_identity_is_stable_across_restart(self) -> None:

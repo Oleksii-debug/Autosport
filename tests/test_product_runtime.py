@@ -1174,6 +1174,52 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 product_runtime_module.SQLiteMarketStore.close = original
 
+    def test_builder_ignores_generated_product_subtype_constructor_rebinding(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = build_autonomous_product_runtime(
+                workspace=root / "first",
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            runtime_type = type(first)
+            coordinator_type = type(first.coordinator)
+            desktop_type = type(first.coordinator.desktop_consumer)
+            first.close()
+
+            originals = {
+                runtime_type: runtime_type.__init__,
+                coordinator_type: coordinator_type.__init__,
+                desktop_type: desktop_type.__init__,
+            }
+
+            def forged(*_args, **_kwargs):
+                raise AssertionError(
+                    "rebound generated product constructor must not execute"
+                )
+
+            second = None
+            try:
+                for cls in originals:
+                    cls.__init__ = forged
+                second = build_autonomous_product_runtime(
+                    workspace=root / "second",
+                    source=_Source(),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+                self.assertEqual(second.status().source_id, "provider-a")
+            finally:
+                for cls, original in originals.items():
+                    cls.__init__ = original
+                if second is not None:
+                    second.close()
+
     def test_builder_ignores_durable_state_constructor_rebinding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

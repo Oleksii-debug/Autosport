@@ -14,6 +14,7 @@ from typing import Callable, Mapping, Sequence
 
 from .collector_service import _load_source_factory
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
+from .product_runtime_entry import tick_autonomous_product_runtime
 from .secret_redaction import _safe_exception_type_label
 
 
@@ -480,7 +481,7 @@ def run_product(
                 )
                 break
 
-            result = runtime.tick()
+            result = tick_autonomous_product_runtime(runtime)
             cycles += 1
             _print_record(
                 "product_tick",

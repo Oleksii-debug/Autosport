@@ -521,6 +521,23 @@ class MarketMirror:
             mirror.apply(current[key])
         return mirror
 
+    @classmethod
+    def from_live_store(cls, store: SQLiteMarketStore) -> "MarketMirror":
+        """Restore only rows with durable product-owned live receipt authority.
+
+        Legacy, replay and imported rows remain canonical market history but cannot
+        self-promote their caller-supplied ingest_ts into a live receipt clock on
+        restart. The receipt side table is intentionally prospective: rows written
+        before that authority existed stay absent from this live projection.
+        """
+        if not isinstance(store, SQLiteMarketStore):
+            raise TypeError("store must be a SQLiteMarketStore")
+        mirror = cls()
+        current = store.trusted_live_current_by_source()
+        for key in sorted(current):
+            mirror.apply(current[key])
+        return mirror
+
     def __len__(self) -> int:
         with self._lock:
             return len(self._latest)

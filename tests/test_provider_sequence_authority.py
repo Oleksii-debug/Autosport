@@ -352,7 +352,10 @@ def test_create_true_does_not_claim_preexisting_uninitialized_file(tmp_path: Pat
     path = tmp_path / "provider-sequence.db"
     path.write_bytes(b"")
 
-    with pytest.raises(ProviderSequenceAuthorityError, match="schema is not canonical"):
+    with pytest.raises(
+        ProviderSequenceAuthorityError,
+        match="requires SQLite WAL mode",
+    ):
         _authority(path, create=True)
 
     assert path.read_bytes() == b""

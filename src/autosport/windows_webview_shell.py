@@ -2278,22 +2278,37 @@ def launch_windows_shell(
         nonlocal close_teardown_thread
         if not canonical_bridge:
             return True
+        thread_start_failed = False
         with close_teardown_lock:
             if close_teardown_succeeded:
                 return True
             if close_teardown_thread is not None:
                 return False
-            candidate = threading.Thread(
-                target=run_close_teardown,
-                name="autosport-webview-safe-close",
-                daemon=False,
-            )
-            close_teardown_thread = candidate
             try:
+                candidate = threading.Thread(
+                    target=run_close_teardown,
+                    name="autosport-webview-safe-close",
+                    daemon=False,
+                )
+                close_teardown_thread = candidate
                 candidate.start()
             except Exception:
                 close_teardown_thread = None
+                thread_start_failed = True
+
+        if thread_start_failed:
+            # Thread creation/start failure must never turn an exception in the
+            # pywebview event callback into implicit permission to close. Fall
+            # back to the older synchronous safety path: block the native close
+            # until canonical teardown succeeds, or veto it on any failure.
+            try:
+                api._close_from_host()
+            except Exception:
                 return False
+            with close_teardown_lock:
+                close_teardown_succeeded = True
+            return True
+
         # pywebview's blocking closing event treats False as cancellation. The
         # semantic window therefore stays present while teardown runs.
         return False

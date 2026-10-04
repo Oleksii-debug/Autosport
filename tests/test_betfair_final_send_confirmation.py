@@ -4,12 +4,14 @@ import http.client
 import tempfile
 from dataclasses import replace
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
 import test_betfair_supervised_execution as provider_tests
 
+import autosport.betfair_execution_confirmation as confirmation_runtime
 from autosport.betfair_execution_confirmation import (
     CONFIRMATION_FILENAME,
     betfair_execution_confirmation_spec,
@@ -174,7 +176,15 @@ def test_exact_confirmation_is_consumed_before_one_provider_send() -> None:
             ).attempts
             if item.attempt.attempt_id == attempt_id
         )
-        assert attempt_view.submitted_request_sha256 is not None
+        request_sha256 = sha256(transport.calls[0]["body"]).hexdigest()
+        assert attempt_view.submitted_request_sha256 == request_sha256
+        assert binding.receipt.consumed_by == confirmation_runtime._consumer_key(
+            bound=bound,
+            action=action,
+            attempt_id=attempt_id,
+            request_sha256=request_sha256,
+            review_sha256=review.review_sha256,
+        )
         assert binding.receipt.consumed_at == attempt_view.submitted_at
 
 

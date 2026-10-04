@@ -1146,6 +1146,8 @@ class SQLiteMarketStore:
             _APPEND_BASELINE_TX_RE.fullmatch(first_commit.tx_id) is None
             or first_commit.previous_committed_state_sha256 is not None
             or first_commit.intended_state_sha256 != observed_state_sha256
+            or first_commit.semantic_binding_sha256
+            != _append_baseline_binding_sha256(observed_state_sha256)
         ):
             raise MonotonicAuthorityRollbackError(
                 "generation-zero market baseline is missing, changed, or unproven"
@@ -1194,6 +1196,96 @@ class SQLiteMarketStore:
             committed_state_sha256 = record.intended_state_sha256
             expected_start = end + 1
         return committed_head, committed_state_sha256
+
+    @staticmethod
+    def _require_canonical_append_authority_bindings(
+        history: tuple[AuthorityRecord, ...],
+        entries: tuple[tuple[int, str, str], ...],
+        *,
+        baseline_state_sha256: str,
+    ) -> None:
+        """Prove every committed append transition carries the canonical product binding."""
+
+        commits = tuple(
+            record for record in history if record.phase is AuthorityPhase.COMMIT
+        )
+        if not commits:
+            raise MonotonicAuthorityRollbackError(
+                "market append authority lacks a committed generation-zero baseline"
+            )
+
+        baseline = commits[0]
+        expected_baseline_binding = _append_baseline_binding_sha256(
+            baseline_state_sha256
+        )
+        if (
+            _APPEND_BASELINE_TX_RE.fullmatch(baseline.tx_id) is None
+            or baseline.previous_committed_state_sha256 is not None
+            or baseline.intended_state_sha256 != baseline_state_sha256
+            or baseline.semantic_binding_sha256 != expected_baseline_binding
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "market append authority baseline semantic binding is invalid"
+            )
+
+        entry_index = 0
+        previous_state_sha256 = baseline_state_sha256
+        expected_start = 1
+        for record in commits[1:]:
+            match = _APPEND_TX_RE.fullmatch(record.tx_id)
+            if match is None:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority history has invalid transaction identity"
+                )
+            start = int(match.group("start"))
+            end = int(match.group("end"))
+            if start != expected_start or end < start:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority history is non-contiguous"
+                )
+
+            count = end - start + 1
+            transition_entries = entries[entry_index : entry_index + count]
+            if (
+                len(transition_entries) != count
+                or tuple(entry[0] for entry in transition_entries)
+                != tuple(range(start, end + 1))
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority transition does not match durable entries"
+                )
+
+            intended_state_sha256 = previous_state_sha256
+            for generation, dedupe_key, payload_json in transition_entries:
+                intended_state_sha256 = _append_state_step_sha256(
+                    intended_state_sha256,
+                    append_generation=generation,
+                    dedupe_key=dedupe_key,
+                    payload_json=payload_json,
+                )
+
+            expected_binding_sha256 = _append_binding_sha256(
+                previous_state_sha256=previous_state_sha256,
+                intended_state_sha256=intended_state_sha256,
+                entries=transition_entries,
+            )
+            if (
+                record.previous_committed_state_sha256 != previous_state_sha256
+                or record.intended_state_sha256 != intended_state_sha256
+                or record.semantic_binding_sha256 != expected_binding_sha256
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority semantic binding is invalid"
+                )
+
+            entry_index += count
+            expected_start = end + 1
+            previous_state_sha256 = intended_state_sha256
+
+        if entry_index != len(entries):
+            raise MonotonicAuthorityRollbackError(
+                "positive market append authority does not cover durable entries"
+            )
 
     def _positive_append_generation_head(self) -> int:
         row = self.connection.execute(
@@ -1292,9 +1384,15 @@ class SQLiteMarketStore:
         # preserving every generation number.  Recompute the complete product-owned
         # chain before any caller is allowed to extend or rely on that authority.
         entries = self._validated_positive_append_entries()
+        baseline_state_sha256 = self._generation_zero_baseline_state_sha256()
         observed_state_sha256 = self._append_state_from_entries(
             entries,
-            baseline_state_sha256=self._generation_zero_baseline_state_sha256(),
+            baseline_state_sha256=baseline_state_sha256,
+        )
+        self._require_canonical_append_authority_bindings(
+            history,
+            entries,
+            baseline_state_sha256=baseline_state_sha256,
         )
         observed_head = entries[-1][0] if entries else 0
         if (

@@ -1315,6 +1315,7 @@ class VerifiedTerminalEconomics:
     total_states: int
     worst_terminal_profit: Decimal
     best_terminal_profit: Decimal
+    evaluated_stakes: tuple[Decimal, ...]
     worst_proven: bool
     best_proven: bool
     outcome_space_exhaustive: bool = False
@@ -1345,6 +1346,17 @@ class VerifiedTerminalEconomics:
         ):
             if not isinstance(value, Decimal) or not value.is_finite():
                 raise ValueError(f"{label} must be a finite exact Decimal")
+        if type(self.evaluated_stakes) is not tuple:
+            raise ValueError("terminal economics evaluated_stakes must be a tuple")
+        if len(self.evaluated_stakes) != len(self.completeness_evidence.intent_sha256s):
+            raise ValueError(
+                "terminal economics evaluated_stakes must bind the exact intent vector"
+            )
+        for stake in self.evaluated_stakes:
+            if type(stake) is not Decimal or not stake.is_finite() or stake < 0:
+                raise ValueError(
+                    "terminal economics evaluated_stakes must contain non-negative finite exact Decimals"
+                )
         if (
             type(self.worst_proven) is not bool
             or type(self.best_proven) is not bool
@@ -1395,12 +1407,13 @@ class VerifiedTerminalEconomics:
     def _identity_payload(self) -> dict[str, object]:
         return {
             "schema": "autosport.verified_terminal_economics",
-            "schema_version": 2,
+            "schema_version": 3,
             "completeness_evidence": self.completeness_evidence.to_dict(),
             "report_mode": self.report_mode,
             "total_states": self.total_states,
             "worst_terminal_profit": str(self.worst_terminal_profit),
             "best_terminal_profit": str(self.best_terminal_profit),
+            "evaluated_stakes": [str(stake) for stake in self.evaluated_stakes],
             "worst_proven": self.worst_proven,
             "best_proven": self.best_proven,
             "outcome_space_exhaustive": self.outcome_space_exhaustive,
@@ -1437,6 +1450,7 @@ class VerifiedTerminalEconomics:
             "total_states",
             "worst_terminal_profit",
             "best_terminal_profit",
+            "evaluated_stakes",
             "worst_proven",
             "best_proven",
             "outcome_space_exhaustive",
@@ -1453,11 +1467,23 @@ class VerifiedTerminalEconomics:
             or raw["schema"] != "autosport.verified_terminal_economics"
             or type(raw["schema_version"]) is not int
             or isinstance(raw["schema_version"], bool)
-            or raw["schema_version"] != 2
+            or raw["schema_version"] != 3
         ):
             raise ValueError("unsupported terminal economics schema")
         try:
             authority_sha256s_raw = raw["outcome_authority_sha256s"]
+            evaluated_stakes_raw = raw["evaluated_stakes"]
+            if type(evaluated_stakes_raw) is not list:
+                raise ValueError(
+                    "serialized terminal economics evaluated_stakes must be a list"
+                )
+            evaluated_stakes = tuple(
+                _decimal_from_serialized(
+                    "serialized terminal evaluated stake",
+                    stake,
+                )
+                for stake in evaluated_stakes_raw
+            )
             if type(authority_sha256s_raw) is not list:
                 raise ValueError(
                     "serialized outcome authority identities must be a list"
@@ -1518,6 +1544,7 @@ class VerifiedTerminalEconomics:
                     "serialized best_terminal_profit",
                     raw["best_terminal_profit"],
                 ),
+                evaluated_stakes=evaluated_stakes,
                 worst_proven=raw["worst_proven"],
                 best_proven=raw["best_proven"],
                 outcome_space_exhaustive=raw["outcome_space_exhaustive"],
@@ -1732,6 +1759,10 @@ class PortfolioPlan:
             if self.terminal_economics.outcome_authority_sha256s:
                 _assert_authoritative_terminal_economics(self.terminal_economics)
             terminal_evidence = self.terminal_economics.completeness_evidence
+            if self.stakes != self.terminal_economics.evaluated_stakes:
+                raise ValueError(
+                    "terminal economics must bind the exact portfolio stake vector"
+                )
             if self.portfolio_sha256 != terminal_evidence.portfolio_sha256:
                 raise ValueError(
                     "terminal economics must bind exact portfolio identity"
@@ -2427,6 +2458,7 @@ def _verify_terminal_economics(
             total_states=report.total_states,
             worst_terminal_profit=report.observed_worst,
             best_terminal_profit=report.observed_best,
+            evaluated_stakes=stakes,
             worst_proven=report.worst_proven,
             best_proven=report.best_proven,
             outcome_space_exhaustive=report.outcome_space_exhaustive,
@@ -2473,6 +2505,7 @@ def _verify_terminal_economics(
         total_states=report.total_states,
         worst_terminal_profit=report.observed_worst,
         best_terminal_profit=report.observed_best,
+        evaluated_stakes=stakes,
         worst_proven=report.worst_proven,
         best_proven=report.best_proven,
     )

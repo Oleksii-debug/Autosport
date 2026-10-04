@@ -13,6 +13,8 @@ from .market_outcomes import MarketSettlementOutcomeAuthority
 from .portfolio import PortfolioEngine, _snapshot_open_tickets_for_analysis
 
 
+_MAX_SCENARIO_GROUPS = 256
+_MAX_SCENARIO_OUTCOMES_PER_GROUP = 1024
 _MAX_SCENARIO_PROBABILITY_COEFFICIENT_DIGITS = 4096
 _MAX_SCENARIO_PROBABILITY_ABS_EXPONENT = 4096
 _SCENARIO_DECIMAL_CONTEXT = Context(
@@ -70,6 +72,8 @@ class ScenarioGroup:
         _canonical_scenario_text(self.group_id, field="scenario group_id")
         if type(self.outcomes) is not tuple or len(self.outcomes) < 2:
             raise ValueError("scenario group outcomes must be a tuple with at least two outcomes")
+        if len(self.outcomes) > _MAX_SCENARIO_OUTCOMES_PER_GROUP:
+            raise ValueError("scenario group outcomes exceeds resource limit")
         if any(type(item) is not ScenarioOutcome for item in self.outcomes):
             raise ValueError("scenario group outcomes must contain exact ScenarioOutcome values")
         for item in self.outcomes:
@@ -108,6 +112,8 @@ def _snapshot_scenario_groups(
     if type(groups) not in (list, tuple):
         raise ValueError("scenario groups must be a list or tuple")
     source_groups = tuple(groups)
+    if len(source_groups) > _MAX_SCENARIO_GROUPS:
+        raise ValueError("scenario groups exceeds resource limit")
     captured: list[tuple[str, tuple[tuple[str, Decimal | None], ...]]] = []
     snapshots: list[ScenarioGroup] = []
     for group in source_groups:

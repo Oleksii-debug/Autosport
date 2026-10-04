@@ -77,6 +77,196 @@ class MirrorSnapshot:
     events: tuple[MarketEvent, ...]
 
 
+def _trusted_mirror_event_key(
+    event: MarketEvent,
+    *,
+    _event_type: type[MarketEvent] = MarketEvent,
+    _quote_key=MarketEvent.quote_key.fget,
+) -> tuple[str, str]:
+    if type(event) is not _event_type:
+        raise TypeError("trusted mirror event must be an exact MarketEvent")
+    if _quote_key is None:
+        raise RuntimeError("canonical quote_key descriptor is unavailable")
+    return (event.source_id, _quote_key(event))
+
+
+def _trusted_mirror_event_snapshot(
+    event: MarketEvent,
+    *,
+    _event_type: type[MarketEvent] = MarketEvent,
+    _to_dict=MarketEvent.to_dict,
+    _from_dict=MarketEvent.from_dict,
+) -> MarketEvent:
+    if type(event) is not _event_type:
+        raise TypeError("trusted mirror event must be an exact MarketEvent")
+    snapshot = _from_dict(_to_dict(event))
+    if type(snapshot) is not _event_type:
+        raise TypeError("trusted mirror snapshot lost canonical MarketEvent authority")
+    return snapshot
+
+
+def _trusted_replay_utc_timestamp(
+    value: str,
+    *,
+    _fromisoformat=datetime.fromisoformat,
+    _utc=timezone.utc,
+) -> datetime | None:
+    try:
+        parsed = _fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(_utc)
+
+
+def _trusted_replay_boundary(
+    *,
+    as_of: datetime,
+    max_age: timedelta,
+    _datetime_type: type[datetime] = datetime,
+    _timedelta_type: type[timedelta] = timedelta,
+    _utc=timezone.utc,
+) -> tuple[datetime, timedelta]:
+    if not isinstance(as_of, _datetime_type):
+        raise TypeError("as_of must be a datetime")
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as_of must be timezone-aware")
+    if not isinstance(max_age, _timedelta_type):
+        raise TypeError("max_age must be a timedelta")
+    if max_age < _timedelta_type(0):
+        raise ValueError("max_age must be non-negative")
+    return as_of.astimezone(_utc), max_age
+
+
+def _trusted_replay_selector(
+    values: str | Iterable[str] | None,
+    *,
+    name: str,
+) -> frozenset[str] | None:
+    if values is None:
+        return None
+    if isinstance(values, str):
+        selected = frozenset({values})
+    else:
+        try:
+            selected = frozenset(values)
+        except TypeError as exc:
+            raise TypeError(f"{name} must be a string or iterable of strings") from exc
+    if any(not isinstance(value, str) or not value for value in selected):
+        raise ValueError(f"{name} entries must be non-empty strings")
+    return selected
+
+
+def _trusted_replay_same_sequence_payload(
+    left: MarketEvent,
+    right: MarketEvent,
+    *,
+    _to_dict=MarketEvent.to_dict,
+) -> bool:
+    left_payload = _to_dict(left)
+    right_payload = _to_dict(right)
+    for local_clock in ("observed_ts", "ingest_ts"):
+        left_payload.pop(local_clock, None)
+        right_payload.pop(local_clock, None)
+    return left_payload == right_payload
+
+
+def _trusted_replay_view(
+    history: Iterable[MarketEvent],
+    *,
+    as_of: datetime,
+    max_age: timedelta,
+    source_ids: str | Iterable[str] | None = None,
+    sports: str | Iterable[str] | None = None,
+    event_ids: str | Iterable[str] | None = None,
+    market_ids: str | Iterable[str] | None = None,
+    selection_ids: str | Iterable[str] | None = None,
+    _boundary=_trusted_replay_boundary,
+    _selector=_trusted_replay_selector,
+    _utc_timestamp=_trusted_replay_utc_timestamp,
+    _event_key=_trusted_mirror_event_key,
+    _snapshot_event=_trusted_mirror_event_snapshot,
+    _same_payload=_trusted_replay_same_sequence_payload,
+    _snapshot_type=MirrorSnapshot,
+    _zero_age: timedelta = timedelta(0),
+    _eligible_statuses=frozenset({"open"}),
+) -> MirrorSnapshot:
+    """Rebuild trusted replay without dispatch through mutable MarketMirror methods."""
+    boundary, age_limit = _boundary(as_of=as_of, max_age=max_age)
+    latest: dict[tuple[str, str], MarketEvent] = {}
+    revision = 0
+
+    for candidate in history:
+        event = _snapshot_event(candidate)
+        observed = _utc_timestamp(event.observed_ts)
+        ingested = _utc_timestamp(event.ingest_ts)
+        if observed is None or ingested is None:
+            continue
+        if observed > boundary or ingested > boundary:
+            continue
+
+        key = _event_key(event)
+        previous = latest.get(key)
+        if previous is None:
+            latest[key] = event
+            revision += 1
+            continue
+        if event.sequence < previous.sequence:
+            continue
+        if event.sequence == previous.sequence:
+            if _same_payload(event, previous):
+                continue
+            raise ValueError(
+                "conflicting MarketEvent payload reused an existing source-local sequence"
+            )
+        latest[key] = event
+        revision += 1
+
+    selected_sources = _selector(source_ids, name="source_ids")
+    selected_sports = _selector(sports, name="sports")
+    selected_events = _selector(event_ids, name="event_ids")
+    selected_markets = _selector(market_ids, name="market_ids")
+    selected_selections = _selector(selection_ids, name="selection_ids")
+
+    eligible: list[MarketEvent] = []
+    for key in sorted(latest):
+        event = _snapshot_event(latest[key])
+        if selected_sources is not None and event.source_id not in selected_sources:
+            continue
+        if selected_sports is not None and event.sport not in selected_sports:
+            continue
+        if selected_events is not None and event.event_id not in selected_events:
+            continue
+        if selected_markets is not None and event.market_id not in selected_markets:
+            continue
+        if (
+            selected_selections is not None
+            and event.selection_id not in selected_selections
+        ):
+            continue
+        if event.status not in _eligible_statuses:
+            continue
+
+        source_time = _utc_timestamp(event.source_ts or event.observed_ts)
+        observed_time = _utc_timestamp(event.observed_ts)
+        ingest_time = _utc_timestamp(event.ingest_ts)
+        if (
+            source_time is None
+            or observed_time is None
+            or ingest_time is None
+            or source_time > boundary
+            or observed_time > boundary
+            or ingest_time > boundary
+        ):
+            continue
+        age = boundary - source_time
+        if _zero_age <= age <= age_limit:
+            eligible.append(event)
+
+    return _snapshot_type(revision=revision, events=tuple(eligible))
+
+
 class MarketMirror:
     """Deterministic in-memory mirror for normalized market quotes.
 
@@ -658,6 +848,7 @@ class MarketMirror:
         _trusted_current=_trusted_live_current_by_source,
         _init_fn=__init__,
         _apply_fn=apply,
+        _event_key=_trusted_mirror_event_key,
     ) -> "MarketMirror":
         """Restore only rows with durable product-owned live receipt authority.
 
@@ -676,10 +867,55 @@ class MarketMirror:
         mirror = object.__new__(cls)
         _init_fn(mirror)
         current = _trusted_current(canonical_store)
-        for key in sorted(current):
-            _apply_fn(mirror, current[key])
+        for expected_key in sorted(current):
+            event = current[expected_key]
+            if expected_key != _event_key(event):
+                raise ValueError("trusted live current key does not match MarketEvent identity")
+            _apply_fn(mirror, event)
         return mirror
 
     def __len__(self) -> int:
         with self._lock:
             return len(self._latest)
+
+def _seal_trusted_recovery_call_surfaces() -> None:
+    """Expose trusted recovery contracts without caller-replaceable canonical hooks."""
+
+    replay_impl = MarketMirror.__dict__["replay_view_from_store"].__func__
+    live_bootstrap_impl = MarketMirror.__dict__["from_live_store"].__func__
+
+    def replay_view_from_store(
+        cls,
+        store: SQLiteMarketStore,
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+        require_live_receipt_authority: bool = False,
+        source_ids: str | Iterable[str] | None = None,
+        sports: str | Iterable[str] | None = None,
+        event_ids: str | Iterable[str] | None = None,
+        market_ids: str | Iterable[str] | None = None,
+        selection_ids: str | Iterable[str] | None = None,
+    ) -> MirrorSnapshot:
+        return replay_impl(
+            cls,
+            store,
+            as_of=as_of,
+            max_age=max_age,
+            require_live_receipt_authority=require_live_receipt_authority,
+            source_ids=source_ids,
+            sports=sports,
+            event_ids=event_ids,
+            market_ids=market_ids,
+            selection_ids=selection_ids,
+        )
+
+    def from_live_store(cls, store: SQLiteMarketStore) -> "MarketMirror":
+        return live_bootstrap_impl(cls, store)
+
+    MarketMirror.replay_view_from_store = classmethod(replay_view_from_store)
+    MarketMirror.from_live_store = classmethod(from_live_store)
+
+
+_seal_trusted_recovery_call_surfaces()
+del _seal_trusted_recovery_call_surfaces

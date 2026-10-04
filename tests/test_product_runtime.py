@@ -96,6 +96,12 @@ class _MutatingCatalogSource(_Source):
         return _Source.fetch_catalog_page(self, checkpoint)
 
 
+class _MutatingDeltaSource(_Source):
+    def fetch_deltas(self, checkpoint, records, max_items):
+        self.product_source_configuration_sha256 = "2" * 64
+        return ()
+
+
 def _replacement_source_resolve_event(self, delta):
     if delta.event_id == "never":
         raise AssertionError("replacement resolver executable semantics")
@@ -1015,6 +1021,35 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     runtime.tick()
 
                 self.assertEqual(runtime.lifecycle.records(), ())
+                self.assertEqual(
+                    runtime.collector.delta_store.deltas_after_commit(
+                        source_id=source.source_id,
+                    ),
+                    (),
+                )
+            finally:
+                runtime.close()
+
+    def test_delta_fetch_result_is_not_released_if_source_authority_changes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = _MutatingDeltaSource(configuration_sha256="1" * 64)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "source resolver authority changed after product composition",
+                ):
+                    runtime.collector.source.fetch_deltas(None, (), 10)
+
                 self.assertEqual(
                     runtime.collector.delta_store.deltas_after_commit(
                         source_id=source.source_id,

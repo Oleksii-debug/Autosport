@@ -845,29 +845,43 @@ class PersistentLiveDecisionLoop:
             ) -> object:
                 store = self._default_market_store
                 health_store = self._default_health_store
-                if store is None:
+                opened_here = store is None
+                if opened_here:
                     store = SQLiteMarketStore(self.workspace / "market.db")
                     try:
                         health_store = SourceHealthStore(
                             self.workspace / "source_health.json"
                         )
-                        # One bounded-current reconciliation covers durable changes
-                        # between construction and the first live poll. Subsequent
-                        # cycles reuse this exact canonical store and rely on the bus.
-                        for (
-                            persisted_event,
-                            append_generation,
-                        ) in store.current_by_source_with_append_generation().values():
-                            updates.reconcile_persisted(
-                                persisted_event,
-                                append_generation=append_generation,
-                            )
                     except BaseException:
                         store.close()
                         raise
+                assert store is not None
+                assert health_store is not None
+
+                # MarketEventBus delivery is process-local. A peer process may commit
+                # a newer positive append into the shared canonical SQLite store
+                # between our polls without touching this loop's in-memory mirror.
+                # Reconcile independently proven durable current state at every
+                # observation boundary before asking the provider for another batch.
+                # This keeps long-lived decision truth aligned with cross-process
+                # market authority without turning the mirror into persistence.
+                try:
+                    for (
+                        persisted_event,
+                        append_generation,
+                    ) in store.current_by_source_with_append_generation().values():
+                        updates.reconcile_persisted(
+                            persisted_event,
+                            append_generation=append_generation,
+                        )
+                except BaseException:
+                    if opened_here:
+                        store.close()
+                    raise
+
+                if opened_here:
                     self._default_market_store = store
                     self._default_health_store = health_store
-                assert health_store is not None
                 return poll_open_market_store_once(
                     store,
                     health_store,

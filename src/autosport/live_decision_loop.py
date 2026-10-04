@@ -121,7 +121,7 @@ PostAppendHook = Callable[[], None]
 
 
 _PROGRESS_SCHEMA = "autosport.live_decision_progress"
-_PROGRESS_VERSION = 1
+_PROGRESS_VERSION = 2
 _PROGRESS_KEYS = frozenset(
     {
         "schema",
@@ -130,6 +130,7 @@ _PROGRESS_KEYS = frozenset(
         "phase",
         "decision_ts",
         "market_state_sha256",
+        "market_append_generation",
         "decision_context_sha256",
         "affected_input_ids",
         "registered_input_ids",
@@ -139,6 +140,7 @@ _PROGRESS_KEYS = frozenset(
         "gate",
     }
 )
+_PROGRESS_KEYS_V1 = _PROGRESS_KEYS - {"market_append_generation"}
 _PHASE_PENDING = "pending"
 _PHASE_APPEND_PENDING = "append_pending"
 _PHASE_COMMITTED = "committed"
@@ -545,6 +547,7 @@ class _Progress:
     phase: str
     decision_ts: str
     market_state_sha256: str
+    market_append_generation: int | None
     decision_context_sha256: str
     affected_input_ids: tuple[str, ...]
     registered_input_ids: tuple[str, ...]
@@ -557,6 +560,13 @@ class _Progress:
         _canonical_text("loop_id", self.loop_id)
         _canonical_timestamp("decision_ts", self.decision_ts)
         _canonical_sha256("market_state_sha256", self.market_state_sha256)
+        if self.market_append_generation is not None and (
+            type(self.market_append_generation) is not int
+            or self.market_append_generation < 0
+        ):
+            raise LiveDecisionProgressError(
+                "market_append_generation must be a non-negative int or null"
+            )
         _canonical_sha256("decision_context_sha256", self.decision_context_sha256)
         if self.phase not in {
             _PHASE_PENDING,
@@ -621,6 +631,7 @@ class _Progress:
             "phase": self.phase,
             "decision_ts": self.decision_ts,
             "market_state_sha256": self.market_state_sha256,
+            "market_append_generation": self.market_append_generation,
             "decision_context_sha256": self.decision_context_sha256,
             "affected_input_ids": list(self.affected_input_ids),
             "registered_input_ids": list(self.registered_input_ids),
@@ -632,11 +643,23 @@ class _Progress:
 
     @classmethod
     def from_dict(cls, raw: object) -> "_Progress":
-        if type(raw) is not dict or set(raw) != _PROGRESS_KEYS:
+        if type(raw) is not dict:
             raise LiveDecisionProgressError(
                 "live decision progress must contain canonical fields"
             )
-        if raw["schema"] != _PROGRESS_SCHEMA or raw["schema_version"] != _PROGRESS_VERSION:
+        schema_version = raw.get("schema_version")
+        expected_keys = (
+            _PROGRESS_KEYS
+            if schema_version == _PROGRESS_VERSION
+            else _PROGRESS_KEYS_V1
+            if schema_version == 1
+            else None
+        )
+        if expected_keys is None or set(raw) != expected_keys:
+            raise LiveDecisionProgressError(
+                "live decision progress must contain canonical fields"
+            )
+        if raw["schema"] != _PROGRESS_SCHEMA:
             raise LiveDecisionProgressError("unsupported live decision progress schema")
         input_ids = raw["affected_input_ids"]
         registered_ids = raw["registered_input_ids"]
@@ -656,6 +679,11 @@ class _Progress:
                 phase=raw["phase"],
                 decision_ts=raw["decision_ts"],
                 market_state_sha256=raw["market_state_sha256"],
+                market_append_generation=(
+                    None
+                    if schema_version == 1
+                    else raw["market_append_generation"]
+                ),
                 decision_context_sha256=raw["decision_context_sha256"],
                 affected_input_ids=tuple(input_ids),
                 registered_input_ids=tuple(registered_ids),
@@ -966,6 +994,7 @@ class PersistentLiveDecisionLoop:
         self._availability_generations: dict[str, int] = {}
         self._availability_heap: list[tuple[datetime, str, int]] = []
         self._decision_market_frontier_as_of: datetime | None = None
+        self._decision_market_append_generation: int | None = None
         self._decision_market_history: tuple[tuple[MarketEvent, int], ...] | None = None
         self._decision_market_history_frozen = False
 
@@ -976,6 +1005,7 @@ class PersistentLiveDecisionLoop:
         self._default_health_store = None
         self._default_market_change_token = None
         self._decision_market_frontier_as_of = None
+        self._decision_market_append_generation = None
         self._decision_market_history = None
         self._decision_market_history_frozen = False
         if store is not None:
@@ -1036,6 +1066,7 @@ class PersistentLiveDecisionLoop:
         """Choose a cutoff and freeze any exceptional history it may consume."""
 
         self._decision_market_frontier_as_of = None
+        self._decision_market_append_generation = None
         self._decision_market_history = None
         self._decision_market_history_frozen = False
 
@@ -1056,6 +1087,7 @@ class PersistentLiveDecisionLoop:
                 self.mirror_updates,
             )
             decision_time = self._sample_clock()
+            append_generation = store.committed_append_generation_head()
             frozen_history: tuple[tuple[MarketEvent, int], ...] | None = None
             if self._decision_refresh_may_need_history(decision_time) and any(
                 self.dependencies.requires_current_history_fallback(
@@ -1068,6 +1100,7 @@ class PersistentLiveDecisionLoop:
 
             if store.external_change_token() == expected_token:
                 self._decision_market_frontier_as_of = decision_time
+                self._decision_market_append_generation = append_generation
                 self._decision_market_history = frozen_history
                 self._decision_market_history_frozen = True
                 return decision_time
@@ -1612,6 +1645,7 @@ class PersistentLiveDecisionLoop:
                 progress.registered_input_ids,
                 decision_time,
                 expected_market_state_sha256=progress.market_state_sha256,
+                max_append_generation=progress.market_append_generation,
             )
             intents = self._all_cached_intents()
         else:
@@ -1647,6 +1681,8 @@ class PersistentLiveDecisionLoop:
                 != progress.plan_sha256
                 or durable_record.payload.get("market_state_sha256")
                 != progress.market_state_sha256
+                or durable_record.payload.get("market_append_generation")
+                != progress.market_append_generation
                 or durable_record.payload.get("decision_context_sha256")
                 != progress.decision_context_sha256
                 or durable_record.payload.get("gate") != progress.gate
@@ -1781,6 +1817,7 @@ class PersistentLiveDecisionLoop:
         as_of: datetime,
         *,
         expected_market_state_sha256: str,
+        max_append_generation: int | None,
     ) -> None:
         _canonical_sha256(
             "expected replay market_state_sha256",
@@ -1788,11 +1825,30 @@ class PersistentLiveDecisionLoop:
         )
         store = SQLiteMarketStore(self.workspace / "market.db")
         try:
-            snapshot = MarketMirror.replay_view_from_store(
-                store,
-                as_of=as_of,
-                max_age=self.max_quote_age,
-            )
+            if max_append_generation is None:
+                # Legacy progress did not persist a market-generation frontier.
+                snapshot = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=as_of,
+                    max_age=self.max_quote_age,
+                )
+            else:
+                boundary, age_limit = MarketMirror._decision_boundary(
+                    as_of=as_of,
+                    max_age=self.max_quote_age,
+                )
+                snapshot = MarketMirror._decision_view_from_proven_history(
+                    store.events_at_committed_append_boundary(
+                        max_append_generation
+                    ),
+                    boundary=boundary,
+                    max_age=age_limit,
+                    source_ids=None,
+                    sports=None,
+                    event_ids=None,
+                    market_ids=None,
+                    selection_ids=None,
+                )
         finally:
             store.close()
 
@@ -2182,6 +2238,11 @@ class PersistentLiveDecisionLoop:
                     "intent_evidence_json": prepared_execution.intent_evidence_json,
                 }
 
+        progress_market_append_generation = (
+            None
+            if self._progress is None
+            else self._progress.market_append_generation
+        )
         record_payload = {
             "schema": "autosport.persistent_live_decision",
             "schema_version": 2,
@@ -2189,6 +2250,7 @@ class PersistentLiveDecisionLoop:
             "mode": self.mode.value,
             "gate": gate,
             "market_state_sha256": market_state_sha256,
+            "market_append_generation": progress_market_append_generation,
             "decision_context_sha256": decision_context_sha256,
             "intent_strategy_version_id": provenance.strategy_version_id,
             "intent_model_version_id": provenance.model_version_id,
@@ -2285,6 +2347,7 @@ class PersistentLiveDecisionLoop:
                     phase=_PHASE_APPEND_PENDING,
                     decision_ts=plan.decision_ts,
                     market_state_sha256=market_state_sha256,
+                    market_append_generation=durable_progress.market_append_generation,
                     decision_context_sha256=decision_context_sha256,
                     affected_input_ids=affected_input_ids,
                     registered_input_ids=self.dependencies.input_ids,
@@ -2304,6 +2367,7 @@ class PersistentLiveDecisionLoop:
                     phase=_PHASE_APPEND_PENDING,
                     decision_ts=plan.decision_ts,
                     market_state_sha256=market_state_sha256,
+                    market_append_generation=durable_progress.market_append_generation,
                     decision_context_sha256=decision_context_sha256,
                     affected_input_ids=affected_input_ids,
                     registered_input_ids=self.dependencies.input_ids,
@@ -2327,6 +2391,8 @@ class PersistentLiveDecisionLoop:
                     or existing.payload.get("plan_sha256") != plan.plan_sha256
                     or existing.payload.get("market_state_sha256")
                     != market_state_sha256
+                    or existing.payload.get("market_append_generation")
+                    != durable_progress.market_append_generation
                     or existing.payload.get("decision_context_sha256")
                     != decision_context_sha256
                     or existing.payload.get("intent_strategy_version_id")
@@ -2374,6 +2440,7 @@ class PersistentLiveDecisionLoop:
                 phase=_PHASE_COMMITTED,
                 decision_ts=plan.decision_ts,
                 market_state_sha256=market_state_sha256,
+                market_append_generation=durable_progress.market_append_generation,
                 decision_context_sha256=decision_context_sha256,
                 affected_input_ids=affected_input_ids,
                 registered_input_ids=self.dependencies.input_ids,
@@ -2413,6 +2480,11 @@ class PersistentLiveDecisionLoop:
     ) -> None:
         _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
         self.intent_provenance.assert_available_at(decision_time)
+        market_append_generation = (
+            self._decision_market_append_generation
+            if self._decision_market_frontier_as_of == decision_time
+            else None
+        )
         with WorkspaceEconomicLock(self.workspace):
             durable_control = self._load_control()
             if durable_control is None:
@@ -2495,6 +2567,7 @@ class PersistentLiveDecisionLoop:
                 phase=_PHASE_PENDING,
                 decision_ts=decision_ts,
                 market_state_sha256=market_state_sha256,
+                market_append_generation=market_append_generation,
                 decision_context_sha256=durable_context_sha256,
                 affected_input_ids=affected_input_ids,
                 registered_input_ids=self.dependencies.input_ids,

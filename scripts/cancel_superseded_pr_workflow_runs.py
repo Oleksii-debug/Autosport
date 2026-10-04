@@ -556,6 +556,21 @@ class GitHubApi:
                 request_code is not None
                 and bound_func is request_func
                 and getattr(request_func, "__code__", None) is request_code
+                and getattr(request_func, "__defaults__", None)
+                is request_positional_defaults
+                and getattr(request_func, "__kwdefaults__", None)
+                is request_keyword_defaults
+                and (
+                    request_keyword_defaults is None
+                    or (
+                        len(request_keyword_defaults) == len(request_keyword_items)
+                        and all(
+                            key in request_keyword_defaults
+                            and request_keyword_defaults[key] is value
+                            for key, value in request_keyword_items
+                        )
+                    )
+                )
                 and getattr(_encode_query, "__code__", None) is _encode_query_code
                 and getattr(_encode_query, "__defaults__", None)
                 is _encode_query_defaults

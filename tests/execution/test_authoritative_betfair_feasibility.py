@@ -961,6 +961,48 @@ def test_unreserved_bound_plan_cannot_cross_product_authority_seam() -> None:
             )
 
 
+def test_builtin_type_rebinding_cannot_mask_ledger_subclass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, _source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+    called = False
+
+    class ForgedLedger(RealExecutionLedger):
+        def verified_snapshot(self):
+            nonlocal called
+            called = True
+            raise AssertionError(
+                "ledger subclass dispatch must not cross exact-type boundary"
+            )
+
+    real_type = type
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = ForgedLedger(Path(tmp) / "real.jsonl")
+
+        def forged_type(value):
+            if real_type(value) is ForgedLedger:
+                return RealExecutionLedger
+            return real_type(value)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(builtins, "type", forged_type)
+            with pytest.raises(
+                TypeError,
+                match="ledger must be exact RealExecutionLedger",
+            ):
+                assess_authoritative_betfair_execution_feasibility(
+                    ledger,
+                    bound,
+                    receipt,
+                    action_id=ACTION_ID,
+                    max_snapshot_age=timedelta(seconds=2),
+                )
+    assert called is False
+
+
 def test_injected_transport_and_clock_cannot_mint_positive_provider_origin() -> None:
     receipt = _client(MarketBookTransport()).read_market_book_depth("1.234", 42)
     bound = _bound()

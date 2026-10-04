@@ -491,6 +491,7 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     _assert_market_book_depth_authoritative,
     _price_ladder_type,
     _price_ladder_admissible,
+    _exact_type,
 ) -> ExecutionFeasibilitySnapshot:
     """Resolve provider depth against the durable plan and fail closed on limits.
 
@@ -510,11 +511,11 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     # a RealExecutionLedger subclass can override verified_snapshot(), and a
     # BoundSupervisedExecutionPlan subclass can override binding/action/profile
     # resolution while still satisfying isinstance().
-    if type(ledger) is not _ledger_type:
+    if _exact_type(ledger) is not _ledger_type:
         raise TypeError("ledger must be exact RealExecutionLedger")
-    if type(bound) is not _bound_type:
+    if _exact_type(bound) is not _bound_type:
         raise TypeError("bound must be exact BoundSupervisedExecutionPlan")
-    if type(receipt) is not _receipt_type:
+    if _exact_type(receipt) is not _receipt_type:
         raise TypeError("receipt must be exact BetfairMarketBookDepthObservation")
     acquisition_started_at = _market_book_acquisition_started_at(receipt)
     # Provider provenance is necessary but must not choose the decision epoch.
@@ -562,7 +563,7 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     if price_ladder_admission is None:
         price_ladder_reasons.append("PRICE_LADDER_AUTHORITY_UNPROVEN")
     else:
-        if type(price_ladder_admission) is not _price_ladder_type:
+        if _exact_type(price_ladder_admission) is not _price_ladder_type:
             raise TypeError(
                 "price_ladder_admission must be exact "
                 "BetfairPriceLadderAdmission or None"
@@ -809,6 +810,7 @@ def _install_execution_feasibility_result_authority():
         raise RuntimeError("Betfair price-ladder admissible property has no getter")
     price_ladder_admissible_code = price_ladder_admissible.__code__
     fingerprint = _feasibility_result_fingerprint
+    exact_type = type
 
     def assess(
         ledger: RealExecutionLedger,
@@ -901,8 +903,9 @@ def _install_execution_feasibility_result_authority():
             _assert_market_book_depth_authoritative=market_book_assert_authoritative,
             _price_ladder_type=price_ladder_type,
             _price_ladder_admissible=price_ladder_admissible,
+            _exact_type=exact_type,
         )
-        if type(result) is not result_type:
+        if exact_type(result) is not result_type:
             raise TypeError("authoritative feasibility resolver returned invalid result type")
         result_id = id(result)
         result_fingerprint = fingerprint(result)
@@ -917,7 +920,7 @@ def _install_execution_feasibility_result_authority():
         return result
 
     def is_authoritative(result: ExecutionFeasibilitySnapshot) -> bool:
-        if type(result) is not result_type:
+        if exact_type(result) is not result_type:
             return False
         current = issued.get(id(result))
         if current is None or current[0]() is not result:

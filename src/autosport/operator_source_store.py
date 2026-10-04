@@ -51,8 +51,14 @@ class OperatorSourceConfigStore:
             ) from exc
 
     def _read_locked(self) -> OperatorSourceConfig | None:
-        if not self.path.exists():
+        try:
+            self.path.lstat()
+        except FileNotFoundError:
             return None
+        except OSError as exc:
+            raise OperatorSourceStoreError(
+                "operator source configuration cannot be inspected"
+            ) from exc
         try:
             raw = read_bounded_regular_file_no_follow(
                 self.path,

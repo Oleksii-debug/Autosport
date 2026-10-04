@@ -19,10 +19,10 @@ class ProposalRiskTargetDispatchAuthorityFalsifiers(unittest.TestCase):
     """Expected-red authority falsifiers stacked on canonical PR #2133.
 
     A product-issued proposal target is a durable precondition for the downstream
-    proposal-specific ruin evaluation.  Rebinding Python dispatch after module
+    proposal-specific ruin evaluation. Rebinding Python dispatch after module
     import must therefore fail closed even when the replacement delegates to the
-    original implementation and returns byte-for-byte equivalent values.  A
-    delegating replacement is intentional: these tests isolate *dispatch identity*
+    original implementation and returns byte-for-byte equivalent values. A
+    delegating replacement is intentional: these tests isolate dispatch identity
     rather than depending on a forged economic payload.
     """
 
@@ -113,7 +113,7 @@ class ProposalRiskTargetDispatchAuthorityFalsifiers(unittest.TestCase):
         )
 
     def test_issue_rejects_dispatch_guard_rebinding(self) -> None:
-        # Current #2133 looks up _require_dispatch through writable module globals.
+        # A mutable verifier cannot be its own trust root.
         with patch.object(authority, "_require_dispatch", lambda: None):
             with self.assertRaises(authority.ProductProposalRiskTargetError):
                 self._issue()
@@ -125,6 +125,27 @@ class ProposalRiskTargetDispatchAuthorityFalsifiers(unittest.TestCase):
             return original(policy, book, signals, contexts)
 
         with patch.object(authority, "_derive", rebound):
+            with self.assertRaises(authority.ProductProposalRiskTargetError):
+                self._issue()
+
+    def test_issue_rejects_internal_helper_witness_table_substitution(self) -> None:
+        original = authority._derive
+
+        def rebound(policy, book, signals, contexts):
+            return original(policy, book, signals, contexts)
+
+        substituted = tuple(
+            (
+                name,
+                rebound if name == "_derive" else expected,
+                getattr(rebound, "__code__", None) if name == "_derive" else code,
+            )
+            for name, expected, code in authority._PROPOSAL_TARGET_HELPER_WITNESSES
+        )
+        with (
+            patch.object(authority, "_derive", rebound),
+            patch.object(authority, "_PROPOSAL_TARGET_HELPER_WITNESSES", substituted),
+        ):
             with self.assertRaises(authority.ProductProposalRiskTargetError):
                 self._issue()
 
@@ -148,6 +169,27 @@ class ProposalRiskTargetDispatchAuthorityFalsifiers(unittest.TestCase):
             with self.assertRaises(authority.ProductProposalRiskTargetError):
                 self._issue()
 
+    def test_issue_rejects_monotonic_witness_table_substitution(self) -> None:
+        original = authority.MonotonicWorkspaceAuthority.prepare
+
+        def rebound(instance, *args, **kwargs):
+            return original(instance, *args, **kwargs)
+
+        substituted = tuple(
+            (
+                name,
+                rebound if name == "prepare" else expected,
+                getattr(rebound, "__code__", None) if name == "prepare" else code,
+            )
+            for name, expected, code in authority._AUTHORITY_METHOD_WITNESSES
+        )
+        with (
+            patch.object(authority.MonotonicWorkspaceAuthority, "prepare", rebound),
+            patch.object(authority, "_AUTHORITY_METHOD_WITNESSES", substituted),
+        ):
+            with self.assertRaises(authority.ProductProposalRiskTargetError):
+                self._issue()
+
     def test_issue_rejects_market_event_serialization_dispatch_rebinding(self) -> None:
         original = authority.MarketEvent.to_dict
 
@@ -155,6 +197,36 @@ class ProposalRiskTargetDispatchAuthorityFalsifiers(unittest.TestCase):
             return original(instance, *args, **kwargs)
 
         with patch.object(authority.MarketEvent, "to_dict", rebound):
+            with self.assertRaises(authority.ProductProposalRiskTargetError):
+                self._issue()
+
+    def test_issue_rejects_decision_record_constructor_rebinding(self) -> None:
+        original = authority.DecisionRecord
+
+        def rebound(*args, **kwargs):
+            return original(*args, **kwargs)
+
+        with patch.object(authority, "DecisionRecord", rebound):
+            with self.assertRaises(authority.ProductProposalRiskTargetError):
+                self._issue()
+
+    def test_issue_rejects_target_digest_sha256_dispatch_rebinding(self) -> None:
+        original = authority.hashlib.sha256
+
+        def rebound(*args, **kwargs):
+            return original(*args, **kwargs)
+
+        with patch.object(authority.hashlib, "sha256", rebound):
+            with self.assertRaises(authority.ProductProposalRiskTargetError):
+                self._issue()
+
+    def test_issue_rejects_canonical_json_dispatch_rebinding(self) -> None:
+        original = authority.json.dumps
+
+        def rebound(*args, **kwargs):
+            return original(*args, **kwargs)
+
+        with patch.object(authority.json, "dumps", rebound):
             with self.assertRaises(authority.ProductProposalRiskTargetError):
                 self._issue()
 

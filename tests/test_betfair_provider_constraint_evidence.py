@@ -508,3 +508,22 @@ def test_resolver_captures_structural_dependencies_against_module_rebinding(
     assert result.provider_origin_proven is False
     assert result.current_constraint_authority is False
     assert result.execution_authorized is False
+
+
+def test_observation_digests_use_non_python_immutable_getters() -> None:
+    item = observation()
+    for name in ("semantic_sha256", "generation_sha256"):
+        descriptor = BetfairProviderConstraintObservation.__dict__[name]
+        assert isinstance(descriptor, property)
+        assert descriptor.fget is not None
+        assert not hasattr(descriptor.fget, "__code__")
+        assert len(getattr(item, name)) == 64
+
+    semantic_before = item.semantic_sha256
+    generation_before = item.generation_sha256
+    with pytest.raises(AttributeError):
+        object.__setattr__(item, "semantic_sha256", "0" * 64)
+    with pytest.raises(AttributeError):
+        object.__setattr__(item, "generation_sha256", "0" * 64)
+    assert item.semantic_sha256 == semantic_before
+    assert item.generation_sha256 == generation_before

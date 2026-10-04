@@ -730,7 +730,7 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 runtime.close()
 
-    def test_runtime_closed_and_lease_authority_flags_are_not_caller_writable(
+    def test_runtime_closed_and_lease_authority_are_not_caller_writable(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -741,31 +741,86 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 sleep=lambda _: None,
                 initial_bankroll="100",
             )
+            lease = runtime._runtime_lease
             try:
                 with self.assertRaisesRegex(
                     ProductCompositionError,
                     "product runtime authority field '_closed' is immutable",
                 ):
                     runtime._closed = True
+                with self.assertRaises(AttributeError):
+                    lease._authority_active = False
                 with self.assertRaisesRegex(
-                    WorkspaceEconomicLockError,
-                    "product runtime lease authority field '_authority_active' is immutable",
+                    ProductCompositionError,
+                    "runtime lease proxy class member 'release' is immutable",
                 ):
-                    runtime._runtime_lease._authority_active = False
+                    type.__setattr__(
+                        type(lease),
+                        "release",
+                        lambda *_args, **_kwargs: None,
+                    )
                 with self.assertRaisesRegex(
-                    WorkspaceEconomicLockError,
-                    "product runtime lease authority field '_acquired_once' is immutable",
+                    ProductCompositionError,
+                    "runtime lease proxy class member 'authority_active' is immutable",
                 ):
-                    runtime._runtime_lease._acquired_once = False
+                    type.__setattr__(
+                        type(lease),
+                        "authority_active",
+                        False,
+                    )
                 with self.assertRaisesRegex(
-                    WorkspaceEconomicLockError,
-                    "product runtime lease authority field '_operation_fence' is immutable",
+                    ProductCompositionError,
+                    "runtime lease proxy class identity is immutable",
                 ):
-                    runtime._runtime_lease._operation_fence = None
-                self.assertTrue(runtime._runtime_lease.authority_active)
+                    object.__setattr__(
+                        lease,
+                        "__class__",
+                        type("ForgedLease", (), {}),
+                    )
+                self.assertTrue(lease.authority_active)
                 self.assertFalse(runtime._closed)
             finally:
                 runtime.close()
+            self.assertFalse(lease.authority_active)
+
+    def test_builder_ignores_runtime_lease_class_method_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lease_type = product_runtime_module._ProductRuntimeLease
+            originals = {
+                "__init__": lease_type.__init__,
+                "acquire": lease_type.acquire,
+                "release": lease_type.release,
+                "bind_operation_fence": lease_type.bind_operation_fence,
+                "authority_active": lease_type.authority_active,
+            }
+
+            def forged(*_args, **_kwargs):
+                raise AssertionError("rebound runtime lease authority must not execute")
+
+            try:
+                lease_type.__init__ = forged
+                lease_type.acquire = forged
+                lease_type.release = forged
+                lease_type.bind_operation_fence = forged
+                lease_type.authority_active = property(lambda _self: False)
+
+                runtime = build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+                self.assertTrue(runtime._runtime_lease.authority_active)
+                runtime.close()
+                self.assertFalse(runtime._runtime_lease.authority_active)
+            finally:
+                lease_type.__init__ = originals["__init__"]
+                lease_type.acquire = originals["acquire"]
+                lease_type.release = originals["release"]
+                lease_type.bind_operation_fence = originals["bind_operation_fence"]
+                lease_type.authority_active = originals["authority_active"]
 
     def test_start_transition_proxy_ignores_store_and_module_rebinding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

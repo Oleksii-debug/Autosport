@@ -900,10 +900,15 @@ class GitHubApi:
     ):
         request_impl_code = getattr(request_impl, "__code__", None)
         request_impl_defaults = getattr(request_impl, "__defaults__", None)
-        request_impl_kwdefaults = getattr(request_impl, "__kwdefaults__", None)
+        initial_request_kwdefaults = getattr(request_impl, "__kwdefaults__", None)
+        request_impl_kwdefaults_id = (
+            id(initial_request_kwdefaults)
+            if initial_request_kwdefaults is not None
+            else None
+        )
         request_impl_kwdefault_items = (
-            tuple(request_impl_kwdefaults.items())
-            if request_impl_kwdefaults is not None
+            tuple(initial_request_kwdefaults.items())
+            if initial_request_kwdefaults is not None
             else ()
         )
         if request_impl_code is None:
@@ -916,11 +921,17 @@ class GitHubApi:
                 getattr(request_impl, "__code__", None) is request_impl_code
                 and getattr(request_impl, "__defaults__", None)
                 is request_impl_defaults
-                and current_kwdefaults is request_impl_kwdefaults
                 and (
-                    current_kwdefaults is None
+                    (
+                        request_impl_kwdefaults_id is None
+                        and current_kwdefaults is None
+                    )
                     or (
-                        len(current_kwdefaults) == len(request_impl_kwdefault_items)
+                        request_impl_kwdefaults_id is not None
+                        and current_kwdefaults is not None
+                        and id(current_kwdefaults) == request_impl_kwdefaults_id
+                        and len(current_kwdefaults)
+                        == len(request_impl_kwdefault_items)
                         and all(
                             key in current_kwdefaults
                             and current_kwdefaults[key] is value

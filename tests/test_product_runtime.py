@@ -26,7 +26,6 @@ from autosport.product_runtime import (
     build_autonomous_product_runtime,
 )
 from autosport.storage import SQLiteMarketStore
-from autosport.workspace_lock import WorkspaceEconomicLockError
 
 
 class _Clock:

@@ -18,6 +18,7 @@ from autosport.monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
 )
 from autosport.storage import SQLiteMarketStore
+from autosport.workspace_lock import WorkspaceEconomicLockBusyError
 
 
 class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
@@ -1526,6 +1527,39 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 self.assertEqual(history[-1].phase.value, "COMMIT")
             finally:
                 reopened.close()
+
+    def test_parallel_store_append_lock_contention_has_no_partial_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            first = SQLiteMarketStore(path)
+            second = SQLiteMarketStore(path)
+            authority = first._market_append_authority()
+            try:
+                with first._market_append_issuance_lock(authority):
+                    with self.assertRaises(WorkspaceEconomicLockBusyError):
+                        second.append(
+                            self.event(
+                                sequence=1,
+                                odds="2.00",
+                                observed_ts="2026-09-16T19:00:00+00:00",
+                            )
+                        )
+
+                self.assertEqual(first.events(), [])
+                self.assertEqual(
+                    first.connection.execute(
+                        "SELECT COUNT(*) FROM market_event_commit_order"
+                    ).fetchone(),
+                    (0,),
+                )
+                history = first._market_append_authority().read_history()
+                self.assertEqual(
+                    tuple(record.tx_id.startswith("baseline-") for record in history),
+                    (True, True),
+                )
+            finally:
+                second.close()
+                first.close()
 
     def test_duplicate_retry_does_not_advance_positive_machine_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

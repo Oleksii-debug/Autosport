@@ -452,6 +452,8 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 self.assertEqual(first.settled_ticket_ids, tuple(book.tickets))
                 settled = PaperBook.load(root / "paper_book.json")
                 self.assertEqual(settled.balance, Decimal("110"))
+                settled_ticket = settled.tickets[first.settled_ticket_ids[0]]
+                self.assertEqual(settled_ticket.settled_at, clock.value)
 
                 restarted, restarted_store, *_ = _build_coordinator(
                     root, source, clock, outcome_authority=authority
@@ -461,6 +463,10 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     self.assertEqual(second.settled_ticket_ids, ())
                     settled_again = PaperBook.load(root / "paper_book.json")
                     self.assertEqual(settled_again.balance, Decimal("110"))
+                    self.assertEqual(
+                        settled_again.tickets[first.settled_ticket_ids[0]].settled_at,
+                        clock.value,
+                    )
                     self.assertEqual(authority.calls, 2)
                 finally:
                     restarted_store.close()

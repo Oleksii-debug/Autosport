@@ -65,6 +65,8 @@ class MarketEventBus:
         import and tests. IngestionEngine is the sole production caller of this private
         path after it overwrites ingest_ts from its post-acquisition product clock.
         """
+        if type(self) is not MarketEventBus:
+            raise TypeError("live ingestion requires an exact MarketEventBus")
         if type(self.store) is not SQLiteMarketStore:
             raise TypeError("live ingestion requires an exact SQLiteMarketStore")
         accepted = SQLiteMarketStore._append_live_batch_accepted(

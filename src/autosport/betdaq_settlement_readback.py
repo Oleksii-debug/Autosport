@@ -1058,6 +1058,15 @@ class BetdaqEconomicReadbackClient:
             transport = client._transport
             try:
                 require_transport, https_post = _canonical_economic_transport_dispatch()
+            except BetdaqEconomicReadbackError:
+                # Preserve exact canonical-authority tamper evidence from the
+                # economic dispatcher; do not blur it into an ordinary bad transport.
+                raise
+            except Exception:
+                raise BetdaqEconomicReadbackError(
+                    "canonical BETDAQ economic evidence requires product-owned HTTPS transport"
+                ) from None
+            try:
                 require_transport(transport)
             except Exception:
                 raise BetdaqEconomicReadbackError(

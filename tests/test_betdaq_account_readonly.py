@@ -550,7 +550,7 @@ def test_coordinated_transport_class_and_canonical_alias_rebind_fails_before_io(
 
     with pytest.raises(
         BetdaqAccountReadOnlyError,
-        match="canonical BETDAQ account transport was replaced or shadowed",
+        match="canonical BETDAQ account evidence authority was replaced",
     ):
         value.read_account_evidence(
             frozenset({BookmakerCapability.BALANCE_READ})

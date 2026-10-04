@@ -527,6 +527,36 @@ def test_structurally_copied_price_ladder_witness_cannot_cross_consumer_gate() -
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
 
 
+def test_forged_future_ladder_dto_cannot_choose_late_evidence_reason() -> None:
+    transport = MarketBookAndPriceLadderTransport()
+    receipt, ladder, canonical_source = (
+        _synthetic_authoritative_market_and_ladder(
+            transport,
+            price=Decimal("2.00"),
+        )
+    )
+    bound = _bound(datetime.now(timezone.utc))
+    forged = replace(
+        ladder,
+        decision_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+    )
+    assert forged.admissible is False
+
+    with tempfile.TemporaryDirectory() as tmp:
+        result = assess_authoritative_betfair_execution_feasibility(
+            _reserved_ledger(tmp, bound),
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+            price_ladder_admission=forged,
+        )
+
+    assert "PRICE_LADDER_AUTHORITY_UNPROVEN" in result.reasons
+    assert "PRICE_LADDER_EVIDENCE_AFTER_DECISION" not in result.reasons
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+
+
 def test_price_ladder_observed_after_plan_reservation_cannot_backdate_gate() -> None:
     transport = MarketBookAndPriceLadderTransport()
     receipt, canonical_source = _synthetic_authoritative_receipt(transport)

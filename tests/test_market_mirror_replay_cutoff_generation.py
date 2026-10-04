@@ -3741,6 +3741,68 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_pending_cutoff_cannot_commit_over_unissued_append_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                event = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.direct_insert_positive_generation(
+                    store,
+                    event,
+                    generation=1,
+                )
+
+                canonical_as_of = storage_module._canonical_replay_cutoff(
+                    self.CUTOFF.isoformat()
+                )
+                cutoff_id = storage_module._replay_cutoff_id(canonical_as_of)
+                corpus_sha256 = store._frozen_replay_corpus_sha256(1)
+                binding_sha256 = storage_module._replay_cutoff_binding_sha256(
+                    cutoff_id=cutoff_id,
+                    canonical_as_of=canonical_as_of,
+                    max_append_generation=1,
+                    corpus_sha256=corpus_sha256,
+                )
+                rows = ((cutoff_id, canonical_as_of, 1),)
+                intended_state_sha256 = storage_module._replay_cutoff_state_sha256(
+                    rows,
+                    sealed_corpus_sha256=corpus_sha256,
+                )
+                assert intended_state_sha256 is not None
+                authority = store._replay_cutoff_authority()
+                tx_id = f"{cutoff_id[:32]}-{'0' * 32}"
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=intended_state_sha256,
+                    semantic_binding_sha256=binding_sha256,
+                )
+                store.connection.execute(
+                    """INSERT INTO market_replay_cutoffs
+                       (cutoff_id, as_of, max_append_generation)
+                       VALUES (?, ?, ?)""",
+                    (cutoff_id, canonical_as_of, 1),
+                )
+                store.connection.commit()
+                before = authority.read_history()
+                self.assertEqual(before[-1].phase.value, "PREPARE")
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "cutoff exceeds independently committed append authority",
+                ):
+                    self.replay(store)
+
+                after = authority.read_history()
+                self.assertEqual(after, before)
+                self.assertEqual(after[-1].phase.value, "PREPARE")
+            finally:
+                store.close()
+
     def test_cutoff_with_unissued_positive_generation_is_rejected_even_if_cutoff_authority_committed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

@@ -26,6 +26,7 @@ from autosport.product_runtime import (
     build_autonomous_product_runtime,
 )
 from autosport.storage import SQLiteMarketStore
+from autosport.workspace_lock import WorkspaceEconomicLockError
 
 
 class _Clock:
@@ -639,6 +640,123 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     runtime.status()
             finally:
                 object.__setattr__(runtime, "coordinator", original)
+                runtime.close()
+
+    def test_runtime_closed_and_lease_authority_flags_are_not_caller_writable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_autonomous_product_runtime(
+                workspace=Path(directory),
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product runtime authority field '_closed' is immutable",
+                ):
+                    runtime._closed = True
+                with self.assertRaisesRegex(
+                    WorkspaceEconomicLockError,
+                    "product runtime lease authority field '_authority_active' is immutable",
+                ):
+                    runtime._runtime_lease._authority_active = False
+                with self.assertRaisesRegex(
+                    WorkspaceEconomicLockError,
+                    "product runtime lease authority field '_acquired_once' is immutable",
+                ):
+                    runtime._runtime_lease._acquired_once = False
+                with self.assertRaisesRegex(
+                    WorkspaceEconomicLockError,
+                    "product runtime lease authority field '_operation_fence' is immutable",
+                ):
+                    runtime._runtime_lease._operation_fence = None
+                self.assertTrue(runtime._runtime_lease.authority_active)
+                self.assertFalse(runtime._closed)
+            finally:
+                runtime.close()
+
+    def test_start_transition_proxy_ignores_store_and_module_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_autonomous_product_runtime(
+                workspace=Path(directory),
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            transition = runtime._start_transition_store
+            original_pending = product_runtime_module._ProductStartTransitionStore.pending
+            original_read = product_runtime_module._ProductStartTransitionStore._read
+            original_schema = product_runtime_module._ProductStartTransitionStore._SCHEMA
+            original_version = product_runtime_module._ProductStartTransitionStore._VERSION
+            original_loads = product_runtime_module.strict_json_loads
+            original_write = product_runtime_module.atomic_write_json
+            try:
+                def forged(*_args, **_kwargs):
+                    raise AssertionError("rebound START authority must not execute")
+
+                product_runtime_module._ProductStartTransitionStore.pending = forged
+                product_runtime_module._ProductStartTransitionStore._read = forged
+                product_runtime_module._ProductStartTransitionStore._SCHEMA = "forged"
+                product_runtime_module._ProductStartTransitionStore._VERSION = 999
+                product_runtime_module.strict_json_loads = forged
+                product_runtime_module.atomic_write_json = forged
+
+                generation = transition.begin(
+                    collector_was_stopped=False,
+                    session_pre_state="RUNNING",
+                )
+                self.assertEqual(generation, 1)
+                self.assertIsNotNone(transition.pending())
+                transition.mark_completed(generation)
+                self.assertIsNone(transition.pending())
+            finally:
+                product_runtime_module._ProductStartTransitionStore.pending = (
+                    original_pending
+                )
+                product_runtime_module._ProductStartTransitionStore._read = original_read
+                product_runtime_module._ProductStartTransitionStore._SCHEMA = original_schema
+                product_runtime_module._ProductStartTransitionStore._VERSION = (
+                    original_version
+                )
+                product_runtime_module.strict_json_loads = original_loads
+                product_runtime_module.atomic_write_json = original_write
+                runtime.close()
+
+    def test_start_transition_proxy_class_dispatch_is_immutable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_autonomous_product_runtime(
+                workspace=Path(directory),
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            transition = runtime._start_transition_store
+            try:
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "START transition proxy class member 'pending' is immutable",
+                ):
+                    type.__setattr__(
+                        type(transition),
+                        "pending",
+                        lambda *_args, **_kwargs: None,
+                    )
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "START transition proxy class identity is immutable",
+                ):
+                    object.__setattr__(
+                        transition,
+                        "__class__",
+                        type("ForgedStartTransition", (), {}),
+                    )
+            finally:
                 runtime.close()
 
     def test_builder_ignores_product_desktop_consumer_module_rebind(self) -> None:

@@ -657,6 +657,114 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             active.close()
             stale.close()
 
+    def test_stop_race_during_observation_blocks_pending_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            bootstrap = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            bootstrap.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(bootstrap.run_cycle().status, LiveCycleStatus.DECIDED)
+            bootstrap.close()
+
+            controller = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            durable_observer = _DurableObserver(
+                workspace,
+                [
+                    (
+                        self._event(
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START + timedelta(seconds=2),
+                        ),
+                    )
+                ],
+            )
+
+            def stop_during_observation(updates):
+                result = durable_observer(updates)
+                controller.stop()
+                return result
+
+            stale = self._loop(
+                workspace,
+                observer=stop_during_observation,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            progress_before = stale.progress_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "control changed concurrently before pending publication",
+            ):
+                stale.run_cycle()
+
+            self.assertEqual(durable_observer.calls, 1)
+            self.assertEqual(stale.progress_path.read_bytes(), progress_before)
+            self.assertEqual(
+                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
+                1,
+            )
+            controller.close()
+            stale.close()
+
+    def test_unfinished_pending_recovers_before_durable_pause(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(_input_id, _snapshot):
+                raise RuntimeError("simulated process loss after pending publication")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "loss after pending publication"):
+                first.run_cycle()
+            self.assertEqual(
+                json.loads(first.progress_path.read_text(encoding="utf-8"))["phase"],
+                "pending",
+            )
+            first.pause()
+            first.close()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            recovered = resumed.run_cycle()
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertEqual(
+                json.loads(resumed.progress_path.read_text(encoding="utf-8"))["phase"],
+                "committed",
+            )
+            self.assertEqual(resumed.run_cycle().status, LiveCycleStatus.PAUSED)
+            self.assertEqual(resumed_observer.calls, 0)
+            resumed.close()
+
     def test_unfinished_append_pending_recovers_before_durable_stop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

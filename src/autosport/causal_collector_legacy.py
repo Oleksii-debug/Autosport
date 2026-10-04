@@ -966,6 +966,7 @@ class DesktopDeltaConsumer:
                 "application timing must satisfy desktop_available_at <= applied_at <= acknowledged_at"
             )
         return acknowledged.isoformat()
+
     def drain(self, *, as_of: str, view: CausalView = CausalView.AS_KNOWN_AT_DECISION) -> tuple[str, ...]:
         now = _instant(as_of, "as_of")
         available = self.collector.deltas_available_through(as_of=as_of, view=view)

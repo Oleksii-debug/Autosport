@@ -577,7 +577,7 @@ class SQLiteMarketStore:
     def __init__(self, path: str | Path = "autosport.db") -> None:
         self.path = Path(path)
         self._connection_lock = RLock()
-        self._live_receipt_write_depth = 0
+        self._pending_live_receipt_batch: tuple[MarketEvent, ...] | None = None
         self.connection = sqlite3.connect(self.path, check_same_thread=False)
         try:
             self.connection.execute("PRAGMA journal_mode=WAL")
@@ -816,20 +816,23 @@ class SQLiteMarketStore:
         self,
         events: Iterable[MarketEvent],
     ) -> list[MarketEvent]:
-        """Enter live-receipt authority around the canonical batch transaction.
+        """Route one exact live-ingestion batch through the canonical write choke point.
 
-        ``append_batch_accepted`` remains the storage retry/fault-injection choke
-        point. Only rows first inserted while this private context is active receive
-        a receipt witness; duplicate/import/replay rows can never be upgraded.
+        Materialize before arming receipt authority so lazy iterable code cannot run
+        while authority is pending. The canonical public batch writer consumes the
+        one exact tuple identity before iterating it, preventing a reentrant generic
+        append from inheriting live-receipt authority while preserving the existing
+        storage retry/fault-injection seam.
         """
+        materialized = tuple(events)
         with self._connection_lock:
-            if self._live_receipt_write_depth != 0:
+            if self._pending_live_receipt_batch is not None:
                 raise RuntimeError("nested live receipt authority write is not allowed")
-            self._live_receipt_write_depth = 1
+            self._pending_live_receipt_batch = materialized
             try:
-                return self.append_batch_accepted(events)
+                return self.append_batch_accepted(materialized)
             finally:
-                self._live_receipt_write_depth = 0
+                self._pending_live_receipt_batch = None
 
     def append(self, event: MarketEvent) -> bool:
         with self._connection_lock:
@@ -840,7 +843,9 @@ class SQLiteMarketStore:
         """Insert one normalized batch in one transaction and return newly accepted events."""
         accepted: list[MarketEvent] = []
         with self._connection_lock:
-            live_receipt_authority = self._live_receipt_write_depth == 1
+            live_receipt_authority = events is self._pending_live_receipt_batch
+            if live_receipt_authority:
+                self._pending_live_receipt_batch = None
             with self.connection:
                 for event in events:
                     if self._insert_one(event):

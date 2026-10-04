@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
-from .integrity import durable_path_lock
+from .integrity import atomic_write_json
 
 
-_WORKSPACE_PROBE_PAYLOAD = b"autosport workspace atomic publish probe\n"
+_WORKSPACE_PROBE_PAYLOAD = {
+    "probe": "autosport workspace atomic publish probe",
+    "schema_version": 1,
+}
 _WEBVIEW_PROBE_PAYLOAD = b"autosport webview storage write probe\n"
 
 
@@ -22,48 +27,32 @@ def probe_workspace_writable(workspace: str | Path) -> None:
     """Prove canonical durable state can use the product's atomic publication boundary."""
 
     root = _absolute_root(workspace, label="workspace")
-    source: Path | None = None
-    destination: Path | None = None
-    lock_path: Path | None = None
+    probe_directory: Path | None = None
 
     root.mkdir(parents=True, exist_ok=True)
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=root,
-            prefix=".autosport-write-probe-source-",
-            suffix=".tmp",
-            delete=False,
-        ) as probe:
-            source = Path(probe.name)
-            probe.write(_WORKSPACE_PROBE_PAYLOAD)
-            probe.flush()
-            os.fsync(probe.fileno())
+        probe_directory = Path(
+            tempfile.mkdtemp(
+                dir=root,
+                prefix=".autosport-workspace-write-probe-",
+            )
+        )
+        destination = probe_directory / "probe.json"
+        atomic_write_json(destination, _WORKSPACE_PROBE_PAYLOAD)
 
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=root,
-            prefix=".autosport-write-probe-destination-",
-            suffix=".tmp",
-            delete=False,
-        ) as published_probe:
-            destination = Path(published_probe.name)
-        lock_path = destination.with_name(f".{destination.name}.lock")
-
-        with durable_path_lock(destination):
-            os.replace(source, destination)
-            source = None
-
-        if destination.read_bytes() != _WORKSPACE_PROBE_PAYLOAD:
-            raise OSError("workspace atomic replace did not publish expected probe bytes")
+        try:
+            published = json.loads(destination.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise OSError(
+                "workspace canonical atomic publication probe could not be read back"
+            ) from exc
+        if published != _WORKSPACE_PROBE_PAYLOAD:
+            raise OSError(
+                "workspace canonical atomic publication probe readback did not match"
+            )
     finally:
-        for candidate in (source, destination, lock_path):
-            if candidate is None:
-                continue
-            try:
-                candidate.unlink()
-            except FileNotFoundError:
-                pass
+        if probe_directory is not None and probe_directory.exists():
+            shutil.rmtree(probe_directory)
 
 
 def probe_webview_storage_writable(storage_path: str | Path) -> None:

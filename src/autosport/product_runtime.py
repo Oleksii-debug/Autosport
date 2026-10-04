@@ -1010,6 +1010,178 @@ _settlement_authority_identity = _bind_settlement_authority_identity(
 del _settlement_authority_identity_impl
 del _bind_settlement_authority_identity
 
+
+def _settlement_learning_handoff_identity_impl(
+    *,
+    handoff: SettlementLearningHandoff | None,
+    _text,
+    _semantic_sha256,
+    _semantic_error_type,
+    _error_type,
+    _function_type,
+    _method_type,
+    _object_getattribute,
+    _dumps,
+    _sha256,
+) -> str | None:
+    if handoff is None:
+        return None
+    handoff_type = type(handoff)
+    if handoff_type.__getattribute__ is not _object_getattribute:
+        raise _error_type(
+            "settlement learning handoff must use canonical object attribute lookup"
+        )
+    if any("__getattr__" in vars(owner) for owner in handoff_type.__mro__):
+        raise _error_type(
+            "settlement learning handoff cannot define fallback attribute dispatch"
+        )
+    instance_dict = getattr(handoff, "__dict__", None)
+    methods: dict[str, tuple[str, str] | None] = {}
+    for method_name, required in (
+        ("prepare_settlement", False),
+        ("reconcile_after_settlement", True),
+    ):
+        if type(instance_dict) is dict and method_name in instance_dict:
+            raise _error_type(
+                f"settlement learning handoff forbids per-instance {method_name} shadowing"
+            )
+        method = getattr(handoff_type, method_name, None)
+        if method is None and not required:
+            methods[method_name] = None
+            continue
+        if type(method) is not _function_type:
+            raise _error_type(
+                f"settlement learning handoff must use a concrete class {method_name} method"
+            )
+        bound_method = getattr(handoff, method_name, None)
+        if (
+            type(bound_method) is not _method_type
+            or bound_method.__self__ is not handoff
+            or bound_method.__func__ is not method
+        ):
+            raise _error_type(
+                f"settlement learning handoff {method_name} dispatch is not canonical"
+            )
+        if method.__defaults__ is not None or method.__kwdefaults__ not in (None, {}):
+            raise _error_type(
+                f"settlement learning handoff {method_name} cannot use mutable call defaults"
+            )
+        if method.__closure__ is not None:
+            raise _error_type(
+                f"settlement learning handoff {method_name} cannot close over mutable authority"
+            )
+        try:
+            semantic_sha256 = _semantic_sha256(
+                method,
+                runtime_owner=handoff_type,
+            )
+        except _semantic_error_type as exc:
+            raise _error_type(
+                f"settlement learning handoff {method_name} semantics cannot be fingerprinted safely"
+            ) from exc
+        methods[method_name] = (
+            _text(
+                f"{method.__module__}.{method.__qualname__}",
+                f"settlement learning {method_name} owner",
+            ),
+            semantic_sha256,
+        )
+
+    declared_implementation_id = getattr(
+        handoff_type,
+        "settlement_learning_handoff_implementation_id",
+        None,
+    )
+    if declared_implementation_id is None:
+        raise _error_type(
+            "settlement learning handoff must declare stable settlement_learning_handoff_implementation_id"
+        )
+    if (
+        type(instance_dict) is dict
+        and "settlement_learning_handoff_implementation_id" in instance_dict
+    ):
+        raise _error_type(
+            "settlement learning handoff forbids per-instance implementation identity shadowing"
+        )
+    implementation_id = _text(
+        declared_implementation_id,
+        "settlement_learning_handoff_implementation_id",
+    )
+    configuration_sha256 = _text(
+        getattr(handoff, "settlement_learning_configuration_sha256", None),
+        "settlement_learning_configuration_sha256",
+    )
+    if (
+        len(configuration_sha256) != 64
+        or configuration_sha256 != configuration_sha256.lower()
+        or any(
+            character not in "0123456789abcdef"
+            for character in configuration_sha256
+        )
+    ):
+        raise _error_type(
+            "settlement_learning_configuration_sha256 must be lowercase SHA-256 hex"
+        )
+
+    prepare = methods["prepare_settlement"]
+    reconcile = methods["reconcile_after_settlement"]
+    payload = {
+        "implementation": f"{handoff_type.__module__}.{handoff_type.__qualname__}",
+        "implementation_id": implementation_id,
+        "configuration_sha256": configuration_sha256,
+        "prepare_owner": None if prepare is None else prepare[0],
+        "prepare_semantic_sha256": None if prepare is None else prepare[1],
+        "reconcile_owner": reconcile[0] if reconcile is not None else None,
+        "reconcile_semantic_sha256": reconcile[1] if reconcile is not None else None,
+    }
+    encoded = _dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return _sha256(encoded).hexdigest()
+
+
+def _bind_settlement_learning_handoff_identity(implementation):
+    text = _ManifestStore._text
+    semantic_sha256 = function_semantic_sha256
+    semantic_error_type = ResolverSemanticIdentityError
+    error_type = ProductCompositionError
+    function_type = FunctionType
+    method_type = MethodType
+    object_getattribute = object.__getattribute__
+    dumps = json.dumps
+    sha256 = hashlib.sha256
+
+    def bound(
+        *,
+        handoff: SettlementLearningHandoff | None,
+    ) -> str | None:
+        return implementation(
+            handoff=handoff,
+            _text=text,
+            _semantic_sha256=semantic_sha256,
+            _semantic_error_type=semantic_error_type,
+            _error_type=error_type,
+            _function_type=function_type,
+            _method_type=method_type,
+            _object_getattribute=object_getattribute,
+            _dumps=dumps,
+            _sha256=sha256,
+        )
+
+    return bound
+
+
+_settlement_learning_handoff_identity = _bind_settlement_learning_handoff_identity(
+    _settlement_learning_handoff_identity_impl
+)
+del _settlement_learning_handoff_identity_impl
+del _bind_settlement_learning_handoff_identity
+
+
 def _desktop_applied_current_for_source_impl(
     *,
     source_id: str,

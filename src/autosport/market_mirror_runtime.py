@@ -634,28 +634,27 @@ class BoundedMirrorInvalidationBuffer:
                         "invalidation buffer is already bound to a different market store"
                     )
 
-                if self._reconciliation_store_path is None:
-                    if type(self._mirror) is not _mirror_type:
+                if type(self._mirror) is not _mirror_type:
+                    raise TypeError(
+                        "trusted reconciliation requires an exact MarketMirror"
+                    )
+                # Re-prove every retained value at each durable boundary. Path
+                # equality alone cannot distinguish the same database from a
+                # rolled-back/replaced database opened later at that path.
+                with self._mirror._lock:
+                    existing = tuple(
+                        self._mirror._latest[key]
+                        for key in sorted(self._mirror._latest)
+                    )
+                for event in existing:
+                    if type(event) is not _event_type:
                         raise TypeError(
-                            "trusted reconciliation requires an exact MarketMirror"
+                            "trusted reconciliation requires exact MarketEvent values"
                         )
-                    # A pre-populated unbound mirror may have been bootstrapped from a
-                    # different workspace. Prove every existing value against this
-                    # store's durable receipt authority before admitting the binding.
-                    with self._mirror._lock:
-                        existing = tuple(
-                            self._mirror._latest[key]
-                            for key in sorted(self._mirror._latest)
+                    if not _has_trusted_receipt(store, event):
+                        raise ValueError(
+                            "pre-existing mirror state is not trusted by this market store"
                         )
-                    for event in existing:
-                        if type(event) is not _event_type:
-                            raise TypeError(
-                                "trusted reconciliation requires exact MarketEvent values"
-                            )
-                        if not _has_trusted_receipt(store, event):
-                            raise ValueError(
-                                "pre-existing mirror state is not trusted by this market store"
-                            )
 
                 current = _trusted_current(store)
                 ordered_events: list[MarketEvent] = []

@@ -771,15 +771,10 @@ class PaperExecutionAdoptionRuntime:
         suspended_action_ids: frozenset[str] = frozenset(),
     ) -> PaperExecutionAdoptionResult:
         with self._execution_lock:
-            resolved_started_at = self.resolve_execution_started_at(
-                prepared=prepared,
-                trigger_id=trigger_id,
-                proposed_started_at=started_at,
-            )
             return self._execute_unlocked(
                 prepared=prepared,
                 trigger_id=trigger_id,
-                started_at=resolved_started_at,
+                started_at=started_at,
                 materialize_exposure=materialize_exposure,
                 observations=observations,
                 evidence_registry=evidence_registry,

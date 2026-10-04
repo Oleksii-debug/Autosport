@@ -254,6 +254,46 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 "2026-09-20T06:01:00+00:00",
             )
 
+    def test_execute_with_clock_reuses_reserved_start_with_configured_observation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("a1", odds="2.50", stake="10.00")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.25",
+                stake="10.00",
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            clock_value = [datetime.fromisoformat(STARTED_AT)]
+
+            first = runtime.execute_with_clock(
+                prepared=current_prepared,
+                trigger_id="trigger-clock-observed-restart",
+                clock=lambda: clock_value[0],
+                materialize_exposure=True,
+                observations={"a1": registered.as_observation()},
+                evidence_registry=registry,
+            )
+            clock_value[0] = datetime.fromisoformat(
+                "2026-09-20T06:00:00.200000+00:00"
+            )
+            second = runtime.execute_with_clock(
+                prepared=current_prepared,
+                trigger_id="trigger-clock-observed-restart",
+                clock=lambda: clock_value[0],
+                materialize_exposure=True,
+                observations={"a1": registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(first.run, second.run)
+            self.assertEqual(second.run.started_at, STARTED_AT)
+            self.assertEqual(first.ticket_ids, second.ticket_ids)
+            self.assertEqual(len(book.tickets), 1)
+
     def test_moved_accepted_quote_materializes_execution_truth_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)
@@ -279,14 +319,13 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             second = runtime.execute(
                 prepared=current_prepared,
                 trigger_id="trigger-1",
-                started_at="2026-09-20T06:00:00.200000+00:00",
+                started_at=STARTED_AT,
                 materialize_exposure=True,
                 observations={"a1": registered.as_observation()},
                 evidence_registry=registry,
             )
 
             self.assertEqual(first.run.run_id, second.run.run_id)
-            self.assertEqual(second.run.started_at, STARTED_AT)
             self.assertEqual(first.ticket_ids, second.ticket_ids)
             self.assertEqual(len(book.tickets), 1)
             ticket = next(iter(book.tickets.values()))

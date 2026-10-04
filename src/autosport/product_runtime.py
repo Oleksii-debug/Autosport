@@ -889,8 +889,14 @@ def build_autonomous_product_runtime(
         mirror = MarketMirror()
         invalidations = BoundedMirrorInvalidationBuffer(mirror)
 
-        for event in market_store.current_by_source().values():
-            invalidations.accept_persisted(event)
+        # This composition owns exactly one provider/source. Canonical market.db may
+        # legitimately also contain audit/import/live history for other providers;
+        # none of that state may seed this runtime's in-memory decision projection.
+        for (stored_source_id, _quote_key), event in (
+            market_store.current_by_source().items()
+        ):
+            if stored_source_id == source_id:
+                invalidations.accept_persisted(event)
 
         market_bus = MarketEventBus(market_store)
         market_bus.subscribe(invalidations.accept_persisted)

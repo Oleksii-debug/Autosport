@@ -26,6 +26,7 @@ from autosport.product_runtime import (
     build_autonomous_product_runtime,
 )
 from autosport.storage import SQLiteMarketStore
+from autosport.workspace_lock import WorkspaceEconomicLock
 
 
 class _Clock:
@@ -820,6 +821,40 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 lease_type.release = originals["release"]
                 lease_type.bind_operation_fence = originals["bind_operation_fence"]
                 lease_type.authority_active = originals["authority_active"]
+
+    def test_builder_ignores_workspace_lock_entry_method_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            originals = {
+                "__init__": WorkspaceEconomicLock.__init__,
+                "acquire": WorkspaceEconomicLock.acquire,
+                "release": WorkspaceEconomicLock.release,
+            }
+
+            def forged(*_args, **_kwargs):
+                raise AssertionError(
+                    "rebound base workspace-lock authority must not execute"
+                )
+
+            try:
+                WorkspaceEconomicLock.__init__ = forged
+                WorkspaceEconomicLock.acquire = forged
+                WorkspaceEconomicLock.release = forged
+
+                runtime = build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+                self.assertTrue(runtime._runtime_lease.authority_active)
+                runtime.close()
+                self.assertFalse(runtime._runtime_lease.authority_active)
+            finally:
+                WorkspaceEconomicLock.__init__ = originals["__init__"]
+                WorkspaceEconomicLock.acquire = originals["acquire"]
+                WorkspaceEconomicLock.release = originals["release"]
 
     def test_start_transition_proxy_ignores_store_and_module_rebinding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

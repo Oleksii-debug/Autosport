@@ -977,6 +977,53 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_legacy_submicrosecond_local_clock_is_not_blessed_by_cutoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                original = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                tampered = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00.0000004+00:00",
+                    ingest_ts="2026-09-16T19:00:00.0000004+00:00",
+                )
+                store.append(original)
+                store.connection.execute(
+                    """UPDATE market_events
+                       SET observed_ts=?, payload_json=?
+                       WHERE dedupe_key=?""",
+                    (
+                        tampered.observed_ts,
+                        storage_module._canonical_payload(tampered),
+                        original.dedupe_key,
+                    ),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "observed_ts precision finer than microseconds is unsupported",
+                ):
+                    self.replay(store)
+
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (0,),
+                )
+                self.assertEqual(
+                    store._replay_cutoff_authority().read_history(),
+                    (),
+                )
+            finally:
+                store.close()
+
     def test_zero_only_submicrosecond_tail_is_exact_and_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

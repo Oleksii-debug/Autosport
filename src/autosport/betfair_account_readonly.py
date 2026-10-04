@@ -1949,8 +1949,7 @@ def _install_market_price_ladder_authority():
                 or not source_origin_authoritative(source)
             ):
                 raise BetfairReadOnlyError(
-                    "price-ladder observation lacks current canonical direct "
-                    "Betfair provider IO origin"
+                    "price-ladder observation lacks canonical direct Betfair provider IO origin"
                 )
             return current
 

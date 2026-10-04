@@ -9,7 +9,10 @@ from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
 from fractions import Fraction
 
 from .domain import PaperTicket, TicketStatus
-from .market_outcomes import MarketSettlementOutcomeAuthority
+from .market_outcomes import (
+    MarketSettlementOutcomeAuthority,
+    assert_market_settlement_outcome_authoritative,
+)
 from .portfolio import (
     PortfolioEngine,
     _PORTFOLIO_DECIMAL_CONTEXT,
@@ -286,12 +289,14 @@ class ScenarioSearchEngine:
                 "authoritative outcome analysis requires market authorities"
             )
         if any(
-            not isinstance(authority, MarketSettlementOutcomeAuthority)
+            type(authority) is not MarketSettlementOutcomeAuthority
             for authority in authorities
         ):
             raise ValueError(
                 "authoritative outcome analysis requires canonical market authorities"
             )
+        for authority in authorities:
+            assert_market_settlement_outcome_authoritative(authority)
 
         ordered = tuple(
             sorted(

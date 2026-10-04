@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 
 import autosport.proposal_risk_execution_evidence_authority as evidence_authority
 from autosport.proposal_risk_execution_evidence_authority import (
@@ -51,6 +52,23 @@ class ProductProposalRiskExecutionEvidenceDispatchGuardTests(unittest.TestCase):
                 )
         finally:
             evidence_authority.ProductProposalRiskExecutionEvidence = original
+
+    def test_row_validation_descriptor_rebinding_is_rejected_before_input_dispatch(self) -> None:
+        row_type = evidence_authority.CounterfactualMemberExecutionEvidence
+        original = row_type.__dict__["minimum_equity"]
+        try:
+            row_type.minimum_equity = property(lambda self: Decimal("-1"))
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "row descriptor minimum_equity changed",
+            ):
+                evidence_authority.derive_product_proposal_risk_execution_evidence(
+                    None,
+                    (),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            row_type.minimum_equity = original
 
     def test_identity_binder_and_mint_key_are_not_module_capabilities(self) -> None:
         self.assertFalse(hasattr(evidence_authority, "_BIND_IDENTITY"))

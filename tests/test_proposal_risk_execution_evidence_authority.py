@@ -1233,5 +1233,69 @@ class ProductProposalRiskScenarioPopulationTests(unittest.TestCase):
         finally:
             proof.__code__ = original_code
 
+
+    def test_dispatch_guard_code_mutation_is_rejected(self) -> None:
+        guard = scenario_population_authority._REQUIRE_DISPATCH_ORIGINAL
+        original_code = guard.__code__
+
+        def forged_guard(*args, **kwargs):
+            return None
+
+        try:
+            guard.__code__ = forged_guard.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch guard root changed",
+            ):
+                self._issue()
+        finally:
+            guard.__code__ = original_code
+
+    def test_dispatch_guard_defaults_rebind_is_rejected(self) -> None:
+        guard = scenario_population_authority._REQUIRE_DISPATCH_ORIGINAL
+        original_defaults = guard.__defaults__
+        try:
+            guard.__defaults__ = tuple(original_defaults)
+            self.assertIsNot(guard.__defaults__, original_defaults)
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch guard root changed",
+            ):
+                self._issue()
+        finally:
+            guard.__defaults__ = original_defaults
+
+    def test_mint_kwdefault_binder_mutation_is_rejected(self) -> None:
+        mint = scenario_population_authority._mint
+        kwdefaults = mint.__kwdefaults__
+        original = kwdefaults["_bind_identity"]
+
+        def forged_bind(_instance):
+            return None
+
+        try:
+            kwdefaults["_bind_identity"] = forged_bind
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            kwdefaults["_bind_identity"] = original
+
+    def test_text_kwdefault_mutation_is_rejected(self) -> None:
+        helper = scenario_population_authority._text
+        kwdefaults = helper.__kwdefaults__
+        original = kwdefaults["max_length"]
+        try:
+            kwdefaults["max_length"] = 4096
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            kwdefaults["max_length"] = original
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ import json
 import os
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Callable
 
@@ -14,7 +15,7 @@ from .causal_collector import (
     canonical_event_digest,
     digest_source_payload,
 )
-from .domain import MarketEvent, utc_now_iso
+from .domain import MarketEvent, MarketType, utc_now_iso
 from .event_lifecycle import (
     CatalogCheckpoint,
     CatalogEvent,
@@ -601,6 +602,30 @@ class ParlayApiProductSource:
             raise ProductSourcePayloadError(
                 "provider batch requires exact ProviderQuote evidence"
             )
+        required_text = (
+            quote.provider_event_id,
+            quote.provider_market_id,
+            quote.provider_selection_id,
+            quote.observed_ts,
+            quote.status,
+        )
+        optional_text = (
+            quote.source_ts,
+            quote.score_state,
+            quote.sport,
+            quote.exchange_side,
+        )
+        if (
+            any(type(value) is not str for value in required_text)
+            or any(value is not None and type(value) is not str for value in optional_text)
+            or type(quote.decimal_odds) is not Decimal
+            or type(quote.sequence) is not int
+            or type(quote.market_type) is not MarketType
+            or type(quote.metadata) is not dict
+        ):
+            raise ProductSourcePayloadError(
+                "provider quote uses non-canonical acquisition value types"
+            )
         try:
             metadata = strict_json_loads(cls._canonical_json(quote.metadata))
             if type(metadata) is not dict:
@@ -632,6 +657,16 @@ class ParlayApiProductSource:
         if type(batch) is not ProviderBatch:
             raise ProductSourcePayloadError(
                 "provider.read_batch must return exact ProviderBatch"
+            )
+        if (
+            type(batch.source_id) is not str
+            or type(batch.quotes) is not tuple
+            or (batch.cursor is not None and type(batch.cursor) is not str)
+            or type(batch.quality_flags) is not tuple
+            or any(type(flag) is not str for flag in batch.quality_flags)
+        ):
+            raise ProductSourcePayloadError(
+                "provider batch uses non-canonical acquisition value types"
             )
         try:
             quotes = tuple(cls._snapshot_provider_quote(quote) for quote in batch.quotes)

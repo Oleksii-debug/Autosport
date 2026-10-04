@@ -730,13 +730,17 @@ class CanonicalDesktopApplication:
         state_path: str | Path,
         *,
         clock: Callable[[], str],
+        _state_store_type=_CanonicalDesktopApplicationStore,
+        _state_store_init=_CanonicalDesktopApplicationStore.__init__,
     ) -> None:
         if not callable(clock):
             raise TypeError("clock must be callable")
         self.market_bus = market_bus
         self.health_store = health_store
         self.clock = clock
-        self._state = _CanonicalDesktopApplicationStore(state_path)
+        state = object.__new__(_state_store_type)
+        _state_store_init(state, state_path)
+        self._state = state
 
     def _lookup_receipt_impl(
         self,

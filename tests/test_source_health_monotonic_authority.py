@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -245,3 +246,34 @@ def test_long_lived_writer_recovers_published_prefix_before_next_mutation(
     history = store._monotonic_authority().read_history()
     assert history[-1].phase is AuthorityPhase.COMMIT
     assert history[-1].intended_state_sha256 == _sha256(store.path.read_bytes())
+
+
+def test_post_baseline_valid_v3_downgrade_is_rejected_as_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path, monkeypatch, "downgrade")
+    _record_success(store)
+
+    raw = json.loads(store.path.read_text(encoding="utf-8"))
+    raw["schema_version"] = 3
+    for payload in raw["sources"].values():
+        payload.pop("last_failure_kind")
+        payload.pop("consecutive_failure_kind_count")
+    for entries in raw["history"].values():
+        for entry in entries:
+            entry["state"].pop("last_failure_kind")
+            entry["state"].pop("consecutive_failure_kind_count")
+    store.path.write_text(
+        json.dumps(raw, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    # The image is internally valid schema-v3, but this exact workspace already
+    # committed newer authority-bound bytes. Schema compatibility cannot be used
+    # to bypass the monotonic high-water mark.
+    with pytest.raises(
+        MonotonicAuthorityRollbackError,
+        match="rolled back|unproven|authority|match",
+    ):
+        SourceHealthStore(store.path)

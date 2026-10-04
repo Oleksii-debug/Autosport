@@ -123,6 +123,7 @@ class _ProductDesktopDeltaConsumer(DesktopDeltaConsumer):
                 )
         return super().drain(as_of=as_of, view=view)
 
+
 def _serialized_runtime_operation(method):
     """Hold one runtime-local fence across an admitted public lifecycle operation."""
 

@@ -1090,11 +1090,16 @@ class ProphetXSessionLifecycle:
             )
 
         if current.credential_revision != self.scope.credential_revision:
-            if current.slot_hold_until is not None and now < current.slot_hold_until:
+            rotation_hold = current.slot_hold_until
+            if current.state is ProphetXSessionState.RENEWING:
+                # An in-flight refresh may have extended provider occupancy beyond
+                # the pre-refresh slot hold even when credentials rotate meanwhile.
+                rotation_hold = self._renewal_uncertainty_deadline(current)
+            if rotation_hold is not None and now < rotation_hold:
                 return ProphetXLoginAdmission(
                     action=ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
                     snapshot=current,
-                    retry_at=current.slot_hold_until,
+                    retry_at=rotation_hold,
                 )
             return self._grant_login(
                 now,

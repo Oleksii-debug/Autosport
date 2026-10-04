@@ -927,6 +927,54 @@ def test_renewal_failure_after_short_expiry_preserves_provider_slot_hold(tmp_pat
     assert fresh.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
 
 
+def test_credential_rotation_during_renewal_preserves_uncertainty_horizon(tmp_path):
+    original = _lifecycle(tmp_path, revision="rev-1")
+    active = _active(original)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    original.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
+    started = original.begin_renewal(
+        now=due_at,
+        refresh_token_lineage_id=active.session_lineage_id,
+    )
+    assert started.action is ProphetXLoginAdmissionAction.START_RENEWAL
+
+    renewal_uncertainty = due_at + CONSERVATIVE_SESSION_SLOT_HOLD
+    assert active.slot_hold_until < renewal_uncertainty
+
+    rotated = _lifecycle(tmp_path, revision="rev-2")
+    blocked = rotated.begin_login(
+        now=active.slot_hold_until + timedelta(seconds=1),
+        access_token_available=False,
+    )
+    assert (
+        blocked.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    )
+    assert blocked.retry_at == renewal_uncertainty
+    assert blocked.snapshot.credential_revision == "rev-1"
+
+    admitted = rotated.begin_login(
+        now=renewal_uncertainty,
+        access_token_available=False,
+    )
+    assert admitted.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+    assert admitted.snapshot.credential_revision == "rev-2"
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="renewal attempt no longer owns current session authority",
+    ):
+        original.complete_renewal_failure(
+            attempt_id=started.attempt_id,
+            now=renewal_uncertainty + timedelta(seconds=1),
+            failure=ProphetXRenewalFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+        )
+
+
 def test_revocation_during_renewal_preserves_ambiguous_refresh_slot_horizon(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)

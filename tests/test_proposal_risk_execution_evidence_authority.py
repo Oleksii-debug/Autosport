@@ -167,6 +167,7 @@ def _canonical_precommit(
         authorities=tuple(terminal_authorities),
     )
     setattr(test, "_proposal_terminal_population", terminal_population)
+    setattr(test, "_proposal_terminal_authorities", tuple(terminal_authorities))
 
     protocol_id = "proposal-risk-execution-fixed-n-v1"
     dataset_id = "proposal-risk-execution-dataset-v1"
@@ -992,6 +993,217 @@ class ProductProposalRiskScenarioPopulationTests(unittest.TestCase):
                 self._issue()
         finally:
             scenario_population_authority._LEDGER_APPEND = original
+
+import autosport.proposal_risk_terminal_state_mapping_authority as terminal_mapping_authority
+from autosport.proposal_risk_terminal_state_mapping_authority import (
+    CounterfactualMemberTerminalStateSelection,
+    ProductProposalRiskTerminalStateMapping,
+    ProductProposalRiskTerminalStateMappingError,
+    derive_product_proposal_risk_terminal_member_bindings,
+    resolve_product_proposal_risk_terminal_state_mapping,
+)
+
+
+class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
+
+    def setUp(self) -> None:
+        self.precommit = _canonical_precommit(self)
+        self.workspace = getattr(self, "_proposal_risk_workspace")
+        self.terminal_population = getattr(self, "_proposal_terminal_population")
+        self.authorities = getattr(self, "_proposal_terminal_authorities")
+
+    def _selections(
+        self,
+        *,
+        offset: int = 0,
+    ) -> tuple[CounterfactualMemberTerminalStateSelection, ...]:
+        groups = tuple(
+            json.loads(value) for value in self.terminal_population.market_group_json
+        )
+        by_key = {
+            authority.identity.market_key: authority for authority in self.authorities
+        }
+        selections = []
+        for member_index, member_id in enumerate(self.precommit.planned_member_ids):
+            states = []
+            for group_index, group in enumerate(groups):
+                authority = by_key[tuple(group["market_key"])]
+                state_index = (member_index + group_index + offset) % len(
+                    authority.terminal_states
+                )
+                states.append(authority.terminal_states[state_index])
+            selections.append(
+                CounterfactualMemberTerminalStateSelection(
+                    member_id=member_id,
+                    market_states=tuple(states),
+                )
+            )
+        return tuple(selections)
+
+    def _scenario(
+        self,
+        selections: tuple[CounterfactualMemberTerminalStateSelection, ...],
+    ) -> ProductProposalRiskScenarioPopulation:
+        bindings = derive_product_proposal_risk_terminal_member_bindings(
+            self.workspace,
+            self.precommit,
+            self.terminal_population,
+            self.authorities,
+            selections,
+        )
+        return issue_product_proposal_risk_scenario_population(
+            self.workspace,
+            self.precommit,
+            self.terminal_population,
+            bindings,
+        )
+
+    def test_product_derived_terminal_mapping_is_exact_and_non_authorizing(self) -> None:
+        selections = self._selections()
+        scenario = self._scenario(selections)
+        mapped = resolve_product_proposal_risk_terminal_state_mapping(
+            self.workspace,
+            self.precommit,
+            self.terminal_population,
+            scenario,
+            self.authorities,
+            selections,
+        )
+
+        self.assertTrue(mapped.mapping_identity_proven)
+        self.assertTrue(mapped.provider_terminal_population_proven)
+        self.assertTrue(mapped.fixed_n_scenario_precommit_proven)
+        self.assertTrue(mapped.terminal_mapping_proven)
+        self.assertEqual(mapped.member_ids, self.precommit.planned_member_ids)
+        self.assertEqual(
+            mapped.member_scenario_ids,
+            scenario.member_scenario_ids,
+        )
+        self.assertEqual(
+            mapped.member_mapping_sha256s,
+            scenario.member_mapping_sha256s,
+        )
+        self.assertEqual(len(mapped.member_settlement_json), 2)
+        for raw in mapped.member_settlement_json:
+            material = json.loads(raw)
+            self.assertEqual(
+                material["terminal_population_sha256"],
+                self.terminal_population.population_sha256,
+            )
+            self.assertEqual(material["target_sha256"], self.precommit.target_sha256)
+            self.assertEqual(len(material["candidates"]), 2)
+            self.assertTrue(all(candidate["legs"] for candidate in material["candidates"]))
+        self.assertFalse(mapped.product_scenario_source_provenance_proven)
+        self.assertFalse(mapped.iid_member_sampling_proven)
+        self.assertFalse(mapped.scenario_execution_proven)
+        self.assertFalse(mapped.proposal_target_counterfactual_execution_proven)
+        self.assertFalse(mapped.risk_upper_bound_for_target)
+        self.assertFalse(mapped.grants_risk_approval_authority)
+        self.assertFalse(mapped.grants_ticket_authority)
+        self.assertFalse(mapped.grants_broker_execution_authority)
+        self.assertFalse(mapped.grants_real_money_authority)
+        self.assertFalse(mapped.grants_state_mutation_authority)
+
+    def test_post_hoc_terminal_state_substitution_is_rejected(self) -> None:
+        selections = self._selections()
+        scenario = self._scenario(selections)
+        changed = self._selections(offset=1)
+        with self.assertRaisesRegex(
+            ProductProposalRiskTerminalStateMappingError,
+            "does not match the precommitted",
+        ):
+            resolve_product_proposal_risk_terminal_state_mapping(
+                self.workspace,
+                self.precommit,
+                self.terminal_population,
+                scenario,
+                self.authorities,
+                changed,
+            )
+
+    def test_market_state_from_wrong_group_is_rejected(self) -> None:
+        selections = list(self._selections())
+        first = selections[0]
+        self.assertGreaterEqual(len(first.market_states), 2)
+        selections[0] = CounterfactualMemberTerminalStateSelection(
+            member_id=first.member_id,
+            market_states=(first.market_states[1], first.market_states[0]),
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskTerminalStateMappingError,
+            "not derived from its provider authority",
+        ):
+            derive_product_proposal_risk_terminal_member_bindings(
+                self.workspace,
+                self.precommit,
+                self.terminal_population,
+                self.authorities,
+                tuple(selections),
+            )
+
+    def test_arbitrary_scenario_hashes_cannot_mint_terminal_mapping(self) -> None:
+        selections = self._selections()
+        arbitrary = tuple(
+            CounterfactualScenarioMemberBinding(
+                member_id=member_id,
+                scenario_id=f"caller-scenario-{index}",
+                mapping_sha256=_sha(f"caller-mapping-{index}"),
+            )
+            for index, member_id in enumerate(self.precommit.planned_member_ids)
+        )
+        scenario = issue_product_proposal_risk_scenario_population(
+            self.workspace,
+            self.precommit,
+            self.terminal_population,
+            arbitrary,
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskTerminalStateMappingError,
+            "does not match the precommitted",
+        ):
+            resolve_product_proposal_risk_terminal_state_mapping(
+                self.workspace,
+                self.precommit,
+                self.terminal_population,
+                scenario,
+                self.authorities,
+                selections,
+            )
+
+    def test_direct_or_forged_mapping_cannot_mint_authority(self) -> None:
+        with self.assertRaises(TypeError):
+            ProductProposalRiskTerminalStateMapping()
+        forged = object.__new__(ProductProposalRiskTerminalStateMapping)
+        self.assertFalse(forged.mapping_identity_proven)
+        self.assertFalse(forged.provider_terminal_population_proven)
+        self.assertFalse(forged.fixed_n_scenario_precommit_proven)
+        self.assertFalse(forged.terminal_mapping_proven)
+        self.assertFalse(forged.product_scenario_source_provenance_proven)
+        self.assertFalse(forged.iid_member_sampling_proven)
+        self.assertFalse(forged.scenario_execution_proven)
+        self.assertFalse(forged.proposal_target_counterfactual_execution_proven)
+        self.assertFalse(forged.risk_upper_bound_for_target)
+        self.assertFalse(forged.grants_real_money_authority)
+
+    def test_mapper_dispatch_rebinding_fails_closed(self) -> None:
+        selections = self._selections()
+        original = terminal_mapping_authority._SCENARIO_RESOLVER
+        try:
+            terminal_mapping_authority._SCENARIO_RESOLVER = lambda *args, **kwargs: None
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "dispatch changed",
+            ):
+                derive_product_proposal_risk_terminal_member_bindings(
+                    self.workspace,
+                    self.precommit,
+                    self.terminal_population,
+                    self.authorities,
+                    selections,
+                )
+        finally:
+            terminal_mapping_authority._SCENARIO_RESOLVER = original
+
 
 if __name__ == "__main__":
     unittest.main()

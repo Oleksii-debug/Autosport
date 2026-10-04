@@ -295,6 +295,7 @@ class StrategyProofEvaluation:
         _tuple_type=tuple,
         _frozenset_type=frozenset,
         _any=any,
+        _bool_type=bool,
     ) -> None:
         canonical_class = _strategy_validator(self.strategy_class)
         canonical_claim = _claim_validator(self.claims_probability_edge)

@@ -582,13 +582,19 @@ class _Progress:
                 "affected_input_ids must be a subset of registered_input_ids"
             )
         if self.phase == _PHASE_PENDING:
-            if (
-                self.decision_id is not None
-                or self.plan_sha256 is not None
-                or self.ledger_offset is not None
-            ):
+            if self.decision_id is not None or self.plan_sha256 is not None:
                 raise LiveDecisionProgressError(
                     "pending live progress cannot claim append identity"
+                )
+            # New PENDING cursors freeze the Decision Ledger byte frontier at
+            # publication time. Legacy v1 cursors may still carry null here.
+            if self.ledger_offset is not None and (
+                isinstance(self.ledger_offset, bool)
+                or not isinstance(self.ledger_offset, int)
+                or self.ledger_offset < 0
+            ):
+                raise LiveDecisionProgressError(
+                    "pending live progress ledger frontier must be non-negative"
                 )
         else:
             if self.decision_id is None or self.plan_sha256 is None:
@@ -1534,7 +1540,14 @@ class PersistentLiveDecisionLoop:
                 replay_run_id=f"live:{self.loop_id}",
             )
             if latest_live is not None:
-                latest_record = latest_live[1]
+                latest_offset, latest_record = latest_live
+                if (
+                    progress.ledger_offset is not None
+                    and latest_offset >= progress.ledger_offset
+                ):
+                    raise LiveDecisionProgressError(
+                        "pending live progress was superseded after publication"
+                    )
                 _, latest_time = _canonical_timestamp(
                     "latest durable live decision observed_ts",
                     latest_record.observed_ts,
@@ -2042,6 +2055,14 @@ class PersistentLiveDecisionLoop:
                     replay_run_id=f"live:{self.loop_id}",
                 )
                 if (
+                    durable_progress.ledger_offset is not None
+                    and last_record is not None
+                    and last_record[0] >= durable_progress.ledger_offset
+                ):
+                    raise LiveDecisionProgressError(
+                        "pending live progress was superseded before ledger publication"
+                    )
+                if (
                     last_record is not None
                     and last_record[1].decision_id == decision_id
                 ):
@@ -2268,7 +2289,7 @@ class PersistentLiveDecisionLoop:
                 registered_input_ids=self.dependencies.input_ids,
                 decision_id=None,
                 plan_sha256=None,
-                ledger_offset=None,
+                ledger_offset=self._ledger_end_offset(),
                 gate=gate,
             )
             atomic_write_json(self.progress_path, pending.to_dict())

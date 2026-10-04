@@ -4759,6 +4759,55 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_committed_append_boundary_reader_rejects_split_batch_and_preserves_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                second = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:00.500000+00:00",
+                )
+                self.assertEqual(
+                    store.append_batch_accepted((first, second)),
+                    [first, second],
+                )
+                self.assertEqual(store.committed_append_generation_head(), 2)
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "not an exact committed append transition boundary",
+                ):
+                    store.events_at_committed_append_boundary(1)
+
+                prefix = store.events_at_committed_append_boundary(2)
+                self.assertEqual(
+                    [(event.sequence, generation) for event, generation in prefix],
+                    [(1, 1), (2, 2)],
+                )
+
+                third = self.event(
+                    sequence=3,
+                    odds="2.20",
+                    observed_ts="2026-09-16T19:00:00.750000+00:00",
+                )
+                self.assertTrue(store.append(third))
+                self.assertEqual(store.committed_append_generation_head(), 3)
+                self.assertEqual(
+                    [
+                        (event.sequence, generation)
+                        for event, generation in store.events_at_committed_append_boundary(2)
+                    ],
+                    [(1, 1), (2, 2)],
+                )
+            finally:
+                store.close()
+
     def test_replay_preserves_predecessor_when_successor_source_time_is_future(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

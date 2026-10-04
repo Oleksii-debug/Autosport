@@ -1548,17 +1548,18 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"
             store = SQLiteMarketStore(path)
-            canonical_append = store.append_batch_accepted
+            store.connection.execute(
+                """
+                CREATE TEMP TRIGGER fail_live_receipt_insert
+                BEFORE INSERT ON market_event_live_receipts
+                BEGIN
+                    SELECT RAISE(ABORT, 'receipt write failed');
+                END
+                """
+            )
 
-            def fail_receipt(_store, _event):
-                raise sqlite3.OperationalError("receipt write failed")
-
-            def injected_append(events):
-                return canonical_append(events, _insert_receipt_fn=fail_receipt)
-
-            with patch.object(store, "append_batch_accepted", side_effect=injected_append):
-                with self.assertRaisesRegex(sqlite3.OperationalError, "receipt write failed"):
-                    self._ingest(store)
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "receipt write failed"):
+                self._ingest(store)
 
             self.assertEqual(store.events(), [])
             self.assertEqual(store.current_by_source(), {})

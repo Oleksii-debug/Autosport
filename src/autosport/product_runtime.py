@@ -96,6 +96,41 @@ def _build_product_desktop_consumer_type(
     base_drain = base_type.drain
     missing = object()
 
+    class ProductDesktopClassIdentity:
+        __slots__ = ()
+
+        def __get__(self, _instance, owner=None):
+            return owner
+
+        def __set__(self, _instance, _value) -> None:
+            raise error_type("product desktop class identity is immutable")
+
+        def __delete__(self, _instance) -> None:
+            raise error_type("product desktop class identity is immutable")
+
+    class ProductDesktopClassGuard:
+        __slots__ = ("descriptor", "name")
+
+        def __init__(self, name: str, descriptor: object) -> None:
+            self.name = name
+            self.descriptor = descriptor
+
+        def __get__(self, _instance, _owner=None):
+            return self.descriptor
+
+        def __set__(self, _instance, _value) -> None:
+            raise error_type(
+                f"product desktop class member {self.name!r} is immutable"
+            )
+
+        def __delete__(self, _instance) -> None:
+            raise error_type(
+                f"product desktop class member {self.name!r} is immutable"
+            )
+
+    class ProductDesktopMeta(type(base_type)):
+        pass
+
     def sealed_drain(
         self,
         *,
@@ -115,9 +150,13 @@ def _build_product_desktop_consumer_type(
                 )
         return base_drain(self, as_of=as_of, view=view)
 
-    class ProductDesktopDeltaConsumer(base_type):
+    class ProductDesktopDeltaConsumer(
+        base_type,
+        metaclass=ProductDesktopMeta,
+    ):
         """Freeze and continuously re-prove the product-owned desktop authority graph."""
 
+        __class__ = ProductDesktopClassIdentity()
         _PROTECTED_AUTHORITY_FIELDS = protected_fields
         _SNAPSHOT_FIELDS = snapshot_fields
         _product_authority_snapshot = None
@@ -147,6 +186,14 @@ def _build_product_desktop_consumer_type(
                     f"product desktop authority field {name!r} is immutable"
                 )
             object.__setattr__(self, name, value)
+
+    for name in ("__getattribute__", "__setattr__"):
+        descriptor = ProductDesktopDeltaConsumer.__dict__[name]
+        type.__setattr__(
+            ProductDesktopMeta,
+            name,
+            ProductDesktopClassGuard(name, descriptor),
+        )
 
     return ProductDesktopDeltaConsumer
 

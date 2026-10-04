@@ -516,16 +516,28 @@ class MarketMirror:
         )
         event = _require_market_event(event)
 
-        with self._lock:
-            if self._publication_revision_guard is not None:
-                raise MarketMirrorRevisionChanged(
-                    "market mirror persistence is blocked during decision publication"
-                )
-            # Keep durable append and live revision advance in one mirror critical
-            # section. A decision publication guard can therefore linearize before
-            # the append or after the applied revision, never between them.
-            canonical_store.append(event)
-            return self.apply(event)
+        # Reconciliation acquires durable store -> mirror. Preserve that global
+        # order here too; mirror -> store can deadlock against trusted reconciliation.
+        # A publication guard is checked optimistically before the store lock so a
+        # re-entrant hold_revision() caller fails without waiting behind reconciliation.
+        # Re-check under the mirror lock to close the race with a guard that starts
+        # after the optimistic read but before this mutation linearizes.
+        if self._publication_revision_guard is not None:
+            raise MarketMirrorRevisionChanged(
+                "market mirror persistence is blocked during decision publication"
+            )
+        with canonical_store._connection_lock:
+            with self._lock:
+                if self._publication_revision_guard is not None:
+                    raise MarketMirrorRevisionChanged(
+                        "market mirror persistence is blocked during decision publication"
+                    )
+                # Keep durable append and live revision advance in one joint critical
+                # section. append() re-enters the canonical store RLock and apply()
+                # re-enters the mirror RLock, so readers cannot observe an applied
+                # mirror revision before its durable market history exists.
+                canonical_store.append(event)
+                return self.apply(event)
 
     def view(
         self,

@@ -2517,5 +2517,404 @@ class ProductProposalRiskTerminalPayoffEvaluationTests(unittest.TestCase):
         finally:
             terminal_payoff_authority._SCHEMA = original
 
+import autosport.proposal_risk_terminal_component_provenance_authority as terminal_component_provenance_authority
+from autosport.proposal_risk_terminal_component_provenance_authority import (
+    ProductProposalRiskTerminalComponentProvenance,
+    ProductProposalRiskTerminalComponentProvenanceError,
+    resolve_product_proposal_risk_terminal_component_provenance,
+)
+
+
+class ProductProposalRiskTerminalComponentProvenanceTests(unittest.TestCase):
+
+    def setUp(self) -> None:
+        self.precommit = _canonical_precommit(self)
+        self.workspace = getattr(self, "_proposal_risk_workspace")
+        self.terminal_population = getattr(self, "_proposal_terminal_population")
+        self.authorities = getattr(self, "_proposal_terminal_authorities")
+        self.assertFalse(self.terminal_population.terminal_space_exact)
+
+    def _binding(
+        self,
+        state_ids: tuple[str, ...],
+    ):
+        return derive_product_proposal_terminal_scenario_binding(
+            self.workspace,
+            precommit=self.precommit,
+            authorities=self.authorities,
+            market_state_ids=state_ids,
+        )
+
+    def _bindings(self):
+        return (
+            self._binding(("winner:other-a", "winner:selection-b")),
+            self._binding(("winner:selection-a", "winner:other-b")),
+        )
+
+    def _issue_mapping_parent(self, bindings=None) -> None:
+        first, second = bindings or self._bindings()
+        issue_product_proposal_risk_scenario_population(
+            self.workspace,
+            self.precommit,
+            self.terminal_population,
+            (
+                CounterfactualScenarioMemberBinding(
+                    member_id=self.precommit.planned_member_ids[0],
+                    scenario_id=first.scenario_id,
+                    mapping_sha256=first.mapping_sha256,
+                ),
+                CounterfactualScenarioMemberBinding(
+                    member_id=self.precommit.planned_member_ids[1],
+                    scenario_id=second.scenario_id,
+                    mapping_sha256=second.mapping_sha256,
+                ),
+            ),
+        )
+
+    def _resolve(
+        self,
+        bindings=None,
+    ) -> ProductProposalRiskTerminalComponentProvenance:
+        first, second = bindings or self._bindings()
+        return resolve_product_proposal_risk_terminal_component_provenance(
+            self.workspace,
+            precommit=self.precommit,
+            authorities=self.authorities,
+            member_market_state_ids=(
+                first.market_state_ids,
+                second.market_state_ids,
+            ),
+        )
+
+    def test_exact_provider_terminal_component_provenance_is_positive_but_non_authorizing(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        result = self._resolve(bindings)
+
+        self.assertTrue(result.provenance_identity_proven)
+        self.assertTrue(result.provider_terminal_population_proven)
+        self.assertTrue(result.terminal_mapping_proven)
+        self.assertTrue(result.target_terminal_payoff_evaluation_proven)
+        self.assertTrue(result.provider_terminal_component_provenance_proven)
+        self.assertFalse(result.product_scenario_source_provenance_proven)
+        self.assertEqual(
+            result.source_protocol,
+            (
+                "provider-terminal-authority-as-of-target+"
+                "durable-scenario-precommit+exact-terminal-mapping.v1"
+            ),
+        )
+        self.assertEqual(
+            result.terminal_population_sha256,
+            self.terminal_population.population_sha256,
+        )
+        self.assertEqual(
+            result.market_authority_sha256s,
+            self.terminal_population.market_authority_sha256s,
+        )
+        self.assertEqual(
+            result.market_group_sha256s,
+            self.terminal_population.market_group_sha256s,
+        )
+        self.assertIs(
+            result.per_market_terminal_space_exact,
+            self.terminal_population.terminal_space_exact,
+        )
+        self.assertEqual(
+            result.member_scenario_ids,
+            tuple(binding.scenario_id for binding in bindings),
+        )
+        self.assertEqual(
+            result.member_mapping_sha256s,
+            tuple(binding.mapping_sha256 for binding in bindings),
+        )
+        self.assertEqual(
+            result.member_state_vector_sha256s,
+            tuple(binding.state_vector_sha256 for binding in bindings),
+        )
+        self.assertFalse(result.iid_member_mapping_proven)
+        self.assertFalse(result.joint_scenario_support_proven)
+        self.assertFalse(result.scenario_selection_law_proven)
+        self.assertFalse(result.minimum_equity_path_proven)
+        self.assertFalse(result.execution_costs_proven)
+        self.assertFalse(result.slippage_realization_proven)
+        self.assertFalse(result.net_execution_pnl_proven)
+        self.assertFalse(result.cashflow_chronology_proven)
+        self.assertFalse(result.scenario_execution_proven)
+        self.assertFalse(result.proposal_target_counterfactual_execution_proven)
+        self.assertFalse(result.risk_upper_bound_for_target)
+        self.assertFalse(result.grants_risk_approval_authority)
+        self.assertFalse(result.grants_ticket_authority)
+        self.assertFalse(result.grants_broker_execution_authority)
+        self.assertFalse(result.grants_real_money_authority)
+        self.assertFalse(result.grants_state_mutation_authority)
+        self.assertEqual(len(result.provenance_sha256), 64)
+        self.assertEqual(self._resolve(bindings), result)
+
+    def test_repeated_member_preserves_multiplicity_without_sampling_truth(self) -> None:
+        repeated = self._binding(("winner:selection-a", "winner:other-b"))
+        bindings = (repeated, repeated)
+        self._issue_mapping_parent(bindings)
+        result = self._resolve(bindings)
+
+        self.assertTrue(result.provider_terminal_component_provenance_proven)\n        self.assertFalse(result.product_scenario_source_provenance_proven)
+        self.assertEqual(
+            result.member_scenario_ids,
+            (repeated.scenario_id, repeated.scenario_id),
+        )
+        self.assertFalse(result.iid_member_mapping_proven)
+        self.assertFalse(result.joint_scenario_support_proven)
+        self.assertFalse(result.scenario_selection_law_proven)
+
+    def test_direct_or_forged_result_cannot_mint_provenance(self) -> None:
+        with self.assertRaises(TypeError):
+            ProductProposalRiskTerminalComponentProvenance()
+
+        forged = object.__new__(ProductProposalRiskTerminalComponentProvenance)
+        self.assertFalse(forged.provenance_identity_proven)
+        self.assertFalse(forged.provider_terminal_population_proven)
+        self.assertFalse(forged.terminal_mapping_proven)
+        self.assertFalse(forged.target_terminal_payoff_evaluation_proven)
+        self.assertFalse(forged.product_scenario_source_provenance_proven)
+        self.assertFalse(forged.scenario_execution_proven)
+        self.assertFalse(forged.risk_upper_bound_for_target)
+        self.assertFalse(forged.grants_ticket_authority)
+        self.assertFalse(forged.grants_real_money_authority)
+
+    def test_post_precommit_state_vector_substitution_fails_upstream(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        with self.assertRaisesRegex(
+            ProductProposalRiskTerminalComponentProvenanceError,
+            "terminal mapping cannot be re-resolved",
+        ):
+            resolve_product_proposal_risk_terminal_component_provenance(
+                self.workspace,
+                precommit=self.precommit,
+                authorities=self.authorities,
+                member_market_state_ids=(
+                    ("winner:selection-a", "winner:selection-b"),
+                    bindings[1].market_state_ids,
+                ),
+            )
+
+    def test_missing_reverified_provider_authority_fails_closed(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        with self.assertRaisesRegex(
+            ProductProposalRiskTerminalComponentProvenanceError,
+            "terminal mapping cannot be re-resolved",
+        ):
+            resolve_product_proposal_risk_terminal_component_provenance(
+                self.workspace,
+                precommit=self.precommit,
+                authorities=(self.authorities[0],),
+                member_market_state_ids=(
+                    bindings[0].market_state_ids,
+                    bindings[1].market_state_ids,
+                ),
+            )
+
+    def test_fixed_n_member_cardinality_cannot_shrink(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        with self.assertRaisesRegex(
+            ProductProposalRiskTerminalComponentProvenanceError,
+            "terminal mapping cannot be re-resolved",
+        ):
+            resolve_product_proposal_risk_terminal_component_provenance(
+                self.workspace,
+                precommit=self.precommit,
+                authorities=self.authorities,
+                member_market_state_ids=(bindings[0].market_state_ids,),
+            )
+
+    def test_superseded_target_invalidates_provenance(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        issue_product_proposal_risk_target(
+            self.workspace,
+            signal_strengths=(Decimal("0.9"), Decimal("0.7")),
+            contexts=getattr(self, "_proposal_risk_contexts"),
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskTerminalComponentProvenanceError,
+            "terminal mapping cannot be re-resolved",
+        ):
+            self._resolve(bindings)
+
+    def test_protocol_constant_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        original = terminal_component_provenance_authority._SOURCE_PROTOCOL
+        try:
+            terminal_component_provenance_authority._SOURCE_PROTOCOL = (
+                "forged-source-protocol"
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalComponentProvenanceError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            terminal_component_provenance_authority._SOURCE_PROTOCOL = original
+
+    def test_hash_dispatch_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        original = terminal_component_provenance_authority.hashlib.sha256
+        try:
+            terminal_component_provenance_authority.hashlib.sha256 = (
+                lambda *args, **kwargs: None
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalComponentProvenanceError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            terminal_component_provenance_authority.hashlib.sha256 = original
+
+    def test_provider_authority_getter_alias_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        original = terminal_component_provenance_authority._AUTHORITY_SHA_GETTER
+        try:
+            terminal_component_provenance_authority._AUTHORITY_SHA_GETTER = (
+                lambda _authority: "0" * 64
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalComponentProvenanceError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            terminal_component_provenance_authority._AUTHORITY_SHA_GETTER = original
+
+    def test_positive_capability_default_code_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        getter = ProductProposalRiskTerminalComponentProvenance.__dict__[
+            "provider_terminal_component_provenance_proven"
+        ].fget
+        self.assertIsNotNone(getter)
+        proof = getter.__defaults__[0]
+        original_code = proof.__code__
+
+        def forged_proof(_instance):
+            return True
+
+        try:
+            proof.__code__ = forged_proof.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalComponentProvenanceError,
+                "result authority surface changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            proof.__code__ = original_code
+
+    def test_hard_false_execution_getter_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        getter = ProductProposalRiskTerminalComponentProvenance.__dict__[
+            "scenario_execution_proven"
+        ].fget
+        self.assertIsNotNone(getter)
+        original_code = getter.__code__
+
+        def forged_execution(_self):
+            return True
+
+        try:
+            getter.__code__ = forged_execution.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalComponentProvenanceError,
+                "result authority surface changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            getter.__code__ = original_code
+
+    def test_module_global_core_rebind_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        original = terminal_component_provenance_authority._resolve_values
+        try:
+            terminal_component_provenance_authority._resolve_values = (
+                lambda *args, **kwargs: {"workspace_instance_id": "forged"}
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalComponentProvenanceError,
+                "helper root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            terminal_component_provenance_authority._resolve_values = original
+
+    def test_public_resolver_closure_binder_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        resolver = (
+            terminal_component_provenance_authority
+            .resolve_product_proposal_risk_terminal_component_provenance
+        )
+        closure = resolver.__closure__
+        self.assertIsNotNone(closure)
+        binder_cells = [
+            cell
+            for cell in closure
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__name__", None) == "bind"
+        ]
+        self.assertEqual(len(binder_cells), 1)
+        cell = binder_cells[0]
+        original = cell.cell_contents
+
+        def forged_bind(_instance):
+            return None
+
+        try:
+            cell.cell_contents = forged_bind
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalComponentProvenanceError,
+                "public resolver closure changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            cell.cell_contents = original
+
+    def test_public_resolver_rejects_captured_core_code_mutation(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        resolver = (
+            terminal_component_provenance_authority
+            .resolve_product_proposal_risk_terminal_component_provenance
+        )
+        closure = resolver.__closure__
+        self.assertIsNotNone(closure)
+        core_cells = [
+            cell
+            for cell in closure
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__name__", None) == "_resolve_values"
+        ]
+        self.assertEqual(len(core_cells), 1)
+        core = core_cells[0].cell_contents
+        original_code = core.__code__
+
+        def forged_core(*_args, **_kwargs):
+            return {"workspace_instance_id": self.precommit.workspace_instance_id}
+
+        try:
+            core.__code__ = forged_core.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalComponentProvenanceError,
+                "public resolver closure changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            core.__code__ = original_code
+
 if __name__ == "__main__":
     unittest.main()

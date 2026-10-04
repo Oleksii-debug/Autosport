@@ -73,8 +73,9 @@ class _LiveReceiptBatch:
         self,
         *,
         _decode=_decode_market_event,
+        _loads=json.loads,
     ):
-        generation = tuple(_decode(json.loads(payload)) for payload in self._payloads)
+        generation = tuple(_decode(_loads(payload)) for payload in self._payloads)
         self._issued_generations.append(generation)
         return iter(generation)
 
@@ -178,8 +179,8 @@ def _projection_order_key(event: MarketEvent) -> tuple[int, str]:
     return (event.sequence, event.dedupe_key)
 
 
-def _canonical_json(raw: object) -> str:
-    return json.dumps(
+def _canonical_json(raw: object, *, _dumps=json.dumps) -> str:
+    return _dumps(
         raw,
         ensure_ascii=False,
         sort_keys=True,
@@ -238,9 +239,13 @@ def _reject_non_finite_json_constant(value: str) -> object:
     raise ValueError(f"stored market event payload contains non-finite JSON number: {value}")
 
 
-def _load_history_payload(payload_json: str) -> dict[str, object]:
+def _load_history_payload(
+    payload_json: str,
+    *,
+    _loads=json.loads,
+) -> dict[str, object]:
     try:
-        raw = json.loads(
+        raw = _loads(
             payload_json,
             object_pairs_hook=_reject_duplicate_object_pairs,
             parse_constant=_reject_non_finite_json_constant,

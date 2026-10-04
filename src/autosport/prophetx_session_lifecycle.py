@@ -274,6 +274,26 @@ class ProphetXSessionSnapshot:
                 "last_renewal_failure_class must be an exact ProphetXRenewalFailureClass"
             )
 
+        has_transient_failure_evidence = (
+            self.last_failure_class
+            in {
+                ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED,
+                ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE,
+                ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION,
+                ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+            }
+            or self.last_renewal_failure_class
+            in {
+                ProphetXRenewalFailureClass.RETRYABLE,
+                ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE,
+                ProphetXRenewalFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+            }
+        )
+        if has_transient_failure_evidence and self.transient_failures <= 0:
+            raise ProphetXSessionLifecycleError(
+                "transient failure evidence requires a positive failure count"
+            )
+
         if self.state is ProphetXSessionState.AUTH_RETRYABLE_FAILURE:
             valid_failure_evidence = (
                 self.last_failure_class
@@ -1170,6 +1190,7 @@ class ProphetXSessionLifecycle:
                         expiry = None
                     elif failure is ProphetXRenewalFailureClass.CREDENTIAL_REJECTED:
                         state = ProphetXSessionState.CREDENTIAL_REJECTED
+                        failures = current.transient_failures
                         hold = (
                             current.slot_hold_until
                             if current.slot_hold_until is not None

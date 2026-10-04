@@ -15,6 +15,10 @@ from .monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
     MonotonicWorkspaceAuthorityError,
 )
+from .replay import (
+    market_event_payload_multiset_sha256,
+    market_event_payload_sequence_sha256,
+)
 from .run_registry import RunRegistry
 from .run_transaction import RunTransaction, RunTransactionError
 from .risk_sampling_dependence import (
@@ -46,6 +50,10 @@ _STRUCTURE = inspect_fixed_n_iid_sampling_structure
 _STRUCTURE_CODE = getattr(_STRUCTURE, "__code__", None)
 _MEMBERSHIP_TYPE = ResolvedFixedNRiskMembership
 _STRUCTURE_TYPE = ResolvedFixedNIidSamplingStructure
+_REPLAY_SEQUENCE_DIGEST = market_event_payload_sequence_sha256
+_REPLAY_SEQUENCE_DIGEST_CODE = getattr(_REPLAY_SEQUENCE_DIGEST, "__code__", None)
+_REPLAY_MULTISET_DIGEST = market_event_payload_multiset_sha256
+_REPLAY_MULTISET_DIGEST_CODE = getattr(_REPLAY_MULTISET_DIGEST, "__code__", None)
 
 
 class ProductIidDrawPlanError(RuntimeError):
@@ -225,6 +233,78 @@ class ProductIidExpectedDrawPlan:
 _FRAME_UNIT_TYPE = SamplingFrameUnit
 _MEMBER_DRAW_TYPE = ProductIidExpectedMemberDraw
 _PLAN_TYPE = ProductIidExpectedDrawPlan
+
+
+def _require_replay_payload_digest_dispatch() -> None:
+    if (
+        market_event_payload_sequence_sha256 is not _REPLAY_SEQUENCE_DIGEST
+        or getattr(_REPLAY_SEQUENCE_DIGEST, "__code__", None)
+        is not _REPLAY_SEQUENCE_DIGEST_CODE
+        or market_event_payload_multiset_sha256 is not _REPLAY_MULTISET_DIGEST
+        or getattr(_REPLAY_MULTISET_DIGEST, "__code__", None)
+        is not _REPLAY_MULTISET_DIGEST_CODE
+    ):
+        raise ProductIidDrawPlanError(
+            "replay payload digest authority dispatch changed"
+        )
+
+
+def expected_replay_input_payload_sequence_sha256(
+    draw: ProductIidExpectedMemberDraw,
+) -> str:
+    """Derive replay constructor-order identity from one frozen member draw.
+
+    This is an identity relation only. It does not prove that payload digests
+    resolve to MarketEvent bytes or that a product executor consumed them.
+    """
+
+    if type(draw) is not _MEMBER_DRAW_TYPE:
+        raise TypeError("draw must be exact ProductIidExpectedMemberDraw")
+    if (
+        type(draw.draw_count) is not int
+        or draw.draw_count < 0
+        or type(draw.draw_payload_sha256) is not tuple
+        or len(draw.draw_payload_sha256) != draw.draw_count
+    ):
+        raise ProductIidDrawPlanError(
+            "expected member draw payload cardinality is invalid"
+        )
+    _require_replay_payload_digest_dispatch()
+    try:
+        result = _REPLAY_SEQUENCE_DIGEST(draw.draw_payload_sha256)
+    except ValueError as exc:
+        raise ProductIidDrawPlanError(
+            "expected member draw payload sequence is invalid"
+        ) from exc
+    _require_replay_payload_digest_dispatch()
+    return _sha(result, "expected replay input payload sequence sha256")
+
+
+def expected_replay_consumed_payload_multiset_sha256(
+    draw: ProductIidExpectedMemberDraw,
+) -> str:
+    """Derive replay membership identity with exact draw multiplicity."""
+
+    if type(draw) is not _MEMBER_DRAW_TYPE:
+        raise TypeError("draw must be exact ProductIidExpectedMemberDraw")
+    if (
+        type(draw.draw_count) is not int
+        or draw.draw_count < 0
+        or type(draw.draw_payload_sha256) is not tuple
+        or len(draw.draw_payload_sha256) != draw.draw_count
+    ):
+        raise ProductIidDrawPlanError(
+            "expected member draw payload cardinality is invalid"
+        )
+    _require_replay_payload_digest_dispatch()
+    try:
+        result = _REPLAY_MULTISET_DIGEST(draw.draw_payload_sha256)
+    except ValueError as exc:
+        raise ProductIidDrawPlanError(
+            "expected member draw payload multiset is invalid"
+        ) from exc
+    _require_replay_payload_digest_dispatch()
+    return _sha(result, "expected replay consumed payload multiset sha256")
 
 
 def _parse_frame(
@@ -645,6 +725,8 @@ __all__ = [
     "ProductIidExpectedDrawPlan",
     "ProductIidExpectedMemberDraw",
     "SamplingFrameUnit",
+    "expected_replay_consumed_payload_multiset_sha256",
+    "expected_replay_input_payload_sequence_sha256",
     "resolve_product_iid_expected_draw_plan",
     "verify_product_iid_expected_draw_plan",
 ]

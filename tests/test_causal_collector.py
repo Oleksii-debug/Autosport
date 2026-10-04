@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.causal_collector_legacy as causal_collector_legacy_module
+
 from autosport.causal_collector import (
     AckConflictError,
     CanonicalDesktopApplication,
@@ -2306,6 +2308,43 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertIsNone(item["completed_at"])
             self.assertTrue(item["market_applied"])
             self.assertTrue(item["health_applied"])
+            market_store.close()
+
+    def test_canonical_application_lookup_ignores_journal_receipt_method_rebind(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "canonical-application.json"
+            health_path = root / "health.json"
+            market_store = SQLiteMarketStore(root / "market.db")
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                SourceHealthStore(health_path),
+                state_path,
+                clock=lambda: "2026-01-01T00:00:05+00:00",
+            )
+            receipt = application.apply(delta, event)
+
+            raw = json.loads(state_path.read_text(encoding="utf-8"))
+            raw["applications"][delta.delta_id]["completed_at"] = None
+            state_path.write_text(
+                json.dumps(raw, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            reopened = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                SourceHealthStore(health_path),
+                state_path,
+                clock=lambda: "2026-01-01T00:00:06+00:00",
+            )
+            with patch.object(
+                causal_collector_legacy_module._CanonicalDesktopApplicationStore,
+                "receipt",
+                lambda _self, _delta: receipt,
+            ):
+                self.assertIsNone(reopened.lookup_receipt(delta))
             market_store.close()
 
     def test_canonical_application_lookup_rejects_missing_durable_market_effect(self):

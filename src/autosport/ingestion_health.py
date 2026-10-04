@@ -443,6 +443,24 @@ class SourceHealthStore:
     def _recover_current_for_write(self) -> None:
         self._recover_or_bootstrap_authority(self._current_state_sha256())
 
+    def _next_authority_tx_id(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+        observed: str | None,
+        intended: str,
+    ) -> str:
+        history = authority.read_history()
+        authority_tip = history[-1].record_sha256 if history else "<PRISTINE>"
+        material = "\0".join(
+            (
+                self.path.name,
+                authority_tip,
+                observed or "<PRISTINE>",
+                intended,
+            )
+        ).encode("utf-8")
+        return f"source-health-{hashlib.sha256(material).hexdigest()}"
+
     def _verify_authority_current(self, observed: str) -> None:
         authority = self._monotonic_authority()
         history = authority.read_history()
@@ -926,10 +944,11 @@ class SourceHealthStore:
                 intended,
                 kind="PUBLISH",
             )
-            tx_material = "\0".join(
-                (self.path.name, observed or "<PRISTINE>", intended)
-            ).encode("utf-8")
-            tx_id = f"source-health-{hashlib.sha256(tx_material).hexdigest()}"
+            tx_id = self._next_authority_tx_id(
+                authority,
+                observed,
+                intended,
+            )
             authority.prepare(
                 tx_id=tx_id,
                 observed_state_sha256=observed,

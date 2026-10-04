@@ -16,6 +16,8 @@ from decimal import Decimal
 from hashlib import sha256
 from hmac import compare_digest
 import json
+from operator import attrgetter
+from threading import RLock
 from weakref import ReferenceType, ref
 
 from .betfair_account_identity import (
@@ -43,8 +45,72 @@ class BetfairAccountFundsPrecheckError(RuntimeError):
     """Raised when account-funds evidence cannot support a fail-closed precheck."""
 
 
+def _build_funds_precheck_meta():
+    """Seal public funds/economic authority semantics after construction."""
+
+    sealed_classes: set[type] = set()
+    protected_names = frozenset(
+        {
+            "venue_id",
+            "account_context_id",
+            "account_identity_id",
+            "adapter_id",
+            "adapter_version",
+            "required_liability",
+            "available_to_bet_balance",
+            "currency_code",
+            "account_observed_at",
+            "funds_observed_at",
+            "evaluated_at",
+            "account_details_sha256",
+            "account_funds_sha256",
+            "stable_account_identity_proven",
+            "remote_provider_origin_proven",
+            "provider_account_details_origin_proven",
+            "provider_funds_origin_proven",
+            "numeric_sufficient",
+            "liability_unit_proven",
+            "passed",
+            "execution_authorized",
+            "precheck_id",
+            "_stable_account_identity_proven_constant",
+            "_remote_provider_origin_proven_constant",
+            "_provider_account_details_origin_proven_constant",
+            "_provider_funds_origin_proven_constant",
+            "_liability_unit_proven_constant",
+            "_passed_constant",
+            "_execution_authorized_constant",
+        }
+    )
+
+    class _BetfairFundsPrecheckMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "Betfair funds precheck authority surface is sealed: " + name
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name: str) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "Betfair funds precheck authority surface is sealed: " + name
+                )
+            super().__delattr__(name)
+
+        @classmethod
+        def seal(mcls, cls: type) -> None:
+            sealed_classes.add(cls)
+
+    return _BetfairFundsPrecheckMeta
+
+
+_BetfairFundsPrecheckMeta = _build_funds_precheck_meta()
+del _build_funds_precheck_meta
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True)
-class BetfairAccountFundsPrecheck:
+class BetfairAccountFundsPrecheck(metaclass=_BetfairFundsPrecheckMeta):
     """Immutable decision-time funds evidence; source authority is process-local."""
 
     venue_id: str
@@ -99,14 +165,39 @@ class BetfairAccountFundsPrecheck:
         _sha256_hex(self.account_details_sha256, "account_details_sha256")
         _sha256_hex(self.account_funds_sha256, "account_funds_sha256")
 
-    @property
-    def passed(self) -> bool:
-        return self.available_to_bet_balance >= self.required_liability
+    _stable_account_identity_proven_constant = False
+    _remote_provider_origin_proven_constant = False
+    _provider_account_details_origin_proven_constant = False
+    _provider_funds_origin_proven_constant = False
+    _liability_unit_proven_constant = False
+    _passed_constant = False
+    _execution_authorized_constant = False
+
+    stable_account_identity_proven = property(
+        attrgetter("_stable_account_identity_proven_constant")
+    )
+    remote_provider_origin_proven = property(
+        attrgetter("_remote_provider_origin_proven_constant")
+    )
+    provider_account_details_origin_proven = property(
+        attrgetter("_provider_account_details_origin_proven_constant")
+    )
+    provider_funds_origin_proven = property(
+        attrgetter("_provider_funds_origin_proven_constant")
+    )
 
     @property
-    def execution_authorized(self) -> bool:
-        """Funds sufficiency never grants provider-write or real-money authority."""
-        return False
+    def numeric_sufficient(self) -> bool:
+        """Exact same-number comparison only; denomination authority is unresolved."""
+        return self.available_to_bet_balance >= self.required_liability
+
+    liability_unit_proven = property(
+        attrgetter("_liability_unit_proven_constant")
+    )
+    passed = property(attrgetter("_passed_constant"))
+    execution_authorized = property(
+        attrgetter("_execution_authorized_constant")
+    )
 
     @property
     def precheck_id(self) -> str:
@@ -127,13 +218,22 @@ class BetfairAccountFundsPrecheck:
             "evaluated_at": _datetime_text(self.evaluated_at),
             "account_details_sha256": self.account_details_sha256,
             "account_funds_sha256": self.account_funds_sha256,
-            "passed": self.passed,
+            "numeric_sufficient": self.numeric_sufficient,
+            "stable_account_identity_proven": False,
+            "remote_provider_origin_proven": False,
+            "provider_account_details_origin_proven": False,
+            "provider_funds_origin_proven": False,
+            "liability_unit_proven": False,
+            "passed": False,
+            "execution_authorized": False,
         }
         encoded = json.dumps(
             payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
         ).encode("utf-8")
         return sha256(encoded).hexdigest()
 
+
+_BetfairFundsPrecheckMeta.seal(BetfairAccountFundsPrecheck)
 
 @dataclass(frozen=True, slots=True)
 class _IssuedFundsPrecheckRecord:
@@ -143,144 +243,310 @@ class _IssuedFundsPrecheckRecord:
     identity: BetfairAuthenticatedAccountIdentity
 
 
-_ISSUED: dict[int, _IssuedFundsPrecheckRecord] = {}
+def _make_authority():
+    """Closure-hide process-local issuance and pin exact K07/funds dependencies."""
 
+    result_type = BetfairAccountFundsPrecheck
+    record_type = _IssuedFundsPrecheckRecord
+    client_type = BetfairReadOnlyClient
+    funds_type = BetfairAccountFundsObservation
+    identity_type = BetfairAuthenticatedAccountIdentity
+    identity_error = BetfairAccountIdentityError
+    readonly_error = BetfairReadOnlyError
+    precheck_error = BetfairAccountFundsPrecheckError
 
-def _remember_issued(
-    result: BetfairAccountFundsPrecheck,
-    *,
-    client: BetfairReadOnlyClient,
-    identity: BetfairAuthenticatedAccountIdentity,
-) -> None:
-    result_identity = id(result)
+    resolve_identity = resolve_betfair_authenticated_account_identity
+    identity_is_authoritative = is_authoritative_betfair_account_identity
+    read_funds = client_type.read_account_funds
 
-    def _discard(dead_ref: ReferenceType[BetfairAccountFundsPrecheck]) -> None:
-        record = _ISSUED.get(result_identity)
-        if record is not None and record.value_ref is dead_ref:
-            _ISSUED.pop(result_identity, None)
+    nonnegative_decimal = _nonnegative_decimal
+    currency_code = _currency_code
+    parse_provider_time = _parse_provider_time
+    utc_now = _utc_now
+    utc = _utc
+    precheck_id_property = result_type.precheck_id
+    numeric_property = result_type.numeric_sufficient
 
-    value_ref = ref(result, _discard)
-    _ISSUED[result_identity] = _IssuedFundsPrecheckRecord(
-        value_ref=value_ref,
-        precheck_id=result.precheck_id,
-        client=client,
-        identity=identity,
+    venue_id = VENUE_ID
+    adapter_id = ADAPTER_ID
+    adapter_version = ADAPTER_VERSION
+    source_family = SOURCE_FAMILY
+    max_age = MAX_FUNDS_EVIDENCE_AGE
+    max_future_skew = _MAX_FUTURE_SKEW
+
+    decimal_text = _decimal_text
+    datetime_text = _datetime_text
+    json_module = json
+    json_dumps = json.dumps
+    sha256_fn = sha256
+    compare = compare_digest
+
+    result_init = result_type.__init__
+    result_post = result_type.__post_init__
+    hard_false_names = (
+        "stable_account_identity_proven",
+        "remote_provider_origin_proven",
+        "provider_account_details_origin_proven",
+        "provider_funds_origin_proven",
+        "liability_unit_proven",
+        "passed",
+        "execution_authorized",
+    )
+    hard_false_descriptors = tuple(
+        (name, result_type.__dict__[name])
+        for name in hard_false_names
     )
 
+    issued: dict[int, _IssuedFundsPrecheckRecord] = {}
+    lock = RLock()
 
-def evaluate_betfair_account_funds(
-    client: BetfairReadOnlyClient,
-    required_liability: Decimal,
-    *,
-    required_currency_code: str,
-) -> BetfairAccountFundsPrecheck:
-    """Issue funds evidence for one exact product-owned K07 client/session context."""
-
-    if type(client) is not BetfairReadOnlyClient:
-        raise TypeError("client must be an exact canonical BetfairReadOnlyClient")
-    _nonnegative_decimal(required_liability, "required_liability")
-    required_currency_code = _currency_code(
-        required_currency_code, "required_currency_code"
-    )
-
-    try:
-        identity = resolve_betfair_authenticated_account_identity(client)
-        funds = client.read_account_funds()
-        if not is_authoritative_betfair_account_identity(identity, client=client):
-            raise BetfairAccountIdentityError(
-                "authenticated session context changed during funds acquisition"
+    def implementation_is_current() -> bool:
+        return bool(
+            BetfairAccountFundsPrecheck is result_type
+            and _IssuedFundsPrecheckRecord is record_type
+            and BetfairReadOnlyClient is client_type
+            and BetfairAccountFundsObservation is funds_type
+            and BetfairAuthenticatedAccountIdentity is identity_type
+            and resolve_betfair_authenticated_account_identity
+            is resolve_identity
+            and is_authoritative_betfair_account_identity
+            is identity_is_authoritative
+            and client_type.read_account_funds is read_funds
+            and _nonnegative_decimal is nonnegative_decimal
+            and _currency_code is currency_code
+            and _parse_provider_time is parse_provider_time
+            and _utc_now is utc_now
+            and _utc is utc
+            and result_type.__init__ is result_init
+            and result_type.__post_init__ is result_post
+            and result_type.precheck_id is precheck_id_property
+            and result_type.numeric_sufficient is numeric_property
+            and all(
+                result_type.__dict__.get(name) is descriptor
+                for name, descriptor in hard_false_descriptors
             )
-    except (BetfairAccountIdentityError, BetfairReadOnlyError) as exc:
-        raise BetfairAccountFundsPrecheckError(
-            "Betfair account-funds acquisition failed"
-        ) from exc
-    if type(identity) is not BetfairAuthenticatedAccountIdentity:
-        raise BetfairAccountFundsPrecheckError(
-            "account identity acquisition returned non-canonical evidence"
-        )
-    if type(funds) is not BetfairAccountFundsObservation:
-        raise BetfairAccountFundsPrecheckError(
-            "account-funds acquisition returned non-canonical evidence"
-        )
-    account_currency_code = _currency_code(
-        identity.currency_code, "account currency_code"
-    )
-    if required_currency_code != account_currency_code:
-        raise BetfairAccountFundsPrecheckError(
-            "required liability currency does not match Betfair account currency"
+            and VENUE_ID == venue_id
+            and ADAPTER_ID == adapter_id
+            and ADAPTER_VERSION == adapter_version
+            and SOURCE_FAMILY == source_family
+            and MAX_FUNDS_EVIDENCE_AGE == max_age
+            and _MAX_FUTURE_SKEW == max_future_skew
+            and _decimal_text is decimal_text
+            and _datetime_text is datetime_text
+            and json is json_module
+            and json_module.dumps is json_dumps
+            and sha256 is sha256_fn
+            and compare_digest is compare
         )
 
-    evaluated_at = _utc_now()
-    account_observed_at = _parse_provider_time(
-        identity.observed_at, "account observed_at"
-    )
-    funds_observed_at = _parse_provider_time(
-        funds.evidence.observed_at, "funds observed_at"
-    )
-    result = BetfairAccountFundsPrecheck(
-        venue_id=VENUE_ID,
-        account_context_id=identity.session_context_id,
-        account_identity_id=identity.identity_id,
-        adapter_id=ADAPTER_ID,
-        adapter_version=ADAPTER_VERSION,
-        required_liability=required_liability,
-        available_to_bet_balance=funds.available_to_bet_balance,
-        currency_code=account_currency_code,
-        account_observed_at=account_observed_at,
-        funds_observed_at=funds_observed_at,
-        evaluated_at=evaluated_at,
-        account_details_sha256=identity.account_details_sha256,
-        account_funds_sha256=funds.evidence.source_payload_sha256,
-    )
-    _remember_issued(result, client=client, identity=identity)
-    return result
+    def remember(
+        result: BetfairAccountFundsPrecheck,
+        *,
+        client: BetfairReadOnlyClient,
+        identity: BetfairAuthenticatedAccountIdentity,
+    ) -> None:
+        result_identity = id(result)
 
+        def discard(dead_ref: ReferenceType[BetfairAccountFundsPrecheck]) -> None:
+            with lock:
+                record = issued.get(result_identity)
+                if record is not None and record.value_ref is dead_ref:
+                    issued.pop(result_identity, None)
 
-def is_authoritative_funds_precheck(value: object) -> bool:
-    """Return whether current, unchanged funds evidence was issued by this process."""
+        with lock:
+            issued[result_identity] = record_type(
+                value_ref=ref(result, discard),
+                precheck_id=result.precheck_id,
+                client=client,
+                identity=identity,
+            )
 
-    if type(value) is not BetfairAccountFundsPrecheck:
-        return False
-    record = _ISSUED.get(id(value))
-    if record is None or record.value_ref() is not value:
-        return False
-    try:
-        if not compare_digest(record.precheck_id, value.precheck_id):
-            return False
-        if not is_authoritative_betfair_account_identity(
-            record.identity,
-            client=record.client,
-        ):
-            return False
+    def evaluate_betfair_account_funds(
+        client: BetfairReadOnlyClient,
+        required_liability: Decimal,
+        *,
+        required_currency_code: str,
+    ) -> BetfairAccountFundsPrecheck:
+        """Issue a same-session structural funds diagnostic, never positive capital authority."""
+
+        if type(client) is not client_type:
+            raise TypeError("client must be an exact canonical BetfairReadOnlyClient")
+        liability = nonnegative_decimal(required_liability, "required_liability")
+        required_currency = currency_code(
+            required_currency_code,
+            "required_currency_code",
+        )
+        if not implementation_is_current():
+            raise precheck_error("canonical funds authority graph was rebound")
+
+        try:
+            identity = resolve_identity(client)
+            funds = read_funds(client)
+            if not identity_is_authoritative(identity, client=client):
+                raise identity_error(
+                    "authenticated session context changed during funds acquisition"
+                )
+        except (identity_error, readonly_error) as exc:
+            raise precheck_error("Betfair account-funds acquisition failed") from exc
+
+        if not implementation_is_current():
+            raise precheck_error(
+                "canonical funds authority graph changed during acquisition"
+            )
+        if type(identity) is not identity_type:
+            raise precheck_error(
+                "account identity acquisition returned non-canonical evidence"
+            )
+        if type(funds) is not funds_type:
+            raise precheck_error(
+                "account-funds acquisition returned non-canonical evidence"
+            )
+
+        account_currency = currency_code(
+            identity.currency_code,
+            "account currency_code",
+        )
+        if required_currency != account_currency:
+            raise precheck_error(
+                "required liability currency does not match Betfair account currency"
+            )
+
+        evaluated_at = utc_now()
+        account_observed_at = parse_provider_time(
+            identity.observed_at,
+            "account observed_at",
+        )
+        funds_observed_at = parse_provider_time(
+            funds.evidence.observed_at,
+            "funds observed_at",
+        )
+        result = result_type(
+            venue_id=venue_id,
+            account_context_id=identity.session_context_id,
+            account_identity_id=identity.identity_id,
+            adapter_id=adapter_id,
+            adapter_version=adapter_version,
+            required_liability=liability,
+            available_to_bet_balance=funds.available_to_bet_balance,
+            currency_code=account_currency,
+            account_observed_at=account_observed_at,
+            funds_observed_at=funds_observed_at,
+            evaluated_at=evaluated_at,
+            account_details_sha256=identity.account_details_sha256,
+            account_funds_sha256=funds.evidence.source_payload_sha256,
+        )
         if (
-            value.account_context_id != record.identity.session_context_id
-            or value.account_identity_id != record.identity.identity_id
-            or value.currency_code != record.identity.currency_code
-            or value.account_details_sha256
-            != record.identity.account_details_sha256
+            not implementation_is_current()
+            or result.stable_account_identity_proven is not False
+            or result.remote_provider_origin_proven is not False
+            or result.provider_account_details_origin_proven is not False
+            or result.provider_funds_origin_proven is not False
+            or result.liability_unit_proven is not False
+            or result.passed is not False
+            or result.execution_authorized is not False
         ):
+            raise precheck_error("fail-closed funds result was widened")
+
+        remember(result, client=client, identity=identity)
+        return result
+
+    def is_authoritative_funds_precheck(value: object) -> bool:
+        """Verify current same-session structural evidence; not remote provider capital truth."""
+
+        if type(value) is not result_type or not implementation_is_current():
             return False
-        checked_at = _utc(_utc_now(), "authority checked_at")
-        funds_observed_at = _utc(value.funds_observed_at, "funds_observed_at")
-        evaluated_at = _utc(value.evaluated_at, "evaluated_at")
-    except (AttributeError, TypeError, ValueError, BetfairAccountFundsPrecheckError):
-        return False
-    if checked_at + _MAX_FUTURE_SKEW < evaluated_at:
-        return False
-    if funds_observed_at > checked_at + _MAX_FUTURE_SKEW:
-        return False
-    return checked_at - funds_observed_at <= MAX_FUNDS_EVIDENCE_AGE
+        with lock:
+            record = issued.get(id(value))
+            if record is None or record.value_ref() is not value:
+                return False
+
+        def revoke() -> None:
+            with lock:
+                current_record = issued.get(id(value))
+                if current_record is record:
+                    issued.pop(id(value), None)
+
+        try:
+            if not compare(record.precheck_id, value.precheck_id):
+                revoke()
+                return False
+            if not identity_is_authoritative(
+                record.identity,
+                client=record.client,
+            ):
+                revoke()
+                return False
+            if (
+                value.account_context_id != record.identity.session_context_id
+                or value.account_identity_id != record.identity.identity_id
+                or value.currency_code != record.identity.currency_code
+                or value.account_details_sha256
+                != record.identity.account_details_sha256
+            ):
+                revoke()
+                return False
+
+            checked_at = utc(utc_now(), "authority checked_at")
+            funds_observed_at = utc(
+                value.funds_observed_at,
+                "funds_observed_at",
+            )
+            evaluated_at = utc(value.evaluated_at, "evaluated_at")
+            if checked_at + max_future_skew < evaluated_at:
+                revoke()
+                return False
+            if funds_observed_at > checked_at + max_future_skew:
+                revoke()
+                return False
+            if checked_at - funds_observed_at > max_age:
+                revoke()
+                return False
+            valid = (
+                value.stable_account_identity_proven is False
+                and value.remote_provider_origin_proven is False
+                and value.provider_account_details_origin_proven is False
+                and value.provider_funds_origin_proven is False
+                and value.liability_unit_proven is False
+                and value.passed is False
+                and value.execution_authorized is False
+            )
+            if not valid:
+                revoke()
+            return valid
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            identity_error,
+            readonly_error,
+            precheck_error,
+        ):
+            revoke()
+            return False
+
+    def require_authoritative_funds_precheck(
+        value: object,
+    ) -> BetfairAccountFundsPrecheck:
+        if not is_authoritative_funds_precheck(value):
+            raise precheck_error(
+                "account-funds precheck lacks current-process structural authority"
+            )
+        assert type(value) is result_type
+        return value
+
+    return (
+        evaluate_betfair_account_funds,
+        is_authoritative_funds_precheck,
+        require_authoritative_funds_precheck,
+    )
 
 
-def require_authoritative_funds_precheck(
-    value: object,
-) -> BetfairAccountFundsPrecheck:
-    if not is_authoritative_funds_precheck(value):
-        raise BetfairAccountFundsPrecheckError(
-            "account-funds precheck lacks current-process source authority"
-        )
-    assert type(value) is BetfairAccountFundsPrecheck
-    return value
+(
+    evaluate_betfair_account_funds,
+    is_authoritative_funds_precheck,
+    require_authoritative_funds_precheck,
+) = _make_authority()
+del _make_authority
 
 
 def _utc_now() -> datetime:

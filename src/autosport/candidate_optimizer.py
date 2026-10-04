@@ -132,7 +132,8 @@ class PortfolioAwareCandidateOptimizer:
         open_existing = _snapshot_open_tickets_for_analysis(existing_tickets)
         scenario_reports_authoritative = type(self.scenario_engine) is ScenarioSearchEngine
         base_floor, base_ceiling = _scenario_conservative_bounds(open_existing)
-        base_report = self.scenario_engine.analyse(
+        base_report = _analyse_scenario_engine(
+            self.scenario_engine,
             _snapshot_open_tickets_for_analysis(open_existing),
             list(scenario_groups),
         )
@@ -157,7 +158,8 @@ class PortfolioAwareCandidateOptimizer:
             dependent = _dependent_existing_ticket_ids(open_existing, touched_groups, quote_to_group)
             with_candidate_tickets = open_existing + [synthetic]
             with_floor, with_ceiling = _scenario_conservative_bounds(with_candidate_tickets)
-            with_report = self.scenario_engine.analyse(
+            with_report = _analyse_scenario_engine(
+                self.scenario_engine,
                 _snapshot_open_tickets_for_analysis(with_candidate_tickets),
                 list(scenario_groups),
             )
@@ -425,6 +427,26 @@ def _dependent_existing_ticket_ids(
         if ticket_groups.intersection(touched_groups):
             dependent.append(ticket.ticket_id)
     return tuple(sorted(dependent))
+
+
+def _analyse_scenario_engine(
+    engine: ScenarioSearchEngine,
+    tickets: list[PaperTicket],
+    groups: list[ScenarioGroup],
+    _engine_type=ScenarioSearchEngine,
+    _canonical_analyse=ScenarioSearchEngine.analyse,
+) -> ScenarioSearchReport:
+    """Use a reconstructed canonical engine for authority-bearing exact instances."""
+
+    if type(engine) is _engine_type:
+        canonical = _engine_type(
+            exact_state_limit=engine.exact_state_limit,
+            branch_node_limit=engine.branch_node_limit,
+            sample_count=engine.sample_count,
+            seed=engine.seed,
+        )
+        return _canonical_analyse(canonical, tickets, groups)
+    return engine.analyse(tickets, groups)
 
 
 def _validate_scenario_report(

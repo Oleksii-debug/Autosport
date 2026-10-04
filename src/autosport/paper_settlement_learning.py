@@ -1702,8 +1702,8 @@ class PaperSettlementLearningBridge:
             )
         return outcome, reward, transition, checkpoint
 
-    @staticmethod
     def _require_outbox_matches_ticket(
+        self,
         binding: dict[str, object],
         ticket: PaperTicket,
     ) -> None:
@@ -1720,8 +1720,8 @@ class PaperSettlementLearningBridge:
                 "PaperBook changed after learner outbox publication"
             )
         expected_reward = _exact_subtract(ticket.payout, ticket.stake)
-        outcome, reward, transition, _checkpoint_value = (
-            PaperSettlementLearningBridge._outbox_objects(outbox)
+        outcome, reward, transition, _checkpoint_value = self._outbox_objects(
+            outbox
         )
         if (
             str(expected_reward) != outbox["net_reward"]
@@ -1735,6 +1735,33 @@ class PaperSettlementLearningBridge:
         ):
             raise PaperSettlementLearningBridgeError(
                 "learner outbox differs from bound ticket economics or causal identity"
+            )
+
+        replay_semantic = {
+            "binding_id": outbox["binding_id"],
+            "ticket_id": outbox["ticket_id"],
+            "settlement_evidence": outbox["settlement_evidence"],
+            "known_quote_outcomes": outbox["known_quote_outcomes"],
+            "settlement_bundle_sha256": outbox["settlement_bundle_sha256"],
+        }
+        replay_intent = {
+            "intent_id": _digest(replay_semantic),
+            **replay_semantic,
+        }
+        replay_resolutions = self._intent_resolutions(replay_intent)
+        replay_at = max(
+            (resolution.available_at for resolution in replay_resolutions),
+            key=lambda value: _instant(value, "settlement available_at"),
+        )
+        canonical_outbox = self._derive_outbox(
+            binding,
+            ticket,
+            replay_resolutions,
+            at=replay_at,
+        )
+        if canonical_outbox is None or canonical_outbox != outbox:
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox is not the canonical derivation of settlement truth"
             )
 
     def reconcile_after_settlement(

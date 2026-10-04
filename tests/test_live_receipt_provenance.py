@@ -1451,6 +1451,86 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(len(replay.events), 1)
             store.close()
 
+    def test_trusted_current_projects_latest_trusted_row_without_full_history_reader(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                trusted = self._direct_event(sequence=1)
+                untrusted_newer = self._direct_event(sequence=2)
+                self.assertEqual(store._append_live_batch_accepted([trusted]), [trusted])
+                self.assertTrue(store.append(untrusted_newer))
+
+                with patch.object(
+                    storage_module,
+                    "_trusted_live_events_from_connection",
+                    side_effect=AssertionError(
+                        "trusted current must not materialize full trusted history"
+                    ),
+                ):
+                    current = store.trusted_live_current_by_source()
+
+                key = (trusted.source_id, trusted.quote_key)
+                self.assertEqual(current, {key: trusted})
+                self.assertEqual(store.current_by_source()[key], untrusted_newer)
+            finally:
+                store.close()
+
+    def test_trusted_current_reader_binding_survives_runtime_helper_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                self._ingest(store)
+                with patch.object(
+                    storage_module,
+                    "_trusted_live_current_from_connection",
+                    side_effect=AssertionError(
+                        "mutable trusted-current helper must not be consulted"
+                    ),
+                ):
+                    current = store.trusted_live_current_by_source()
+
+                self.assertEqual(len(current), 1)
+            finally:
+                store.close()
+
+    def test_trusted_current_fails_closed_on_runtime_receipt_authority_tamper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                self._ingest(store)
+                store.connection.execute(
+                    "UPDATE market_event_live_receipts SET authority=?",
+                    ("forged-authority",),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "authority kind is not canonical",
+                ):
+                    store.trusted_live_current_by_source()
+            finally:
+                store.close()
+
+    def test_trusted_current_fails_closed_on_selected_receipt_time_tamper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                self._ingest(store)
+                store.connection.execute(
+                    "UPDATE market_event_live_receipts SET ingest_ts=?",
+                    ("2026-10-04T03:00:09+00:00",),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "conflicts with market history",
+                ):
+                    store.trusted_live_current_by_source()
+            finally:
+                store.close()
+
     def test_live_bootstrap_current_projection_does_not_dispatch_through_trusted_events_method(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

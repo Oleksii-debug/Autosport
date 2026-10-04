@@ -1549,6 +1549,7 @@ def _build_product_runtime_type(
 
     class ProductAutonomousProductRuntime(base_type):
         __slots__ = ("__weakref__",)
+        __eq__ = object.__eq__
         __hash__ = object.__hash__
 
         def __init__(self, *args, **kwargs) -> None:

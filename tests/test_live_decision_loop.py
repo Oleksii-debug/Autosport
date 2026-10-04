@@ -31,6 +31,7 @@ from autosport.live_decision_loop import (
     PersistentLiveDecisionLoop,
 )
 from autosport.market_bus import MarketEventBus
+from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
 from autosport.opportunity import Opportunity, OpportunityDecision, QuoteRef, StrategyClass
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import PaperExecutionAdoptionRuntime
@@ -1091,6 +1092,111 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             next_cycle = loop.run_cycle()
             self.assertEqual(next_cycle.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls[-1],
+                ("input-a", (("selection-a", 2, "open"),)),
+            )
+            loop.close()
+
+    def test_post_cutoff_abandoned_append_is_not_retroactively_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            factory = _EmptyIntentFactory()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=self._scientific_registry(
+                    workspace,
+                    self._strategy_version(),
+                ),
+                provider=_EmptyProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            # Force one material recomputation whose exact market frontier remains
+            # generation 1. The peer append lands only after that frontier is frozen.
+            loop._pending_affected["input-a"] = None
+            clock.value = self.START + timedelta(seconds=2)
+            drain = loop.mirror_updates.drain
+            original_recover = MonotonicWorkspaceAuthority.recover
+            injected = False
+
+            def fail_newer_append_commit_once(authority, **kwargs):
+                nonlocal injected
+                tx_id = kwargs.get("tx_id")
+                if (
+                    not injected
+                    and isinstance(tx_id, str)
+                    and tx_id.startswith("append-")
+                ):
+                    injected = True
+                    raise RuntimeError("simulated post-cutoff append PREPARE")
+                return original_recover(authority, **kwargs)
+
+            def append_after_frontier(*, max_items: int):
+                peer_store = SQLiteMarketStore(workspace / "market.db")
+                try:
+                    with patch.object(
+                        MonotonicWorkspaceAuthority,
+                        "recover",
+                        new=fail_newer_append_commit_once,
+                    ):
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "simulated post-cutoff append PREPARE",
+                        ):
+                            peer_store.append(
+                                self._event(
+                                    sequence=2,
+                                    odds="2.10",
+                                    observed=self.START + timedelta(seconds=2),
+                                )
+                            )
+                finally:
+                    peer_store.close()
+                return drain(max_items=max_items)
+
+            with patch.object(
+                loop.mirror_updates,
+                "drain",
+                side_effect=append_after_frontier,
+            ):
+                second = loop.run_cycle()
+
+            self.assertTrue(injected)
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls[-1],
+                ("input-a", (("selection-a", 1, "open"),)),
+            )
+            committed = json.loads(loop.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(committed["market_append_generation"], 1)
+
+            live_store = loop._default_market_store
+            self.assertIsNotNone(live_store)
+            append_history = live_store._market_append_authority().read_history()
+            self.assertEqual(append_history[-1].phase.value, "COMMIT")
+            self.assertEqual(live_store.append_generation_hint(), 2)
+
+            # Once the next cycle reconciles peer durability, generation 2 becomes
+            # decision-visible instead of being retroactively inserted into cycle 2.
+            clock.value = self.START + timedelta(seconds=3)
+            third = loop.run_cycle()
+            self.assertEqual(third.status, LiveCycleStatus.DECIDED)
             self.assertEqual(
                 factory.calls[-1],
                 ("input-a", (("selection-a", 2, "open"),)),

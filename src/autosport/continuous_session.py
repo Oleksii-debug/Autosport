@@ -1165,22 +1165,39 @@ class _ContinuousSessionState:
         *,
         settlement_evidence: tuple[SettlementResolution, ...],
     ) -> None:
-        """Prove recovery is replaying pre-P&L durable truth, never minting new truth."""
+        """Prove recovery replays only still-pending pre-P&L durable truth."""
 
         raw = self._read()
         known_ids = {
             item["evidence_id"]
             for item in raw["settlement_evidence"]
         }
+        pending_ids = {
+            item["evidence_id"]
+            for item in raw["pending_settlement_resolutions"]
+        }
         # Reuse the closure-bound durable integrity path for exact evidence,
-        # event/reference and quote-outcome digest comparison.  It is intentionally
+        # event/reference and quote-outcome digest comparison. It is intentionally
         # side-effect free here because raw is only the freshly read candidate.
         self._merge_settlement_evidence(raw, settlement_evidence)
+
+        seen_ids: set[str] = set()
         for evidence in settlement_evidence:
-            if evidence.evidence_id not in known_ids:
+            evidence_id = evidence.evidence_id
+            if evidence_id in seen_ids:
+                raise ContinuousSessionError(
+                    "recovered settlement evidence repeats evidence_id"
+                )
+            seen_ids.add(evidence_id)
+            if evidence_id not in known_ids:
                 raise ContinuousSessionError(
                     "recovered settlement evidence was not durably staged before P&L"
                 )
+            if evidence_id not in pending_ids:
+                raise ContinuousSessionError(
+                    "recovered settlement evidence is no longer pending for recovery"
+                )
+
 
     def complete_pending_settlement_commit(
         self,
@@ -1963,6 +1980,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
     ) -> tuple[SettlementResolution, ...]:
         if self._settlement_prepared_resolutions is None:
             return ()
+        if _collector_source_id_get(self.collector) != self._settlement_source_id:
+            raise ContinuousSessionError(
+                "collector source identity changed after settlement authority binding"
+            )
+        cutoff = _settlement_instant(as_of, "as_of")
         recovered = self._settlement_prepared_resolutions(
             paper_book_path=self.paper_book_path,
         )
@@ -1970,6 +1992,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "prepared settlement recovery must return a tuple"
             )
+        records = {
+            record.identity: record
+            for record in _lifecycle_records(self.lifecycle)
+            if record.source_id == self._settlement_source_id
+        }
+        seen_evidence_ids: set[str] = set()
         for resolution in recovered:
             if type(resolution) is not _settlement_resolution_type:
                 raise ContinuousSessionError(
@@ -1981,6 +2009,28 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "prepared settlement recovery failed canonical validation"
                 ) from exc
+            if resolution.evidence_id in seen_evidence_ids:
+                raise ContinuousSessionError(
+                    "prepared settlement recovery repeats evidence identity"
+                )
+            seen_evidence_ids.add(resolution.evidence_id)
+            record = records.get(resolution.event_identity)
+            if (
+                record is None
+                or record.phase is not EventPhase.COMPLETED
+                or record.settlement_ref != resolution.settlement_ref
+                or record.settlement_discovered_at is None
+            ):
+                raise ContinuousSessionError(
+                    "prepared settlement recovery conflicts with durable lifecycle"
+                )
+            if _settlement_instant(
+                record.settlement_discovered_at,
+                "settlement_discovered_at",
+            ) > cutoff:
+                raise ContinuousSessionError(
+                    "prepared settlement lifecycle was discovered after the evidence cutoff"
+                )
         self._state.validate_recovered_settlement_evidence(
             settlement_evidence=recovered,
         )

@@ -28,6 +28,10 @@ from .risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskOfRuinVectorEv
 from .scenario_search import ScenarioGroup, ScenarioOutcome, ScenarioSearchEngine
 
 
+_SCENARIO_ENGINE_TYPE = ScenarioSearchEngine
+_SCENARIO_ANALYSE_AUTHORITATIVE = ScenarioSearchEngine.analyse_authoritative
+
+
 class EvidenceTruth(str, Enum):
     EXACT = "exact"
     APPROXIMATE = "approximate"
@@ -2450,7 +2454,8 @@ def _verify_terminal_economics(
                 market_outcome_authorities,
                 decision_as_of=decision_time,
             )
-            report = ScenarioSearchEngine().analyse_authoritative(
+            scenario_engine = _SCENARIO_ENGINE_TYPE()
+            report = scenario_engine.analyse_authoritative(
                 tickets,
                 ordered_authorities,
                 decision_as_of=decision_time,
@@ -2464,6 +2469,16 @@ def _verify_terminal_economics(
             return (
                 None,
                 "current portfolio changed during terminal economics evaluation",
+            )
+        if (
+            ScenarioSearchEngine is not _SCENARIO_ENGINE_TYPE
+            or type(scenario_engine) is not _SCENARIO_ENGINE_TYPE
+            or _SCENARIO_ENGINE_TYPE.analyse_authoritative
+            is not _SCENARIO_ANALYSE_AUTHORITATIVE
+        ):
+            return (
+                None,
+                "canonical authoritative scenario-search authority changed during terminal economics evaluation",
             )
         proof = _issue_authoritative_terminal_economics(
             completeness_evidence=evidence,

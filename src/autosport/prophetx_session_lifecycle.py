@@ -1090,6 +1090,19 @@ class ProphetXSessionLifecycle:
             )
 
         if current.credential_revision != self.scope.credential_revision:
+            if (
+                current.state is ProphetXSessionState.PROVIDER_UNAVAILABLE
+                and current.retry_not_before is not None
+                and now < current.retry_not_before
+            ):
+                # Credential rotation must not launder a provider-wide outage into a
+                # fresh login attempt. The health/backoff horizon belongs to the shared
+                # provider pool, not to one credential revision.
+                return ProphetXLoginAdmission(
+                    action=ProphetXLoginAdmissionAction.RETRY_LATER,
+                    snapshot=current,
+                    retry_at=current.retry_not_before,
+                )
             rotation_hold = current.slot_hold_until
             if current.state is ProphetXSessionState.RENEWING:
                 # An in-flight refresh may have extended provider occupancy beyond

@@ -11,10 +11,11 @@ digest with provider evidence. This projection consumes that authority when
 present instead of inventing a second writer or serializer.
 
 Even a request hash plus an acknowledgement hash is not, by itself, typed
-provider accepted-price provenance. Acknowledgement odds/stake therefore remain
-explicitly unverified and this projection cannot claim a complete
-decision -> actual-submit -> accepted-price chain until a canonical provider
-outcome resolver supplies that missing authority.
+provider accepted-price provenance. Acknowledgement odds/stake remain
+unverified unless the same canonical ledger also contains a provider-origin
+verified effect issued by the authenticated readback authority. Full-chain
+completion additionally requires exact durable request correlation; provider
+outcome truth alone never launders an unbound submit instruction.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from .real_execution_ledger import (
 )
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 CHAIN_NOT_SUBMITTED = "NOT_SUBMITTED"
 CHAIN_SUBMISSION_UNKNOWN = "SUBMISSION_UNKNOWN"
@@ -44,6 +45,7 @@ CHAIN_SUBMIT_INSTRUCTION_BOUND = "SUBMIT_INSTRUCTION_BOUND"
 
 ACCEPTED_PRICE_NOT_APPLICABLE = "NOT_APPLICABLE"
 ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED = "ACKNOWLEDGED_UNVERIFIED"
+ACCEPTED_PRICE_PROVIDER_VERIFIED = "PROVIDER_VERIFIED"
 ACCEPTED_PRICE_UNKNOWN = "UNKNOWN"
 
 
@@ -64,6 +66,9 @@ _CANONICAL_EXECUTION_ATTEMPT_READ_VIEW_TYPE = (
 _CANONICAL_PROVIDER_EVIDENCE_BINDING_VIEW_TYPE = (
     _CANONICAL_VERIFIED_EXECUTION_VIEW_GLOBALS["ProviderEvidenceBindingView"]
 )
+_CANONICAL_VERIFIED_PROVIDER_EFFECT_BINDING_VIEW_TYPE = (
+    _CANONICAL_VERIFIED_EXECUTION_VIEW_GLOBALS["VerifiedProviderEffectBindingView"]
+)
 _CANONICAL_EXECUTION_ATTEMPT_TYPE = (
     _CANONICAL_VERIFIED_EXECUTION_VIEW_GLOBALS["ExecutionAttempt"]
 )
@@ -80,6 +85,10 @@ _CANONICAL_VERIFIED_EXECUTION_VIEW_TYPE_BINDINGS = (
     ("VerifiedExecutionPlanView", _CANONICAL_VERIFIED_EXECUTION_PLAN_VIEW_TYPE),
     ("ExecutionAttemptReadView", _CANONICAL_EXECUTION_ATTEMPT_READ_VIEW_TYPE),
     ("ProviderEvidenceBindingView", _CANONICAL_PROVIDER_EVIDENCE_BINDING_VIEW_TYPE),
+    (
+        "VerifiedProviderEffectBindingView",
+        _CANONICAL_VERIFIED_PROVIDER_EFFECT_BINDING_VIEW_TYPE,
+    ),
     ("ExecutionAttempt", _CANONICAL_EXECUTION_ATTEMPT_TYPE),
     ("ExecutionAction", _CANONICAL_EXECUTION_ACTION_TYPE),
     ("ExternalAcknowledgement", _CANONICAL_EXTERNAL_ACKNOWLEDGEMENT_TYPE),
@@ -111,8 +120,8 @@ def _build_execution_quote_chain_evidence_meta():
             "acknowledgement_binding_matches",
             "accepted_price_verified",
             "chain_complete",
-            "_accepted_price_verified_constant",
-            "_chain_complete_constant",
+            "_accepted_price_verified",
+            "_chain_complete",
             "evidence_sha256",
             "to_dict",
         }
@@ -227,6 +236,14 @@ def _read_canonical_verified_execution_view(
                 "canonical provider evidence view type authority is unavailable"
             )
         if (
+            item.verified_provider_effect is not None
+            and type(item.verified_provider_effect)
+            is not _CANONICAL_VERIFIED_PROVIDER_EFFECT_BINDING_VIEW_TYPE
+        ):
+            raise ExecutionQuoteChainUnavailable(
+                "canonical verified provider effect view type authority is unavailable"
+            )
+        if (
             item.acknowledgement is not None
             and type(item.acknowledgement)
             is not _CANONICAL_EXTERNAL_ACKNOWLEDGEMENT_TYPE
@@ -242,10 +259,11 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
     """One immutable, snapshot-bound quote-chain diagnostic.
 
     The class intentionally exposes no caller-settable `chain_complete` or
-    `accepted_price_verified` field. Exact request-binding fields may become
-    positive only on a canonical builder-issued projection; accepted-price and
-    full-chain authority remain false until a typed provider outcome authority
-    exists. This object is not a new execution or provider-write authority.
+    `accepted_price_verified` field. Exact request-binding and provider-outcome
+    fields may become positive only on a canonical builder-issued projection.
+    Provider-origin accepted-price truth and full-chain completion are separate:
+    the latter also requires exact durable submit-request correlation. This
+    object is not a new execution or provider-write authority.
     """
 
     source_ledger_sha256: str
@@ -290,7 +308,17 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
     acknowledged_stake: Decimal | None
     accepted_price_status: str
 
+    provider_outcome_evidence_id: str | None = None
+    provider_outcome_observed_at: str | None = None
+    provider_outcome_source_payload_sha256: str | None = None
+    provider_outcome_receipt_id: str | None = None
+    provider_outcome_status: str | None = None
+    provider_accepted_odds: Decimal | None = None
+    provider_accepted_stake: Decimal | None = None
+
     schema_version: int = SCHEMA_VERSION
+    _accepted_price_verified: bool = field(init=False, repr=False)
+    _chain_complete: bool = field(init=False, repr=False)
     _evidence_sha256: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -313,6 +341,16 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
                 _sha256_text(
                     self.provider_acknowledgement_sha256,
                     "provider_acknowledgement_sha256",
+                )
+            if self.provider_outcome_evidence_id is not None:
+                _sha256_text(
+                    self.provider_outcome_evidence_id,
+                    "provider_outcome_evidence_id",
+                )
+            if self.provider_outcome_source_payload_sha256 is not None:
+                _sha256_text(
+                    self.provider_outcome_source_payload_sha256,
+                    "provider_outcome_source_payload_sha256",
                 )
         except ValueError as exc:
             raise ExecutionQuoteChainError(str(exc)) from exc
@@ -364,6 +402,55 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
                     "provider request digest conflicts with durable submission"
                 )
 
+        provider_outcome = (
+            self.provider_outcome_evidence_id,
+            self.provider_outcome_observed_at,
+            self.provider_outcome_source_payload_sha256,
+            self.provider_outcome_receipt_id,
+            self.provider_outcome_status,
+            self.provider_accepted_odds,
+            self.provider_accepted_stake,
+        )
+        has_provider_outcome = all(value is not None for value in provider_outcome)
+        if any(value is not None for value in provider_outcome) and not has_provider_outcome:
+            raise ExecutionQuoteChainError(
+                "provider outcome provenance must be present as one complete typed fact"
+            )
+        if has_provider_outcome:
+            if (
+                type(self.provider_outcome_observed_at) is not str
+                or not self.provider_outcome_observed_at.strip()
+            ):
+                raise ExecutionQuoteChainError(
+                    "provider outcome observed_at must be non-empty text"
+                )
+            if (
+                type(self.provider_outcome_receipt_id) is not str
+                or not self.provider_outcome_receipt_id.strip()
+            ):
+                raise ExecutionQuoteChainError(
+                    "provider outcome receipt must be non-empty text"
+                )
+            if self.provider_outcome_status not in {"ACCEPTED", "PARTIAL"}:
+                raise ExecutionQuoteChainError(
+                    "provider outcome status must be ACCEPTED/PARTIAL"
+                )
+            if type(self.provider_accepted_odds) is not Decimal:
+                raise ExecutionQuoteChainError(
+                    "provider accepted odds must be exact Decimal"
+                )
+            if type(self.provider_accepted_stake) is not Decimal:
+                raise ExecutionQuoteChainError(
+                    "provider accepted stake must be exact Decimal"
+                )
+            if (
+                self.provider_accepted_odds <= Decimal("0")
+                or self.provider_accepted_stake <= Decimal("0")
+            ):
+                raise ExecutionQuoteChainError(
+                    "provider accepted economics must be positive"
+                )
+
         has_ack = self.acknowledgement_status is not None
         if not has_ack:
             if self.external_receipt_id is not None or self.acknowledged_at is not None:
@@ -374,7 +461,11 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
                 raise ExecutionQuoteChainError(
                     "unacknowledged attempt cannot claim acknowledgement economics"
                 )
-            expected_price_status = ACCEPTED_PRICE_UNKNOWN
+            expected_price_status = (
+                ACCEPTED_PRICE_PROVIDER_VERIFIED
+                if has_provider_outcome
+                else ACCEPTED_PRICE_UNKNOWN
+            )
         elif self.acknowledgement_status in {"ACCEPTED", "PARTIAL"}:
             if self.external_receipt_id is None or self.acknowledged_at is None:
                 raise ExecutionQuoteChainError(
@@ -384,7 +475,20 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
                 raise ExecutionQuoteChainError(
                     "accepted/partial acknowledgement requires acknowledgement economics"
                 )
-            expected_price_status = ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED
+            if has_provider_outcome:
+                if (
+                    self.provider_outcome_receipt_id != self.external_receipt_id
+                    or self.provider_outcome_status != self.acknowledgement_status
+                    or self.provider_outcome_observed_at != self.acknowledged_at
+                    or self.provider_accepted_odds != self.acknowledged_odds
+                    or self.provider_accepted_stake != self.acknowledged_stake
+                ):
+                    raise ExecutionQuoteChainError(
+                        "provider outcome conflicts with durable acknowledgement"
+                    )
+                expected_price_status = ACCEPTED_PRICE_PROVIDER_VERIFIED
+            else:
+                expected_price_status = ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED
         elif self.acknowledgement_status == "REJECTED":
             if self.acknowledged_at is None:
                 raise ExecutionQuoteChainError(
@@ -393,6 +497,10 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
             if self.acknowledged_odds is not None or self.acknowledged_stake is not None:
                 raise ExecutionQuoteChainError(
                     "rejected acknowledgement cannot claim acknowledgement economics"
+                )
+            if has_provider_outcome:
+                raise ExecutionQuoteChainError(
+                    "rejected acknowledgement conflicts with positive provider outcome"
                 )
             expected_price_status = ACCEPTED_PRICE_NOT_APPLICABLE
         else:
@@ -411,6 +519,26 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
             raise ExecutionQuoteChainError(
                 "provider acknowledgement digest cannot match without acknowledgement"
             )
+
+        exact_request_correlation = (
+            self.submission_instruction_sha256 is not None
+            and self.provider_request_sha256 == self.submission_instruction_sha256
+        )
+        object.__setattr__(
+            self,
+            "_accepted_price_verified",
+            has_provider_outcome,
+        )
+        object.__setattr__(
+            self,
+            "_chain_complete",
+            (
+                has_provider_outcome
+                and has_ack
+                and exact_request_correlation
+                and self.attempt_state == self.provider_outcome_status
+            ),
+        )
 
         # Product issuance is attached only after canonical ledger projection.
         # Caller construction remains structurally valid but has no authority.
@@ -454,22 +582,15 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
 
         return self._acknowledgement_binding_matches
 
-    # These two claims are intentionally hard-false until a future typed
-    # provider-outcome authority exists.  Keep their getters out of mutable
-    # Python bytecode: a sealed property descriptor still exposes a Python
-    # fget.__code__ object that hostile in-process code can replace in place.
-    # slots=True prevents an instance from shadowing these sealed class
-    # constants, while the metaclass prevents class rebinding after issuance
-    # authority is installed.
-    _accepted_price_verified_constant = False
-    _chain_complete_constant = False
-
+    # Keep these claim getters out of mutable Python bytecode. The canonical
+    # builder computes frozen internal booleans from sealed durable fields;
+    # attrgetter descriptors expose them without a replaceable Python fget.
     accepted_price_verified = property(
-        attrgetter("_accepted_price_verified_constant"),
+        attrgetter("_accepted_price_verified"),
         doc="Whether accepted economics are provider-origin verified end-to-end.",
     )
     chain_complete = property(
-        attrgetter("_chain_complete_constant"),
+        attrgetter("_chain_complete"),
         doc="Whether decision -> actual submit -> accepted quote chain is complete.",
     )
 
@@ -525,6 +646,23 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
             "provider_request_sha256": self.provider_request_sha256,
             "provider_acknowledgement_sha256": self.provider_acknowledgement_sha256,
             "acknowledgement_binding_matches": self._acknowledgement_binding_matches,
+            "provider_outcome_evidence_id": self.provider_outcome_evidence_id,
+            "provider_outcome_observed_at": self.provider_outcome_observed_at,
+            "provider_outcome_source_payload_sha256": (
+                self.provider_outcome_source_payload_sha256
+            ),
+            "provider_outcome_receipt_id": self.provider_outcome_receipt_id,
+            "provider_outcome_status": self.provider_outcome_status,
+            "provider_accepted_odds": (
+                _decimal_text(self.provider_accepted_odds)
+                if self.provider_accepted_odds is not None
+                else None
+            ),
+            "provider_accepted_stake": (
+                _decimal_text(self.provider_accepted_stake)
+                if self.provider_accepted_stake is not None
+                else None
+            ),
             "external_receipt_id": self.external_receipt_id,
             "acknowledgement_status": self.acknowledgement_status,
             "acknowledged_at": self.acknowledged_at,
@@ -587,6 +725,7 @@ def build_execution_quote_chain_evidence(
     action = attempt_view.action
     acknowledgement = attempt_view.acknowledgement
     provider = attempt_view.provider_evidence
+    verified_effect = attempt_view.verified_provider_effect
 
     submitted_request_sha256 = getattr(
         attempt_view,
@@ -651,6 +790,39 @@ def build_execution_quote_chain_evidence(
         else:
             accepted_price_status = ACCEPTED_PRICE_NOT_APPLICABLE
 
+    provider_outcome_evidence_id = None
+    provider_outcome_observed_at = None
+    provider_outcome_source_payload_sha256 = None
+    provider_outcome_receipt_id = None
+    provider_outcome_status = None
+    provider_accepted_odds = None
+    provider_accepted_stake = None
+    if verified_effect is not None:
+        provider_outcome_evidence_id = verified_effect.evidence_id
+        provider_outcome_observed_at = verified_effect.observed_at
+        provider_outcome_source_payload_sha256 = (
+            verified_effect.source_payload_sha256
+        )
+        provider_outcome_receipt_id = verified_effect.external_receipt_id
+        provider_outcome_status = verified_effect.status.value
+        provider_accepted_odds = verified_effect.accepted_odds
+        provider_accepted_stake = verified_effect.accepted_stake
+        if acknowledgement is not None and (
+            acknowledgement.external_receipt_id != provider_outcome_receipt_id
+            or acknowledgement.status.value != provider_outcome_status
+            or acknowledgement.acknowledged_at != provider_outcome_observed_at
+            or acknowledgement.accepted_odds != provider_accepted_odds
+            or acknowledgement.accepted_stake != provider_accepted_stake
+        ):
+            raise ExecutionQuoteChainUnavailable(
+                "verified provider outcome conflicts with durable acknowledgement"
+            )
+        if acknowledgement is not None and acknowledgement.status.value == "REJECTED":
+            raise ExecutionQuoteChainUnavailable(
+                "positive verified provider outcome conflicts with rejection"
+            )
+        accepted_price_status = ACCEPTED_PRICE_PROVIDER_VERIFIED
+
     evidence = ExecutionQuoteChainEvidence(
         source_ledger_sha256=view.snapshot_sha256,
         source_event_count=view.event_count,
@@ -690,6 +862,15 @@ def build_execution_quote_chain_evidence(
         acknowledged_odds=acknowledged_odds,
         acknowledged_stake=acknowledged_stake,
         accepted_price_status=accepted_price_status,
+        provider_outcome_evidence_id=provider_outcome_evidence_id,
+        provider_outcome_observed_at=provider_outcome_observed_at,
+        provider_outcome_source_payload_sha256=(
+            provider_outcome_source_payload_sha256
+        ),
+        provider_outcome_receipt_id=provider_outcome_receipt_id,
+        provider_outcome_status=provider_outcome_status,
+        provider_accepted_odds=provider_accepted_odds,
+        provider_accepted_stake=provider_accepted_stake,
     )
     return evidence
 
@@ -746,6 +927,10 @@ def _install_quote_chain_evidence_authority() -> None:
             "_CANONICAL_PROVIDER_EVIDENCE_BINDING_VIEW_TYPE",
             _CANONICAL_PROVIDER_EVIDENCE_BINDING_VIEW_TYPE,
         ),
+        (
+            "_CANONICAL_VERIFIED_PROVIDER_EFFECT_BINDING_VIEW_TYPE",
+            _CANONICAL_VERIFIED_PROVIDER_EFFECT_BINDING_VIEW_TYPE,
+        ),
         ("_CANONICAL_EXECUTION_ATTEMPT_TYPE", _CANONICAL_EXECUTION_ATTEMPT_TYPE),
         ("_CANONICAL_EXECUTION_ACTION_TYPE", _CANONICAL_EXECUTION_ACTION_TYPE),
         (
@@ -777,6 +962,7 @@ def _install_quote_chain_evidence_authority() -> None:
             "ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED",
             ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED,
         ),
+        ("ACCEPTED_PRICE_PROVIDER_VERIFIED", ACCEPTED_PRICE_PROVIDER_VERIFIED),
         ("ACCEPTED_PRICE_UNKNOWN", ACCEPTED_PRICE_UNKNOWN),
     )
 

@@ -1732,7 +1732,6 @@ class RealExecutionLedger:
             provider_order_ref_value: str | None = None
             provider_evidence_seen = False
             verified_provider_effect: VerifiedProviderEffectBindingView | None = None
-            verified_provider_effect_time: datetime | None = None
             stored_acknowledgement: ExternalAcknowledgement | None = None
             legacy_provider_evidence_time: datetime | None = None
             provider_acknowledgements: dict[str, datetime] = {}
@@ -2054,7 +2053,6 @@ class RealExecutionLedger:
                                 "verified PARTIAL effect stake must be below requested action stake"
                             )
                         verified_provider_effect = effect
-                        verified_provider_effect_time = effect_time
                     elif (
                         followup["event_type"]
                         == EventType.EXTERNAL_ACKNOWLEDGEMENT.value

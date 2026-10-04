@@ -918,7 +918,7 @@ class SQLiteMarketStore:
     def trusted_live_current_by_source(self) -> dict[tuple[str, str], MarketEvent]:
         """Project latest source-local live state without retroactively trusting imports."""
         current: dict[tuple[str, str], MarketEvent] = {}
-        for event in self.trusted_live_events():
+        for event in SQLiteMarketStore.trusted_live_events(self):
             key = (event.source_id, event.quote_key)
             previous = current.get(key)
             if previous is None or _projection_order_key(event) > _projection_order_key(

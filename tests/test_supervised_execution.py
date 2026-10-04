@@ -2100,8 +2100,37 @@ def _pre_provider_unknown_ledger(path: Path):
     return ledger, bound, approval, action
 
 
+RETRY_RESERVED_AT = "2026-09-18T13:20:07+00:00"
+
+
+def _begin_product_pre_provider_retry(
+    ledger,
+    bound,
+    approval,
+    *,
+    previous_attempt_id: str,
+    retry_attempt_id: str,
+):
+    from autosport.betfair_pre_provider_recovery import (
+        begin_betfair_pre_provider_retry_attempt,
+    )
+
+    token = supervised_execution._TEST_TRUSTED_NOW.set(RETRY_RESERVED_AT)
+    try:
+        return begin_betfair_pre_provider_retry_attempt(
+            ledger,
+            bound,
+            approval,
+            previous_attempt_id=previous_attempt_id,
+            retry_attempt_id=retry_attempt_id,
+        )
+    finally:
+        supervised_execution._TEST_TRUSTED_NOW.reset(token)
+
+
 def test_product_pre_provider_authority_releases_only_specialized_retry(tmp_path) -> None:
     from autosport.betfair_pre_provider_recovery import (
+        BetfairPreProviderRecoveryError,
         begin_betfair_pre_provider_retry_attempt,
         recover_betfair_pre_provider_attempt,
     )
@@ -2135,7 +2164,19 @@ def test_product_pre_provider_authority_releases_only_specialized_retry(tmp_path
             attempt_id="attempt-generic-retry",
         )
 
-    retry = begin_betfair_pre_provider_retry_attempt(
+    with pytest.raises(
+        BetfairPreProviderRecoveryError,
+        match="cannot admit retry",
+    ):
+        begin_betfair_pre_provider_retry_attempt(
+            ledger,
+            bound,
+            approval,
+            previous_attempt_id="attempt-pre-provider-1",
+            retry_attempt_id="attempt-clock-rollback",
+        )
+
+    retry = _begin_product_pre_provider_retry(
         ledger,
         bound,
         approval,
@@ -2144,6 +2185,18 @@ def test_product_pre_provider_authority_releases_only_specialized_retry(tmp_path
     )
     assert retry.action_id == action.action_id
     assert ledger.attempt_state("attempt-product-retry") is AttemptState.RESERVED
+    from autosport.real_execution_ledger import EventType
+
+    retry_event = next(
+        event
+        for event in ledger._events()
+        if event["event_type"] == EventType.ATTEMPT_RESERVED.value
+        and event["attempt_id"] == "attempt-product-retry"
+    )
+    assert (
+        retry_event["payload"]["product_no_effect_authority_id"]
+        == recovered.evidence_id
+    )
 
 
 def test_generic_not_found_cannot_mint_product_pre_provider_retry(tmp_path) -> None:
@@ -2272,7 +2325,7 @@ def test_pre_provider_no_effect_authority_survives_restart_and_reconstruction(
     assert authority is not None
     assert authority["evidence_id"] == recovered.evidence_id
 
-    retry = begin_betfair_pre_provider_retry_attempt(
+    retry = _begin_product_pre_provider_retry(
         restarted,
         reconstructed,
         approval,
@@ -2300,7 +2353,7 @@ def test_pre_provider_no_effect_authority_is_single_use(tmp_path) -> None:
         attempt_id="attempt-pre-provider-1",
         observed_at=READBACK_AT,
     )
-    begin_betfair_pre_provider_retry_attempt(
+    _begin_product_pre_provider_retry(
         ledger,
         bound,
         approval,
@@ -2312,7 +2365,7 @@ def test_pre_provider_no_effect_authority_is_single_use(tmp_path) -> None:
         BetfairPreProviderRecoveryError,
         match="cannot admit retry",
     ):
-        begin_betfair_pre_provider_retry_attempt(
+        _begin_product_pre_provider_retry(
             ledger,
             bound,
             approval,

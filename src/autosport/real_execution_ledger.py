@@ -1525,14 +1525,30 @@ class RealExecutionLedger:
                     raise ExecutionLedgerIntegrityError(
                         "supervised attempt reservation requires prior active approval"
                     )
-            if set(first["payload"]) != {"effect_fingerprint", "reserved_at"}:
+            reservation_fields = set(first["payload"])
+            if reservation_fields not in (
+                {"effect_fingerprint", "reserved_at"},
+                {
+                    "effect_fingerprint",
+                    "reserved_at",
+                    "product_no_effect_authority_id",
+                },
+            ):
                 raise ExecutionLedgerIntegrityError(
                     "ATTEMPT_RESERVED payload schema is invalid"
                 )
+            retry_authority_id = first["payload"].get(
+                "product_no_effect_authority_id"
+            )
             try:
                 reserved_time = _timestamp(
                     first["payload"]["reserved_at"], "reserved_at"
                 )
+                if retry_authority_id is not None:
+                    _sha256_text(
+                        retry_authority_id,
+                        "product_no_effect_authority_id",
+                    )
             except (KeyError, ValueError) as exc:
                 raise ExecutionLedgerIntegrityError(
                     "attempt reservation timestamp is invalid"
@@ -1550,6 +1566,53 @@ class RealExecutionLedger:
                 if reserved_time < approved_time or reserved_time >= expires_time:
                     raise ExecutionLedgerIntegrityError(
                         "supervised attempt reservation is outside approval lifetime"
+                    )
+            if retry_authority_id is not None:
+                first_index = next(
+                    index
+                    for index, candidate in enumerate(events)
+                    if candidate is first
+                )
+                prior_reservations = [
+                    candidate
+                    for candidate in events[:first_index]
+                    if candidate["plan_id"] == first["plan_id"]
+                    and candidate["action_id"] == first["action_id"]
+                    and candidate["event_type"] == EventType.ATTEMPT_RESERVED.value
+                ]
+                if not prior_reservations:
+                    raise ExecutionLedgerIntegrityError(
+                        "product no-effect authority cannot authorize a first attempt"
+                    )
+                previous_attempt_id = prior_reservations[-1]["attempt_id"]
+                previous_events = [
+                    candidate
+                    for candidate in events[:first_index]
+                    if candidate["attempt_id"] == previous_attempt_id
+                ]
+                if cls._state(previous_events) is not AttemptState.RECONCILED_NOT_FOUND:
+                    raise ExecutionLedgerIntegrityError(
+                        "retry authority predecessor is not terminal no-effect"
+                    )
+                authorities = [
+                    candidate
+                    for candidate in previous_events
+                    if candidate["event_type"]
+                    == EventType.BETFAIR_PRE_PROVIDER_NO_EFFECT_AUTHORIZED.value
+                    and candidate["payload"].get("evidence_id")
+                    == retry_authority_id
+                ]
+                if len(authorities) != 1:
+                    raise ExecutionLedgerIntegrityError(
+                        "retry reservation lacks matching product no-effect authority"
+                    )
+                authority_time = _timestamp(
+                    authorities[0]["payload"]["authorized_at"],
+                    "authorized_at",
+                )
+                if reserved_time < authority_time:
+                    raise ExecutionLedgerIntegrityError(
+                        "retry reservation precedes product no-effect authority"
                     )
             plan_event, action = cls._action_payload(
                 events, first["plan_id"], first["action_id"]
@@ -2747,6 +2810,14 @@ class RealExecutionLedger:
                     raise ExecutionStateError(
                         "product no-effect authority does not match latest prior attempt"
                     )
+                authority_time = _timestamp(
+                    authorities[0]["payload"]["authorized_at"],
+                    "authorized_at",
+                )
+                if reserved_time < authority_time:
+                    raise ExecutionStateError(
+                        "retry reservation cannot precede product no-effect authority"
+                    )
                 authority_index = events.index(authorities[0])
                 if any(
                     event["plan_id"] == plan_id
@@ -2771,15 +2842,20 @@ class RealExecutionLedger:
                 raise ExecutionStateError(
                     "cannot reserve attempt at or after persisted quote expiry"
                 )
+            reservation_payload = {
+                "effect_fingerprint": fingerprint,
+                "reserved_at": reserved_at,
+            }
+            if product_no_effect_authority_id is not None:
+                reservation_payload["product_no_effect_authority_id"] = (
+                    product_no_effect_authority_id
+                )
             self._append(
                 EventType.ATTEMPT_RESERVED,
                 plan_id,
                 action_id,
                 attempt_id,
-                {
-                    "effect_fingerprint": fingerprint,
-                    "reserved_at": reserved_at,
-                },
+                reservation_payload,
             )
             return ExecutionAttempt(
                 attempt_id, plan_id, action_id, fingerprint, reserved_at

@@ -142,6 +142,27 @@ def _derive_run_economics(
 class PaperExecutionLedger(_impl.PaperExecutionLedger):
     """PAPER ledger with mechanically derived completion economics."""
 
+    _ALLOWED_EVENT_TYPES = frozenset(
+        {
+            "OBSERVATION_EVIDENCE_REGISTERED",
+            "PAPER_EXPOSURE_SCOPE_BOUND",
+            "RUN_RESERVED",
+            "ATTEMPT_RECORDED",
+            "RUN_COMPLETED",
+        }
+    )
+
+    def _load_unlocked(self) -> list[dict[str, Any]]:
+        events = super()._load_unlocked()
+        if any(
+            event.get("event_type") not in self._ALLOWED_EVENT_TYPES
+            for event in events
+        ):
+            raise PaperExecutionIntegrityError(
+                "PAPER execution ledger contains unsupported event_type"
+            )
+        return events
+
     def _append_completion_unlocked(
         self,
         *,

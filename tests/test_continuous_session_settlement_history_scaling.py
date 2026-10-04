@@ -891,6 +891,63 @@ def test_legacy_migration_recovers_from_partial_journal_publication() -> None:
         assert len(restarted.snapshot().settlement_evidence) == _SMALL_HISTORY
 
 
+def test_wave_m_v3_rollback_cannot_discard_newer_v4_journal_tail() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        quote_outcomes = {
+            "provider-a:event-0:winner:home": "win",
+        }
+        embedded = _checkpoint_payload(1)
+        embedded["schema_version"] = 3
+        embedded["settlement_evidence"][0]["quote_outcomes_sha256"] = (
+            continuous_session._settlement_quote_outcomes_sha256(
+                quote_outcomes
+            )
+        )
+        legacy_v3 = json.dumps(embedded, sort_keys=True)
+        path.write_text(legacy_v3, encoding="utf-8")
+
+        state = continuous_session._ContinuousSessionState(
+            path,
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        state.record_success(
+            at=_AT,
+            full_refresh=False,
+            settlement_evidence=(
+                continuous_session.SettlementResolution(
+                    event_identity="provider-a:event-new",
+                    settlement_ref="provider-result:new",
+                    quote_outcomes={
+                        "provider-a:event-new:winner:home": "win"
+                    },
+                    evidence_id="receipt-newer-than-v3",
+                    evidence_sha256="e" * 64,
+                    available_at=_AT,
+                ),
+            ),
+        )
+        assert state.operational_snapshot().settlement_evidence_count == 2
+
+        path.write_text(legacy_v3, encoding="utf-8")
+        try:
+            continuous_session._ContinuousSessionState(
+                path,
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "Wave M v3 rollback discarded a newer committed v4 journal tail"
+            )
+
+
 def test_legacy_rollback_cannot_discard_newer_settlement_journal_tail() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

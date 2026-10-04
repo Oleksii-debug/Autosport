@@ -22,7 +22,7 @@ class CancellationError(RuntimeError):
     pass
 
 
-class RequestBudgetExhausted(CancellationError):
+class RequestBudgetExhausted(RuntimeError):
     """The trusted controller exhausted its bounded GitHub transport budget."""
 
 

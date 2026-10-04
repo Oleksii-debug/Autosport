@@ -4455,3 +4455,20 @@ def test_request_budget_exhaustion_propagates_from_orphan_association(
         match="request budget exhausted",
     ):
         api.cancel_historical_unbound_runs()
+
+
+
+def test_budget_exception_global_rebind_cannot_redirect_generic_main_failure(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        scoped_controller,
+        "RequestBudgetExhausted",
+        CancellationError,
+    )
+    args = _scoped_main_args()
+    args[args.index("--event-head-sha") + 1] = "not-a-sha"
+
+    assert scoped_controller.main(args) == 2
+    assert "invalid event head sha" in capsys.readouterr().err

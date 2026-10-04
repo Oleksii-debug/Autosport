@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.ingestion_health as health_module
 from autosport.ingestion_health import SourceHealthStore
 from autosport.monotonic_workspace_authority import (
     AuthorityPhase,
@@ -277,3 +278,48 @@ def test_post_baseline_valid_v3_downgrade_is_rejected_as_rollback(
         match="rolled back|unproven|authority|match",
     ):
         SourceHealthStore(store.path)
+
+
+def test_recovery_does_not_commit_published_prefix_until_reflush_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path, monkeypatch, "reflush-target")
+    _record_success(store)
+    observed = _sha256(store.path.read_bytes())
+
+    future = _store(tmp_path, monkeypatch, "reflush-future")
+    _record_success(future)
+    _record_provider_failure(future)
+    intended_bytes = future.path.read_bytes()
+    intended = _sha256(intended_bytes)
+
+    authority = store._monotonic_authority()
+    binding = store._authority_binding(observed, intended, kind="PUBLISH")
+    authority.prepare(
+        tx_id="test-reflush-required",
+        observed_state_sha256=observed,
+        intended_state_sha256=intended,
+        semantic_binding_sha256=binding,
+    )
+    store.path.write_bytes(intended_bytes)
+
+    canonical_sync = health_module._sync_existing_file
+
+    def fail_sync(_path: Path) -> None:
+        raise OSError("simulated durability barrier failure")
+
+    monkeypatch.setattr(health_module, "_sync_existing_file", fail_sync)
+    with pytest.raises(OSError, match="durability barrier failure"):
+        SourceHealthStore(store.path)
+
+    # Failed durability proof must leave the independent authority at PREPARE.
+    history = authority.read_history()
+    assert history[-1].phase is AuthorityPhase.PREPARE
+
+    monkeypatch.setattr(health_module, "_sync_existing_file", canonical_sync)
+    reopened = SourceHealthStore(store.path)
+    assert reopened.get("provider-a").status == "failed"
+    history = authority.read_history()
+    assert history[-1].phase is AuthorityPhase.COMMIT
+    assert history[-1].intended_state_sha256 == intended

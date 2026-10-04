@@ -1234,10 +1234,12 @@ def _build_product_run_capital_path_evidence_verifier(
     resolver,
     evidence_type: type[ProductRunCapitalPathEvidence],
 ):
-    """Freeze the only resolver/type graph a verifier may trust."""
+    """Freeze resolver/type/slot authority and compare exact evidence snapshots."""
 
     module_globals = globals()
     resolver_code = getattr(resolver, "__code__", None)
+    if resolver_code is None:
+        raise RuntimeError("run-capital evidence resolver is unavailable")
     field_names = (
         "member_id",
         "member_index",
@@ -1262,6 +1264,134 @@ def _build_product_run_capital_path_evidence_verifier(
         "source_evidence_sha256",
         "complete",
     )
+    descriptors = tuple(
+        (name, evidence_type.__dict__[name]) for name in field_names
+    )
+
+    def require_verifier_dispatch() -> None:
+        if (
+            module_globals.get("resolve_product_run_capital_path_evidence")
+            is not resolver
+            or getattr(resolver, "__code__", None) is not resolver_code
+            or module_globals.get("ProductRunCapitalPathEvidence")
+            is not evidence_type
+            or any(
+                evidence_type.__dict__.get(name) is not descriptor
+                for name, descriptor in descriptors
+            )
+        ):
+            raise ProductRunCapitalPathError(
+                "run-capital evidence verifier authority dispatch changed"
+            )
+
+    def descriptor_value(
+        descriptor: object,
+        instance: object,
+    ) -> object:
+        getter = getattr(descriptor, "__get__", None)
+        if getter is None:
+            raise ProductRunCapitalPathError(
+                "run-capital evidence field descriptor is unavailable"
+            )
+        return getter(instance, evidence_type)
+
+    def exact_text(value: object, name: str) -> str:
+        if type(value) is not str:
+            raise ProductRunCapitalPathError(
+                f"run-capital evidence {name} must be exact text"
+            )
+        return value
+
+    def exact_text_tuple(value: object, name: str) -> tuple[str, ...]:
+        if type(value) is not tuple or any(type(item) is not str for item in value):
+            raise ProductRunCapitalPathError(
+                f"run-capital evidence {name} must be an exact text tuple"
+            )
+        return value
+
+    def snapshot(
+        value: ProductRunCapitalPathEvidence,
+    ) -> tuple[object, ...]:
+        if type(value) is not evidence_type:
+            raise TypeError(
+                "candidate must be an exact ProductRunCapitalPathEvidence"
+            )
+        raw = {
+            name: descriptor_value(descriptor, value)
+            for name, descriptor in descriptors
+        }
+        member_index = raw["member_index"]
+        if type(member_index) is not int:
+            raise ProductRunCapitalPathError(
+                "run-capital evidence member_index must be an exact integer"
+            )
+        minimum_equity = raw["minimum_equity"]
+        if type(minimum_equity) is not Decimal or not minimum_equity.is_finite():
+            raise ProductRunCapitalPathError(
+                "run-capital evidence minimum_equity must be an exact finite Decimal"
+            )
+        complete = raw["complete"]
+        if type(complete) is not bool:
+            raise ProductRunCapitalPathError(
+                "run-capital evidence complete must be an exact bool"
+            )
+        return (
+            exact_text(raw["member_id"], "member_id"),
+            member_index,
+            exact_text(raw["expected_stream_sha256"], "expected_stream_sha256"),
+            exact_text(raw["base_snapshot_sha256"], "base_snapshot_sha256"),
+            exact_text(raw["final_snapshot_sha256"], "final_snapshot_sha256"),
+            exact_text_tuple(raw["changed_ticket_ids"], "changed_ticket_ids"),
+            minimum_equity.as_tuple(),
+            exact_text(raw["outcome_available_at"], "outcome_available_at"),
+            exact_text(
+                raw["expected_draw_plan_sha256"],
+                "expected_draw_plan_sha256",
+            ),
+            exact_text(
+                raw["expected_draw_transcript_sha256"],
+                "expected_draw_transcript_sha256",
+            ),
+            exact_text(
+                raw["run_admission_receipt_sha256"],
+                "run_admission_receipt_sha256",
+            ),
+            exact_text(
+                raw["run_execution_receipt_sha256"],
+                "run_execution_receipt_sha256",
+            ),
+            exact_text(
+                raw["executed_initial_capital_state_sha256"],
+                "executed_initial_capital_state_sha256",
+            ),
+            exact_text(
+                raw["executed_stake_policy_sha256"],
+                "executed_stake_policy_sha256",
+            ),
+            exact_text(
+                raw["expected_replay_input_event_payload_sequence_sha256"],
+                "expected_replay_input_event_payload_sequence_sha256",
+            ),
+            exact_text(
+                raw["completed_replay_input_event_payload_sequence_sha256"],
+                "completed_replay_input_event_payload_sequence_sha256",
+            ),
+            exact_text(
+                raw["expected_replay_consumed_event_payload_multiset_sha256"],
+                "expected_replay_consumed_event_payload_multiset_sha256",
+            ),
+            exact_text(
+                raw["completed_replay_consumed_event_payload_multiset_sha256"],
+                "completed_replay_consumed_event_payload_multiset_sha256",
+            ),
+            exact_text(raw["settlement_effects_sha256"], "settlement_effects_sha256"),
+            exact_text(
+                raw["replay_source_evidence_sha256"],
+                "replay_source_evidence_sha256",
+            ),
+            exact_text(raw["source_evidence_sha256"], "source_evidence_sha256"),
+            complete,
+        )
 
     def verifier(
         candidate: ProductRunCapitalPathEvidence,
@@ -1277,20 +1407,8 @@ def _build_product_run_capital_path_evidence_verifier(
         settlement_bridge: PaperSettlementLearningBridge,
         authority_root: str | Path | None = None,
     ) -> ProductRunCapitalPathEvidence:
-        if (
-            module_globals.get("resolve_product_run_capital_path_evidence")
-            is not resolver
-            or getattr(resolver, "__code__", None) is not resolver_code
-            or module_globals.get("ProductRunCapitalPathEvidence")
-            is not evidence_type
-        ):
-            raise ProductRunCapitalPathError(
-                "run-capital evidence verifier authority dispatch changed"
-            )
-        if type(candidate) is not evidence_type:
-            raise TypeError(
-                "candidate must be an exact ProductRunCapitalPathEvidence"
-            )
+        require_verifier_dispatch()
+        candidate_snapshot = snapshot(candidate)
         canonical = resolver(
             workspace=workspace,
             run_id=run_id,
@@ -1303,23 +1421,12 @@ def _build_product_run_capital_path_evidence_verifier(
             settlement_bridge=settlement_bridge,
             authority_root=authority_root,
         )
-        if (
-            module_globals.get("resolve_product_run_capital_path_evidence")
-            is not resolver
-            or getattr(resolver, "__code__", None) is not resolver_code
-            or module_globals.get("ProductRunCapitalPathEvidence")
-            is not evidence_type
-        ):
+        require_verifier_dispatch()
+        if snapshot(canonical) != candidate_snapshot:
             raise ProductRunCapitalPathError(
-                "run-capital evidence verifier authority dispatch changed"
+                "run-capital evidence does not match canonical durable roots"
             )
-        for field_name in field_names:
-            supplied = getattr(candidate, field_name)
-            expected = getattr(canonical, field_name)
-            if type(supplied) is not type(expected) or supplied != expected:
-                raise ProductRunCapitalPathError(
-                    "run-capital evidence does not match canonical durable roots"
-                )
+        require_verifier_dispatch()
         return canonical
 
     verifier.__name__ = "verify_product_run_capital_path_evidence"

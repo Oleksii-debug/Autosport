@@ -402,13 +402,93 @@ def _build_qualification_verifier(
     resolver,
     authority_type: type[ProductFixedNIidQualificationAuthority],
 ):
-    """Freeze verifier dispatch and compare immutable fields without dataclass __eq__."""
+    """Freeze verifier dispatch and compare exact immutable field snapshots."""
 
     module_globals = globals()
     resolver_code = getattr(resolver, "__code__", None)
     if resolver_code is None:
         raise RuntimeError("fixed-N IID qualification resolver is unavailable")
     fields = _QUALIFICATION_FIELDS
+    descriptors = tuple(
+        (name, authority_type.__dict__[name]) for name in fields
+    )
+
+    def require_verifier_dispatch() -> None:
+        if (
+            module_globals.get("resolve_product_fixed_n_iid_qualification")
+            is not resolver
+            or getattr(resolver, "__code__", None) is not resolver_code
+            or module_globals.get("ProductFixedNIidQualificationAuthority")
+            is not authority_type
+            or module_globals.get("_AUTHORITY_TYPE") is not authority_type
+            or any(
+                authority_type.__dict__.get(name) is not descriptor
+                for name, descriptor in descriptors
+            )
+        ):
+            raise ProductFixedNIidQualificationError(
+                "fixed-N IID qualification verifier authority dispatch changed"
+            )
+
+    def descriptor_value(
+        descriptor: object,
+        instance: object,
+    ) -> object:
+        getter = getattr(descriptor, "__get__", None)
+        if getter is None:
+            raise ProductFixedNIidQualificationError(
+                "fixed-N IID qualification field descriptor is unavailable"
+            )
+        return getter(instance, authority_type)
+
+    def exact_text(value: object, name: str) -> str:
+        if type(value) is not str:
+            raise ProductFixedNIidQualificationError(
+                f"fixed-N IID qualification {name} must be exact text"
+            )
+        return value
+
+    def exact_text_tuple(value: object, name: str) -> tuple[str, ...]:
+        if type(value) is not tuple or any(type(item) is not str for item in value):
+            raise ProductFixedNIidQualificationError(
+                f"fixed-N IID qualification {name} must be an exact text tuple"
+            )
+        return value
+
+    def snapshot(
+        value: ProductFixedNIidQualificationAuthority,
+    ) -> tuple[object, ...]:
+        if type(value) is not authority_type:
+            raise TypeError(
+                "candidate must be exact ProductFixedNIidQualificationAuthority"
+            )
+        raw = {
+            name: descriptor_value(descriptor, value)
+            for name, descriptor in descriptors
+        }
+        return (
+            exact_text(raw["experiment_id"], "experiment_id"),
+            exact_text_tuple(raw["planned_member_ids"], "planned_member_ids"),
+            exact_text_tuple(
+                raw["member_execution_receipt_sha256"],
+                "member_execution_receipt_sha256",
+            ),
+            exact_text_tuple(
+                raw["member_path_evidence_sha256"],
+                "member_path_evidence_sha256",
+            ),
+            exact_text(raw["occurrence_root_sha256"], "occurrence_root_sha256"),
+            exact_text(
+                raw["sampling_manifest_sha256"],
+                "sampling_manifest_sha256",
+            ),
+            exact_text(
+                raw["initial_capital_state_sha256"],
+                "initial_capital_state_sha256",
+            ),
+            exact_text(raw["stake_policy_sha256"], "stake_policy_sha256"),
+            exact_text(raw["qualification_sha256"], "qualification_sha256"),
+        )
 
     def verifier(
         candidate: ProductFixedNIidQualificationAuthority,
@@ -422,24 +502,9 @@ def _build_qualification_verifier(
         settlement_bridges: tuple[PaperSettlementLearningBridge, ...],
         authority_root: str | Path | None = None,
     ) -> ProductFixedNIidQualificationAuthority:
-        def require_verifier_dispatch() -> None:
-            if (
-                module_globals.get("resolve_product_fixed_n_iid_qualification")
-                is not resolver
-                or getattr(resolver, "__code__", None) is not resolver_code
-                or module_globals.get("ProductFixedNIidQualificationAuthority")
-                is not authority_type
-            ):
-                raise ProductFixedNIidQualificationError(
-                    "fixed-N IID qualification verifier authority dispatch changed"
-                )
-
         require_verifier_dispatch()
         _require_dispatch()
-        if type(candidate) is not authority_type:
-            raise TypeError(
-                "candidate must be exact ProductFixedNIidQualificationAuthority"
-            )
+        candidate_snapshot = snapshot(candidate)
         canonical = resolver(
             membership,
             registry_path=registry_path,
@@ -452,21 +517,7 @@ def _build_qualification_verifier(
         )
         require_verifier_dispatch()
         _require_dispatch()
-        if type(canonical) is not authority_type:
-            raise ProductFixedNIidQualificationError(
-                "fixed-N IID qualification resolver returned invalid authority type"
-            )
-        try:
-            differs = any(
-                object.__getattribute__(candidate, field_name)
-                != object.__getattribute__(canonical, field_name)
-                for field_name in fields
-            )
-        except AttributeError as exc:
-            raise ProductFixedNIidQualificationError(
-                "fixed-N IID qualification differs from canonical durable evidence"
-            ) from exc
-        if differs:
+        if snapshot(canonical) != candidate_snapshot:
             raise ProductFixedNIidQualificationError(
                 "fixed-N IID qualification differs from canonical durable evidence"
             )

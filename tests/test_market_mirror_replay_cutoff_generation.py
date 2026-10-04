@@ -325,6 +325,115 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     SQLiteMarketStore(path)
             self.assertTrue(tampered)
 
+    def test_restart_rejects_projection_trigger_before_rebuild_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            event = self.event(
+                sequence=1,
+                odds="2.00",
+                observed_ts="2026-09-16T19:00:00+00:00",
+            )
+            store = SQLiteMarketStore(path)
+            try:
+                self.assertTrue(store.append(event))
+            finally:
+                store.close()
+
+            original_rebuild = SQLiteMarketStore._rebuild_current_quotes
+            injected = False
+
+            def inject_trigger_before_rebuild(instance, *, append_authority):
+                nonlocal injected
+                if not injected:
+                    injected = True
+                    external = sqlite3.connect(path)
+                    try:
+                        external.execute(
+                            """CREATE TRIGGER startup_projection_side_effect
+                               AFTER DELETE ON current_quotes
+                               BEGIN
+                                   DELETE FROM market_events;
+                               END"""
+                        )
+                        external.commit()
+                    finally:
+                        external.close()
+                return original_rebuild(
+                    instance,
+                    append_authority=append_authority,
+                )
+
+            with patch.object(
+                SQLiteMarketStore,
+                "_rebuild_current_quotes",
+                new=inject_trigger_before_rebuild,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "current_quotes schema is not canonical: triggers are not allowed",
+                ):
+                    SQLiteMarketStore(path)
+
+            self.assertTrue(injected)
+            external = sqlite3.connect(path)
+            try:
+                self.assertEqual(
+                    external.execute("SELECT COUNT(*) FROM market_events").fetchone(),
+                    (1,),
+                )
+            finally:
+                external.close()
+
+    def test_restart_repairs_projection_row_missing_from_proven_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            event = self.event(
+                sequence=1,
+                odds="2.00",
+                observed_ts="2026-09-16T19:00:00+00:00",
+            )
+            store = SQLiteMarketStore(path)
+            try:
+                self.assertTrue(store.append(event))
+            finally:
+                store.close()
+
+            forged_raw = event.to_dict()
+            forged_raw["selection_id"] = "selection-forged"
+            forged_raw["sequence"] = 999
+            forged = MarketEvent.from_dict(forged_raw)
+            external = sqlite3.connect(path)
+            try:
+                external.execute(
+                    """INSERT INTO current_quotes
+                       (source_id, quote_key, observed_ts, sequence, payload_json)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        forged.source_id,
+                        forged.quote_key,
+                        forged.observed_ts,
+                        forged.sequence,
+                        storage_module._canonical_payload(forged),
+                    ),
+                )
+                external.commit()
+            finally:
+                external.close()
+
+            reopened = SQLiteMarketStore(path)
+            try:
+                current = reopened.current_by_source()
+                self.assertEqual(set(current), {(event.source_id, event.quote_key)})
+                self.assertEqual(current[(event.source_id, event.quote_key)], event)
+                self.assertEqual(
+                    reopened.connection.execute(
+                        "SELECT COUNT(*) FROM current_quotes"
+                    ).fetchone(),
+                    (1,),
+                )
+            finally:
+                reopened.close()
+
     def test_late_backdated_append_cannot_rewrite_frozen_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

@@ -74,7 +74,7 @@ def test_decimal_subclass_cannot_bypass_ess_raw_support_bound() -> None:
     assert boundary.effective_sample_size == Decimal("2")
 
     hostile = _AdversarialEffectiveSampleSize("1000")
-    assert hostile > Decimal("2") is False
+    assert not (hostile > Decimal("2"))
 
     with pytest.raises(
         PolicyUtilityError,

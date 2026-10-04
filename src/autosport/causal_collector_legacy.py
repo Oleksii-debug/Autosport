@@ -492,6 +492,96 @@ class _CanonicalDesktopApplicationStore(_JsonAtomicStore):
         receipt.validate()
         return receipt
 
+    def _validated_completed_receipt(
+        self,
+        *,
+        delta_id: str,
+        item: Mapping[str, Any],
+        stored_source_id: str,
+    ) -> DesktopApplicationReceipt:
+        """Re-prove restart-authority evidence without compacted CollectorDelta rows."""
+
+        try:
+            source_cursor = _text(item.get("source_cursor"), "source_cursor")
+            prepared_at = item.get("prepared_at")
+            prepared = _instant(prepared_at, "prepared_at")
+            completed_at = item.get("completed_at")
+            completed = _instant(completed_at, "completed_at")
+            health_before = self._health_state(item.get("health_before"))
+            health_after = self._health_state(item.get("health_after"))
+            receipt = DesktopApplicationReceipt(
+                delta_id=delta_id,
+                canonical_event_digest=item.get("canonical_event_digest"),
+                receipt_id=item.get("receipt_id"),
+                applied_at=completed_at,
+            )
+            receipt.validate()
+        except (TypeError, ValueError) as exc:
+            raise ApplicationReceiptError(
+                "completed canonical desktop application evidence is malformed"
+            ) from exc
+
+        expected_receipt_id = (
+            f"canonical-desktop:{delta_id}:{receipt.canonical_event_digest[:16]}"
+        )
+        if receipt.receipt_id != expected_receipt_id:
+            raise ApplicationReceiptError(
+                "completed canonical desktop application receipt identity is invalid"
+            )
+        if completed < prepared:
+            raise ApplicationReceiptError(
+                "completed canonical desktop application predates preparation"
+            )
+        if (
+            health_before.source_id != stored_source_id
+            or health_after.source_id != stored_source_id
+        ):
+            raise ApplicationReceiptError(
+                "completed canonical desktop application health source identity changed"
+            )
+
+        expected_after = {
+            "poll_count": health_before.poll_count + 1,
+            "total_received": health_before.total_received + 1,
+            "total_accepted": health_before.total_accepted + 1,
+            "total_rejected": health_before.total_rejected,
+            "total_failures": health_before.total_failures,
+            "consecutive_failures": 0,
+            "last_success_at": prepared_at,
+            "last_error_at": health_before.last_error_at,
+            "last_error": None,
+            "last_cursor": source_cursor,
+            "last_failure_kind": None,
+            "consecutive_failure_kind_count": 0,
+        }
+        for field_name, expected in expected_after.items():
+            if getattr(health_after, field_name) != expected:
+                raise ApplicationReceiptError(
+                    "completed canonical desktop application health transition is invalid"
+                )
+
+        expected_status = "degraded" if health_after.quality_flags else "healthy"
+        if health_after.status != expected_status:
+            raise ApplicationReceiptError(
+                "completed canonical desktop application health status is invalid"
+            )
+        if health_after.quality_flags != tuple(sorted(health_after.quality_flags)):
+            raise ApplicationReceiptError(
+                "completed canonical desktop application quality flags are not canonical"
+            )
+        if health_before.latest_source_ts is not None:
+            if health_after.latest_source_ts is None or _instant(
+                health_after.latest_source_ts,
+                "health_after.latest_source_ts",
+            ) < _instant(
+                health_before.latest_source_ts,
+                "health_before.latest_source_ts",
+            ):
+                raise ApplicationReceiptError(
+                    "completed canonical desktop application source time regressed"
+                )
+        return receipt
+
     def completed_receipts_for_source(
         self,
         source_id: str,
@@ -542,14 +632,13 @@ class _CanonicalDesktopApplicationStore(_JsonAtomicStore):
                 raise ApplicationReceiptError(
                     "canonical desktop application completed without durable effects"
                 )
-            receipt = DesktopApplicationReceipt(
-                delta_id=delta_id,
-                canonical_event_digest=item.get("canonical_event_digest"),
-                receipt_id=item.get("receipt_id"),
-                applied_at=completed_at,
+            receipts.append(
+                self._validated_completed_receipt(
+                    delta_id=delta_id,
+                    item=item,
+                    stored_source_id=stored_source_id,
+                )
             )
-            receipt.validate()
-            receipts.append(receipt)
         return tuple(sorted(receipts, key=lambda receipt: receipt.delta_id))
 
 

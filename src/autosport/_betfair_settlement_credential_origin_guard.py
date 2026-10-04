@@ -57,7 +57,7 @@ def _install_credential_origin_guard():
     resolve_identity = _RESOLVE_IDENTITY
     require_identity = _REQUIRE_IDENTITY
 
-    def _metadata_snapshot(function):
+    def _function_snapshot(function):
         code = getattr(function, "__code__", None)
         defaults = getattr(function, "__defaults__", None)
         kwdefaults = getattr(function, "__kwdefaults__", None)
@@ -77,51 +77,48 @@ def _install_credential_origin_guard():
             raise RuntimeError(
                 "Betfair settlement credential-origin closure authority is unavailable"
             ) from exc
-        return code, defaults, kwdefaults, kwitems, closure, closure_values
+        return (
+            function,
+            code,
+            defaults,
+            kwdefaults,
+            kwitems,
+            closure,
+            closure_values,
+        )
 
-    (
-        resolve_identity_code,
-        resolve_identity_defaults,
-        resolve_identity_kwdefaults,
-        resolve_identity_kwitems,
-        resolve_identity_closure,
-        resolve_identity_closure_values,
-    ) = _metadata_snapshot(resolve_identity)
-    (
-        require_identity_code,
-        require_identity_defaults,
-        require_identity_kwdefaults,
-        require_identity_kwitems,
-        require_identity_closure,
-        require_identity_closure_values,
-    ) = _metadata_snapshot(require_identity)
-    (
-        qualified_read_code,
-        qualified_read_defaults,
-        qualified_read_kwdefaults,
-        qualified_read_kwitems,
-        qualified_read_closure,
-        qualified_read_closure_values,
-    ) = _metadata_snapshot(original_qualified_read)
-    (
-        currency_lookup_code,
-        currency_lookup_defaults,
-        currency_lookup_kwdefaults,
-        currency_lookup_kwitems,
-        currency_lookup_closure,
-        currency_lookup_closure_values,
-    ) = _metadata_snapshot(original_currency_for_capture)
+    def _executable_graph_snapshot(function):
+        pending = [function]
+        seen: set[int] = set()
+        records = []
+        while pending:
+            current = pending.pop()
+            current_id = id(current)
+            if current_id in seen:
+                continue
+            seen.add(current_id)
+            record = _function_snapshot(current)
+            records.append(record)
+            for captured in record[6]:
+                if getattr(captured, "__code__", None) is not None:
+                    pending.append(captured)
+        return tuple(records)
 
-    def _metadata_current(
-        function,
-        *,
-        code,
-        defaults,
-        kwdefaults,
-        kwitems,
-        closure,
-        closure_values,
-    ) -> bool:
+    resolve_identity_graph = _executable_graph_snapshot(resolve_identity)
+    require_identity_graph = _executable_graph_snapshot(require_identity)
+    qualified_read_graph = _executable_graph_snapshot(original_qualified_read)
+    currency_lookup_graph = _executable_graph_snapshot(original_currency_for_capture)
+
+    def _function_record_current(record) -> bool:
+        (
+            function,
+            code,
+            defaults,
+            kwdefaults,
+            kwitems,
+            closure,
+            closure_values,
+        ) = record
         current_kwdefaults = getattr(function, "__kwdefaults__", None)
         current_closure = getattr(function, "__closure__", None)
         try:
@@ -143,7 +140,6 @@ def _install_credential_origin_guard():
                 for current, expected in zip(
                     current_closure_values,
                     closure_values,
-                    strict=True,
                 )
             )
             and (
@@ -159,57 +155,28 @@ def _install_credential_origin_guard():
             )
         )
 
+    def _executable_graph_current(graph) -> bool:
+        return all(_function_record_current(record) for record in graph)
+
     def _identity_verifier_current() -> bool:
         return (
             globals().get("_RESOLVE_IDENTITY") is resolve_identity
             and globals().get("_REQUIRE_IDENTITY") is require_identity
-            and _metadata_current(
-                resolve_identity,
-                code=resolve_identity_code,
-                defaults=resolve_identity_defaults,
-                kwdefaults=resolve_identity_kwdefaults,
-                kwitems=resolve_identity_kwitems,
-                closure=resolve_identity_closure,
-                closure_values=resolve_identity_closure_values,
-            )
-            and _metadata_current(
-                require_identity,
-                code=require_identity_code,
-                defaults=require_identity_defaults,
-                kwdefaults=require_identity_kwdefaults,
-                kwitems=require_identity_kwitems,
-                closure=require_identity_closure,
-                closure_values=require_identity_closure_values,
-            )
+            and _executable_graph_current(resolve_identity_graph)
+            and _executable_graph_current(require_identity_graph)
         )
 
     def _qualified_read_current() -> bool:
         return (
             globals().get("_ORIGINAL_QUALIFIED_READ") is original_qualified_read
-            and _metadata_current(
-                original_qualified_read,
-                code=qualified_read_code,
-                defaults=qualified_read_defaults,
-                kwdefaults=qualified_read_kwdefaults,
-                kwitems=qualified_read_kwitems,
-                closure=qualified_read_closure,
-                closure_values=qualified_read_closure_values,
-            )
+            and _executable_graph_current(qualified_read_graph)
         )
 
     def _currency_lookup_current() -> bool:
         return (
             globals().get("_ORIGINAL_CURRENCY_FOR_CAPTURE")
             is original_currency_for_capture
-            and _metadata_current(
-                original_currency_for_capture,
-                code=currency_lookup_code,
-                defaults=currency_lookup_defaults,
-                kwdefaults=currency_lookup_kwdefaults,
-                kwitems=currency_lookup_kwitems,
-                closure=currency_lookup_closure,
-                closure_values=currency_lookup_closure_values,
-            )
+            and _executable_graph_current(currency_lookup_graph)
         )
 
     def _assert_identity_verifier_current() -> None:

@@ -304,7 +304,10 @@ def _assess_unsealed(
 
 
 def _install_price_ladder_admission_authority():
-    issued: dict[int, tuple[object, str]] = {}
+    issued: dict[
+        int,
+        tuple[object, str, BetfairMarketPriceLadderObservation],
+    ] = {}
     raw_assess = _assess_unsealed
     raw_assess_code = raw_assess.__code__
     fingerprint = _result_fingerprint
@@ -402,6 +405,12 @@ def _install_price_ladder_admission_authority():
         )
         if type(result) is not result_type:
             raise TypeError("price-ladder assessor returned invalid result type")
+        # Close the final issuance race against a concurrently observed
+        # incompatible MarketDescription revision. The result registry also keeps
+        # the exact provider receipt so later positive-property checks can
+        # revalidate its current definition generation instead of turning a
+        # historical admissible state into timeless authority.
+        acquisition(observation)
         result_id = id(result)
         result_fingerprint = fingerprint(result)
 
@@ -410,7 +419,11 @@ def _install_price_ladder_admission_authority():
             if existing is not None and existing[0] is current:
                 issued.pop(key, None)
 
-        issued[result_id] = (ref(result, forget), result_fingerprint)
+        issued[result_id] = (
+            ref(result, forget),
+            result_fingerprint,
+            observation,
+        )
         return result
 
     def is_authoritative(result: BetfairPriceLadderAdmission) -> bool:
@@ -420,6 +433,7 @@ def _install_price_ladder_admission_authority():
         if current is None or current[0]() is not result:
             return False
         try:
+            acquisition(current[2])
             return current[1] == fingerprint(result)
         except Exception:
             return False

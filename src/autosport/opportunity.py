@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
-from typing import Any, Iterable
+from typing import Any
 
 from .domain import MarketEvent, _quote_identity
 from .forecasting import ForecastRecord, parse_iso_timestamp
@@ -34,6 +35,22 @@ class OpportunityDecision(str, Enum):
     WAIT = "wait"
     ZERO = "zero"
     ACTIONABLE = "actionable"
+
+
+def _strategy_class_from_serialized(
+    value: object,
+    *,
+    _strategy_type: type[StrategyClass] = StrategyClass,
+) -> StrategyClass:
+    return _strategy_type(value)
+
+
+def _opportunity_decision_from_serialized(
+    value: object,
+    *,
+    _decision_type: type[OpportunityDecision] = OpportunityDecision,
+) -> OpportunityDecision:
+    return _decision_type(value)
 
 
 def _canonical_text(value: object, field_name: str) -> str:
@@ -81,8 +98,10 @@ def _quote_key(
     market_id: str,
     selection_id: str,
     sport: str | None,
+    *,
+    _quote_identity_fn=_quote_identity,
 ) -> str:
-    return _quote_identity(event_id, market_id, selection_id, sport)
+    return _quote_identity_fn(event_id, market_id, selection_id, sport)
 
 
 def _canonical_hash(value: object, field_name: str) -> str:
@@ -105,8 +124,9 @@ def _finite_decimal(
     field_name: str,
     *,
     nonnegative: bool = False,
+    _decimal_type: type[Decimal] = Decimal,
 ) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
+    if type(value) is not _decimal_type or not value.is_finite():
         raise OpportunityContractError(
             f"{field_name} must be an exact finite Decimal"
         )
@@ -115,14 +135,20 @@ def _finite_decimal(
     return value
 
 
-def _decimal_from_serialized(value: object, field_name: str) -> Decimal:
+def _decimal_from_serialized(
+    value: object,
+    field_name: str,
+    *,
+    _decimal_type: type[Decimal] = Decimal,
+    _invalid_operation_type: type[InvalidOperation] = InvalidOperation,
+) -> Decimal:
     if type(value) is not str or not value or value.strip() != value:
         raise OpportunityContractError(
             f"{field_name} must be a canonical finite Decimal string"
         )
     try:
-        result = Decimal(value)
-    except InvalidOperation as exc:
+        result = _decimal_type(value)
+    except _invalid_operation_type as exc:
         raise OpportunityContractError(
             f"{field_name} must be a canonical finite Decimal string"
         ) from exc
@@ -133,15 +159,20 @@ def _decimal_from_serialized(value: object, field_name: str) -> Decimal:
     return result
 
 
-def _canonical_json_hash(payload: object) -> str:
-    encoded = json.dumps(
+def _canonical_json_hash(
+    payload: object,
+    *,
+    _json_dumps=json.dumps,
+    _sha256=hashlib.sha256,
+) -> str:
+    encoded = _json_dumps(
         payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return _sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -170,12 +201,24 @@ class EvidenceRef:
         )
 
 
+def _evidence_ref_from_dict(
+    raw: object,
+    *,
+    _evidence_ref_type: type[EvidenceRef] = EvidenceRef,
+) -> EvidenceRef:
+    return _evidence_ref_type.from_dict(raw)
+
+
 def _sorted_unique_evidence(
-    values: Iterable[EvidenceRef],
+    values: tuple[EvidenceRef, ...],
     field_name: str,
+    *,
+    _evidence_ref_type: type[EvidenceRef] = EvidenceRef,
 ) -> tuple[EvidenceRef, ...]:
-    refs = tuple(values)
-    if any(not isinstance(item, EvidenceRef) for item in refs):
+    if type(values) is not tuple:
+        raise OpportunityContractError(f"{field_name} must be a tuple")
+    refs = values
+    if any(type(item) is not _evidence_ref_type for item in refs):
         raise OpportunityContractError(
             f"{field_name} must contain only EvidenceRef values"
         )
@@ -185,6 +228,21 @@ def _sorted_unique_evidence(
             f"{field_name} contains duplicate references"
         )
     return ordered
+
+
+def _canonical_market_event_copy(
+    event: object,
+    *,
+    _market_event_type: type[MarketEvent] = MarketEvent,
+) -> MarketEvent:
+    if type(event) is not _market_event_type:
+        raise OpportunityContractError("quote source must be a MarketEvent")
+    try:
+        return _market_event_type.from_dict(event.to_dict())
+    except (TypeError, ValueError) as exc:
+        raise OpportunityContractError(
+            "quote source MarketEvent is non-canonical"
+        ) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +262,10 @@ class QuoteRef:
     market_snapshot_hash: str | None = None
     sport: str | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _finite_decimal_fn=_finite_decimal,
+    ) -> None:
         for name in (
             "event_id",
             "market_id",
@@ -220,7 +281,7 @@ class QuoteRef:
             raise OpportunityContractError(
                 "quote sequence must be a non-negative non-boolean int"
             )
-        odds = _finite_decimal(self.decimal_odds, "quote decimal_odds")
+        odds = _finite_decimal_fn(self.decimal_odds, "quote decimal_odds")
         if odds <= 1:
             raise OpportunityContractError(
                 "quote decimal_odds must be greater than 1"
@@ -229,8 +290,8 @@ class QuoteRef:
         _optional_hash(self.market_snapshot_hash, "market_snapshot_hash")
 
     @property
-    def quote_key(self) -> str:
-        return _quote_key(
+    def quote_key(self, _quote_key_fn=_quote_key) -> str:
+        return _quote_key_fn(
             self.event_id,
             self.market_id,
             self.selection_id,
@@ -254,15 +315,10 @@ class QuoteRef:
         event: MarketEvent,
         *,
         market_snapshot_hash: str | None = None,
+        _canonical_market_event_copy_fn=_canonical_market_event_copy,
+        _canonical_json_hash_fn=_canonical_json_hash,
     ) -> "QuoteRef":
-        if not isinstance(event, MarketEvent):
-            raise OpportunityContractError("quote source must be a MarketEvent")
-        try:
-            canonical = MarketEvent.from_dict(event.to_dict())
-        except (TypeError, ValueError) as exc:
-            raise OpportunityContractError(
-                "quote source MarketEvent is non-canonical"
-            ) from exc
+        canonical = _canonical_market_event_copy_fn(event)
         payload = canonical.to_dict()
         return cls(
             event_id=canonical.event_id,
@@ -274,7 +330,7 @@ class QuoteRef:
             observed_ts=canonical.observed_ts,
             source_ts=canonical.source_ts,
             ingest_ts=canonical.ingest_ts,
-            market_event_hash=_canonical_json_hash(payload),
+            market_event_hash=_canonical_json_hash_fn(payload),
             market_snapshot_hash=_optional_hash(
                 market_snapshot_hash,
                 "market_snapshot_hash",
@@ -353,6 +409,14 @@ class QuoteRef:
         )
 
 
+def _quote_ref_from_dict(
+    raw: object,
+    *,
+    _quote_ref_type: type[QuoteRef] = QuoteRef,
+) -> QuoteRef:
+    return _quote_ref_type.from_dict(raw)
+
+
 @dataclass(frozen=True, slots=True)
 class PredictiveEligibilityEvidence:
     """Versioned external witness that makes forecast uncertainty actionable."""
@@ -371,7 +435,11 @@ class PredictiveEligibilityEvidence:
     as_of: str
     valid_until: str
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _parse_iso_timestamp=parse_iso_timestamp,
+        _finite_decimal_fn=_finite_decimal,
+    ) -> None:
         _canonical_text(self.evaluation_id, "predictive evaluation_id")
         _canonical_hash(self.evaluation_sha256, "predictive evaluation_sha256")
         _canonical_hash(self.protocol_sha256, "predictive protocol_sha256")
@@ -397,7 +465,7 @@ class PredictiveEligibilityEvidence:
             raise OpportunityContractError(
                 "predictive minimum_sample_size must be a positive non-boolean int"
             )
-        maximum = _finite_decimal(
+        maximum = _finite_decimal_fn(
             self.maximum_uncertainty,
             "predictive maximum_uncertainty",
             nonnegative=True,
@@ -406,8 +474,8 @@ class PredictiveEligibilityEvidence:
             raise OpportunityContractError(
                 "predictive maximum_uncertainty must be between 0 and 1"
             )
-        as_of = parse_iso_timestamp(self.as_of)
-        valid_until = parse_iso_timestamp(self.valid_until)
+        as_of = _parse_iso_timestamp(self.as_of)
+        valid_until = _parse_iso_timestamp(self.valid_until)
         if as_of > valid_until:
             raise OpportunityContractError(
                 "predictive eligibility as_of must not be after valid_until"
@@ -502,6 +570,30 @@ class PredictiveEligibilityEvidence:
         )
 
 
+def _require_exact_forecast_binding(
+    forecast: object,
+    quote: object,
+    *,
+    _forecast_type: type[ForecastRecord] = ForecastRecord,
+    _quote_ref_type: type[QuoteRef] = QuoteRef,
+) -> tuple[ForecastRecord, QuoteRef]:
+    if type(forecast) is not _forecast_type:
+        raise OpportunityContractError(
+            "forecast source must be a ForecastRecord"
+        )
+    if type(quote) is not _quote_ref_type:
+        raise OpportunityContractError("forecast quote must be a QuoteRef")
+    return forecast, quote
+
+
+def _predictive_eligibility_from_dict(
+    raw: object,
+    *,
+    _evidence_type: type[PredictiveEligibilityEvidence] = PredictiveEligibilityEvidence,
+) -> PredictiveEligibilityEvidence:
+    return _evidence_type.from_dict(raw)
+
+
 @dataclass(frozen=True, slots=True)
 class ForecastRef:
     """Causal forecast evidence bound to one exact QuoteRef snapshot.
@@ -523,11 +615,18 @@ class ForecastRef:
     uncertainty: Decimal | None = None
     predictive_eligibility: PredictiveEligibilityEvidence | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _predictive_evidence_type: type[PredictiveEligibilityEvidence] = (
+            PredictiveEligibilityEvidence
+        ),
+        _parse_iso_timestamp=parse_iso_timestamp,
+        _finite_decimal_fn=_finite_decimal,
+    ) -> None:
         _canonical_text(self.forecast_id, "forecast_id")
         _canonical_hash(self.forecast_hash, "forecast_hash")
         _canonical_text(self.quote_key, "forecast quote_key")
-        probability = _finite_decimal(
+        probability = _finite_decimal_fn(
             self.probability, "forecast probability"
         )
         if probability < 0 or probability > 1:
@@ -535,7 +634,7 @@ class ForecastRef:
                 "forecast probability must be between 0 and 1"
             )
         _canonical_text(self.input_cutoff_ts, "forecast input_cutoff_ts")
-        parse_iso_timestamp(self.input_cutoff_ts)
+        _parse_iso_timestamp(self.input_cutoff_ts)
         _canonical_hash(self.market_snapshot_hash, "market_snapshot_hash")
         _canonical_hash(
             self.quote_market_event_hash,
@@ -558,7 +657,7 @@ class ForecastRef:
             _canonical_text(self.model_id, "forecast model_id")
             _canonical_text(self.model_version, "forecast model_version")
             _canonical_text(self.strategy_version, "forecast strategy_version")
-            uncertainty = _finite_decimal(
+            uncertainty = _finite_decimal_fn(
                 self.uncertainty,
                 "forecast uncertainty",
                 nonnegative=True,
@@ -568,9 +667,7 @@ class ForecastRef:
                     "forecast uncertainty must be between 0 and 1"
                 )
         if self.predictive_eligibility is not None:
-            if not isinstance(
-                self.predictive_eligibility, PredictiveEligibilityEvidence
-            ):
+            if type(self.predictive_eligibility) is not _predictive_evidence_type:
                 raise OpportunityContractError(
                     "forecast predictive_eligibility must be typed evidence"
                 )
@@ -595,13 +692,9 @@ class ForecastRef:
         quote: QuoteRef,
         *,
         predictive_eligibility: PredictiveEligibilityEvidence | None = None,
+        _require_exact_forecast_binding_fn=_require_exact_forecast_binding,
     ) -> "ForecastRef":
-        if not isinstance(forecast, ForecastRecord):
-            raise OpportunityContractError(
-                "forecast source must be a ForecastRecord"
-            )
-        if not isinstance(quote, QuoteRef):
-            raise OpportunityContractError("forecast quote must be a QuoteRef")
+        forecast, quote = _require_exact_forecast_binding_fn(forecast, quote)
         if forecast.quote_key != quote.quote_key:
             raise OpportunityContractError(
                 "forecast quote_key does not match bound QuoteRef"
@@ -638,6 +731,9 @@ class ForecastRef:
         decision_time: object,
         *,
         expected_model_id: str | None,
+        _parse_iso_timestamp=parse_iso_timestamp,
+        _datetime_type=datetime,
+        _utc_zone=timezone.utc,
     ) -> str | None:
         if (
             self.model_id is None
@@ -652,15 +748,20 @@ class ForecastRef:
             )
         if expected_model_id is None or self.model_id != expected_model_id:
             return "predictive forecast model identity does not match intent model"
-        if not hasattr(decision_time, "tzinfo") or decision_time.tzinfo is None:
+        if (
+            type(decision_time) is not _datetime_type
+            or decision_time.tzinfo is None
+            or decision_time.utcoffset() is None
+        ):
             return "predictive decision time must be timezone-aware"
-        cutoff = parse_iso_timestamp(self.input_cutoff_ts)
-        if cutoff > decision_time:
+        decision_cut = decision_time.astimezone(_utc_zone)
+        cutoff = _parse_iso_timestamp(self.input_cutoff_ts)
+        if cutoff > decision_cut:
             return "predictive forecast input cutoff is from the future"
         witness = self.predictive_eligibility
-        as_of = parse_iso_timestamp(witness.as_of)
-        valid_until = parse_iso_timestamp(witness.valid_until)
-        if decision_time < as_of or decision_time > valid_until:
+        as_of = _parse_iso_timestamp(witness.as_of)
+        valid_until = _parse_iso_timestamp(witness.valid_until)
+        if decision_cut < as_of or decision_cut > valid_until:
             return "predictive calibration eligibility evidence is stale"
         if not witness.support_qualified:
             return "predictive calibration evidence has insufficient sample support"
@@ -785,9 +886,17 @@ class ForecastRef:
             predictive_eligibility=(
                 None
                 if eligibility_raw is None
-                else PredictiveEligibilityEvidence.from_dict(eligibility_raw)
+                else _predictive_eligibility_from_dict(eligibility_raw)
             ),
         )
+
+
+def _forecast_ref_from_dict(
+    raw: object,
+    *,
+    _forecast_ref_type: type[ForecastRef] = ForecastRef,
+) -> ForecastRef:
+    return _forecast_ref_type.from_dict(raw)
 
 
 @dataclass(frozen=True, slots=True)
@@ -799,12 +908,21 @@ class Opportunity:
     forecasts: tuple[ForecastRef, ...] = ()
     evidence_refs: tuple[EvidenceRef, ...] = ()
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.strategy_class, StrategyClass):
+    def __post_init__(
+        self,
+        _strategy_type: type[StrategyClass] = StrategyClass,
+        _decision_type: type[OpportunityDecision] = OpportunityDecision,
+        _predictive_edge: StrategyClass = StrategyClass.PREDICTIVE_EDGE,
+        _hybrid: StrategyClass = StrategyClass.HYBRID,
+        _quote_ref_type: type[QuoteRef] = QuoteRef,
+        _forecast_ref_type: type[ForecastRef] = ForecastRef,
+        _sorted_unique_evidence_fn=_sorted_unique_evidence,
+    ) -> None:
+        if type(self.strategy_class) is not _strategy_type:
             raise OpportunityContractError(
                 "strategy_class must be a StrategyClass"
             )
-        if not isinstance(self.decision, OpportunityDecision):
+        if type(self.decision) is not _decision_type:
             raise OpportunityContractError(
                 "decision must be an OpportunityDecision"
             )
@@ -813,26 +931,28 @@ class Opportunity:
                 "claims_probability_edge must be a boolean"
             )
         if (
-            self.strategy_class is StrategyClass.PREDICTIVE_EDGE
+            self.strategy_class is _predictive_edge
             and not self.claims_probability_edge
         ):
             raise OpportunityContractError(
                 "PREDICTIVE_EDGE must claim a probability edge"
             )
         if self.claims_probability_edge and self.strategy_class not in {
-            StrategyClass.PREDICTIVE_EDGE,
-            StrategyClass.HYBRID,
+            _predictive_edge,
+            _hybrid,
         }:
             raise OpportunityContractError(
                 "probability edge is supported only for PREDICTIVE_EDGE or HYBRID"
             )
 
-        quotes = tuple(self.quotes)
+        if type(self.quotes) is not tuple:
+            raise OpportunityContractError("opportunity quotes must be a tuple")
+        quotes = self.quotes
         if not quotes:
             raise OpportunityContractError(
                 "opportunity requires at least one quote"
             )
-        if any(not isinstance(item, QuoteRef) for item in quotes):
+        if any(type(item) is not _quote_ref_type for item in quotes):
             raise OpportunityContractError(
                 "opportunity quotes must be QuoteRef values"
             )
@@ -849,8 +969,10 @@ class Opportunity:
             )
         object.__setattr__(self, "quotes", quotes)
 
-        forecasts = tuple(self.forecasts)
-        if any(not isinstance(item, ForecastRef) for item in forecasts):
+        if type(self.forecasts) is not tuple:
+            raise OpportunityContractError("opportunity forecasts must be a tuple")
+        forecasts = self.forecasts
+        if any(type(item) is not _forecast_ref_type for item in forecasts):
             raise OpportunityContractError(
                 "opportunity forecasts must be ForecastRef values"
             )
@@ -899,7 +1021,7 @@ class Opportunity:
         object.__setattr__(
             self,
             "evidence_refs",
-            _sorted_unique_evidence(
+            _sorted_unique_evidence_fn(
                 self.evidence_refs,
                 "opportunity evidence_refs",
             ),
@@ -923,9 +1045,12 @@ class Opportunity:
         return None
 
     @property
-    def predictive_uncertainty_haircut(self) -> Decimal | None:
+    def predictive_uncertainty_haircut(
+        self,
+        _decimal_type: type[Decimal] = Decimal,
+    ) -> Decimal | None:
         if not self.claims_probability_edge:
-            return Decimal("0")
+            return _decimal_type("0")
         values = tuple(
             forecast.uncertainty
             for forecast in self.forecasts
@@ -945,14 +1070,20 @@ class Opportunity:
         }
 
     @property
-    def conflict_key(self) -> str:
+    def conflict_key(
+        self,
+        _canonical_json_hash_fn=_canonical_json_hash,
+    ) -> str:
         """Stable identity for one evidence-defined opportunity before decision state."""
 
-        return _canonical_json_hash(self._decision_independent_payload())
+        return _canonical_json_hash_fn(self._decision_independent_payload())
 
     @property
-    def opportunity_id(self) -> str:
-        return _canonical_json_hash(self._identity_payload())
+    def opportunity_id(
+        self,
+        _canonical_json_hash_fn=_canonical_json_hash,
+    ) -> str:
+        return _canonical_json_hash_fn(self._identity_payload())
 
     def _identity_payload(self) -> dict[str, Any]:
         return {
@@ -982,8 +1113,8 @@ class Opportunity:
                 "opportunity must contain canonical fields"
             )
         try:
-            strategy_class = StrategyClass(raw["strategy_class"])
-            decision = OpportunityDecision(raw["decision"])
+            strategy_class = _strategy_class_from_serialized(raw["strategy_class"])
+            decision = _opportunity_decision_from_serialized(raw["decision"])
         except (TypeError, ValueError) as exc:
             raise OpportunityContractError(
                 "opportunity enum value is unsupported"
@@ -1004,14 +1135,14 @@ class Opportunity:
             strategy_class=strategy_class,
             decision=decision,
             quotes=tuple(
-                QuoteRef.from_dict(item) for item in raw["quotes"]
+                _quote_ref_from_dict(item) for item in raw["quotes"]
             ),
             claims_probability_edge=raw["claims_probability_edge"],
             forecasts=tuple(
-                ForecastRef.from_dict(item) for item in raw["forecasts"]
+                _forecast_ref_from_dict(item) for item in raw["forecasts"]
             ),
             evidence_refs=tuple(
-                EvidenceRef.from_dict(item)
+                _evidence_ref_from_dict(item)
                 for item in raw["evidence_refs"]
             ),
         )
@@ -1025,17 +1156,30 @@ class Opportunity:
         return result
 
 
+def _opportunity_from_dict(
+    raw: object,
+    *,
+    _opportunity_type: type[Opportunity] = Opportunity,
+) -> Opportunity:
+    return _opportunity_type.from_dict(raw)
+
+
 @dataclass(frozen=True, slots=True)
 class OpportunitySet:
     opportunities: tuple[Opportunity, ...]
 
-    def __post_init__(self) -> None:
-        values = tuple(self.opportunities)
+    def __post_init__(
+        self,
+        _opportunity_type: type[Opportunity] = Opportunity,
+    ) -> None:
+        if type(self.opportunities) is not tuple:
+            raise OpportunityContractError("opportunity set members must be a tuple")
+        values = self.opportunities
         if len(values) > _MAX_OPPORTUNITIES:
             raise OpportunityContractError(
                 f"opportunity set exceeds {_MAX_OPPORTUNITIES} members"
             )
-        if any(not isinstance(item, Opportunity) for item in values):
+        if any(type(item) is not _opportunity_type for item in values):
             raise OpportunityContractError(
                 "opportunity set must contain only Opportunity values"
             )
@@ -1055,8 +1199,11 @@ class OpportunitySet:
         object.__setattr__(self, "opportunities", ordered)
 
     @property
-    def opportunity_set_id(self) -> str:
-        return _canonical_json_hash(
+    def opportunity_set_id(
+        self,
+        _canonical_json_hash_fn=_canonical_json_hash,
+    ) -> str:
+        return _canonical_json_hash_fn(
             {
                 "opportunity_ids": [
                     item.opportunity_id for item in self.opportunities
@@ -1087,7 +1234,7 @@ class OpportunitySet:
             )
         result = cls(
             opportunities=tuple(
-                Opportunity.from_dict(item)
+                _opportunity_from_dict(item)
                 for item in raw["opportunities"]
             )
         )
@@ -1101,17 +1248,28 @@ class OpportunitySet:
         return result
 
 
+def _opportunity_set_from_dict(
+    raw: object,
+    *,
+    _opportunity_set_type: type[OpportunitySet] = OpportunitySet,
+) -> OpportunitySet:
+    return _opportunity_set_type.from_dict(raw)
+
+
 @dataclass(frozen=True, slots=True)
 class PlanAllocation:
     opportunity_id: str
     stake: Decimal
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _finite_decimal_fn=_finite_decimal,
+    ) -> None:
         _canonical_hash(
             self.opportunity_id,
             "allocation opportunity_id",
         )
-        _finite_decimal(
+        _finite_decimal_fn(
             self.stake,
             "allocation stake",
             nonnegative=True,
@@ -1144,6 +1302,14 @@ class PlanAllocation:
         )
 
 
+def _plan_allocation_from_dict(
+    raw: object,
+    *,
+    _allocation_type: type[PlanAllocation] = PlanAllocation,
+) -> PlanAllocation:
+    return _allocation_type.from_dict(raw)
+
+
 @dataclass(frozen=True, slots=True)
 class PortfolioPlan:
     """Non-executing stake-vector snapshot bound to upstream authorities."""
@@ -1160,15 +1326,23 @@ class PortfolioPlan:
         default_factory=tuple
     )
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.opportunity_set, OpportunitySet):
+    def __post_init__(
+        self,
+        _opportunity_set_type: type[OpportunitySet] = OpportunitySet,
+        _allocation_type: type[PlanAllocation] = PlanAllocation,
+        _actionable_decision: OpportunityDecision = OpportunityDecision.ACTIONABLE,
+        _sorted_unique_evidence_fn=_sorted_unique_evidence,
+    ) -> None:
+        if type(self.opportunity_set) is not _opportunity_set_type:
             raise OpportunityContractError(
                 "opportunity_set must be an OpportunitySet"
             )
 
-        allocations = tuple(self.allocations)
+        if type(self.allocations) is not tuple:
+            raise OpportunityContractError("allocations must be a tuple")
+        allocations = self.allocations
         if any(
-            not isinstance(item, PlanAllocation) for item in allocations
+            type(item) is not _allocation_type for item in allocations
         ):
             raise OpportunityContractError(
                 "allocations must contain only PlanAllocation values"
@@ -1193,22 +1367,22 @@ class PortfolioPlan:
             if (
                 allocation.stake > 0
                 and members[allocation.opportunity_id].decision
-                is not OpportunityDecision.ACTIONABLE
+                is not _actionable_decision
             ):
                 raise OpportunityContractError(
                     "WAIT/ZERO opportunity cannot receive positive stake"
                 )
         object.__setattr__(self, "allocations", allocations)
 
-        portfolio_refs = _sorted_unique_evidence(
+        portfolio_refs = _sorted_unique_evidence_fn(
             self.portfolio_evidence_refs,
             "portfolio_evidence_refs",
         )
-        risk_refs = _sorted_unique_evidence(
+        risk_refs = _sorted_unique_evidence_fn(
             self.risk_evidence_refs,
             "risk_evidence_refs",
         )
-        ledger_refs = _sorted_unique_evidence(
+        ledger_refs = _sorted_unique_evidence_fn(
             self.ledger_state_refs,
             "ledger_state_refs",
         )
@@ -1226,8 +1400,11 @@ class PortfolioPlan:
         object.__setattr__(self, "ledger_state_refs", ledger_refs)
 
     @property
-    def plan_id(self) -> str:
-        return _canonical_json_hash(self._identity_payload())
+    def plan_id(
+        self,
+        _canonical_json_hash_fn=_canonical_json_hash,
+    ) -> str:
+        return _canonical_json_hash_fn(self._identity_payload())
 
     def _identity_payload(self) -> dict[str, Any]:
         return {
@@ -1276,7 +1453,7 @@ class PortfolioPlan:
                 raise OpportunityContractError(
                     f"{name} must be a JSON array"
                 )
-        opportunity_set = OpportunitySet.from_dict(
+        opportunity_set = _opportunity_set_from_dict(
             raw["opportunity_set"]
         )
         serialized_set_id = _canonical_hash(
@@ -1290,19 +1467,19 @@ class PortfolioPlan:
         result = cls(
             opportunity_set=opportunity_set,
             allocations=tuple(
-                PlanAllocation.from_dict(item)
+                _plan_allocation_from_dict(item)
                 for item in raw["allocations"]
             ),
             portfolio_evidence_refs=tuple(
-                EvidenceRef.from_dict(item)
+                _evidence_ref_from_dict(item)
                 for item in raw["portfolio_evidence_refs"]
             ),
             risk_evidence_refs=tuple(
-                EvidenceRef.from_dict(item)
+                _evidence_ref_from_dict(item)
                 for item in raw["risk_evidence_refs"]
             ),
             ledger_state_refs=tuple(
-                EvidenceRef.from_dict(item)
+                _evidence_ref_from_dict(item)
                 for item in raw["ledger_state_refs"]
             ),
         )

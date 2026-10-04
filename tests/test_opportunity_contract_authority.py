@@ -4,6 +4,8 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.opportunity as opportunity_module
+
 from autosport.domain import MarketEvent
 from autosport.opportunity import (
     EvidenceRef,
@@ -14,6 +16,7 @@ from autosport.opportunity import (
     OpportunitySet,
     PlanAllocation,
     PortfolioPlan,
+    PredictiveEligibilityEvidence,
     QuoteRef,
     StrategyClass,
 )
@@ -148,3 +151,340 @@ def test_opportunity_set_rejects_conflicting_decisions_for_same_facts() -> None:
         match="conflicting decisions for the same canonical opportunity",
     ):
         OpportunitySet((waiting, actionable))
+
+
+class _HostileDecimal(Decimal):
+    def is_finite(self) -> bool:
+        raise AssertionError("Decimal subclass virtual dispatch must not execute")
+
+
+def test_decimal_subclasses_fail_closed_before_virtual_dispatch() -> None:
+    with pytest.raises(
+        OpportunityContractError,
+        match="allocation stake must be an exact finite Decimal",
+    ):
+        PlanAllocation(_HASH, _HostileDecimal("1"))
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="quote decimal_odds must be an exact finite Decimal",
+    ):
+        QuoteRef(
+            event_id="event-hostile-decimal",
+            market_id="market-hostile-decimal",
+            selection_id="selection-hostile-decimal",
+            source_id="provider-hostile-decimal",
+            sequence=1,
+            decimal_odds=_HostileDecimal("2"),
+            observed_ts="2026-09-16T16:00:00+00:00",
+            source_ts="2026-09-16T15:59:59+00:00",
+            ingest_ts="2026-09-16T16:00:01+00:00",
+            market_event_hash=_HASH,
+        )
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="forecast probability must be an exact finite Decimal",
+    ):
+        ForecastRef(
+            forecast_id="forecast-hostile-probability",
+            forecast_hash=_HASH,
+            quote_key="event|market|selection",
+            probability=_HostileDecimal("0.5"),
+            input_cutoff_ts="2026-09-16T16:00:00+00:00",
+            market_snapshot_hash=_HASH,
+            quote_market_event_hash=_HASH,
+        )
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="forecast uncertainty must be an exact finite Decimal",
+    ):
+        ForecastRef(
+            forecast_id="forecast-hostile-uncertainty",
+            forecast_hash=_HASH,
+            quote_key="event|market|selection",
+            probability=Decimal("0.5"),
+            input_cutoff_ts="2026-09-16T16:00:00+00:00",
+            market_snapshot_hash=_HASH,
+            quote_market_event_hash=_HASH,
+            model_id="model",
+            model_version="1",
+            strategy_version="1",
+            uncertainty=_HostileDecimal("0.1"),
+        )
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="predictive maximum_uncertainty must be an exact finite Decimal",
+    ):
+        PredictiveEligibilityEvidence(
+            evaluation_id="evaluation-hostile-decimal",
+            evaluation_sha256=_HASH,
+            protocol_sha256=_HASH,
+            admission_policy_sha256=_HASH,
+            model_id="model",
+            model_version="1",
+            strategy_version="1",
+            uncertainty_kind="absolute_probability_radius_v1",
+            sample_size=100,
+            minimum_sample_size=50,
+            maximum_uncertainty=_HostileDecimal("0.1"),
+            as_of="2026-09-16T16:00:00+00:00",
+            valid_until="2026-09-17T16:00:00+00:00",
+        )
+
+
+class _HostileEvidenceRef(EvidenceRef):
+    __slots__ = ()
+
+    def __hash__(self) -> int:
+        raise AssertionError("EvidenceRef subclass hash dispatch must not execute")
+
+    def __lt__(self, other: object) -> bool:
+        raise AssertionError("EvidenceRef subclass ordering dispatch must not execute")
+
+
+def test_evidence_ref_subclasses_fail_closed_before_virtual_dispatch() -> None:
+    hostile = _HostileEvidenceRef(
+        "attacker-evidence-authority",
+        "attacker-evidence-reference",
+    )
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="opportunity evidence_refs must contain only EvidenceRef values",
+    ):
+        Opportunity(
+            strategy_class=StrategyClass.ARBITRAGE,
+            decision=OpportunityDecision.WAIT,
+            quotes=(_quote(),),
+            evidence_refs=(hostile,),
+        )
+
+class _HostileMarketEvent(MarketEvent):
+    __slots__ = ()
+
+    def to_dict(self) -> dict[str, object]:
+        raise AssertionError("MarketEvent subclass serialization must not execute")
+
+
+class _HostileQuoteRef(QuoteRef):
+    __slots__ = ()
+
+    @property
+    def identity_key(self) -> tuple[str, str, str, str, str, int]:
+        raise AssertionError("QuoteRef subclass identity dispatch must not execute")
+
+    @property
+    def quote_key(self) -> str:
+        raise AssertionError("QuoteRef subclass quote dispatch must not execute")
+
+
+def test_canonical_typed_subclasses_fail_closed_before_property_dispatch() -> None:
+    hostile_event = _HostileMarketEvent(
+        event_id="event-hostile-type",
+        market_id="market-hostile-type",
+        selection_id="selection-hostile-type",
+        decimal_odds=Decimal("2"),
+        observed_ts="2026-09-16T16:00:00+00:00",
+        source_id="provider-hostile-type",
+        sequence=1,
+        source_ts="2026-09-16T15:59:59+00:00",
+        ingest_ts="2026-09-16T16:00:01+00:00",
+    )
+    with pytest.raises(
+        OpportunityContractError,
+        match="quote source must be a MarketEvent",
+    ):
+        QuoteRef.from_market_event(hostile_event)
+
+    hostile_quote = _HostileQuoteRef(
+        event_id="event-hostile-quote",
+        market_id="market-hostile-quote",
+        selection_id="selection-hostile-quote",
+        source_id="provider-hostile-quote",
+        sequence=1,
+        decimal_odds=Decimal("2"),
+        observed_ts="2026-09-16T16:00:00+00:00",
+        source_ts="2026-09-16T15:59:59+00:00",
+        ingest_ts="2026-09-16T16:00:01+00:00",
+        market_event_hash=_HASH,
+    )
+    with pytest.raises(
+        OpportunityContractError,
+        match="opportunity quotes must be QuoteRef values",
+    ):
+        Opportunity(
+            strategy_class=StrategyClass.ARBITRAGE,
+            decision=OpportunityDecision.WAIT,
+            quotes=(hostile_quote,),
+        )
+
+def test_validator_helper_rebinding_cannot_bypass_exact_decimal_ingress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        opportunity_module,
+        "_finite_decimal",
+        lambda value, *_args, **_kwargs: value,
+    )
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="allocation stake must be an exact finite Decimal",
+    ):
+        PlanAllocation(_HASH, _HostileDecimal("1"))
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="quote decimal_odds must be an exact finite Decimal",
+    ):
+        QuoteRef(
+            event_id="event-helper-rebind",
+            market_id="market-helper-rebind",
+            selection_id="selection-helper-rebind",
+            source_id="provider-helper-rebind",
+            sequence=1,
+            decimal_odds=_HostileDecimal("2"),
+            observed_ts="2026-09-16T16:00:00+00:00",
+            source_ts="2026-09-16T15:59:59+00:00",
+            ingest_ts="2026-09-16T16:00:01+00:00",
+            market_event_hash=_HASH,
+        )
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="forecast probability must be an exact finite Decimal",
+    ):
+        ForecastRef(
+            forecast_id="forecast-helper-rebind",
+            forecast_hash=_HASH,
+            quote_key="event|market|selection",
+            probability=_HostileDecimal("0.5"),
+            input_cutoff_ts="2026-09-16T16:00:00+00:00",
+            market_snapshot_hash=_HASH,
+            quote_market_event_hash=_HASH,
+        )
+
+
+def test_evidence_helper_rebinding_cannot_admit_subclass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile = _HostileEvidenceRef(
+        "attacker-helper-authority",
+        "attacker-helper-reference",
+    )
+    monkeypatch.setattr(
+        opportunity_module,
+        "_sorted_unique_evidence",
+        lambda values, *_args, **_kwargs: values,
+    )
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="opportunity evidence_refs must contain only EvidenceRef values",
+    ):
+        Opportunity(
+            strategy_class=StrategyClass.ARBITRAGE,
+            decision=OpportunityDecision.WAIT,
+            quotes=(_quote(),),
+            evidence_refs=(hostile,),
+        )
+
+
+def test_identity_helper_rebinding_cannot_replace_economic_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quote = _quote()
+    opportunity = Opportunity(
+        strategy_class=StrategyClass.ARBITRAGE,
+        decision=OpportunityDecision.ACTIONABLE,
+        quotes=(quote,),
+    )
+    opportunity_set = OpportunitySet((opportunity,))
+    plan = PortfolioPlan(opportunity_set=opportunity_set)
+    expected = (
+        quote.quote_key,
+        quote.market_event_hash,
+        opportunity.conflict_key,
+        opportunity.opportunity_id,
+        opportunity_set.opportunity_set_id,
+        plan.plan_id,
+    )
+
+    monkeypatch.setattr(
+        opportunity_module,
+        "_quote_key",
+        lambda *_args, **_kwargs: "attacker|quote|key",
+    )
+    monkeypatch.setattr(
+        opportunity_module,
+        "_canonical_json_hash",
+        lambda *_args, **_kwargs: "0" * 64,
+    )
+
+    rebuilt_quote = _quote()
+    rebuilt_opportunity = Opportunity(
+        strategy_class=StrategyClass.ARBITRAGE,
+        decision=OpportunityDecision.ACTIONABLE,
+        quotes=(rebuilt_quote,),
+    )
+    rebuilt_set = OpportunitySet((rebuilt_opportunity,))
+    rebuilt_plan = PortfolioPlan(opportunity_set=rebuilt_set)
+
+    assert (
+        rebuilt_quote.quote_key,
+        rebuilt_quote.market_event_hash,
+        rebuilt_opportunity.conflict_key,
+        rebuilt_opportunity.opportunity_id,
+        rebuilt_set.opportunity_set_id,
+        rebuilt_plan.plan_id,
+    ) == expected
+
+class _HostileDecisionTime:
+    tzinfo = object()
+
+    def __lt__(self, _other: object) -> bool:
+        raise AssertionError("caller decision-time comparison must not execute")
+
+    def __gt__(self, _other: object) -> bool:
+        raise AssertionError("caller decision-time comparison must not execute")
+
+
+def test_predictive_decision_time_rejects_hostile_objects_before_comparison() -> None:
+    eligibility = PredictiveEligibilityEvidence(
+        evaluation_id="evaluation-hostile-decision-time",
+        evaluation_sha256=_HASH,
+        protocol_sha256=_HASH,
+        admission_policy_sha256=_HASH,
+        model_id="model",
+        model_version="1",
+        strategy_version="1",
+        uncertainty_kind="absolute_probability_radius_v1",
+        sample_size=100,
+        minimum_sample_size=50,
+        maximum_uncertainty=Decimal("0.1"),
+        as_of="2026-09-16T15:00:00+00:00",
+        valid_until="2026-09-16T18:00:00+00:00",
+    )
+    forecast = ForecastRef(
+        forecast_id="forecast-hostile-decision-time",
+        forecast_hash=_HASH,
+        quote_key="event|market|selection",
+        probability=Decimal("0.5"),
+        input_cutoff_ts="2026-09-16T16:00:00+00:00",
+        market_snapshot_hash=_HASH,
+        quote_market_event_hash=_HASH,
+        model_id="model",
+        model_version="1",
+        strategy_version="1",
+        uncertainty=Decimal("0.05"),
+        predictive_eligibility=eligibility,
+    )
+
+    assert forecast.predictive_eligibility_reason(
+        _HostileDecisionTime(),
+        expected_model_id="model",
+    ) == "predictive decision time must be timezone-aware"
+

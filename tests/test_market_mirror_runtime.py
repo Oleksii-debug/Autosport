@@ -248,6 +248,28 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertEqual(mirror.snapshot(), ())
         self.assertEqual(runtime.pending_count, 0)
 
+    def test_focused_causal_view_excludes_generation_zero_audit_state(self) -> None:
+        mirror = MarketMirror()
+        legacy = self.event(sequence=1, odds="2.00")
+        positive = MarketEvent.from_dict(
+            {
+                **self.event(sequence=1, odds="1.90").to_dict(),
+                "source_id": "provider-b",
+            }
+        )
+        mirror._apply_with_causal_authority(legacy, decision_causal=False)
+        mirror._apply_with_causal_authority(positive, decision_causal=True)
+
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("all")
+        snapshot = dependencies.causal_view("all")
+
+        self.assertEqual(snapshot.events, (positive,))
+        self.assertEqual(
+            {event.dedupe_key for event in mirror.snapshot()},
+            {legacy.dedupe_key, positive.dedupe_key},
+        )
+
     def test_focused_dependencies_route_only_affected_provider_and_selection(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror)

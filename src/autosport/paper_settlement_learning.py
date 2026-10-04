@@ -304,6 +304,95 @@ def _expected_ticket_economics(
     return TicketStatus.WON, payout
 
 
+def _bind_canonical_settlement_evidence_collector(method):
+    """Seal learner settlement evidence type and causal validation roots."""
+
+    resolution_type = SettlementResolution
+    datetime_type = datetime
+    timezone_utc = timezone.utc
+    valid_hex = frozenset("0123456789abcdef")
+    valid_outcomes = frozenset({"win", "loss", "void"})
+
+    def canonical_text(value: object, name: str) -> str:
+        if (
+            type(value) is not str
+            or not value
+            or value != value.strip()
+            or "\x00" in value
+        ):
+            raise ValueError(f"{name} must be canonical non-empty text")
+        try:
+            value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValueError(f"{name} must be valid UTF-8") from exc
+        return value
+
+    def canonical_instant(value: object, name: str) -> datetime:
+        raw = canonical_text(value, name)
+        try:
+            parsed = datetime_type.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(
+                f"{name} must be timezone-aware ISO-8601"
+            ) from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"{name} must be timezone-aware ISO-8601")
+        return parsed.astimezone(timezone_utc)
+
+    def validate_resolution(
+        resolution: SettlementResolution,
+        *,
+        as_of: str,
+    ) -> None:
+        if type(resolution) is not resolution_type:
+            raise TypeError("settlement resolution must be canonical")
+        canonical_text(resolution.event_identity, "event_identity")
+        canonical_text(resolution.settlement_ref, "settlement_ref")
+        canonical_text(resolution.evidence_id, "evidence_id")
+        digest = resolution.evidence_sha256
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in valid_hex for character in digest)
+        ):
+            raise ValueError(
+                "evidence_sha256 must be lowercase SHA-256 hex"
+            )
+        cutoff = canonical_instant(as_of, "as_of")
+        available = canonical_instant(resolution.available_at, "available_at")
+        if available > cutoff:
+            raise ValueError(
+                "settlement evidence is not causally available at learner cutoff"
+            )
+        quote_outcomes = resolution.quote_outcomes
+        if type(quote_outcomes) is not dict or not quote_outcomes:
+            raise ValueError("quote_outcomes must be a non-empty exact dict")
+        for quote_key, outcome in quote_outcomes.items():
+            canonical_text(quote_key, "quote_outcomes quote_key")
+            if type(outcome) is not str or outcome not in valid_outcomes:
+                raise ValueError("quote_outcomes contains unsupported outcome")
+
+    def guarded(
+        ticket: PaperTicket,
+        resolutions: tuple[SettlementResolution, ...],
+        *,
+        at: str,
+    ):
+        return method(
+            ticket,
+            resolutions,
+            at=at,
+            _settlement_resolution_type=resolution_type,
+            _settlement_resolution_validate=validate_resolution,
+        )
+
+    guarded.__name__ = method.__name__
+    guarded.__qualname__ = method.__qualname__
+    guarded.__doc__ = method.__doc__
+    guarded.__annotations__ = method.__annotations__
+    return guarded
+
+
 class PaperSettlementLearningBridge:
     """Durable identity bridge from settled PAPER economics to one AgentLoop resolution."""
 
@@ -957,11 +1046,14 @@ class PaperSettlementLearningBridge:
         return ticket
 
     @staticmethod
+    @_bind_canonical_settlement_evidence_collector
     def _collect_evidence(
         ticket: PaperTicket,
         resolutions: tuple[SettlementResolution, ...],
         *,
         at: str,
+        _settlement_resolution_type: type[SettlementResolution],
+        _settlement_resolution_validate,
     ) -> tuple[list[dict[str, object]], dict[str, str]] | None:
         if len(ticket.provider_source_ids) != 1:
             raise PaperSettlementLearningBridgeError(
@@ -982,12 +1074,12 @@ class PaperSettlementLearningBridge:
             for leg in ticket.legs
         }
         for resolution in resolutions:
-            if not isinstance(resolution, SettlementResolution):
+            if type(resolution) is not _settlement_resolution_type:
                 raise PaperSettlementLearningBridgeError(
                     "handoff contains non-canonical settlement evidence"
                 )
             try:
-                resolution.validate(as_of=at)
+                _settlement_resolution_validate(resolution, as_of=at)
             except (TypeError, ValueError) as exc:
                 raise PaperSettlementLearningBridgeError(
                     "settlement evidence failed causal validation"

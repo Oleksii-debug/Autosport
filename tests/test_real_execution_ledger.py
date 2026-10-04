@@ -1767,13 +1767,28 @@ class RealExecutionLedgerTests(unittest.TestCase):
             ):
                 ledger.verify_integrity()
 
-    def test_existing_writer_lock_fails_closed(self):
+    def test_persistent_writer_lock_file_without_os_owner_is_reusable(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"
             ledger = RealExecutionLedger(path)
-            ledger._lock_path.write_text("owner", encoding="utf-8")
-            with self.assertRaises(ExecutionLedgerBusyError):
-                ledger.reserve_plan(plan(action()))
+            ledger._lock_path.write_text("stale-process-marker", encoding="utf-8")
+
+            ledger.reserve_plan(plan(action()))
+
+            self.assertTrue(ledger._lock_path.exists())
+            self.assertEqual(ledger.verify_integrity(), 1)
+
+    def test_live_writer_lock_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            competing = RealExecutionLedger(path)
+
+            def while_writer_is_live():
+                with self.assertRaises(ExecutionLedgerBusyError):
+                    competing.reserve_plan(plan(action()))
+
+            ledger._mutate(while_writer_is_live)
 
     def test_rejected_ack_cannot_claim_accepted_money(self):
         with self.assertRaises(ValueError):

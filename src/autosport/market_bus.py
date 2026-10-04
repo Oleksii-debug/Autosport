@@ -58,6 +58,19 @@ class MarketEventBus:
         self._notify(accepted)
         return len(accepted)
 
+    def _publish_many_live_ingestion(self, events: Iterable[MarketEvent]) -> int:
+        """Persist through the product-owned live-receipt authority seam.
+
+        Generic bus publication intentionally remains provenance-neutral for replay,
+        import and tests. IngestionEngine is the sole production caller of this private
+        path after it overwrites ingest_ts from its post-acquisition product clock.
+        """
+        accepted = self.store._append_live_batch_accepted(
+            deepcopy(event) for event in events
+        )
+        self._notify(accepted)
+        return len(accepted)
+
     def _notify(self, events: Iterable[MarketEvent]) -> None:
         # Persistence has already succeeded. Keep an independent value snapshot for
         # delivery-error evidence and isolate every callback from mutable nested

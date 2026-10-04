@@ -14,7 +14,10 @@ from autosport.run_transaction import RunTransaction, RunTransactionError
 
 class RunTransactionTerminalCompletionTests(unittest.TestCase):
     @staticmethod
-    def _prepare_canonical_commit(root: Path):
+    def _prepare_canonical_commit(
+        root: Path,
+        sampling_draw_admission_receipt_sha256: str | None = None,
+    ):
         registry = RunRegistry.initialize_pristine(root / "run_registry.json")
         book_path = root / "paper_book.json"
         PaperBook("10000").save(book_path)
@@ -34,6 +37,9 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
             run_id,
             base_paper_book_sha256=base_book_hash,
             base_decision_ledger_sha256=base_ledger_hash,
+            sampling_draw_admission_receipt_sha256=(
+                sampling_draw_admission_receipt_sha256
+            ),
         )
         tx = RunTransaction.start(
             root,
@@ -44,6 +50,9 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
             strategy_id=strategy_id,
             base_paper_book_sha256=base_book_hash,
             base_decision_ledger_sha256=base_ledger_hash,
+            sampling_draw_admission_receipt_sha256=(
+                sampling_draw_admission_receipt_sha256
+            ),
         )
         staged_book = PaperBook.load(book_path)
         staged_book.open_ticket(
@@ -94,6 +103,87 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(detached.manifest_path.read_text(encoding="utf-8"))["phase"],
                 "completed",
+            )
+
+    def test_draw_admission_binding_survives_terminal_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            admission = "d" * 64
+            tx, registry, key, summary, summary_path = self._prepare_canonical_commit(
+                root,
+                admission,
+            )
+
+            self.assertEqual(
+                registry.get(key)["sampling_draw_admission_receipt_sha256"],
+                admission,
+            )
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                manifest["sampling_draw_admission_receipt_sha256"],
+                admission,
+            )
+            self.assertEqual(
+                summary["sampling_draw_admission_receipt_sha256"],
+                admission,
+            )
+
+            registry.reconcile_completed_summary(
+                key,
+                summary_path,
+                root / "paper_book.json",
+            )
+            detached = RunTransaction(root, tx.run_id)
+            detached.mark_registry_completed()
+            verified, _sha = registry.verified_completed_summary_for_run(tx.run_id)
+            self.assertEqual(
+                verified["sampling_draw_admission_receipt_sha256"],
+                admission,
+            )
+
+    def test_transaction_start_rejects_draw_admission_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
+            book_path = root / "paper_book.json"
+            PaperBook("10000").save(book_path)
+            ledger = JsonlDecisionLedger(root / "decisions.jsonl")
+            ledger.path.touch()
+
+            market_sha256 = "a" * 64
+            results_sha256 = "b" * 64
+            strategy_id = "baseline-v1"
+            run_id = "draw-admission-mismatch"
+            base_book_hash = sha256_file(book_path)
+            base_ledger_hash = sha256_file(ledger.path)
+            key = registry.begin(
+                market_sha256,
+                results_sha256,
+                strategy_id,
+                run_id,
+                base_paper_book_sha256=base_book_hash,
+                base_decision_ledger_sha256=base_ledger_hash,
+                sampling_draw_admission_receipt_sha256="d" * 64,
+            )
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "sampling draw-admission binding mismatch",
+            ):
+                RunTransaction.start(
+                    root,
+                    run_id=run_id,
+                    experiment_key=key,
+                    market_sha256=market_sha256,
+                    results_sha256=results_sha256,
+                    strategy_id=strategy_id,
+                    base_paper_book_sha256=base_book_hash,
+                    base_decision_ledger_sha256=base_ledger_hash,
+                    sampling_draw_admission_receipt_sha256="e" * 64,
+                )
+
+            self.assertFalse(
+                (root / RunTransaction.ROOT_NAME / run_id).exists()
             )
 
     def test_detached_completion_rejects_in_progress_registry_identity(self):

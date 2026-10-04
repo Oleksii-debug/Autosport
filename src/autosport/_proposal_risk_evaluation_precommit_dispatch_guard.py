@@ -1,20 +1,20 @@
-"""Seal proposal/science precommit public dispatch against module rebinding.
+"""Seal proposal-risk precommit and execution-evidence public dispatch.
 
-The owning authority module already exact-fences its upstream target, scientific,
-ledger, goal and policy roots. This composition closes the remaining public seam:
-callers must not be able to rebind the module-level dispatch guard or one of the
-internal join/build helpers and then invoke an otherwise canonical public issuer or
-resolver. No scientific result, risk bound, ticket permission or money authority is
-introduced here.
+The owning modules exact-fence their upstream economic/scientific roots. This package
+composition closes the remaining mutable module surfaces before callers receive the
+public package: precommit issuer/resolver dispatch and the proposal execution-evidence
+deriver/helpers. No risk approval, ticket, broker, real-money or state-mutation
+authority is introduced here.
 """
 from __future__ import annotations
 
 from types import FunctionType
 
 from . import proposal_risk_evaluation_precommit_authority as _authority
+from . import proposal_risk_execution_evidence_authority as _execution_authority
 
 
-def _install_guard() -> None:
+def _install_precommit_guard() -> None:
     module = _authority
     error_type = module.ProductProposalRiskEvaluationPrecommitError
     canonical_issue = module.issue_product_proposal_risk_evaluation_precommit
@@ -150,6 +150,104 @@ def _install_guard() -> None:
     )
 
 
-_install_guard()
-del _install_guard
+def _install_execution_evidence_guard() -> None:
+    module = _execution_authority
+    error_type = module.ProductProposalRiskExecutionEvidenceError
+    canonical_derive = module.derive_product_proposal_risk_execution_evidence
+    precommit_type = module.ProductProposalRiskEvaluationPrecommit
+    row_type = module.CounterfactualMemberExecutionEvidence
+    result_type = module.ProductProposalRiskExecutionEvidence
+
+    if type(canonical_derive) is not FunctionType:
+        raise RuntimeError(
+            "proposal risk execution evidence canonical dispatch is unavailable"
+        )
+
+    helper_names = (
+        "_text",
+        "_sha",
+        "_instant",
+        "_decimal",
+        "_decimal_text",
+        "_canonical_json",
+        "_digest",
+        "_require_estimator_dispatch",
+        "_evidence_payload",
+        "_mint",
+    )
+    helper_witnesses: tuple[tuple[str, object, object], ...] = tuple(
+        (
+            name,
+            getattr(module, name),
+            getattr(getattr(module, name), "__code__", None),
+        )
+        for name in helper_names
+    )
+    if any(code is None for _, _, code in helper_witnesses):
+        raise RuntimeError(
+            "proposal risk execution evidence helper dispatch is unavailable"
+        )
+    derive_code = canonical_derive.__code__
+
+    def require_surface() -> None:
+        if module.ProductProposalRiskEvaluationPrecommit is not precommit_type:
+            raise error_type(
+                "proposal risk execution evidence precommit type was rebound"
+            )
+        if module.CounterfactualMemberExecutionEvidence is not row_type:
+            raise error_type(
+                "proposal risk execution evidence row type was rebound"
+            )
+        if module.ProductProposalRiskExecutionEvidence is not result_type:
+            raise error_type(
+                "proposal risk execution evidence result type was rebound"
+            )
+        for name, expected, code in helper_witnesses:
+            current = getattr(module, name, None)
+            if current is not expected or getattr(current, "__code__", None) is not code:
+                raise error_type(
+                    f"proposal risk execution evidence helper {name} changed"
+                )
+        if canonical_derive.__code__ is not derive_code:
+            raise error_type(
+                "proposal risk execution evidence derivation implementation changed"
+            )
+
+    def sealed_derive_product_proposal_risk_execution_evidence(
+        precommit,
+        rows,
+        *,
+        evaluated_at,
+    ):
+        if (
+            module.derive_product_proposal_risk_execution_evidence
+            is not sealed_derive_product_proposal_risk_execution_evidence
+        ):
+            raise error_type(
+                "proposal risk execution evidence public derivation was rebound"
+            )
+        require_surface()
+        result = canonical_derive(
+            precommit,
+            rows,
+            evaluated_at=evaluated_at,
+        )
+        require_surface()
+        if type(result) is not result_type:
+            raise error_type(
+                "proposal risk execution evidence returned non-canonical result"
+            )
+        return result
+
+    sealed_derive_product_proposal_risk_execution_evidence._autosport_dispatch_sealed = True
+    module.derive_product_proposal_risk_execution_evidence = (
+        sealed_derive_product_proposal_risk_execution_evidence
+    )
+
+
+_install_precommit_guard()
+_install_execution_evidence_guard()
+del _install_precommit_guard
+del _install_execution_evidence_guard
 del _authority
+del _execution_authority

@@ -2631,6 +2631,27 @@ class SQLiteMarketStore:
             if generation > 0
         ]
 
+    def external_change_token(self) -> int:
+        """Return SQLite's connection-local token for commits by other connections.
+
+        This is only a cheap invalidation hint. It does not authorize market data:
+        callers that observe a changed token must still re-read through a proven
+        SQLiteMarketStore authority method before using any market value.
+        """
+
+        with self._connection_lock:
+            self._require_database_path_identity()
+            row = self.connection.execute("PRAGMA data_version").fetchone()
+            self._require_database_path_identity()
+        if (
+            row is None
+            or len(row) != 1
+            or type(row[0]) is not int
+            or row[0] < 0
+        ):
+            raise ValueError("SQLite data_version is invalid")
+        return row[0]
+
     def current_by_source_with_append_generation(
         self,
     ) -> dict[tuple[str, str], tuple[MarketEvent, int]]:

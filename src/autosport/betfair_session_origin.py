@@ -131,6 +131,7 @@ def _build_session_authority_surface_meta():
     sealed_classes: set[type] = set()
     protected_names = frozenset(
         {
+            "__getattribute__",
             "venue_id",
             "login_method",
             "jurisdiction",
@@ -492,6 +493,7 @@ def _build_origin_authority_runtime():
         json_decoder_raw_decode, "__code__", None
     )
 
+    origin_getattribute = origin_type.__getattribute__
     origin_init = origin_type.__init__
     origin_init_code = getattr(origin_init, "__code__", None)
     origin_post_init = origin_type.__post_init__
@@ -572,6 +574,7 @@ def _build_origin_authority_runtime():
             and Request is request_type
             and urlencode is urlencode_fn
             and getattr(urlencode_fn, "__code__", None) is urlencode_code
+            and origin_type.__getattribute__ is origin_getattribute
             and origin_type.__init__ is origin_init
             and getattr(origin_init, "__code__", None) is origin_init_code
             and origin_type.__post_init__ is origin_post_init
@@ -882,6 +885,7 @@ def _build_bound_authority_runtime(require_origin):
     datetime_type = datetime
     utc = timezone.utc
 
+    bound_getattribute = bound_type.__getattribute__
     bound_init = bound_type.__init__
     bound_init_code = getattr(bound_init, "__code__", None)
     bound_post_init = bound_type.__post_init__
@@ -954,6 +958,7 @@ def _build_bound_authority_runtime(require_origin):
             and ORIGIN_SCHEMA == origin_schema
             and ORIGIN_SCHEMA_VERSION == origin_schema_version
             and _CERT_LOGIN_ENDPOINTS is endpoint_table
+            and bound_type.__getattribute__ is bound_getattribute
             and bound_type.__init__ is bound_init
             and getattr(bound_init, "__code__", None) is bound_init_code
             and bound_type.__post_init__ is bound_post_init

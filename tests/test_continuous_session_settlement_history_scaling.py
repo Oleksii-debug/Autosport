@@ -214,6 +214,64 @@ def test_empty_checkpoint_rejects_orphan_settlement_journal() -> None:
         assert checkpoint_path.read_bytes() == before
 
 
+def test_new_session_rejects_preexisting_orphan_journal_before_checkpoint_publish() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        checkpoint_path = root / "continuous_session.json"
+        journal = root / "continuous_session.settlement-evidence"
+        journal.mkdir()
+
+        try:
+            continuous_session._ContinuousSessionState(
+                checkpoint_path,
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "new session published state over a preexisting orphan journal"
+            )
+
+        assert not checkpoint_path.exists()
+        assert journal.exists()
+
+
+def test_empty_legacy_migration_rejects_orphan_journal_without_checkpoint_rewrite() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        checkpoint_path = root / "continuous_session.json"
+        checkpoint_path.write_text(
+            json.dumps(_checkpoint_payload(0), sort_keys=True),
+            encoding="utf-8",
+        )
+        before = checkpoint_path.read_bytes()
+        journal = root / "continuous_session.settlement-evidence"
+        journal.mkdir()
+
+        try:
+            continuous_session._ContinuousSessionState(
+                checkpoint_path,
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "empty legacy migration published schema v3 over an orphan journal"
+            )
+
+        assert checkpoint_path.read_bytes() == before
+        assert json.loads(checkpoint_path.read_text(encoding="utf-8"))[
+            "schema_version"
+        ] == 2
+        assert journal.exists()
+
+
 def test_runtime_tip_deletion_blocks_bounded_operational_mutation() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

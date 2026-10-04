@@ -521,6 +521,13 @@ class ProphetXSessionSnapshot:
                     raise ProphetXSessionLifecycleError(
                         "session-pool exhaustion cannot carry access-expiry evidence"
                     )
+                if (
+                    self.slot_hold_until
+                    < self.last_transition_at + CONSERVATIVE_SESSION_SLOT_HOLD
+                ):
+                    raise ProphetXSessionLifecycleError(
+                        "session-pool hold is below the conservative floor"
+                    )
             elif self.access_expires_at is not None:
                 if self.access_expires_at <= self.last_transition_at:
                     raise ProphetXSessionLifecycleError(

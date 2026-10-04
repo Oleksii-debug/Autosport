@@ -3216,6 +3216,25 @@ class PersistentLiveDecisionLoop:
                 )
             canonical_opportunities.append(opportunity)
 
+        if tuple(
+            opportunity.strategy_class.value
+            for opportunity in canonical_opportunities
+        ) != durable_plan.opportunity_classes:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision opportunity classes conflict with plan"
+            )
+        if (
+            durable_plan.dependency_graph is not None
+            and tuple(
+                item["candidate_sha256"] for item in intent_items
+            )
+            != durable_plan.dependency_graph.candidate_sha256s
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision candidate identities conflict with "
+                "portfolio dependency graph"
+            )
+
         if progress.market_append_generation is not None:
             if committed_market_history is None:
                 raise DecisionLedgerIntegrityError(
@@ -3249,7 +3268,12 @@ class PersistentLiveDecisionLoop:
                 )
 
             decision_visible_events = committed_snapshot.events
-            for opportunity in canonical_opportunities:
+            for item, opportunity in zip(
+                intent_items,
+                canonical_opportunities,
+                strict=True,
+            ):
+                matched_events: list[MarketEvent] = []
                 for quote in opportunity.quotes:
                     matching_events = tuple(
                         event
@@ -3267,6 +3291,106 @@ class PersistentLiveDecisionLoop:
                             "committed live decision quote is not bound to "
                             "proven market history"
                         )
+                    matched_events.append(matching_events[0])
+
+                risk_context = item["risk_context"]
+                provider_accounts_raw = risk_context["provider_accounts"]
+                if type(provider_accounts_raw) is not list:
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision provider-account evidence is invalid"
+                    )
+                provider_accounts: list[tuple[str, str]] = []
+                try:
+                    for binding_raw in provider_accounts_raw:
+                        if (
+                            type(binding_raw) is not list
+                            or len(binding_raw) != 2
+                        ):
+                            raise ValueError(
+                                "provider account binding is not canonical"
+                            )
+                        provider_accounts.append(
+                            (
+                                _canonical_text(
+                                    "provider account source_id",
+                                    binding_raw[0],
+                                ),
+                                _canonical_text(
+                                    "provider account_id",
+                                    binding_raw[1],
+                                ),
+                            )
+                        )
+                except (TypeError, ValueError) as exc:
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision provider-account evidence is invalid"
+                    ) from exc
+                canonical_accounts = tuple(provider_accounts)
+                source_ids = tuple(
+                    source_id for source_id, _ in canonical_accounts
+                )
+                if (
+                    canonical_accounts != tuple(sorted(canonical_accounts))
+                    or len(canonical_accounts) != len(set(canonical_accounts))
+                    or len(source_ids) != len(set(source_ids))
+                    or (
+                        canonical_accounts
+                        and frozenset(source_ids)
+                        != frozenset(
+                            event.source_id for event in matched_events
+                        )
+                    )
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision provider-account evidence is noncanonical"
+                    )
+
+                candidate_payload = {
+                    "schema": "autosport.risk-candidate.v2",
+                    "legs": [
+                        {
+                            "event_id": quote.event_id,
+                            "market_id": quote.market_id,
+                            "selection_id": quote.selection_id,
+                            "locked_odds": str(quote.decimal_odds),
+                        }
+                        for quote in sorted(
+                            opportunity.quotes,
+                            key=lambda value: value.quote_key,
+                        )
+                    ],
+                    "quotes": [
+                        event.to_dict()
+                        for event in sorted(
+                            matched_events,
+                            key=lambda value: value.quote_key,
+                        )
+                    ],
+                    "provider_accounts": [
+                        {
+                            "source_id": source_id,
+                            "account_id": account_id,
+                        }
+                        for source_id, account_id in canonical_accounts
+                    ],
+                    "bankroll_id": risk_context["bankroll_id"],
+                    "currency": risk_context["currency"],
+                    "measurement_window_start": risk_context[
+                        "measurement_window_start"
+                    ],
+                    "measurement_window_end": risk_context[
+                        "measurement_window_end"
+                    ],
+                    "proposal_ts": risk_context["proposal_ts"],
+                }
+                if (
+                    _canonical_json_sha256(candidate_payload)
+                    != item["candidate_sha256"]
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision risk candidate conflicts with "
+                        "proven market/economic evidence"
+                    )
         elif committed_market_history is not None:
             raise DecisionLedgerIntegrityError(
                 "legacy committed decision unexpectedly supplied market prefix"

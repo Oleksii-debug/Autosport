@@ -26,6 +26,9 @@ from .monotonic_workspace_authority import (
 from .proposal_risk_evaluation_precommit_authority import (
     ProductProposalRiskEvaluationPrecommit,
 )
+from .proposal_target_terminal_population_authority import (
+    ProductProposalTargetTerminalPopulation,
+)
 from .risk import PaperRiskPolicy
 from .workspace_lock import WorkspaceEconomicLock
 
@@ -47,6 +50,10 @@ _TARGET_SCHEMA = "autosport.proposal-risk-target-precommit.v1"
 _TARGET_ACTION = "PROPOSAL_RISK_TARGET_PRECOMMIT"
 _TARGET_AGENT = "autosport.proposal-risk-target-authority.v1"
 _TARGET_ACTION_PREFIX = "target-v1:"
+_TERMINAL_PARENT_SCHEMA = "autosport.proposal-target-terminal-population-precommit.v1"
+_TERMINAL_PARENT_ACTION = "PROPOSAL_TARGET_TERMINAL_POPULATION_PRECOMMIT"
+_TERMINAL_PARENT_AGENT = "autosport.proposal-target-terminal-population-authority.v1"
+_TERMINAL_PARENT_ACTION_PREFIX = "proposal-target-terminal-population-v1:"
 _HEX = frozenset("0123456789abcdef")
 _MAX_DECIMAL_TEXT = 256
 _PATH_TYPE = type(Path("."))
@@ -66,6 +73,31 @@ _ENSURE_DURABLE_FILE = ensure_durable_file
 _JSON_DUMPS = json.dumps
 _HASHLIB_SHA256 = hashlib.sha256
 _UTC_NOW_ISO = utc_now_iso
+_TERMINAL_POPULATION_TYPE = ProductProposalTargetTerminalPopulation
+_TERMINAL_POPULATION_PROPERTY_NAMES = (
+    "population_identity_proven",
+    "provider_terminal_authority_proven",
+    "terminal_space_exhaustive",
+    "probability_model_bound",
+    "scientific_precommit_bound",
+    "iid_member_mapping_proven",
+    "proposal_target_counterfactual_execution_proven",
+    "risk_upper_bound_for_target",
+    "grants_ticket_authority",
+    "grants_real_money_authority",
+)
+_TERMINAL_POPULATION_PROPERTY_WITNESSES = tuple(
+    (
+        name,
+        _TERMINAL_POPULATION_TYPE.__dict__[name],
+        _TERMINAL_POPULATION_TYPE.__dict__[name].fget,
+        getattr(_TERMINAL_POPULATION_TYPE.__dict__[name].fget, "__code__", None),
+    )
+    for name in _TERMINAL_POPULATION_PROPERTY_NAMES
+)
+_TERMINAL_POPULATION_PROPERTY_WITNESSES_EXPECTED = (
+    _TERMINAL_POPULATION_PROPERTY_WITNESSES
+)
 
 
 class ProductProposalRiskScenarioPopulationError(RuntimeError):
@@ -353,6 +385,7 @@ _DISPATCH_ROOT = (
     _JSON_DUMPS,
     _HASHLIB_SHA256,
     _UTC_NOW_ISO,
+    _TERMINAL_POPULATION_TYPE,
 )
 
 
@@ -375,6 +408,7 @@ def _require_dispatch(
         json.dumps,
         hashlib.sha256,
         utc_now_iso,
+        ProductProposalTargetTerminalPopulation,
     )
     aliases = (
         _PRECOMMIT_TYPE,
@@ -392,12 +426,28 @@ def _require_dispatch(
         _JSON_DUMPS,
         _HASHLIB_SHA256,
         _UTC_NOW_ISO,
+        _TERMINAL_POPULATION_TYPE,
     )
     if (
         type(_expected) is not tuple
         or len(current) != len(_expected)
         or any(actual is not expected for actual, expected in zip(current, _expected))
         or any(actual is not expected for actual, expected in zip(aliases, _expected))
+        or _TERMINAL_POPULATION_PROPERTY_WITNESSES
+        is not _TERMINAL_POPULATION_PROPERTY_WITNESSES_EXPECTED
+        or any(
+            ProductProposalTargetTerminalPopulation.__dict__.get(name)
+            is not descriptor
+            or getattr(
+                ProductProposalTargetTerminalPopulation.__dict__.get(name),
+                "fget",
+                None,
+            )
+            is not getter
+            or getattr(getter, "__code__", None) is not code
+            for name, descriptor, getter, code
+            in _TERMINAL_POPULATION_PROPERTY_WITNESSES_EXPECTED
+        )
     ):
         raise ProductProposalRiskScenarioPopulationError(
             "scenario population authority dispatch changed"
@@ -428,6 +478,44 @@ def _require_precommit(
             "proposal risk evaluation precommit truth boundary is inconsistent"
         )
     return precommit
+
+
+def _require_terminal_population(
+    precommit: ProductProposalRiskEvaluationPrecommit,
+    terminal_population: object,
+) -> ProductProposalTargetTerminalPopulation:
+    if type(terminal_population) is not _TERMINAL_POPULATION_TYPE:
+        raise ProductProposalRiskScenarioPopulationError(
+            "terminal_population must be exact ProductProposalTargetTerminalPopulation"
+        )
+    if (
+        terminal_population.population_identity_proven is not True
+        or terminal_population.provider_terminal_authority_proven is not True
+        or terminal_population.terminal_space_exhaustive is not True
+        or terminal_population.probability_model_bound is not False
+        or terminal_population.scientific_precommit_bound is not False
+        or terminal_population.iid_member_mapping_proven is not False
+        or terminal_population.proposal_target_counterfactual_execution_proven
+        is not False
+        or terminal_population.risk_upper_bound_for_target is not False
+        or terminal_population.grants_ticket_authority is not False
+        or terminal_population.grants_real_money_authority is not False
+    ):
+        raise ProductProposalRiskScenarioPopulationError(
+            "terminal population truth boundary is inconsistent"
+        )
+    if (
+        terminal_population.workspace_instance_id != precommit.workspace_instance_id
+        or terminal_population.target_sha256 != precommit.target_sha256
+        or terminal_population.candidate_vector_sha256
+        != precommit.candidate_vector_sha256
+        or terminal_population.target_decision_ts != precommit.target_decision_ts
+    ):
+        raise ProductProposalRiskScenarioPopulationError(
+            "terminal population does not bind the exact proposal target"
+        )
+    _sha(terminal_population.population_sha256, "terminal_population_sha256")
+    return terminal_population
 
 
 def _validate_members(

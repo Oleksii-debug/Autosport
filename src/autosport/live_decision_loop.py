@@ -1977,7 +1977,14 @@ class PersistentLiveDecisionLoop:
                     )
                 ledger_offset = durable_progress.ledger_offset
             else:
-                ledger_offset = self._ledger_end_offset()
+                last_record = self._verified_last_ledger_record()
+                if (
+                    last_record is not None
+                    and last_record[1].decision_id == decision_id
+                ):
+                    ledger_offset = last_record[0]
+                else:
+                    ledger_offset = self._ledger_end_offset()
                 durable_progress = _Progress(
                     loop_id=self.loop_id,
                     phase=_PHASE_APPEND_PENDING,
@@ -2250,6 +2257,53 @@ class PersistentLiveDecisionLoop:
             raise DecisionLedgerIntegrityError(
                 "Decision Ledger end offset is unreadable"
             ) from exc
+
+    def _verified_last_ledger_record(
+        self,
+    ) -> tuple[int, DecisionRecord] | None:
+        """Read and verify only the final durable ledger record and its byte offset."""
+
+        path = self.decision_ledger.path
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, 2)
+                size = handle.tell()
+                if size == 0:
+                    return None
+                handle.seek(size - 1)
+                if handle.read(1) != b"\n":
+                    raise DecisionLedgerIntegrityError(
+                        "Decision Ledger has an unterminated final record"
+                    )
+
+                end = size - 1
+                position = end
+                suffix = b""
+                while position > 0:
+                    start = max(0, position - 8192)
+                    handle.seek(start)
+                    chunk = handle.read(position - start)
+                    marker = chunk.rfind(b"\n")
+                    if marker >= 0:
+                        offset = start + marker + 1
+                        line = chunk[marker + 1 :] + suffix + b"\n"
+                        break
+                    suffix = chunk + suffix
+                    position = start
+                else:
+                    offset = 0
+                    line = suffix + b"\n"
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger final record is unreadable"
+            ) from exc
+
+        JsonlDecisionLedger._verify_bytes(line)
+        envelope = json.loads(line.decode("utf-8"))
+        record = JsonlDecisionLedger._validate_record(envelope["record"])
+        return offset, DecisionRecord(**record)
 
     def _verified_ledger_record_at_offset(
         self,

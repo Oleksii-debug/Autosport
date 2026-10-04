@@ -155,7 +155,7 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 restored.close()
 
-    def test_runtime_preload_excludes_other_source_market_history(self) -> None:
+    def test_runtime_preload_excludes_unreceipted_same_and_other_source_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             store = SQLiteMarketStore(root / "market.db")
@@ -182,11 +182,16 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 initial_bankroll="100",
             )
             try:
-                snapshot = runtime.mirror.snapshot()
-                self.assertEqual(len(snapshot), 1)
-                self.assertEqual(snapshot[0].source_id, "provider-a")
-                self.assertEqual(snapshot[0].sequence, 1)
-                self.assertEqual(runtime.invalidations.pending_count, 1)
+                self.assertEqual(runtime.mirror.snapshot(), ())
+                self.assertEqual(runtime.invalidations.pending_count, 0)
+                self.assertIsNone(
+                    runtime.mirror.get(
+                        "provider-a",
+                        "event-1",
+                        "winner",
+                        "player-a",
+                    )
+                )
                 self.assertIsNone(
                     runtime.mirror.get(
                         "provider-b",
@@ -201,6 +206,73 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 )
             finally:
                 runtime.close()
+
+    def test_restart_preload_uses_receipt_authoritative_history_not_generic_current(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event()
+            delta = _delta(event)
+            source = _Source(resolved_event=event)
+
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                self.assertEqual(
+                    runtime.coordinator.desktop_consumer.drain(as_of=clock.value),
+                    (delta.delta_id,),
+                )
+                snapshot = runtime.mirror.snapshot()
+                self.assertEqual(len(snapshot), 1)
+                self.assertEqual(snapshot[0].sequence, 1)
+            finally:
+                runtime.close()
+
+            generic_newer = MarketEvent.from_dict(
+                {
+                    **event.to_dict(),
+                    "decimal_odds": "2.20",
+                    "sequence": 99,
+                    "observed_ts": "2026-09-20T13:57:59+00:00",
+                    "ingest_ts": "2026-09-20T13:58:00+00:00",
+                }
+            )
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                self.assertTrue(store.append(generic_newer))
+                current = store.current_by_source()[
+                    ("provider-a", generic_newer.quote_key)
+                ]
+                self.assertEqual(current.sequence, 99)
+            finally:
+                store.close()
+
+            restored = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                snapshot = restored.mirror.snapshot()
+                self.assertEqual(len(snapshot), 1)
+                self.assertEqual(snapshot[0].source_id, "provider-a")
+                self.assertEqual(snapshot[0].sequence, 1)
+                self.assertEqual(snapshot[0].decimal_odds, event.decimal_odds)
+                self.assertEqual(restored.invalidations.pending_count, 1)
+                current = restored.market_store.current_by_source()[
+                    ("provider-a", generic_newer.quote_key)
+                ]
+                self.assertEqual(current.sequence, 99)
+            finally:
+                restored.close()
 
     def test_restart_with_different_source_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -835,11 +835,46 @@ class PersistentLiveDecisionLoop:
         self._default_health_store: SourceHealthStore | None = None
         self._default_market_change_token: int | None = None
 
-        store = SQLiteMarketStore(self.workspace / "market.db")
-        try:
-            mirror = MarketMirror.from_store(store)
-        finally:
-            store.close()
+        self.progress_path = self.workspace / self.PROGRESS_FILE_NAME
+        self.pre_action_book_path = self.workspace / self.PRE_ACTION_BOOK_FILE_NAME
+        self.control_path = self.workspace / self.CONTROL_FILE_NAME
+        self._progress = self._load_progress()
+        if self._progress is not None and self._progress.loop_id != self.loop_id:
+            raise LiveDecisionProgressError(
+                "persisted live progress belongs to a different loop_id"
+            )
+        if self._progress is not None:
+            _, durable_decision_time = _canonical_timestamp(
+                "persisted decision_ts",
+                self._progress.decision_ts,
+            )
+            if durable_decision_time > self._last_clock_time:
+                self._last_clock_time = durable_decision_time
+
+        unfinished_generation = (
+            self._progress.market_append_generation
+            if self._progress is not None
+            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+            else None
+        )
+        if unfinished_generation is None:
+            store = SQLiteMarketStore(self.workspace / "market.db")
+            try:
+                mirror = MarketMirror.from_store(store)
+            finally:
+                store.close()
+        else:
+            store = SQLiteMarketStore.open_frozen_prefix_reader(
+                self.workspace / "market.db"
+            )
+            try:
+                mirror = MarketMirror.from_proven_history(
+                    store.events_at_committed_append_boundary(
+                        unfinished_generation
+                    )
+                )
+            finally:
+                store.close()
         self.mirror_updates = BoundedMirrorInvalidationBuffer(
             mirror,
             max_dirty_keys=self.bounds.max_dirty_keys,
@@ -930,21 +965,6 @@ class PersistentLiveDecisionLoop:
         else:
             self._observe = observation_runner
 
-        self.progress_path = self.workspace / self.PROGRESS_FILE_NAME
-        self.pre_action_book_path = self.workspace / self.PRE_ACTION_BOOK_FILE_NAME
-        self.control_path = self.workspace / self.CONTROL_FILE_NAME
-        self._progress = self._load_progress()
-        if self._progress is not None and self._progress.loop_id != self.loop_id:
-            raise LiveDecisionProgressError(
-                "persisted live progress belongs to a different loop_id"
-            )
-        if self._progress is not None:
-            _, durable_decision_time = _canonical_timestamp(
-                "persisted decision_ts",
-                self._progress.decision_ts,
-            )
-            if durable_decision_time > self._last_clock_time:
-                self._last_clock_time = durable_decision_time
         if self.decision_ledger.path.exists():
             with WorkspaceEconomicLock(self.workspace):
                 self.decision_ledger.verify_integrity()
@@ -1841,7 +1861,13 @@ class PersistentLiveDecisionLoop:
         )
         if type(refresh_intents) is not bool:
             raise TypeError("refresh_intents must be a bool")
-        store = SQLiteMarketStore(self.workspace / "market.db")
+        store = (
+            SQLiteMarketStore(self.workspace / "market.db")
+            if max_append_generation is None
+            else SQLiteMarketStore.open_frozen_prefix_reader(
+                self.workspace / "market.db"
+            )
+        )
         try:
             if max_append_generation is None:
                 # Legacy progress did not persist a market-generation frontier.

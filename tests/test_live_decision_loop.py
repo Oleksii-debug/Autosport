@@ -3842,6 +3842,100 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             resumed.close()
 
+    def test_pending_restart_ignores_malformed_later_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(input_id, snapshot):
+                del input_id, snapshot
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+            pending = json.loads(first.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(pending["market_append_generation"], 1)
+            first.close()
+
+            path = workspace / "market.db"
+            corruptor = SQLiteMarketStore(path)
+            try:
+                tail = self._event(
+                    selection="selection-a",
+                    sequence=2,
+                    odds="2.10",
+                    observed=self.START + timedelta(milliseconds=500),
+                )
+                payload = json.dumps(
+                    tail.to_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                corruptor.connection.execute(
+                    """INSERT INTO market_events
+                       (dedupe_key,quote_key,event_id,market_id,selection_id,
+                        decimal_odds,observed_ts,source_id,sequence,payload_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        tail.dedupe_key,
+                        tail.quote_key,
+                        tail.event_id,
+                        tail.market_id,
+                        tail.selection_id,
+                        str(tail.decimal_odds),
+                        tail.observed_ts,
+                        tail.source_id,
+                        tail.sequence,
+                        payload,
+                    ),
+                )
+                corruptor.connection.execute(
+                    """INSERT INTO market_event_commit_order
+                       (dedupe_key, append_generation)
+                       VALUES (?, ?)""",
+                    (tail.dedupe_key, 3),
+                )
+                corruptor.connection.commit()
+            finally:
+                corruptor.close()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed_factory = _EmptyIntentFactory()
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=resumed_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            recovered = resumed.run_cycle()
+
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertEqual(
+                resumed_factory.calls[-1],
+                ("input-a", (("selection-a", 1, "open"),)),
+            )
+            committed = json.loads(
+                resumed.progress_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(committed["market_append_generation"], 1)
+            resumed.close()
+
+            with self.assertRaises(ValueError):
+                SQLiteMarketStore(path)
+
     def test_pending_restart_rejects_rolled_back_market_append_frontier(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -3391,6 +3391,56 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             self.assertTrue(replaced)
             self.assertTrue(moved_path.exists())
 
+    def test_noncanonical_pending_cutoff_is_not_machine_committed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                store.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
+                canonical_as_of = storage_module._canonical_replay_cutoff(
+                    self.CUTOFF.isoformat()
+                )
+                cutoff_id = storage_module._replay_cutoff_id(canonical_as_of)
+                store.connection.execute(
+                    """INSERT INTO market_replay_cutoffs
+                       (cutoff_id, as_of, max_append_generation)
+                       VALUES (?, ?, ?)""",
+                    (cutoff_id, canonical_as_of, 1),
+                )
+                store.connection.commit()
+
+                cutoff_rows = store._validated_replay_cutoff_rows()
+                intended_state = store._replay_cutoff_authority_state_sha256(
+                    cutoff_rows
+                )
+                self.assertIsNotNone(intended_state)
+                authority = store._replay_cutoff_authority()
+                tx_id = f"{cutoff_id[:32]}-" + ("2" * 32)
+                forged_binding = "2" * 64
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=intended_state,
+                    semantic_binding_sha256=forged_binding,
+                )
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "cutoff PREPARE semantic binding is invalid",
+                ):
+                    self.replay(store)
+
+                history = authority.read_history()
+                self.assertEqual(history[-1].phase.value, "PREPARE")
+                self.assertEqual(history[-1].tx_id, tx_id)
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

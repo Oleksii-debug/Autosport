@@ -1245,6 +1245,10 @@ class RunRegistry:
             expected_identity["sampling_draw_admission_receipt_sha256"] = item.get(
                 "sampling_draw_admission_receipt_sha256"
             )
+        if "replay_execution_receipt_sha256" in manifest:
+            expected_identity["replay_execution_receipt_sha256"] = manifest.get(
+                "replay_execution_receipt_sha256"
+            )
         for field, expected_value in expected_identity.items():
             if summary.get(field) != expected_value or manifest.get(field) != expected_value:
                 raise ReconciliationError(
@@ -1262,6 +1266,7 @@ class RunRegistry:
             "replay_consumed_event_payload_sequence_sha256",
             "replay_applied_event_payload_sequence_sha256",
             "replay_consumed_event_payload_multiset_sha256",
+            "replay_execution_receipt_sha256",
         )
         present_replay_evidence = tuple(
             field_name
@@ -1284,6 +1289,10 @@ class RunRegistry:
             if type(event_count) is not int or event_count < 0:
                 raise ReconciliationError(
                     "completed run replay event_count is invalid"
+                )
+            if not _is_canonical_sha256(summary.get("replay_dataset_hash")):
+                raise ReconciliationError(
+                    "completed run replay dataset identity is invalid"
                 )
 
         targets = manifest.get("targets")

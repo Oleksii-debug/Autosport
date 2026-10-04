@@ -926,6 +926,84 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertEqual(deliveries, [])
             self.assertFalse(checkpoint.has_ack(delta.delta_id))
 
+    def test_consumer_keeps_locked_checkpoint_and_callback_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            alternate = DesktopDeltaCheckpointStore(root / "alternate-desktop.json")
+            payload = event_payload()
+            delta = self.make_delta(payload=payload)
+            collector.append(delta)
+            receipt = DesktopApplicationReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                receipt_id="receipt-d1",
+                applied_at="2026-01-01T00:00:05+00:00",
+            )
+            original_deliveries = []
+            mutated_deliveries = []
+            consumer = None
+
+            def lookup(_delta):
+                consumer.checkpoint = alternate
+                consumer._on_application_receipt = (
+                    lambda *_: mutated_deliveries.append("mutated")
+                )
+                return receipt
+
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda _: self.fail("durable receipt must skip resolution"),
+                apply_event=lambda *_: self.fail("durable receipt must skip apply"),
+                lookup_application_receipt=lookup,
+                on_application_receipt=lambda *_: original_deliveries.append("original"),
+            )
+
+            self.assertEqual(
+                consumer.drain(as_of="2026-01-01T00:00:06+00:00"),
+                (delta.delta_id,),
+            )
+            self.assertTrue(checkpoint.has_ack(delta.delta_id))
+            self.assertFalse(alternate.has_ack(delta.delta_id))
+            self.assertEqual(original_deliveries, ["original"])
+            self.assertEqual(mutated_deliveries, [])
+
+    def test_consumer_ack_write_ignores_checkpoint_method_rebind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            payload = event_payload()
+            delta = self.make_delta(payload=payload)
+            collector.append(delta)
+            receipt = DesktopApplicationReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                receipt_id="receipt-d1",
+                applied_at="2026-01-01T00:00:05+00:00",
+            )
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda _: self.fail("durable receipt must skip resolution"),
+                apply_event=lambda *_: self.fail("durable receipt must skip apply"),
+                lookup_application_receipt=lambda _: receipt,
+            )
+
+            with patch.object(
+                DesktopDeltaCheckpointStore,
+                "_ack_locked",
+                lambda *_args, **_kwargs: None,
+            ):
+                self.assertEqual(
+                    consumer.drain(as_of="2026-01-01T00:00:06+00:00"),
+                    (delta.delta_id,),
+                )
+
+            self.assertTrue(checkpoint.has_ack(delta.delta_id))
+
     def test_consumer_retries_post_receipt_delivery_before_ack(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

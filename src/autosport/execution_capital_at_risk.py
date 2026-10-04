@@ -364,6 +364,16 @@ def _install_ledger_read_authority():
     snapshot_type_bindings = (
         ("VerifiedExecutionLedgerSnapshot", snapshot_type),
     )
+    monotonic_authority_type = execution_view_globals["_MONOTONIC_AUTHORITY_TYPE"]
+    monotonic_recover = execution_view_globals["_MONOTONIC_RECOVER"]
+    monotonic_recover_code = exact_getattr(monotonic_recover, "__code__", None)
+    monotonic_error_type = execution_view_globals[
+        "MonotonicWorkspaceAuthorityError"
+    ]
+    if monotonic_recover_code is None:
+        raise ExecutionCapitalAtRiskError(
+            "canonical execution-ledger monotonic recovery authority is incomplete"
+        )
 
     # These are the direct RealExecutionLedger call targets used while projecting
     # the verified plan/snapshot.  Reject class rebinding/code mutation and instance
@@ -381,6 +391,13 @@ def _install_ledger_read_authority():
         "_reconciliation_snapshot_from_dict",
         "_stale",
         "_read_verified_state",
+        "_read_serialized",
+        "_acquire_posix_ledger_read_lock",
+        "_ensure_existing_path_durable",
+        "_recover_monotonic_state",
+        "_monotonic_state_sha256",
+        "_canonical_monotonic_authority",
+        "_monotonic_authority_identity",
     )
 
     def descriptor_code(value: object) -> object | None:
@@ -493,6 +510,18 @@ def _install_ledger_read_authority():
                 snapshot_globals.get(name, missing) is not expected
                 for name, expected in snapshot_type_bindings
             )
+            or execution_view_globals.get(
+                "_MONOTONIC_AUTHORITY_TYPE", missing
+            )
+            is not monotonic_authority_type
+            or execution_view_globals.get("_MONOTONIC_RECOVER", missing)
+            is not monotonic_recover
+            or exact_getattr(monotonic_recover, "__code__", None)
+            is not monotonic_recover_code
+            or execution_view_globals.get(
+                "MonotonicWorkspaceAuthorityError", missing
+            )
+            is not monotonic_error_type
         ):
             raise ExecutionCapitalAtRiskError(
                 "canonical execution-ledger read authority changed"

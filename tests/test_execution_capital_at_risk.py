@@ -1216,3 +1216,67 @@ def test_upstream_view_field_descriptor_substitution_cannot_hide_attempts(
 
     assert calls == []
 
+
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "_read_serialized",
+        "_acquire_posix_ledger_read_lock",
+        "_ensure_existing_path_durable",
+        "_recover_monotonic_state",
+        "_monotonic_state_sha256",
+        "_canonical_monotonic_authority",
+        "_monotonic_authority_identity",
+    ),
+)
+def test_transitive_ledger_read_method_rebinding_is_rejected_before_execution(
+    tmp_path,
+    monkeypatch,
+    method_name,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    _attempt(ledger, plan)
+    calls = []
+
+    def forged(*_args, **_kwargs):
+        calls.append(method_name)
+        raise AssertionError("rebound transitive ledger read helper must not execute")
+
+    monkeypatch.setattr(RealExecutionLedger, method_name, forged)
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="canonical execution-ledger read authority changed",
+    ):
+        resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+    assert calls == []
+
+
+def test_monotonic_recovery_alias_rebinding_is_rejected_before_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    _attempt(ledger, plan)
+    calls = []
+    ledger_globals = RealExecutionLedger.verified_execution_view.__globals__
+
+    def forged_recover(*_args, **_kwargs):
+        calls.append("recover")
+        return None
+
+    monkeypatch.setitem(
+        ledger_globals,
+        "_MONOTONIC_RECOVER",
+        forged_recover,
+    )
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="canonical execution-ledger read authority changed",
+    ):
+        resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+    assert calls == []
+

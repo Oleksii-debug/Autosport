@@ -48,14 +48,35 @@ def _bind_canonical_settlement_engine(method):
 
     canonical_engine_type = SettlementEngine
     canonical_scope_resolver = _canonical_open_quote_keys_for_book
+    canonical_resolution_type = SettlementResolution
+    canonical_resolution_validate = SettlementResolution.validate
+    canonical_instant = _instant
+    canonical_book_type = PaperBook
+    canonical_book_load = PaperBook.load
+    canonical_workspace_lock_type = WorkspaceEconomicLock
 
     def guarded(self, *args, **kwargs):
-        if "_settlement_engine_type" in kwargs:
-            raise TypeError("settlement engine origin is internal product authority")
-        if "_settlement_scope_resolver" in kwargs:
-            raise TypeError("settlement scope origin is internal product authority")
+        protected = {
+            "_settlement_engine_type": "settlement engine origin is internal product authority",
+            "_settlement_scope_resolver": "settlement scope origin is internal product authority",
+            "_settlement_resolution_type": "settlement evidence type is internal product authority",
+            "_settlement_resolution_validate": "settlement evidence validator is internal product authority",
+            "_settlement_instant": "settlement clock parser is internal product authority",
+            "_paper_book_type": "settlement book type is internal product authority",
+            "_paper_book_load": "settlement book loader is internal product authority",
+            "_workspace_lock_type": "settlement lock origin is internal product authority",
+        }
+        for name, message in protected.items():
+            if name in kwargs:
+                raise TypeError(message)
         kwargs["_settlement_engine_type"] = canonical_engine_type
         kwargs["_settlement_scope_resolver"] = canonical_scope_resolver
+        kwargs["_settlement_resolution_type"] = canonical_resolution_type
+        kwargs["_settlement_resolution_validate"] = canonical_resolution_validate
+        kwargs["_settlement_instant"] = canonical_instant
+        kwargs["_paper_book_type"] = canonical_book_type
+        kwargs["_paper_book_load"] = canonical_book_load
+        kwargs["_workspace_lock_type"] = canonical_workspace_lock_type
         return method(self, *args, **kwargs)
 
     guarded.__name__ = method.__name__
@@ -1067,19 +1088,69 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         settled_at: str,
         _settlement_engine_type: type[SettlementEngine],
         _settlement_scope_resolver: Callable[[object, PaperBook, str], set[str]],
+        _settlement_resolution_type: type[SettlementResolution],
+        _settlement_resolution_validate: Callable[..., None],
+        _settlement_instant: Callable[..., datetime],
+        _paper_book_type: type[PaperBook],
+        _paper_book_load: Callable[[str | Path], PaperBook],
+        _workspace_lock_type: type[WorkspaceEconomicLock],
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        if type(resolutions) is not tuple:
+            raise TypeError("settlement resolutions must be a tuple")
         if not resolutions:
             return (), ()
         if SettlementEngine is not _settlement_engine_type:
             raise ContinuousSessionError(
                 "settlement engine constructor origin changed"
             )
-        unique: dict[str, SettlementResolution] = {}
-        for resolution in resolutions:
-            unique.setdefault(resolution.evidence_id, resolution)
 
-        with WorkspaceEconomicLock(self.workspace):
-            book = self._load_book()
+        canonical_settled_at = _settlement_instant(
+            settled_at,
+            "settled_at",
+        ).isoformat()
+        unique: dict[str, SettlementResolution] = {}
+        event_ref_authority: dict[tuple[str, str], str] = {}
+        for resolution in resolutions:
+            if type(resolution) is not _settlement_resolution_type:
+                raise ContinuousSessionError(
+                    "settlement handoff contains non-canonical resolution evidence"
+                )
+            try:
+                _settlement_resolution_validate(
+                    resolution,
+                    as_of=canonical_settled_at,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ContinuousSessionError(
+                    "settlement resolution failed canonical validation"
+                ) from exc
+
+            previous = unique.get(resolution.evidence_id)
+            if previous is not None and previous != resolution:
+                raise ContinuousSessionError(
+                    "settlement evidence id has multiple authorities"
+                )
+            event_ref = (resolution.event_identity, resolution.settlement_ref)
+            previous_event_ref_authority = event_ref_authority.get(event_ref)
+            if (
+                previous_event_ref_authority is not None
+                and previous_event_ref_authority != resolution.evidence_id
+            ):
+                raise ContinuousSessionError(
+                    "settlement event/reference has multiple evidence authorities"
+                )
+            unique[resolution.evidence_id] = resolution
+            event_ref_authority[event_ref] = resolution.evidence_id
+
+        with _workspace_lock_type(self.workspace):
+            if self.paper_book_path.exists():
+                book = _paper_book_load(self.paper_book_path)
+            else:
+                book = _paper_book_type(self.initial_bankroll)
+            if type(book) is not _paper_book_type:
+                raise ContinuousSessionError(
+                    "settlement book loader returned non-canonical type"
+                )
             engine = _settlement_engine_type()
             if type(engine) is not _settlement_engine_type:
                 raise ContinuousSessionError(
@@ -1101,7 +1172,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             settled = tuple(
                 engine.settle_ready(
                     book,
-                    settled_at=_instant(settled_at, "settled_at").isoformat(),
+                    settled_at=canonical_settled_at,
                 )
             )
             if settled:

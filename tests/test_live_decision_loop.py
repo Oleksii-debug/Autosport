@@ -365,15 +365,23 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             live_store = loop._default_market_store
             self.assertIsNotNone(live_store)
-            with patch.object(
-                live_store,
-                "current_by_source_with_append_generation",
-                wraps=live_store.current_by_source_with_append_generation,
-            ) as proven_current:
+            with (
+                patch.object(
+                    live_store,
+                    "current_by_source_with_append_generation",
+                    wraps=live_store.current_by_source_with_append_generation,
+                ) as proven_current,
+                patch.object(
+                    live_store,
+                    "require_committed_append_generation",
+                    wraps=live_store.require_committed_append_generation,
+                ) as proven_frontier,
+            ):
                 clock.value = self.START + timedelta(seconds=2)
                 idle = loop.run_cycle()
                 self.assertEqual(idle.status, LiveCycleStatus.NO_CHANGE)
                 self.assertEqual(proven_current.call_count, 0)
+                self.assertEqual(proven_frontier.call_count, 0)
 
                 peer_store = SQLiteMarketStore(workspace / "market.db")
                 try:
@@ -392,6 +400,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 clock.value = self.START + timedelta(seconds=3)
                 second = loop.run_cycle()
                 self.assertEqual(proven_current.call_count, 1)
+                self.assertEqual(proven_frontier.call_count, 1)
 
             self.assertEqual(second.status, LiveCycleStatus.DECIDED)
             self.assertEqual(provider.calls, 3)

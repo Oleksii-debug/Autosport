@@ -4830,6 +4830,49 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_committed_append_prefix_ignores_noncontiguous_unissued_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                tail = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:00.500000+00:00",
+                )
+                self.assertTrue(store.append(first))
+                self.direct_insert_positive_generation(
+                    store,
+                    tail,
+                    generation=3,
+                )
+
+                self.assertEqual(store.append_generation_hint(), 3)
+
+                # The independently committed generation-1 state remains readable
+                # even though the later direct tail is globally non-contiguous.
+                store.require_committed_append_generation(1)
+                prefix = store.events_at_committed_append_boundary(1)
+                self.assertEqual(
+                    [(event.sequence, generation) for event, generation in prefix],
+                    [(1, 1)],
+                )
+
+                # Fresh publication must still reject the malformed current tail,
+                # and the unissued generation itself never gains prefix authority.
+                with self.assertRaises(ValueError):
+                    store.require_current_append_authority_with_boundary(1)
+                with self.assertRaises(MonotonicAuthorityRollbackError):
+                    store.require_committed_append_generation(3)
+                with self.assertRaises(MonotonicAuthorityRollbackError):
+                    store.events_at_committed_append_boundary(3)
+            finally:
+                store.close()
+
     def test_committed_append_prefix_does_not_recover_newer_prepare(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

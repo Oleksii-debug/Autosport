@@ -2307,17 +2307,15 @@ class SQLiteMarketStore:
                 self.connection.execute("BEGIN")
                 try:
                     _validate_canonical_table(self.connection, "market_events")
-                    self._validate_causal_replay_state()
-                    # This API proves the caller's already-sampled immutable prefix.
-                    # Do not require the later current tail to be product-issued: a
-                    # post-frontier direct/unissued tail must not revoke an older
-                    # independently committed boundary. The exact prefix proof below
-                    # still rejects asking for any unissued or split-batch generation.
-                    current_head = self._positive_append_generation_head()
-                    if max_generation > current_head:
-                        raise MonotonicAuthorityRollbackError(
-                            "requested market append boundary exceeds committed authority"
-                        )
+                    _validate_canonical_table(
+                        self.connection,
+                        "market_event_commit_order",
+                    )
+                    # Prove only the caller's already-sampled immutable prefix. Later
+                    # rows are outside this recovery authority and may be malformed,
+                    # direct-written, or abandoned without revoking an earlier exact
+                    # machine-committed boundary. The prefix proof itself still binds
+                    # every row at or below max_generation to committed append history.
                     self._require_committed_append_authority_through(
                         authority,
                         max_generation,
@@ -2386,17 +2384,15 @@ class SQLiteMarketStore:
                 self.connection.execute("BEGIN")
                 try:
                     _validate_canonical_table(self.connection, "market_events")
-                    self._validate_causal_replay_state()
-                    # This API proves the caller's already-sampled immutable prefix.
-                    # Do not require the later current tail to be product-issued: a
-                    # post-frontier direct/unissued tail must not revoke an older
-                    # independently committed boundary. The exact prefix proof below
-                    # still rejects asking for any unissued or split-batch generation.
-                    current_head = self._positive_append_generation_head()
-                    if max_generation > current_head:
-                        raise MonotonicAuthorityRollbackError(
-                            "requested market append boundary exceeds committed authority"
-                        )
+                    _validate_canonical_table(
+                        self.connection,
+                        "market_event_commit_order",
+                    )
+                    # Prove only the caller's already-sampled immutable prefix. Later
+                    # rows are outside this recovery authority and may be malformed,
+                    # direct-written, or abandoned without revoking an earlier exact
+                    # machine-committed boundary. The prefix proof itself still binds
+                    # every row at or below max_generation to committed append history.
                     self._require_committed_append_authority_through(
                         authority,
                         max_generation,

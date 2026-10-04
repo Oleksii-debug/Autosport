@@ -1055,7 +1055,7 @@ class _ContinuousSessionState:
                 "continuous session state schema/identity mismatch"
             )
         _text(raw["session_id"], "session_id")
-        _instant(raw["started_at"], "started_at")
+        started_at = _instant(raw["started_at"], "started_at")
         try:
             state = SessionState(raw["state"])
         except ValueError as exc:
@@ -1067,9 +1067,35 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "cycles_completed must be a non-negative integer"
             )
-        for name in ("last_success_at", "last_full_refresh_at"):
-            if raw[name] is not None:
-                _instant(raw[name], name)
+        last_success_at = (
+            None
+            if raw["last_success_at"] is None
+            else _instant(raw["last_success_at"], "last_success_at")
+        )
+        if last_success_at is not None and last_success_at < started_at:
+            raise ContinuousSessionError(
+                "last_success_at predates continuous session start"
+            )
+        last_full_refresh_at = (
+            None
+            if raw["last_full_refresh_at"] is None
+            else _instant(
+                raw["last_full_refresh_at"],
+                "last_full_refresh_at",
+            )
+        )
+        if last_full_refresh_at is not None:
+            if last_success_at is None:
+                raise ContinuousSessionError(
+                    "last_full_refresh_at requires a successful cycle"
+                )
+            if (
+                last_full_refresh_at < started_at
+                or last_full_refresh_at > last_success_at
+            ):
+                raise ContinuousSessionError(
+                    "last_full_refresh_at is outside durable success history"
+                )
         if raw["last_error_code"] is not None:
             _text(raw["last_error_code"], "last_error_code")
 
@@ -1277,7 +1303,22 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "settlement evidence pending base tip mismatch"
             )
-        _instant(raw["success_at"], "settlement evidence pending success_at")
+        success_at = _instant(
+            raw["success_at"],
+            "settlement evidence pending success_at",
+        )
+        started_at = _instant(state["started_at"], "started_at")
+        if success_at < started_at:
+            raise ContinuousSessionError(
+                "settlement evidence pending success predates session start"
+            )
+        if state["last_success_at"] is not None and success_at < _instant(
+            state["last_success_at"],
+            "last_success_at",
+        ):
+            raise ContinuousSessionError(
+                "settlement evidence pending success rewinds durable success time"
+            )
         if type(raw["full_refresh"]) is not bool:
             raise ContinuousSessionError(
                 "settlement evidence pending full_refresh must be boolean"
@@ -2096,6 +2137,18 @@ class _ContinuousSessionState:
             raise TypeError("full_refresh must be boolean")
 
         def mutate_success(raw: dict[str, Any]) -> None:
+            success_at = _instant(timestamp, "at")
+            if success_at < _instant(raw["started_at"], "started_at"):
+                raise ContinuousSessionError(
+                    "successful cycle timestamp predates session start"
+                )
+            if raw["last_success_at"] is not None and success_at < _instant(
+                raw["last_success_at"],
+                "last_success_at",
+            ):
+                raise ContinuousSessionError(
+                    "successful cycle timestamp rewinds durable success time"
+                )
             raw["cycles_completed"] = int(raw["cycles_completed"]) + 1
             raw["last_success_at"] = timestamp
             raw["last_error_code"] = None

@@ -131,6 +131,114 @@ def _journal_snapshot(root: Path) -> dict[str, bytes]:
     }
 
 
+
+def test_success_clock_rollback_cannot_rewind_operational_checkpoint() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        path = root / "continuous_session.json"
+        before = path.read_bytes()
+        journal_before = _journal_snapshot(root)
+
+        try:
+            state.record_success(
+                at="2026-09-22T06:19:59+00:00",
+                full_refresh=False,
+                settlement_evidence=(),
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "clock rollback rewound durable continuous-session success time"
+            )
+
+        assert path.read_bytes() == before
+        assert _journal_snapshot(root) == journal_before
+
+
+def test_pending_recovery_clock_rollback_fails_before_journal_tail_write() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        state = _state_with_history(root, 1)
+        checkpoint = json.loads(path.read_text(encoding="utf-8"))
+        resolution = continuous_session.SettlementResolution(
+            event_identity="provider-a:event-clock-rollback",
+            settlement_ref="provider-result:clock-rollback",
+            quote_outcomes={
+                "provider-a:event-clock-rollback:winner:home": "win"
+            },
+            evidence_id="receipt-clock-rollback",
+            evidence_sha256="c" * 64,
+            available_at="2026-09-22T06:19:58+00:00",
+        )
+        item = state._normalized_settlement_evidence(resolution)
+        record = state._build_evidence_record(
+            item,
+            sequence=2,
+            previous_record_sha256=checkpoint[
+                "settlement_evidence_tip_sha256"
+            ],
+        )
+        checkpoint["settlement_evidence_pending"] = {
+            "base_count": 1,
+            "base_tip_sha256": checkpoint[
+                "settlement_evidence_tip_sha256"
+            ],
+            "success_at": "2026-09-22T06:19:59+00:00",
+            "full_refresh": False,
+            "records": [record],
+        }
+        path.write_text(
+            json.dumps(checkpoint, sort_keys=True),
+            encoding="utf-8",
+        )
+        before = _journal_snapshot(root)
+
+        try:
+            continuous_session._ContinuousSessionState(
+                path,
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "pending recovery accepted a success-time rollback"
+            )
+
+        assert _journal_snapshot(root) == before
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+        assert persisted["settlement_evidence_pending"] is not None
+        assert persisted["last_success_at"] == _AT
+
+
+def test_checkpoint_rejects_full_refresh_newer_than_last_success() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        _state_with_history(root, 1)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["last_full_refresh_at"] = "2026-09-22T06:20:01+00:00"
+        path.write_text(json.dumps(raw, sort_keys=True), encoding="utf-8")
+
+        try:
+            continuous_session._ContinuousSessionState(
+                path,
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "checkpoint accepted full-refresh time after last success"
+            )
+
 def test_unrelated_failure_checkpoint_preserves_settlement_journal_bytes() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

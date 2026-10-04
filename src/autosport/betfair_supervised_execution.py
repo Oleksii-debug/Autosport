@@ -43,6 +43,7 @@ from .real_execution_ledger import (
     ExternalAcknowledgement,
     RealExecutionLedger,
 )
+from . import supervised_execution as _supervised_execution_runtime
 from .supervised_execution import (
     BoundSupervisedExecutionPlan,
     SupervisedApproval,
@@ -948,15 +949,15 @@ def _place_action_with_final_durable_authority(
     client: BetfairSupervisedPlaceOrdersClient,
     provider_order_ref: str,
     execution_workspace: Path,
-    clock: Callable[[], str],
 ) -> BetfairPlaceExecutionReport:
     """Hold approval stable and fsync SUBMITTED at the transport boundary.
 
     The canonical ledger writer fence spans the one irreversible provider call.
-    Final approval/quote time is sampled by the private pre-transport callback,
-    after the exact request bytes have been built and immediately before POST.
-    A durable approval revocation therefore either commits first and denies the
-    send, or cannot commit until the already-authorized provider call returns.
+    Final approval/quote time is sampled by the product-owned trusted clock in
+    the private pre-transport callback, after exact request bytes have been built
+    and immediately before POST. A durable approval revocation therefore either
+    commits first and denies the send, or cannot commit until the already-
+    authorized provider call returns.
     """
 
     def operation() -> BetfairPlaceExecutionReport:
@@ -1012,7 +1013,7 @@ def _place_action_with_final_durable_authority(
 
         def authorize_and_submit(_request_sha256: str) -> None:
             nonlocal submitted
-            send_at = clock()
+            send_at = _supervised_execution_runtime._trusted_now()
             _require_approval(bound, approval, send_at)
             _require_durable_approval(ledger, bound, approval)
             if _time(send_at, "final send time") < _time(
@@ -1088,7 +1089,10 @@ def execute_betfair_supervised_action(
         )
     action = bound.action_for(action_id)
     _validate_betfair_place_action(action)
-    now = clock or _now
+    # Kept for API compatibility only. Execution-authority timestamps must never
+    # be minted by a caller-supplied clock.
+    _ = clock
+    trusted_now = _supervised_execution_runtime._trusted_now
     execution_workspace = ledger.path.parent.resolve()
 
     # Owner authority and durable supervised approval are independently
@@ -1128,7 +1132,6 @@ def execute_betfair_supervised_action(
                 client=client,
                 provider_order_ref=provider_order_ref,
                 execution_workspace=execution_workspace,
-                clock=now,
             )
         except BetfairPlaceOrdersAmbiguous:
             ledger.mark_unknown(
@@ -1137,7 +1140,7 @@ def execute_betfair_supervised_action(
                     "betfair_placeOrders_ambiguous_effect_"
                     "requires_readback"
                 ),
-                observed_at=now(),
+                observed_at=trusted_now(),
             )
             return BetfairSupervisedExecutionResult(
                 PlaceOrdersOutcome.UNKNOWN,

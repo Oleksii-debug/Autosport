@@ -1545,6 +1545,70 @@ def test_persisted_credential_rejection_cannot_launder_through_wait_state(
         )
 
 
+@pytest.mark.parametrize(
+    ("retry_not_before", "failure"),
+    [
+        (NOW + timedelta(seconds=5), None),
+        (None, ProphetXRenewalFailureClass.RETRYABLE),
+        (None, ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE),
+    ],
+)
+def test_renewal_due_retry_horizon_must_match_failure_evidence(
+    retry_not_before,
+    failure,
+):
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="retry horizon must match transient renewal failure evidence",
+    ):
+        ProphetXSessionSnapshot(
+            state=ProphetXSessionState.RENEWAL_DUE,
+            generation=4,
+            credential_revision="rev-1",
+            integration_role="market-maker-primary",
+            last_transition_at=NOW,
+            session_lineage_id="a" * 64,
+            access_expires_at=NOW + timedelta(minutes=1),
+            slot_hold_started_at=NOW - timedelta(minutes=9),
+            slot_hold_until=NOW + timedelta(minutes=11),
+            retry_not_before=retry_not_before,
+            transient_failures=1 if failure is not None else 0,
+            last_renewal_failure_class=failure,
+        )
+
+
+@pytest.mark.parametrize(
+    ("login_failure", "renewal_failure"),
+    [
+        (ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT, None),
+        (None, ProphetXRenewalFailureClass.RETRYABLE),
+        (None, ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE),
+        (None, ProphetXRenewalFailureClass.AMBIGUOUS_PROVIDER_RESULT),
+    ],
+)
+def test_refresh_success_wait_evidence_cannot_carry_failure_history(
+    login_failure,
+    renewal_failure,
+):
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="refresh-success wait evidence cannot carry failure history",
+    ):
+        ProphetXSessionSnapshot(
+            state=ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+            generation=5,
+            credential_revision="rev-1",
+            integration_role="market-maker-primary",
+            last_transition_at=NOW,
+            access_expires_at=NOW + timedelta(minutes=10),
+            slot_hold_started_at=NOW,
+            slot_hold_until=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
+            transient_failures=1,
+            last_failure_class=login_failure,
+            last_renewal_failure_class=renewal_failure,
+        )
+
+
 def test_renewal_persisted_state_remains_secret_free(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)

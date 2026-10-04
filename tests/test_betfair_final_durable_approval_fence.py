@@ -40,6 +40,23 @@ def _fixed_final_fence_clock(monkeypatch) -> None:
     )
 
 
+def _set_trusted_clock_sequence(monkeypatch, *values: str) -> None:
+    assert values
+    sequence = iter(values)
+    final = values[-1]
+
+    def trusted_now() -> str:
+        try:
+            return next(sequence)
+        except StopIteration:
+            return final
+
+    monkeypatch.setattr(
+        "autosport.supervised_execution._trusted_now",
+        trusted_now,
+    )
+
+
 def _assert_reserved_without_submission(
     ledger: RealExecutionLedger,
     plan_id: str,
@@ -214,11 +231,18 @@ def test_cross_instance_revocation_cannot_commit_during_provider_send() -> None:
         )
 
 
-def test_submitted_fact_is_durable_and_cross_instance_visible_before_post() -> None:
+def test_submitted_fact_is_durable_and_cross_instance_visible_before_post(
+    monkeypatch,
+) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         observer = RealExecutionLedger(Path(tmp) / "real.jsonl")
         observed_submitted = False
+        _set_trusted_clock_sequence(
+            monkeypatch,
+            RESERVED_AT,
+            SUBMITTED_AT,
+        )
 
         def inspect_then_respond(request):
             nonlocal observed_submitted
@@ -248,7 +272,7 @@ def test_submitted_fact_is_durable_and_cross_instance_visible_before_post() -> N
             attempt_id="attempt-durable-before-post",
             profile=profile,
             client=client,
-            clock=lambda: SUBMITTED_AT,
+            clock=lambda: "1900-01-01T00:00:00+00:00",
         )
 
         assert observed_submitted
@@ -256,11 +280,18 @@ def test_submitted_fact_is_durable_and_cross_instance_visible_before_post() -> N
         assert result.attempt_state is AttemptState.ACCEPTED
 
 
-def test_quote_expiry_exact_boundary_denies_before_submitted_or_transport() -> None:
+def test_quote_expiry_exact_boundary_denies_before_submitted_or_transport(
+    monkeypatch,
+) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(lambda request: _response(request))
         client = _enabled_client(profile, transport, store=goal_store)
+        _set_trusted_clock_sequence(
+            monkeypatch,
+            RESERVED_AT,
+            QUOTE_EXPIRES_AT,
+        )
 
         with pytest.raises(
             BetfairSupervisedExecutionError,
@@ -274,7 +305,7 @@ def test_quote_expiry_exact_boundary_denies_before_submitted_or_transport() -> N
                 attempt_id="attempt-expired-quote-final-send",
                 profile=profile,
                 client=client,
-                clock=lambda: QUOTE_EXPIRES_AT,
+                clock=lambda: RESERVED_AT,
             )
 
         assert transport.calls == []
@@ -285,11 +316,18 @@ def test_quote_expiry_exact_boundary_denies_before_submitted_or_transport() -> N
         )
 
 
-def test_approval_expiry_exact_boundary_denies_before_submitted_or_transport() -> None:
+def test_caller_clock_cannot_mask_trusted_approval_expiry_before_transport(
+    monkeypatch,
+) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(lambda request: _response(request))
         client = _enabled_client(profile, transport, store=goal_store)
+        _set_trusted_clock_sequence(
+            monkeypatch,
+            RESERVED_AT,
+            APPROVAL_EXPIRES_AT,
+        )
 
         with pytest.raises(
             SupervisedExecutionError,
@@ -303,7 +341,7 @@ def test_approval_expiry_exact_boundary_denies_before_submitted_or_transport() -
                 attempt_id="attempt-expired-approval-final-send",
                 profile=profile,
                 client=client,
-                clock=lambda: APPROVAL_EXPIRES_AT,
+                clock=lambda: RESERVED_AT,
             )
 
         assert transport.calls == []
@@ -314,12 +352,17 @@ def test_approval_expiry_exact_boundary_denies_before_submitted_or_transport() -
         )
 
 
-def test_final_send_cannot_precede_attempt_reservation() -> None:
+def test_final_send_cannot_precede_attempt_reservation(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(lambda request: _response(request))
         client = _enabled_client(profile, transport, store=goal_store)
-        before_reservation = "2026-09-19T12:00:00+00:00"
+        before_reservation = "2026-09-19T08:00:02.500000+00:00"
+        _set_trusted_clock_sequence(
+            monkeypatch,
+            RESERVED_AT,
+            before_reservation,
+        )
 
         with pytest.raises(
             BetfairSupervisedExecutionError,
@@ -333,7 +376,7 @@ def test_final_send_cannot_precede_attempt_reservation() -> None:
                 attempt_id="attempt-final-clock-before-reservation",
                 profile=profile,
                 client=client,
-                clock=lambda: before_reservation,
+                clock=lambda: SUBMITTED_AT,
             )
 
         assert transport.calls == []

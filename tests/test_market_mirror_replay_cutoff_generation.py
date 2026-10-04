@@ -4214,6 +4214,41 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_existing_cutoff_ignores_later_orphan_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(first))
+                frozen = self.replay(store)
+                self.assertEqual(self.semantic_events(frozen), (first.to_dict(),))
+
+                store.connection.execute(
+                    "INSERT INTO market_event_commit_order "
+                    "(dedupe_key, append_generation) VALUES (?, ?)",
+                    ("orphan-cutoff-tail", 3),
+                )
+                store.connection.commit()
+
+                self.assertEqual(
+                    self.semantic_events(self.replay(store)),
+                    (first.to_dict(),),
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "append-generation authority does not exactly cover history",
+                ):
+                    self.replay(
+                        store,
+                        as_of=self.CUTOFF + timedelta(seconds=1),
+                    )
+            finally:
+                store.close()
+
     def test_existing_cutoff_ignores_noncontiguous_later_tail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

@@ -697,13 +697,18 @@ def _install_execution_feasibility_result_authority():
             raw_assess.__code__ is not raw_assess_code
             or _assess_execution_feasibility is not canonical_assess
             or canonical_assess.__code__ is not canonical_assess_code
-            or RealExecutionLedger.verified_execution_view
+        ):
+            raise RuntimeError(
+                "canonical execution feasibility assessor changed"
+            )
+        if (
+            RealExecutionLedger.verified_execution_view
             is not verified_execution_view
             or verified_execution_view.__code__
             is not verified_execution_view_code
         ):
             raise RuntimeError(
-                "canonical execution feasibility authority changed"
+                "canonical execution ledger verified plan view changed"
             )
         result = raw_assess(
             ledger,

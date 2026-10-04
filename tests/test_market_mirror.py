@@ -6,6 +6,7 @@ import unittest
 
 from autosport.domain import MarketEvent
 from autosport.market_mirror import MarketMirror, MirrorUpdate
+from autosport.market_state_identity import PROPHETX_REST_MARKET_STATE_CONTRACT
 from autosport.storage import SQLiteMarketStore
 
 
@@ -38,6 +39,59 @@ class MarketMirrorTests(unittest.TestCase):
             ingest_ts=ingest_ts or observed_ts,
             sport=sport,
         )
+
+
+    @staticmethod
+    def prophetx_refresh_event(*, sequence: int, odds: str = "2.00") -> MarketEvent:
+        timestamp = f"2026-09-16T19:00:{sequence:02d}+00:00"
+        return MarketEvent(
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            decimal_odds=Decimal(odds),
+            observed_ts=timestamp,
+            source_id="prophetx:sandbox",
+            sequence=sequence,
+            status="open",
+            ingest_ts=timestamp,
+            metadata={
+                "provider": "prophetx",
+                "environment": "sandbox",
+                "transport_surface": "v3_affiliate_get_markets",
+                "request_fingerprint_sha256": "a" * 64,
+                "product_acquisition_sequence": sequence,
+                "response_sha256": f"{sequence:x}".rjust(64, "0"),
+                "snapshot_fingerprint_sha256": (
+                    f"{sequence + 100:x}".rjust(64, "0")
+                ),
+                "sequence_authority_id": "prophetx-rest-test-authority",
+                "sequence_source_id": (
+                    "prophetx:sandbox:rest:v3-affiliate-get-markets"
+                ),
+                "semantic_state_contract": PROPHETX_REST_MARKET_STATE_CONTRACT,
+            },
+        )
+
+    def test_higher_acquisition_with_same_semantic_state_is_classified_refresh(self) -> None:
+        mirror = MarketMirror()
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+
+        self.assertEqual(mirror.apply(first).status, MirrorUpdate.APPLIED)
+        result = mirror.apply(refresh)
+
+        self.assertEqual(result.status, MirrorUpdate.SEMANTIC_REFRESH)
+        self.assertEqual(result.previous_sequence, 1)
+        self.assertEqual(result.current_sequence, 2)
+        self.assertEqual(mirror.snapshot(), (refresh,))
+
+    def test_semantic_contract_still_reports_economic_change_as_applied(self) -> None:
+        mirror = MarketMirror()
+        first = self.prophetx_refresh_event(sequence=1, odds="2.00")
+        changed = self.prophetx_refresh_event(sequence=2, odds="2.10")
+
+        self.assertEqual(mirror.apply(first).status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.apply(changed).status, MirrorUpdate.APPLIED)
 
     def test_new_and_forward_updates_are_applied(self) -> None:
         mirror = MarketMirror()

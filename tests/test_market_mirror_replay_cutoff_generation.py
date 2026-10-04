@@ -3958,6 +3958,62 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     "committed transition state is invalid",
                 ):
                     self.replay(store)
+
+                third_as_of = storage_module._canonical_replay_cutoff(
+                    (self.CUTOFF + timedelta(seconds=2)).isoformat()
+                )
+                third_id = storage_module._replay_cutoff_id(third_as_of)
+                third_binding = storage_module._replay_cutoff_binding_sha256(
+                    cutoff_id=third_id,
+                    canonical_as_of=third_as_of,
+                    max_append_generation=0,
+                    corpus_sha256=corpus_sha256,
+                )
+                third_rows = tuple(
+                    sorted(
+                        (*final_rows, (third_id, third_as_of, 0)),
+                        key=lambda row: row[0],
+                    )
+                )
+                third_state = storage_module._replay_cutoff_state_sha256(
+                    third_rows,
+                    sealed_corpus_sha256=corpus_sha256,
+                )
+                assert third_state is not None
+                third_tx = f"{third_id[:32]}-{'4' * 32}"
+                authority.prepare(
+                    tx_id=third_tx,
+                    observed_state_sha256=final_state,
+                    intended_state_sha256=third_state,
+                    semantic_binding_sha256=third_binding,
+                )
+                store.connection.execute(
+                    """INSERT INTO market_replay_cutoffs
+                       (cutoff_id, as_of, max_append_generation)
+                       VALUES (?, ?, ?)""",
+                    (third_id, third_as_of, 0),
+                )
+                store.connection.commit()
+                before_pending_recovery = authority.read_history()
+                self.assertEqual(
+                    before_pending_recovery[-1].phase.value,
+                    "PREPARE",
+                )
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "committed transition state is invalid",
+                ):
+                    self.replay(store)
+
+                self.assertEqual(
+                    authority.read_history(),
+                    before_pending_recovery,
+                )
+                self.assertEqual(
+                    authority.read_history()[-1].phase.value,
+                    "PREPARE",
+                )
             finally:
                 store.close()
 

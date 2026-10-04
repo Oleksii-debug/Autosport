@@ -13,6 +13,7 @@ from typing import Callable, Protocol
 
 from .causal_collector import (
     CanonicalDesktopApplication,
+    CausalView,
     CollectorDelta,
     CollectorDeltaStore,
     DesktopApplicationReceipt,
@@ -55,15 +56,7 @@ class ProductCompositionError(RuntimeError):
 
 
 class _ProductDesktopDeltaConsumer(DesktopDeltaConsumer):
-    """Freeze the product-owned desktop authority graph after composition.
-
-    DesktopDeltaConsumer remains intentionally injectable for library/test use. The
-    autonomous product publishes one durable composition manifest and must not silently
-    switch collector, checkpoint, application, delivery, or clock authorities between
-    ticks. Mid-drain callback mutation is already snapshot-safe in the generic consumer;
-    this guard closes the between-drain mutation boundary for the product-owned instance
-    without narrowing the generic consumer contract.
-    """
+    """Freeze and continuously re-prove the product-owned desktop authority graph."""
 
     _PROTECTED_AUTHORITY_FIELDS = frozenset(
         {
@@ -78,13 +71,32 @@ class _ProductDesktopDeltaConsumer(DesktopDeltaConsumer):
             "drain",
             "__class__",
             "__dict__",
+            "_PROTECTED_AUTHORITY_FIELDS",
+            "_product_authority_snapshot",
             "_product_authority_sealed",
         }
+    )
+    _SNAPSHOT_FIELDS = (
+        "collector",
+        "checkpoint",
+        "resolve_event",
+        "apply_event",
+        "lookup_application_receipt",
+        "_acknowledgement_clock",
+        "_on_application_receipt",
     )
 
     def __init__(self, *args, **kwargs) -> None:
         object.__setattr__(self, "_product_authority_sealed", False)
         super().__init__(*args, **kwargs)
+        object.__setattr__(
+            self,
+            "_product_authority_snapshot",
+            tuple(
+                (name, object.__getattribute__(self, name))
+                for name in self._SNAPSHOT_FIELDS
+            ),
+        )
         object.__setattr__(self, "_product_authority_sealed", True)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -96,6 +108,23 @@ class _ProductDesktopDeltaConsumer(DesktopDeltaConsumer):
                 f"product desktop authority field {name!r} is immutable"
             )
         object.__setattr__(self, name, value)
+
+    def _require_authority_snapshot(self) -> None:
+        snapshot = object.__getattribute__(self, "_product_authority_snapshot")
+        for name, expected in snapshot:
+            if object.__getattribute__(self, name) is not expected:
+                raise ProductCompositionError(
+                    f"product desktop authority field {name!r} changed after composition"
+                )
+
+    def drain(
+        self,
+        *,
+        as_of: str,
+        view: CausalView = CausalView.AS_KNOWN_AT_DECISION,
+    ) -> tuple[str, ...]:
+        self._require_authority_snapshot()
+        return super().drain(as_of=as_of, view=view)
 
 def _serialized_runtime_operation(method):
     """Hold one runtime-local fence across an admitted public lifecycle operation."""

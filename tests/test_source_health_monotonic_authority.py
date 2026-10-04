@@ -329,6 +329,47 @@ def test_recovery_does_not_commit_published_prefix_until_reflush_succeeds(
     assert history[-1].intended_state_sha256 == intended
 
 
+def test_constructor_revalidates_after_recovery_before_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path, monkeypatch, "constructor-race")
+    _record_success(store)
+    valid_old = store.path.read_bytes()
+    _record_provider_failure(store)
+    current = store.path.read_bytes()
+    assert current != valid_old
+
+    canonical_recover = SourceHealthStore._recover_or_bootstrap_authority
+    injected = False
+
+    def rollback_after_recovery(
+        self: SourceHealthStore,
+        observed: str | None,
+    ):
+        nonlocal injected
+        authority = canonical_recover(self, observed)
+        if self.path == store.path and not injected:
+            injected = True
+            self.path.write_bytes(valid_old)
+        return authority
+
+    monkeypatch.setattr(
+        SourceHealthStore,
+        "_recover_or_bootstrap_authority",
+        rollback_after_recovery,
+    )
+
+    with pytest.raises(
+        MonotonicAuthorityRollbackError,
+        match="rolled back|unproven|authority|match",
+    ):
+        SourceHealthStore(store.path)
+
+    assert injected is True
+    assert store.path.read_bytes() == valid_old
+
+
 def test_bootstrap_digest_is_from_the_exact_validated_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

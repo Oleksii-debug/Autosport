@@ -1639,6 +1639,88 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_new_append_repairs_forged_current_projection_from_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T18:59:58+00:00",
+                )
+                self.assertTrue(store.append(first))
+                forged = self.event(
+                    sequence=999,
+                    odds="99.00",
+                    observed_ts="2026-09-16T18:59:59+00:00",
+                )
+                store.connection.execute(
+                    """UPDATE current_quotes
+                       SET observed_ts=?, sequence=?, payload_json=?
+                       WHERE source_id=? AND quote_key=?""",
+                    (
+                        forged.observed_ts,
+                        forged.sequence,
+                        storage_module._canonical_payload(forged),
+                        first.source_id,
+                        first.quote_key,
+                    ),
+                )
+                store.connection.commit()
+
+                second = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(second))
+                current = store.current_by_source()[(second.source_id, second.quote_key)]
+                self.assertEqual(current.sequence, 2)
+                self.assertEqual(current.decimal_odds, Decimal("2.10"))
+                self.assertEqual(current.dedupe_key, second.dedupe_key)
+            finally:
+                store.close()
+
+    def test_duplicate_retry_repairs_forged_current_projection_from_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                event = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(event))
+                forged = self.event(
+                    sequence=999,
+                    odds="99.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                store.connection.execute(
+                    """UPDATE current_quotes
+                       SET observed_ts=?, sequence=?, payload_json=?
+                       WHERE source_id=? AND quote_key=?""",
+                    (
+                        forged.observed_ts,
+                        forged.sequence,
+                        storage_module._canonical_payload(forged),
+                        event.source_id,
+                        event.quote_key,
+                    ),
+                )
+                store.connection.commit()
+
+                before = store._market_append_authority().read_history()
+                self.assertFalse(store.append(event))
+                after = store._market_append_authority().read_history()
+                self.assertEqual(after, before)
+                current = store.current_by_source()[(event.source_id, event.quote_key)]
+                self.assertEqual(current.sequence, 1)
+                self.assertEqual(current.decimal_odds, Decimal("2.00"))
+                self.assertEqual(current.dedupe_key, event.dedupe_key)
+            finally:
+                store.close()
+
     def test_coherent_positive_history_rewrite_blocks_duplicate_retry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

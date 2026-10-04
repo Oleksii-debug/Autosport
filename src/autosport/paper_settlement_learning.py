@@ -784,6 +784,14 @@ class PaperSettlementLearningBridge:
                 raise PaperSettlementLearningBridgeError(
                     "ticket must be bound before settlement"
                 )
+            if len(ticket.provider_source_ids) != 1:
+                raise PaperSettlementLearningBridgeError(
+                    "settlement learning requires exactly one ticket provider source"
+                )
+            if any(leg.sport is None for leg in ticket.legs):
+                raise PaperSettlementLearningBridgeError(
+                    "settlement learning requires explicit sport on every ticket leg"
+                )
             if _instant(ticket.placed_at, "ticket placed_at") < _instant(
                 action.decided_at, "action decided_at"
             ):
@@ -955,10 +963,23 @@ class PaperSettlementLearningBridge:
         *,
         at: str,
     ) -> tuple[list[dict[str, object]], dict[str, str]] | None:
+        if len(ticket.provider_source_ids) != 1:
+            raise PaperSettlementLearningBridgeError(
+                "settlement learning requires exactly one ticket provider source"
+            )
+        if any(leg.sport is None for leg in ticket.legs):
+            raise PaperSettlementLearningBridgeError(
+                "settlement learning requires explicit sport on every ticket leg"
+            )
+        source_id = ticket.provider_source_ids[0]
         leg_keys = {leg.quote_key for leg in ticket.legs}
         known: dict[str, str] = {}
         used: dict[str, dict[str, object]] = {}
         leg_by_key = {leg.quote_key: leg for leg in ticket.legs}
+        expected_event_identity_by_key = {
+            leg.quote_key: f"{source_id}:{leg.event_id}"
+            for leg in ticket.legs
+        }
         for resolution in resolutions:
             if not isinstance(resolution, SettlementResolution):
                 raise PaperSettlementLearningBridgeError(
@@ -977,13 +998,10 @@ class PaperSettlementLearningBridge:
             }
             if not scoped:
                 continue
-            identity_parts = {resolution.event_identity}
-            if ":" in resolution.event_identity:
-                identity_parts.add(resolution.event_identity.split(":", 1)[1])
             for key in scoped:
-                if leg_by_key[key].event_id not in identity_parts:
+                if resolution.event_identity != expected_event_identity_by_key[key]:
                     raise PaperSettlementLearningBridgeError(
-                        "settlement evidence event identity differs from bound ticket leg"
+                        "settlement evidence provider/event identity differs from bound ticket leg"
                     )
             for key, value in scoped.items():
                 previous = known.get(key)

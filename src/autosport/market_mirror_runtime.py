@@ -510,6 +510,10 @@ class BoundedMirrorInvalidationBuffer:
         self._max_dirty_keys = max_dirty_keys
         self._dirty: dict[MirrorQuoteKey, None] = {}
         self._full_refresh_required = False
+        # A live subscriber failure happens only after SQLite commit. Preserve the
+        # exact already-durable event so the next canonical poll can repair mirror
+        # state before any newer provider batch is allowed to advance.
+        self._pending_recovery: list[MarketEvent] = []
         self._lock = RLock()
 
     @property
@@ -530,7 +534,39 @@ class BoundedMirrorInvalidationBuffer:
         with self._lock:
             return self._full_refresh_required
 
-    def accept_persisted(self, event: MarketEvent) -> MirrorApplyResult:
+    @property
+    def pending_recovery_count(self) -> int:
+        """Return durable subscriber deliveries still missing from mirror state."""
+        with self._lock:
+            return len(self._pending_recovery)
+
+    def _record_invalidation_locked(self, result: MirrorApplyResult) -> None:
+        if result.status is not MirrorUpdate.APPLIED:
+            return
+
+        if self._full_refresh_required:
+            return
+
+        key = (result.source_id, result.quote_key)
+        if key in self._dirty:
+            return
+
+        if len(self._dirty) >= self._max_dirty_keys:
+            # Never publish a partial affected-key list as complete truth.
+            # The mirror already contains this update, so degrade to one
+            # coherent full refresh rather than dropping durable state.
+            self._dirty.clear()
+            self._full_refresh_required = True
+            return
+
+        self._dirty[key] = None
+
+    def accept_persisted(
+        self,
+        event: MarketEvent,
+        *,
+        _snapshot_event=MarketMirror._snapshot_event,
+    ) -> MirrorApplyResult:
         """Apply one already-durable event and record its affected quote if material.
 
         The tracker lock covers both mirror mutation and invalidation publication so
@@ -541,27 +577,36 @@ class BoundedMirrorInvalidationBuffer:
             raise TypeError("event must be a MarketEvent")
 
         with self._lock:
-            result = self._mirror.apply(event)
-            if result.status is not MirrorUpdate.APPLIED:
-                return result
-
-            if self._full_refresh_required:
-                return result
-
-            key = (result.source_id, result.quote_key)
-            if key in self._dirty:
-                return result
-
-            if len(self._dirty) >= self._max_dirty_keys:
-                # Never publish a partial affected-key list as complete truth.
-                # The mirror already contains this update, so degrade to one
-                # coherent full refresh rather than dropping durable state.
-                self._dirty.clear()
-                self._full_refresh_required = True
-                return result
-
-            self._dirty[key] = None
+            try:
+                result = self._mirror.apply(event)
+            except Exception:
+                # MarketEventBus invokes this callback only after the live receipt
+                # transaction commits. Keep an owned canonical snapshot before
+                # surfacing the delivery failure so a later poll can repair the
+                # non-durable mirror without replaying or refetching the provider.
+                self._pending_recovery.append(_snapshot_event(event))
+                raise
+            self._record_invalidation_locked(result)
             return result
+
+    def reconcile_pending(self) -> tuple[MirrorApplyResult, ...]:
+        """Repair post-commit subscriber failures before admitting newer live input.
+
+        Recovery is strictly in original delivery order. A still-failing head remains
+        queued and the exception is surfaced, so callers cannot skip an unresolved
+        durable event and continue making decisions from a newer partial mirror.
+        Successful material repairs enter the same bounded invalidation protocol as
+        ordinary subscriber delivery.
+        """
+        recovered: list[MirrorApplyResult] = []
+        with self._lock:
+            while self._pending_recovery:
+                event = self._pending_recovery[0]
+                result = self._mirror.apply(event)
+                self._record_invalidation_locked(result)
+                self._pending_recovery.pop(0)
+                recovered.append(result)
+        return tuple(recovered)
 
     def drain_and_route(
         self,

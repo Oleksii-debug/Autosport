@@ -1405,17 +1405,35 @@ class SQLiteMarketStore:
 
     def _validated_positive_append_entries(
         self,
+        *,
+        max_generation: int | None = None,
     ) -> tuple[tuple[int, str, str], ...]:
         qualified_columns = ",".join(
             f"m.{column}" for column in _HISTORY_COLUMNS
         )
-        rows = self.connection.execute(
-            f"""SELECT c.append_generation, {qualified_columns}
-                FROM market_event_commit_order AS c
-                JOIN market_events AS m ON m.dedupe_key = c.dedupe_key
-                WHERE c.append_generation > 0
-                ORDER BY c.append_generation"""
-        ).fetchall()
+        if (
+            max_generation is not None
+            and (type(max_generation) is not int or max_generation < 0)
+        ):
+            raise ValueError("max_generation must be a non-negative int")
+        if max_generation is None:
+            rows = self.connection.execute(
+                f"""SELECT c.append_generation, {qualified_columns}
+                    FROM market_event_commit_order AS c
+                    JOIN market_events AS m ON m.dedupe_key = c.dedupe_key
+                    WHERE c.append_generation > 0
+                    ORDER BY c.append_generation"""
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                f"""SELECT c.append_generation, {qualified_columns}
+                    FROM market_event_commit_order AS c
+                    JOIN market_events AS m ON m.dedupe_key = c.dedupe_key
+                    WHERE c.append_generation > 0
+                      AND c.append_generation <= ?
+                    ORDER BY c.append_generation""",
+                (max_generation,),
+            ).fetchall()
         entries: list[tuple[int, str, str]] = []
         expected_generation = 1
         for row in rows:
@@ -1532,6 +1550,44 @@ class SQLiteMarketStore:
         # proof and cutoff publication.  _recover_positive_append_authority performs
         # the full baseline + positive-chain digest proof, not merely a head check.
         self._recover_positive_append_authority(authority)
+
+    def _require_committed_append_authority_through(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+        max_generation: int,
+    ) -> None:
+        """Prove a frozen cutoff is inside the committed append-authority prefix.
+
+        This deliberately does not recover a pending append. Existing cutoffs must
+        remain readable while a newer live writer owns PREPARE, but they may never
+        rely on a SQLite generation that lacks an independently committed product
+        append transition.
+        """
+
+        if type(max_generation) is not int or max_generation < 0:
+            raise ValueError("max_generation must be a non-negative int")
+        history = authority.read_history()
+        committed_head, _committed_state_sha256 = (
+            self._append_authority_committed_tip(history)
+        )
+        if max_generation > committed_head:
+            raise MonotonicAuthorityRollbackError(
+                "causal replay cutoff exceeds independently committed append authority"
+            )
+
+        entries = self._validated_positive_append_entries(
+            max_generation=committed_head
+        )
+        if len(entries) != committed_head:
+            raise MonotonicAuthorityRollbackError(
+                "committed append authority is missing durable market history"
+            )
+        baseline_state_sha256 = self._generation_zero_baseline_state_sha256()
+        self._require_canonical_append_authority_bindings(
+            history,
+            entries,
+            baseline_state_sha256=baseline_state_sha256,
+        )
 
     def _replay_cutoff_authority(self) -> MonotonicWorkspaceAuthority:
         self._require_database_path_identity()
@@ -2274,6 +2330,10 @@ class SQLiteMarketStore:
                     stored_as_of, max_generation = current_row
                     if stored_as_of != canonical_as_of:
                         raise ValueError("causal replay cutoff authority is invalid")
+                    self._require_committed_append_authority_through(
+                        append_authority,
+                        max_generation,
+                    )
                     corpus_sha256 = self._frozen_replay_corpus_sha256(max_generation)
                     expected_binding_sha256 = _replay_cutoff_binding_sha256(
                         cutoff_id=cutoff_id,

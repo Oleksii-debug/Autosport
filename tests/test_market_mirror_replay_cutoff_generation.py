@@ -420,35 +420,71 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
     def test_pre_v1_history_migrates_to_generation_zero_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"
-            original = SQLiteMarketStore(path)
-            try:
-                # Build bytes that predate both causal companion tables and the
-                # independent positive-append witness. Going through public append()
-                # here would correctly create the new machine authority and would no
-                # longer model a pre-v1 database.
-                with original.connection:
-                    self.assertTrue(
-                        original._insert_one(
-                            self.event(
-                                sequence=1,
-                                odds="2.00",
-                                observed_ts="2026-09-16T19:00:00+00:00",
-                            )
-                        )
-                    )
-                self.assertEqual(
-                    original._market_append_authority().read_history(),
-                    (),
-                )
-            finally:
-                original.close()
+            legacy_event = self.event(
+                sequence=1,
+                odds="2.00",
+                observed_ts="2026-09-16T19:00:00+00:00",
+            )
+            payload = storage_module._canonical_payload(legacy_event)
 
-            # Simulate the exact pre-v1 durable shape by removing only the new
-            # causal companion objects while retaining canonical history/current.
+            # Construct the exact pre-causal-companion durable shape without ever
+            # activating the new independent machine authority.
             raw = sqlite3.connect(path)
             try:
-                raw.execute("DROP TABLE market_replay_cutoffs")
-                raw.execute("DROP TABLE market_event_commit_order")
+                raw.execute(
+                    """CREATE TABLE market_events (
+                        dedupe_key TEXT PRIMARY KEY,
+                        quote_key TEXT NOT NULL,
+                        event_id TEXT NOT NULL,
+                        market_id TEXT NOT NULL,
+                        selection_id TEXT NOT NULL,
+                        decimal_odds TEXT NOT NULL,
+                        observed_ts TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL
+                    )"""
+                )
+                raw.execute(
+                    """CREATE TABLE current_quotes (
+                        source_id TEXT NOT NULL,
+                        quote_key TEXT NOT NULL,
+                        observed_ts TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        PRIMARY KEY (source_id, quote_key)
+                    )"""
+                )
+                raw.execute(
+                    """INSERT INTO market_events
+                       (dedupe_key,quote_key,event_id,market_id,selection_id,
+                        decimal_odds,observed_ts,source_id,sequence,payload_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        legacy_event.dedupe_key,
+                        legacy_event.quote_key,
+                        legacy_event.event_id,
+                        legacy_event.market_id,
+                        legacy_event.selection_id,
+                        str(legacy_event.decimal_odds),
+                        legacy_event.observed_ts,
+                        legacy_event.source_id,
+                        legacy_event.sequence,
+                        payload,
+                    ),
+                )
+                raw.execute(
+                    """INSERT INTO current_quotes
+                       (source_id,quote_key,observed_ts,sequence,payload_json)
+                       VALUES (?,?,?,?,?)""",
+                    (
+                        legacy_event.source_id,
+                        legacy_event.quote_key,
+                        legacy_event.observed_ts,
+                        legacy_event.sequence,
+                        payload,
+                    ),
+                )
                 raw.commit()
             finally:
                 raw.close()
@@ -459,6 +495,18 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     "SELECT append_generation FROM market_event_commit_order"
                 ).fetchall()
                 self.assertEqual(legacy_rows, [(0,)])
+
+                baseline_history = migrated._market_append_authority().read_history()
+                baseline_commits = [
+                    record
+                    for record in baseline_history
+                    if record.phase.value == "COMMIT"
+                ]
+                self.assertEqual(len(baseline_commits), 1)
+                self.assertRegex(
+                    baseline_commits[0].tx_id,
+                    r"^baseline-[0-9a-f]{32}$",
+                )
 
                 migrated.append(
                     self.event(
@@ -1185,6 +1233,64 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_direct_generation_zero_insert_after_activation_cannot_be_blessed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            forged = self.event(
+                sequence=1,
+                odds="9.99",
+                observed_ts="2026-09-16T19:00:00+00:00",
+            )
+            try:
+                payload = storage_module._canonical_payload(forged)
+                store.connection.execute(
+                    """INSERT INTO market_events
+                       (dedupe_key,quote_key,event_id,market_id,selection_id,
+                        decimal_odds,observed_ts,source_id,sequence,payload_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        forged.dedupe_key,
+                        forged.quote_key,
+                        forged.event_id,
+                        forged.market_id,
+                        forged.selection_id,
+                        str(forged.decimal_odds),
+                        forged.observed_ts,
+                        forged.source_id,
+                        forged.sequence,
+                        payload,
+                    ),
+                )
+                store.connection.execute(
+                    """INSERT INTO market_event_commit_order
+                       (dedupe_key, append_generation)
+                       VALUES (?, 0)""",
+                    (forged.dedupe_key,),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "positive market append chronology is missing, forged, or unproven",
+                ):
+                    self.replay(store)
+
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (0,),
+                )
+            finally:
+                store.close()
+
+            with self.assertRaisesRegex(
+                MonotonicAuthorityRollbackError,
+                "generation-zero market baseline is missing, changed, or unproven",
+            ):
+                SQLiteMarketStore(path)
+
     def test_direct_first_positive_generation_cannot_be_blessed_by_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
@@ -1315,7 +1421,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 history = store._market_append_authority().read_history()
                 self.assertEqual(
                     tuple(record.phase.value for record in history),
-                    ("PREPARE", "COMMIT"),
+                    ("PREPARE", "COMMIT", "PREPARE", "COMMIT"),
                 )
             finally:
                 store.close()
@@ -1357,6 +1463,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     record
                     for record in history
                     if record.phase.value == "COMMIT"
+                    and record.tx_id.startswith("append-")
                 ]
                 self.assertEqual(len(commits), 1)
                 self.assertRegex(

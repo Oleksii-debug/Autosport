@@ -899,6 +899,10 @@ class SQLiteMarketStore:
                         )
                     expected.append(stored)
 
+                if any(type(event) is not MarketEvent for event in accepted):
+                    raise TypeError(
+                        "live append hook must return exact MarketEvent instances"
+                    )
                 if tuple(_canonical_payload(event) for event in accepted) != tuple(
                     _canonical_payload(event) for event in expected
                 ):

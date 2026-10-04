@@ -1372,6 +1372,51 @@ class AutonomousProductCompositionTests(unittest.TestCase):
 
             self.assertEqual(forged_calls, [])
 
+    def test_product_application_ignores_market_and_health_method_rebinding(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event()
+            delta = _delta(event)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(resolved_event=event),
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            original_publish = product_runtime_module.MarketEventBus.publish
+            original_get = product_runtime_module.SourceHealthStore.get
+            forged_calls = []
+
+            def forged(*_args, **_kwargs):
+                forged_calls.append(True)
+                raise AssertionError(
+                    "rebound market/health application method must not execute"
+                )
+
+            try:
+                product_runtime_module.MarketEventBus.publish = forged
+                product_runtime_module.SourceHealthStore.get = forged
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                self.assertEqual(
+                    runtime.coordinator.desktop_consumer.drain(as_of=clock.value),
+                    (delta.delta_id,),
+                )
+                self.assertEqual(forged_calls, [])
+                self.assertTrue(
+                    DesktopDeltaCheckpointStore(
+                        root / "desktop_acks.json"
+                    ).has_ack(delta.delta_id)
+                )
+                self.assertEqual(runtime.market_store.events(event.event_id), [event])
+            finally:
+                product_runtime_module.MarketEventBus.publish = original_publish
+                product_runtime_module.SourceHealthStore.get = original_get
+                runtime.close()
+
     def test_product_desktop_authority_graph_rejects_post_build_rebind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

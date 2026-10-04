@@ -822,6 +822,156 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_same_settlement_evidence_cannot_change_quote_outcome_after_pnl_commit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:stable",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+            )
+            book.save(root / "paper_book.json")
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="provider-result:stable",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="stable-outcome",
+                evidence_sha256="0" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            authority = _OutcomeAuthority(resolution)
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                first = coordinator.tick()
+                self.assertEqual(len(first.settled_ticket_ids), 1)
+                self.assertEqual(
+                    PaperBook.load(root / "paper_book.json").balance,
+                    Decimal("110"),
+                )
+
+                authority.resolution = SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="provider-result:stable",
+                    quote_outcomes={leg.quote_key: "loss"},
+                    evidence_id="stable-outcome",
+                    evidence_sha256="0" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "settlement outcome interpretation conflicts with durable evidence",
+                ):
+                    coordinator.tick()
+
+                self.assertEqual(
+                    PaperBook.load(root / "paper_book.json").balance,
+                    Decimal("110"),
+                )
+                self.assertEqual(coordinator.status().cycles_completed, 1)
+            finally:
+                store.close()
+
+    def test_settlement_event_reference_cannot_change_evidence_identity_after_pnl_commit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:stable",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+            )
+            book.save(root / "paper_book.json")
+            authority = _OutcomeAuthority(
+                SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="provider-result:stable",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="stable-outcome",
+                    evidence_sha256="0" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                coordinator.tick()
+                authority.resolution = SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="provider-result:stable",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="replacement-outcome",
+                    evidence_sha256="1" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "settlement event/reference conflicts with durable evidence",
+                ):
+                    coordinator.tick()
+                self.assertEqual(
+                    PaperBook.load(root / "paper_book.json").balance,
+                    Decimal("110"),
+                )
+                self.assertEqual(coordinator.status().cycles_completed, 1)
+            finally:
+                store.close()
+
     def test_unresolved_gap_is_durable_in_status_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -1352,6 +1352,86 @@ class PortfolioPlanTests(unittest.TestCase):
             plan.reason,
         )
 
+    def test_positive_plan_fails_closed_if_paperbook_changes_after_terminal_proof(self) -> None:
+        goal = self._goal()
+        authority = self._betfair_authority()
+        book = PaperBook("1000")
+        existing_leg = TicketLeg(
+            "event-betfair-1",
+            "1.23456789",
+            "101",
+            Decimal("3"),
+            sport="table_tennis",
+        )
+        existing = book.open_ticket(
+            [existing_leg],
+            "10",
+            placed_at="2026-09-18T13:10:00+00:00",
+            provider_source_ids=("betfair_exchange_historical",),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+        )
+        intent = self._intent(
+            goal,
+            suffix="betfair-post-proof-race",
+            strategy_class=StrategyClass.PREDICTIVE_EDGE,
+            signal=Decimal("0.03"),
+            odds=Decimal("3"),
+            sport="table_tennis",
+            event_id="event-betfair-1",
+            market_id="1.23456789",
+            selection_id="202",
+            source_id="betfair_exchange_historical",
+        )
+        groups = (
+            ScenarioGroup(
+                "betfair-post-proof-control",
+                (
+                    ScenarioOutcome(existing_leg.quote_key),
+                    ScenarioOutcome(intent.risk_context.legs[0].quote_key),
+                ),
+            ),
+        )
+        intents = self._bind_terminal_state((intent,), groups)
+        graph = self._graph(book, intents)
+        witness = self._terminal_witness(book, intents, graph, groups)
+        canonical_verify = portfolio_plan_module._verify_terminal_economics
+
+        def settle_after_terminal_proof(*args, **kwargs):
+            proof, reason = canonical_verify(*args, **kwargs)
+            self.assertIsNotNone(proof)
+            self.assertIsNone(reason)
+            book.settle(
+                existing.ticket_id,
+                {existing_leg.quote_key},
+                settled_at="2026-09-18T13:19:59+00:00",
+            )
+            return proof, reason
+
+        with patch.object(
+            portfolio_plan_module,
+            "_verify_terminal_economics",
+            settle_after_terminal_proof,
+        ):
+            plan = build_portfolio_plan(
+                book,
+                intents,
+                self._policy(goal),
+                self.DECISION_TS,
+                dependency_graph=graph,
+                terminal_state_evidence=witness,
+                market_outcome_authorities=(authority,),
+            )
+
+        self.assertEqual(plan.action, PortfolioAction.WAIT)
+        self.assertEqual(plan.stakes, (Decimal("0"),))
+        self.assertIsNone(plan.terminal_economics)
+        self.assertIsNone(plan.portfolio_sha256)
+        self.assertIn(
+            "canonical portfolio changed during portfolio-plan construction",
+            plan.reason,
+        )
+
     def test_authoritative_terminal_proof_requires_reverified_authority_on_readback(self) -> None:
         goal = self._goal()
         authority = self._betfair_authority()

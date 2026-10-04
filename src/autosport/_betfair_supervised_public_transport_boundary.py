@@ -24,7 +24,9 @@ from pathlib import Path
 
 from . import betfair_execution_confirmation as _confirmation
 from . import betfair_supervised_execution as _impl
+from . import real_execution_ledger as _ledger_runtime
 from . import trusted_runtime_code_profile as _runtime_profile
+from . import workspace_lock as _workspace_lock_runtime
 
 
 _CLIENT_TYPE = _impl.BetfairSupervisedPlaceOrdersClient
@@ -58,6 +60,19 @@ _FINAL_REQUIRE_DURABLE_APPROVAL_CODE = getattr(
 )
 _LEDGER_MARK_SUBMITTED = _impl._CANONICAL_LEDGER_MARK_SUBMITTED
 _LEDGER_MARK_SUBMITTED_CODE = getattr(_LEDGER_MARK_SUBMITTED, "__code__", None)
+_LEDGER_APPROVAL_ACTIVE = _impl.RealExecutionLedger.supervised_approval_is_active
+_LEDGER_APPROVAL_ACTIVE_CODE = getattr(_LEDGER_APPROVAL_ACTIVE, "__code__", None)
+_WORKSPACE_LOCK_TYPE = _workspace_lock_runtime.WorkspaceEconomicLock
+_WORKSPACE_LOCK_ERROR = _workspace_lock_runtime.WorkspaceEconomicLockError
+_WORKSPACE_LOCK_BUSY_ERROR = _workspace_lock_runtime.WorkspaceEconomicLockBusyError
+_WORKSPACE_LOCK_ADD_NOTE = _workspace_lock_runtime._add_secondary_failure_note
+_WORKSPACE_LOCK_STABLE_STAT = _workspace_lock_runtime._stable_stat_metadata
+_WORKSPACE_LOCK_OPEN_READ_ONLY = _workspace_lock_runtime._open_read_only_descriptor
+_WORKSPACE_LOCK_TRANSITIVE_FUNCTIONS = (
+    (_WORKSPACE_LOCK_ADD_NOTE, getattr(_WORKSPACE_LOCK_ADD_NOTE, "__code__", None)),
+    (_WORKSPACE_LOCK_STABLE_STAT, getattr(_WORKSPACE_LOCK_STABLE_STAT, "__code__", None)),
+    (_WORKSPACE_LOCK_OPEN_READ_ONLY, getattr(_WORKSPACE_LOCK_OPEN_READ_ONLY, "__code__", None)),
+)
 _SUBMITTED_STATE = _impl.AttemptState.SUBMITTED
 
 # The outer transport boundary seals not only the public consume function but every
@@ -136,6 +151,9 @@ _CONFIRMATION_GENERIC_MONOTONIC_AUTHORITY_METHOD_GRAPH = (
     _snapshot_class_callable_graph(
         _CONFIRMATION_GENERIC_MONOTONIC_AUTHORITY_TYPE
     )
+)
+_WORKSPACE_LOCK_METHOD_GRAPH = _snapshot_class_callable_graph(
+    _WORKSPACE_LOCK_TYPE
 )
 del _snapshot_callable_graph, _snapshot_class_callable_graph
 
@@ -219,6 +237,12 @@ if (
     or _FINAL_REQUIRE_DURABLE_APPROVAL_CODE is None
     or not callable(_LEDGER_MARK_SUBMITTED)
     or _LEDGER_MARK_SUBMITTED_CODE is None
+    or not callable(_LEDGER_APPROVAL_ACTIVE)
+    or _LEDGER_APPROVAL_ACTIVE_CODE is None
+    or not all(
+        callable(function) and code is not None
+        for function, code in _WORKSPACE_LOCK_TRANSITIVE_FUNCTIONS
+    )
     or type(_TRUSTED_ACTIVE_BY_WORKSPACE) is not dict
     or type(_TRUSTED_ISSUED) is not dict
     or not callable(_REQUIRE_TRUSTED_PROFILE)
@@ -363,6 +387,35 @@ def _confirmation_graph_unchanged() -> bool:
         and getattr(_LEDGER_MARK_SUBMITTED, "__code__", None)
         is _LEDGER_MARK_SUBMITTED_CODE
         and _impl.RealExecutionLedger.mark_submitted is _LEDGER_MARK_SUBMITTED
+        and _impl.RealExecutionLedger.supervised_approval_is_active
+        is _LEDGER_APPROVAL_ACTIVE
+        and getattr(_LEDGER_APPROVAL_ACTIVE, "__code__", None)
+        is _LEDGER_APPROVAL_ACTIVE_CODE
+        and _ledger_runtime.RealExecutionLedger is _impl.RealExecutionLedger
+        and _ledger_runtime.WorkspaceEconomicLock is _WORKSPACE_LOCK_TYPE
+        and _ledger_runtime.WorkspaceEconomicLockError is _WORKSPACE_LOCK_ERROR
+        and _ledger_runtime.WorkspaceEconomicLockBusyError
+        is _WORKSPACE_LOCK_BUSY_ERROR
+        and _workspace_lock_runtime.WorkspaceEconomicLock is _WORKSPACE_LOCK_TYPE
+        and _workspace_lock_runtime.WorkspaceEconomicLockError
+        is _WORKSPACE_LOCK_ERROR
+        and _workspace_lock_runtime.WorkspaceEconomicLockBusyError
+        is _WORKSPACE_LOCK_BUSY_ERROR
+        and _workspace_lock_runtime._add_secondary_failure_note
+        is _WORKSPACE_LOCK_ADD_NOTE
+        and _workspace_lock_runtime._stable_stat_metadata
+        is _WORKSPACE_LOCK_STABLE_STAT
+        and _workspace_lock_runtime._open_read_only_descriptor
+        is _WORKSPACE_LOCK_OPEN_READ_ONLY
+        and all(
+            getattr(function, "__code__", None) is code
+            for function, code in _WORKSPACE_LOCK_TRANSITIVE_FUNCTIONS
+        )
+        and all(
+            getattr(_WORKSPACE_LOCK_TYPE, name, None) is value
+            and getattr(value, "__code__", None) is code
+            for name, value, code in _WORKSPACE_LOCK_METHOD_GRAPH
+        )
         and _impl.AttemptState.SUBMITTED is _SUBMITTED_STATE
     )
 

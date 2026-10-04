@@ -775,6 +775,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     before_statuses,
                 )
                 self.assertEqual(coordinator.status().cycles_completed, 0)
+                self.assertEqual(coordinator.status().settlement_evidence, ())
             finally:
                 store.close()
 
@@ -899,6 +900,106 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 self.assertEqual(coordinator.status().cycles_completed, 1)
             finally:
                 store.close()
+
+    def test_pre_pnl_crash_replays_same_bound_evidence_exactly_once(
+        self,
+    ) -> None:
+        class _FailBeforeSettlement:
+            def prepare_settlement(self, **_kwargs):
+                raise RuntimeError("pre-settlement crash")
+
+            def reconcile_after_settlement(self, **_kwargs):
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:pre-crash",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+            )
+            book.save(root / "paper_book.json")
+            authority = _OutcomeAuthority(
+                SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="provider-result:pre-crash",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="pre-crash-outcome",
+                    evidence_sha256="0" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+                settlement_learning_handoff=_FailBeforeSettlement(),
+            )
+            try:
+                with self.assertRaisesRegex(RuntimeError, "pre-settlement crash"):
+                    coordinator.tick()
+                self.assertEqual(
+                    PaperBook.load(root / "paper_book.json").balance,
+                    Decimal("90"),
+                )
+                self.assertEqual(coordinator.status().cycles_completed, 0)
+                self.assertEqual(
+                    tuple(
+                        item["evidence_id"]
+                        for item in coordinator.status().settlement_evidence
+                    ),
+                    ("pre-crash-outcome",),
+                )
+            finally:
+                store.close()
+
+            restarted, restarted_store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                recovered = restarted.tick()
+                self.assertEqual(len(recovered.settled_ticket_ids), 1)
+                self.assertEqual(
+                    PaperBook.load(root / "paper_book.json").balance,
+                    Decimal("110"),
+                )
+                self.assertEqual(restarted.status().cycles_completed, 1)
+
+                replay = restarted.tick()
+                self.assertEqual(replay.settled_ticket_ids, ())
+                self.assertEqual(
+                    PaperBook.load(root / "paper_book.json").balance,
+                    Decimal("110"),
+                )
+                self.assertEqual(restarted.status().cycles_completed, 2)
+            finally:
+                restarted_store.close()
 
     def test_settlement_evidence_is_durable_before_post_pnl_crash_and_blocks_reinterpretation(
         self,

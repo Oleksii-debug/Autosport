@@ -96,8 +96,8 @@ class LiveAuthorityHookIsolationTests(unittest.TestCase):
                 self.assertFalse(store.has_trusted_live_receipt(event))
 
                 with self.assertRaisesRegex(
-                    RuntimeError,
-                    "active live batch capability",
+                    PermissionError,
+                    "internal to canonical live ingestion",
                 ):
                     store._insert_live_receipt_authority(event)
                 with self.assertRaises(TypeError):

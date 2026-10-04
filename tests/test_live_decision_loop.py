@@ -2183,6 +2183,68 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
             self.assertEqual([item[0] for item in factory.calls], ["input-a"])
 
+    def test_pending_frontier_rejects_truncated_prior_ledger_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [
+                        (self._event(sequence=1),),
+                        ProviderUnavailableError("provider unavailable"),
+                    ],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            ledger_path = workspace / "decisions.jsonl"
+            prior_size = ledger_path.stat().st_size
+            self.assertGreater(prior_size, 0)
+            clock.value = self.START + timedelta(seconds=2)
+            with patch.object(
+                loop,
+                "_persist_plan",
+                side_effect=RuntimeError("simulated loss after pending frontier"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "loss after pending frontier",
+                ):
+                    loop.run_cycle()
+
+            pending = json.loads(loop.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(pending["phase"], "pending")
+            self.assertEqual(pending["gate"], "provider_gap")
+            self.assertEqual(pending["ledger_offset"], prior_size)
+            ledger_path.write_bytes(b"")
+            loop.close()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=3)),
+            )
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "ledger frontier was truncated",
+            ):
+                resumed.run_cycle()
+
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertEqual(ledger_path.read_bytes(), b"")
+            self.assertEqual(
+                json.loads(resumed.progress_path.read_text(encoding="utf-8"))["phase"],
+                "pending",
+            )
+            resumed.close()
+
     def test_pending_frontier_allows_prior_same_time_live_decision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

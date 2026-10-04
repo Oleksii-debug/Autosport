@@ -293,6 +293,14 @@ class ProphetXSessionSnapshot:
                 "last_renewal_failure_class must be an exact ProphetXRenewalFailureClass"
             )
 
+        if (
+            self.last_failure_class is not None
+            and self.last_renewal_failure_class is not None
+        ):
+            raise ProphetXSessionLifecycleError(
+                "login and renewal failure evidence cannot coexist"
+            )
+
         has_transient_failure_evidence = (
             self.last_failure_class
             in {

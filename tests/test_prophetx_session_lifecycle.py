@@ -1723,6 +1723,56 @@ def test_renewal_due_retry_horizon_must_match_failure_evidence(
 
 
 @pytest.mark.parametrize(
+    "renewal_failure",
+    [
+        ProphetXRenewalFailureClass.RETRYABLE,
+        ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE,
+        ProphetXRenewalFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+    ],
+)
+def test_provider_slot_wait_rejects_dual_failure_origins(renewal_failure):
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="login and renewal failure evidence cannot coexist",
+    ):
+        ProphetXSessionSnapshot(
+            state=ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+            generation=5,
+            credential_revision="rev-1",
+            integration_role="market-maker-primary",
+            last_transition_at=NOW,
+            slot_hold_started_at=NOW,
+            slot_hold_until=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
+            transient_failures=1,
+            last_failure_class=ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+            last_renewal_failure_class=renewal_failure,
+        )
+
+
+def test_persisted_wait_rejects_laundered_dual_failure_origin(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+    _dispatch(lifecycle, admission, at=NOW)
+    lifecycle.complete_login_failure(
+        attempt_id=admission.attempt_id,
+        now=NOW + timedelta(seconds=1),
+        failure=ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+    )
+
+    payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
+    payload["last_renewal_failure_class"] = (
+        ProphetXRenewalFailureClass.RETRYABLE.value
+    )
+    lifecycle.state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="login and renewal failure evidence cannot coexist",
+    ):
+        _lifecycle(tmp_path).read_snapshot()
+
+
+@pytest.mark.parametrize(
     ("login_failure", "renewal_failure"),
     [
         (ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT, None),

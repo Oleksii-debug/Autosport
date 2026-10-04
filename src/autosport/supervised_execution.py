@@ -1125,6 +1125,33 @@ def _canonical_supervised_ledger_dispatch(
             getattr(RealExecutionLedger.begin_attempt, "__code__", None),
         ),
         (
+            "_bind_betfair_pre_provider_no_effect",
+            RealExecutionLedger._bind_betfair_pre_provider_no_effect,
+            getattr(
+                RealExecutionLedger._bind_betfair_pre_provider_no_effect,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "betfair_pre_provider_no_effect_authority",
+            RealExecutionLedger.betfair_pre_provider_no_effect_authority,
+            getattr(
+                RealExecutionLedger.betfair_pre_provider_no_effect_authority,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "verified_execution_view",
+            RealExecutionLedger.verified_execution_view,
+            getattr(
+                RealExecutionLedger.verified_execution_view,
+                "__code__",
+                None,
+            ),
+        ),
+        (
             "provider_order_reference",
             RealExecutionLedger.provider_order_reference,
             getattr(
@@ -1407,6 +1434,7 @@ def begin_supervised_attempt(
     *,
     action_id: str,
     attempt_id: str,
+    product_no_effect_authority_id: str | None = None,
 ) -> ExecutionAttempt:
     now = _canonical_trusted_now()
     _require_approval(bound, approval, now)
@@ -1421,6 +1449,7 @@ def begin_supervised_attempt(
         action_id=action_id,
         attempt_id=attempt_id,
         reserved_at=now,
+        product_no_effect_authority_id=product_no_effect_authority_id,
     )
 
 

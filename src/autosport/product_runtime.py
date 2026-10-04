@@ -54,6 +54,49 @@ class ProductCompositionError(RuntimeError):
     """The durable product composition cannot be verified safely."""
 
 
+class _ProductDesktopDeltaConsumer(DesktopDeltaConsumer):
+    """Freeze the product-owned desktop authority graph after composition.
+
+    DesktopDeltaConsumer remains intentionally injectable for library/test use. The
+    autonomous product publishes one durable composition manifest and must not silently
+    switch collector, checkpoint, application, delivery, or clock authorities between
+    ticks. Mid-drain callback mutation is already snapshot-safe in the generic consumer;
+    this guard closes the between-drain mutation boundary for the product-owned instance
+    without narrowing the generic consumer contract.
+    """
+
+    _PROTECTED_AUTHORITY_FIELDS = frozenset(
+        {
+            "collector",
+            "checkpoint",
+            "resolve_event",
+            "apply_event",
+            "lookup_application_receipt",
+            "_acknowledgement_clock",
+            "_on_application_receipt",
+            "_acknowledged_at",
+            "drain",
+            "__class__",
+            "__dict__",
+            "_product_authority_sealed",
+        }
+    )
+
+    def __init__(self, *args, **kwargs) -> None:
+        object.__setattr__(self, "_product_authority_sealed", False)
+        super().__init__(*args, **kwargs)
+        object.__setattr__(self, "_product_authority_sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if (
+            getattr(self, "_product_authority_sealed", False)
+            and name in self._PROTECTED_AUTHORITY_FIELDS
+        ):
+            raise ProductCompositionError(
+                f"product desktop authority field {name!r} is immutable"
+            )
+        object.__setattr__(self, name, value)
+
 def _serialized_runtime_operation(method):
     """Hold one runtime-local fence across an admitted public lifecycle operation."""
 
@@ -1191,7 +1234,7 @@ def _build_autonomous_product_runtime_impl(
             )
             accept_persisted(event)
 
-        desktop = DesktopDeltaConsumer(
+        desktop = _ProductDesktopDeltaConsumer(
             collector_store,
             DesktopDeltaCheckpointStore(root / "desktop_acks.json"),
             resolve_event=source.resolve_event,

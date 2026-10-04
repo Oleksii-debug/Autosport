@@ -595,10 +595,17 @@ class ProphetXSessionSnapshot:
         if self.state is ProphetXSessionState.CREDENTIAL_REJECTED and (
             self.session_lineage_id is not None
             or self.access_expires_at is not None
-            or self.retry_not_before is not None
         ):
             raise ProphetXSessionLifecycleError(
-                "credential-rejected state cannot carry active-session or retry evidence"
+                "credential-rejected state cannot carry active-session evidence"
+            )
+        if (
+            self.state is ProphetXSessionState.CREDENTIAL_REJECTED
+            and self.retry_not_before is not None
+            and self.retry_not_before <= self.last_transition_at
+        ):
+            raise ProphetXSessionLifecycleError(
+                "credential-rejected retained retry horizon must be future"
             )
 
         if self.state in {
@@ -1315,6 +1322,7 @@ class ProphetXSessionLifecycle:
                         generation = 0
                         hold_started_at = None
                         hold = None
+                        retry_not_before = None
                         failures = 0
                     else:
                         self._require_monotonic_transition(current, timestamp)
@@ -1329,6 +1337,12 @@ class ProphetXSessionLifecycle:
                         if hold is not None and hold <= timestamp:
                             hold_started_at = None
                             hold = None
+                        retry_not_before = (
+                            current.retry_not_before
+                            if current.retry_not_before is not None
+                            and current.retry_not_before > timestamp
+                            else None
+                        )
                         failures = current.transient_failures
                     updated = ProphetXSessionSnapshot(
                         state=ProphetXSessionState.CREDENTIAL_REJECTED,
@@ -1338,6 +1352,7 @@ class ProphetXSessionLifecycle:
                         last_transition_at=timestamp,
                         slot_hold_started_at=hold_started_at,
                         slot_hold_until=hold,
+                        retry_not_before=retry_not_before,
                         transient_failures=failures,
                         last_failure_class=ProphetXLoginFailureClass.CREDENTIAL_REJECTED,
                     )
@@ -1400,17 +1415,13 @@ class ProphetXSessionLifecycle:
 
         if current.credential_revision != self.scope.credential_revision:
             if (
-                current.state
-                in {
-                    ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
-                    ProphetXSessionState.PROVIDER_UNAVAILABLE,
-                }
-                and current.retry_not_before is not None
+                current.retry_not_before is not None
                 and now < current.retry_not_before
             ):
-                # Credential rotation must not launder transient transport/provider
-                # health backoff into a fresh login attempt. Only an explicit
-                # credential-rejection path is recoverable merely by rotating secrets.
+                # Credential rotation and operator revocation must not launder a
+                # still-live transient transport/provider-health backoff into a fresh
+                # login attempt. Provider credential rejection itself carries no retry
+                # horizon and remains recoverable by explicit credential rotation.
                 return ProphetXLoginAdmission(
                     action=ProphetXLoginAdmissionAction.RETRY_LATER,
                     snapshot=current,

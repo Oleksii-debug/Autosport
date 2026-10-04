@@ -3359,7 +3359,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_prepared_learning_settlement_recovers_when_outcome_authority_is_one_shot(
+    def test_learning_settlement_recovers_when_crash_precedes_bridge_prepare(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3523,13 +3523,13 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 coordinator._state.record_settlement_evidence(
                     settlement_evidence=first_seen,
                 )
-                self.assertEqual(
-                    bridge.prepare_settlement(
-                        paper_book_path=root / "paper_book.json",
-                        resolutions=first_seen,
-                        at=clock(),
-                    ),
-                    (ticket.ticket_id,),
+                bridge_state = json.loads(
+                    (root / "paper_learning_bridge.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.assertIsNone(
+                    bridge_state["bindings"][ticket.ticket_id]["settlement_intent"]
                 )
                 self.assertEqual(
                     PaperBook.load(root / "paper_book.json").tickets[
@@ -3583,6 +3583,18 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 self.assertEqual(
                     bridge_state["bindings"][ticket.ticket_id]["status"],
                     "ACKED",
+                )
+                self.assertIsNotNone(
+                    bridge_state["bindings"][ticket.ticket_id]["settlement_intent"]
+                )
+                session_state = json.loads(
+                    (root / "continuous_session.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.assertEqual(
+                    session_state["pending_settlement_resolutions"],
+                    [],
                 )
             finally:
                 restarted_store.close()

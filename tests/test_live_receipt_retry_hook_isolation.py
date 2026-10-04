@@ -235,6 +235,82 @@ class LiveReceiptRetryHookIsolationTests(unittest.TestCase):
             store.close()
             foreign.close()
 
+    def test_transaction_begin_race_cannot_redirect_live_receipt_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            foreign = SQLiteMarketStore(Path(directory) / "foreign.db")
+            event = MarketEvent(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.00"),
+                observed_ts="2026-10-04T03:00:01+00:00",
+                source_id="provider-a",
+                sequence=1,
+                market_type=MarketType.WINNER,
+                ingest_ts="2026-10-04T03:00:02+00:00",
+                metadata={"origin": "canonical"},
+            )
+            original_connection = store.connection
+            original_path = store.path
+
+            class RedirectingConnection:
+                def __init__(self, delegate, redirect):
+                    self._delegate = delegate
+                    self._redirect = redirect
+                    self._fired = False
+
+                @property
+                def in_transaction(self):
+                    return self._delegate.in_transaction
+
+                @property
+                def total_changes(self):
+                    return self._delegate.total_changes
+
+                def execute(self, sql, *args, **kwargs):
+                    result = self._delegate.execute(sql, *args, **kwargs)
+                    if not self._fired and sql.strip().upper() == "BEGIN IMMEDIATE":
+                        self._fired = True
+                        self._redirect()
+                    return result
+
+                def rollback(self):
+                    return self._delegate.rollback()
+
+                def commit(self):
+                    return self._delegate.commit()
+
+            def redirect_after_begin():
+                store.connection = foreign.connection
+                store.path = foreign.path
+
+            bound_connection = RedirectingConnection(
+                original_connection,
+                redirect_after_begin,
+            )
+            store.connection = bound_connection
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "changed during authority transaction",
+                ):
+                    store._append_live_batch_accepted([event])
+            finally:
+                store.connection = original_connection
+                store.path = original_path
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertEqual(store.trusted_live_current_by_source(), {})
+            self.assertFalse(store.has_trusted_live_receipt(event))
+            self.assertEqual(foreign.events(), [])
+            self.assertEqual(foreign.trusted_live_events(), [])
+            self.assertEqual(foreign.trusted_live_current_by_source(), {})
+            self.assertFalse(foreign.has_trusted_live_receipt(event))
+            store.close()
+            foreign.close()
+
     def test_post_snapshot_batch_iterator_rebind_cannot_redirect_canonical_persistence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
@@ -42,6 +43,22 @@ _SCHEMA_V4 = 4
 _HISTORY_ENTRY_V2_FIELDS = frozenset({"recorded_at", "state"})
 _HISTORY_ENTRY_V3_FIELDS = frozenset({"recorded_at", "transition_order", "state"})
 _SOURCE_HEALTH_AUTHORITY_DOMAIN = "autosport.source-health-store.v1"
+
+
+def _source_health_authority_key(
+    path: Path,
+    *,
+    windows: bool | None = None,
+) -> str:
+    """Return the filename identity used by independent monotonic authority.
+
+    Windows resolves path casing case-insensitively. Authority namespaces must do
+    the same or one physical health file could fork freshness history merely by
+    reopening it with different filename casing. POSIX keeps distinct names distinct.
+    """
+
+    use_windows_rules = os.name == "nt" if windows is None else windows
+    return ntpath.normcase(path.name) if use_windows_rules else path.name
 
 
 def parse_source_timestamp(value: str) -> datetime:
@@ -366,7 +383,7 @@ class SourceHealthStore:
         return MonotonicWorkspaceAuthority(
             workspace=self.path.parent.resolve(strict=False),
             domain=_SOURCE_HEALTH_AUTHORITY_DOMAIN,
-            key=self.path.name,
+            key=_source_health_authority_key(self.path),
         )
 
     @staticmethod
@@ -389,7 +406,7 @@ class SourceHealthStore:
             (
                 _SOURCE_HEALTH_AUTHORITY_DOMAIN,
                 kind,
-                self.path.name,
+                _source_health_authority_key(self.path),
                 observed or "<PRISTINE>",
                 intended,
             )
@@ -489,7 +506,7 @@ class SourceHealthStore:
         authority_tip = history[-1].record_sha256 if history else "<PRISTINE>"
         material = "\0".join(
             (
-                self.path.name,
+                _source_health_authority_key(self.path),
                 authority_tip,
                 observed or "<PRISTINE>",
                 intended,

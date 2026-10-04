@@ -2068,6 +2068,74 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertIsNone(progress["completed_at"])
             market_store.close()
 
+    def test_canonical_application_does_not_mark_fake_health_success(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "canonical-application.json"
+            market_store = SQLiteMarketStore(root / "market.db")
+            health_store = SourceHealthStore(root / "health.json")
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                health_store,
+                state_path,
+                clock=lambda: "2026-01-01T00:00:05+00:00",
+            )
+
+            def fake_success(
+                _store,
+                expected_before,
+                *,
+                ambiguous_after=None,
+                now,
+                received,
+                accepted,
+                rejected,
+                cursor,
+                latest_source_ts,
+                quality_flags,
+            ):
+                return replace(
+                    expected_before,
+                    status="degraded" if quality_flags else "healthy",
+                    poll_count=expected_before.poll_count + 1,
+                    total_received=expected_before.total_received + received,
+                    total_accepted=expected_before.total_accepted + accepted,
+                    total_rejected=expected_before.total_rejected + rejected,
+                    consecutive_failures=0,
+                    last_success_at=now,
+                    last_error= None,
+                    last_cursor=cursor,
+                    latest_source_ts=latest_source_ts,
+                    quality_flags=tuple(sorted(quality_flags)),
+                    last_failure_kind=None,
+                    consecutive_failure_kind_count=0,
+                )
+
+            with patch.object(
+                SourceHealthStore,
+                "record_success_if_current",
+                fake_success,
+            ):
+                with self.assertRaisesRegex(
+                    ApplicationReceiptError,
+                    "unexpected durable post-state",
+                ):
+                    application.apply(delta, event)
+
+            progress = application._state.progress(delta)
+            self.assertIsNotNone(progress)
+            self.assertTrue(progress["market_applied"])
+            self.assertFalse(progress["health_applied"])
+            self.assertIsNone(progress["completed_at"])
+            self.assertEqual(health_store.get(delta.source_id).poll_count, 0)
+
+            receipt = application.apply(delta, event)
+            self.assertEqual(receipt.delta_id, delta.delta_id)
+            self.assertEqual(health_store.get(delta.source_id).poll_count, 1)
+            market_store.close()
+
     def test_canonical_application_health_write_uses_preproved_outcome(self):
         event = MarketEvent.from_dict(event_payload())
         delta = self.make_delta(payload=event.to_dict())

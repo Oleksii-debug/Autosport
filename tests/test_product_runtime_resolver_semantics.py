@@ -66,6 +66,13 @@ def _replacement_settlement_helper(record: EventLifecycleRecord, as_of: str):
     return None
 
 
+class _RootedSettlementSource(_ProductSource):
+    _AUTHORITY_FIELDS = frozenset({"settlement_target"})
+
+    def __init__(self) -> None:
+        self.settlement_target = object()
+
+
 class _MutatingSettlementSource(_ProductSource):
     settlement_resolver_implementation_id = "provider-a-mutating-results-resolver-v1"
 
@@ -256,6 +263,29 @@ def test_live_settlement_resolution_rejects_post_build_resolver_rebind(
             runtime.coordinator.outcome_authority.resolve(object(), as_of=NOW)
     finally:
         _ProductSource.resolve = original_resolve
+        runtime.close()
+
+
+def test_live_settlement_resolution_rejects_low_level_source_root_replacement(
+    tmp_path,
+) -> None:
+    source = _RootedSettlementSource()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=source,
+        clock=lambda: NOW,
+        outcome_authority=source,
+    )
+    original = source.settlement_target
+    try:
+        object.__setattr__(source, "settlement_target", object())
+        with pytest.raises(
+            ProductCompositionError,
+            match="product source authority field 'settlement_target' changed after composition",
+        ):
+            runtime.coordinator.outcome_authority.resolve(object(), as_of=NOW)
+    finally:
+        object.__setattr__(source, "settlement_target", original)
         runtime.close()
 
 

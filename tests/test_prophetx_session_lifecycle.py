@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+import autosport.prophetx_session_lifecycle as prophetx_session_lifecycle
 from autosport.prophetx_session_lifecycle import (
     CONSERVATIVE_SESSION_SLOT_HOLD,
     ProphetXLoginAdmissionAction,
@@ -13,6 +14,10 @@ from autosport.prophetx_session_lifecycle import (
     ProphetXSessionLifecycleError,
     ProphetXSessionScope,
     ProphetXSessionState,
+)
+from autosport.workspace_lock import (
+    WorkspaceEconomicLockBusyError,
+    WorkspaceEconomicLockError,
 )
 
 
@@ -629,6 +634,83 @@ def test_renewal_is_single_flight_and_never_authorizes_login_fallback(tmp_path):
         is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
     )
     assert blocked.login_authorized is False
+
+
+def test_renewal_lock_contention_waits_without_login_fallback(tmp_path, monkeypatch):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
+
+    class BusyLock:
+        def __init__(self, workspace):
+            self.workspace = workspace
+
+        def __enter__(self):
+            raise WorkspaceEconomicLockBusyError("owned by another process")
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return None
+
+    monkeypatch.setattr(
+        prophetx_session_lifecycle,
+        "WorkspaceEconomicLock",
+        BusyLock,
+    )
+
+    blocked = lifecycle.begin_renewal(
+        now=due_at,
+        refresh_token_lineage_id=active.session_lineage_id,
+    )
+
+    assert (
+        blocked.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_EXISTING_RENEWAL
+    )
+    assert blocked.snapshot is None
+    assert blocked.attempt_id is None
+    assert blocked.retry_at is None
+    assert blocked.login_authorized is False
+
+
+def test_renewal_lock_integrity_failure_stays_fail_closed(tmp_path, monkeypatch):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
+
+    class BrokenLock:
+        def __init__(self, workspace):
+            self.workspace = workspace
+
+        def __enter__(self):
+            raise WorkspaceEconomicLockError("integrity failure")
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return None
+
+    monkeypatch.setattr(
+        prophetx_session_lifecycle,
+        "WorkspaceEconomicLock",
+        BrokenLock,
+    )
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="cannot acquire ProphetX session-pool coordination lock",
+    ):
+        lifecycle.begin_renewal(
+            now=due_at,
+            refresh_token_lineage_id=active.session_lineage_id,
+        )
 
 
 def test_refresh_success_without_slot_contract_enters_conservative_wait(tmp_path):

@@ -737,6 +737,14 @@ class ProphetXSessionLifecycle:
                         attempt_id=attempt,
                         retry_at=current.access_expires_at,
                     )
+            except WorkspaceEconomicLockBusyError:
+                # Another process is mutating this exact provider pool. A concurrent
+                # renewal caller must wait rather than treating lock contention as an
+                # auth failure or falling back to a replacement login/session.
+                return ProphetXLoginAdmission(
+                    action=ProphetXLoginAdmissionAction.WAIT_FOR_EXISTING_RENEWAL,
+                    snapshot=None,
+                )
             except WorkspaceEconomicLockError as exc:
                 raise ProphetXSessionLifecycleError(
                     "cannot acquire ProphetX session-pool coordination lock"

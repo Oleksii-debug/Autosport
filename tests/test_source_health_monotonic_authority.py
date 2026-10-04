@@ -427,3 +427,57 @@ def test_same_transition_can_retry_after_pre_publish_abort(
     assert history[-1].phase is AuthorityPhase.COMMIT
     assert history[-1].intended_state_sha256 == intended
     assert history[-1].tx_id != first_tx_id
+
+
+def test_first_legacy_baseline_can_retry_after_aborted_prepare(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str((tmp_path / "machine-authority").resolve()),
+    )
+
+    fixture = SourceHealthStore(tmp_path / "fixture-bootstrap" / "source-health.json")
+    legacy_bytes = fixture.path.read_bytes()
+
+    path = tmp_path / "legacy-bootstrap-retry" / "source-health.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(legacy_bytes)
+
+    # Build the same authority identity without running SourceHealthStore.__init__
+    # so the test can stop the first-ever baseline at PREPARE.
+    probe = object.__new__(SourceHealthStore)
+    probe.path = path
+    probe._lock_path = path.with_name(path.name + ".lock")
+    observed = _sha256(legacy_bytes)
+    authority = probe._monotonic_authority()
+    binding = probe._authority_binding(None, observed, kind="BOOTSTRAP")
+    first_tx_id = probe._next_authority_tx_id(
+        authority,
+        None,
+        observed,
+        binding,
+    )
+    authority.prepare(
+        tx_id=first_tx_id,
+        observed_state_sha256=None,
+        intended_state_sha256=observed,
+        semantic_binding_sha256=binding,
+    )
+
+    # Simulate loss before the first baseline could be committed. With no prior
+    # COMMIT, recovery legitimately ABORTs back to pristine authority state.
+    path.unlink()
+    recovery = authority.recover(observed_state_sha256=None)
+    assert recovery.record is not None
+    assert recovery.record.phase is AuthorityPhase.ABORT
+
+    path.write_bytes(legacy_bytes)
+    reopened = SourceHealthStore(path)
+    assert reopened.get("provider-a").status == "unknown"
+
+    history = authority.read_history()
+    assert history[-1].phase is AuthorityPhase.COMMIT
+    assert history[-1].intended_state_sha256 == observed
+    assert history[-1].tx_id != first_tx_id

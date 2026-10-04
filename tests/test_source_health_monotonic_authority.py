@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -138,6 +139,110 @@ def test_success_cas_rejects_subclassed_ambiguous_after(
         )
 
     assert store.get("provider-a") == current
+
+
+def test_success_cas_rejects_string_subclass_field_equality_forgery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path, monkeypatch, "cas-string-field-subclass")
+    _record_success(store)
+    current = store.get("provider-a")
+    forged = store.get("provider-a")
+
+    class AlwaysEqualText(str):
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            return False
+
+    forged.last_cursor = AlwaysEqualText("not-the-durable-cursor")
+    # This is the exact DTO class; only one primitive field carries hostile
+    # equality. Before the boundary repair dataclass equality could therefore
+    # make a stale caller assertion compare equal to the durable state.
+    assert type(forged) is SourceHealthState
+    assert current == forged
+
+    with pytest.raises(
+        ValueError,
+        match="last_cursor must be an exact string or null",
+    ):
+        store.record_success_if_current(
+            forged,
+            now=T2,
+            received=1,
+            accepted=1,
+            rejected=0,
+            cursor="cursor-2",
+            latest_source_ts=T2,
+            quality_flags=(),
+        )
+
+    assert store.get("provider-a") == current
+
+
+def test_success_cas_rejects_integer_subclass_field_equality_forgery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path, monkeypatch, "cas-integer-field-subclass")
+    _record_success(store)
+    current = store.get("provider-a")
+    forged = store.get("provider-a")
+
+    class AlwaysEqualInt(int):
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            return False
+
+    forged.poll_count = AlwaysEqualInt(999)
+    assert type(forged) is SourceHealthState
+    assert current == forged
+
+    with pytest.raises(
+        ValueError,
+        match="poll_count must be a non-negative integer",
+    ):
+        store.record_success_if_current(
+            forged,
+            now=T2,
+            received=1,
+            accepted=1,
+            rejected=0,
+            cursor="cursor-2",
+            latest_source_ts=T2,
+            quality_flags=(),
+        )
+
+    assert store.get("provider-a") == current
+
+
+def test_replay_cutoff_rejects_datetime_subclass_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path, monkeypatch, "as-of-datetime-subclass")
+    _record_success(store)
+    _record_provider_failure(store)
+
+    class ForgedAsOf(datetime):
+        def astimezone(self, tz=None):
+            return datetime.max.replace(tzinfo=timezone.utc)
+
+    forged_cutoff = ForgedAsOf(
+        2026,
+        10,
+        4,
+        0,
+        0,
+        30,
+        tzinfo=timezone.utc,
+    )
+    with pytest.raises(TypeError, match="as_of must be an exact datetime"):
+        store.get_as_of("provider-a", as_of=forged_cutoff)
 
 
 def test_success_cas_snapshots_mutable_expected_state_before_writer_lock(

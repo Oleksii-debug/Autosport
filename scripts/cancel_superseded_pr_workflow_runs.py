@@ -752,6 +752,13 @@ class GitHubApi:
         request_impl = self._request
         request_func = getattr(request_impl, "__func__", request_impl)
         request_code = getattr(request_func, "__code__", None)
+        request_positional_defaults = getattr(request_func, "__defaults__", None)
+        request_keyword_defaults = getattr(request_func, "__kwdefaults__", None)
+        request_keyword_items = (
+            tuple(request_keyword_defaults.items())
+            if request_keyword_defaults is not None
+            else ()
+        )
 
         def request_dispatch_current() -> bool:
             bound = self._request

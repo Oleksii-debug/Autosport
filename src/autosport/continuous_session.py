@@ -1051,10 +1051,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         book: PaperBook,
         event_identity: str,
     ) -> set[str]:
-        parts = {event_identity}
-        if ":" in event_identity:
-            parts.add(event_identity.split(":", 1)[1])
+        record = self.lifecycle.get(event_identity)
+        if record is None:
+            raise ContinuousSessionError(
+                "settlement event identity is absent from durable lifecycle"
+            )
         source_id = self.collector.source_id
+        if record.source_id != source_id:
+            raise ContinuousSessionError(
+                "settlement event source is outside continuous session authority"
+            )
+        parts = {event_identity, record.event_id}
         return {
             leg.quote_key
             for ticket in book.tickets.values()
@@ -1065,6 +1072,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             if not ticket.provider_source_ids or source_id in ticket.provider_source_ids
             for leg in ticket.legs
             if leg.event_id in parts
+            # Explicit sport semantics are authoritative. Legacy legs without a
+            # sport remain readable, but a different declared sport cannot consume
+            # this lifecycle record's settlement evidence.
+            if leg.sport is None or leg.sport == record.sport
         }
 
     def tick(self) -> ContinuousTickResult:

@@ -37,13 +37,17 @@ from .workspace_lock import WorkspaceEconomicLock
 from .real_execution_ledger import (
     AcknowledgementStatus,
     AttemptState,
+    EventType,
     ExecutionAction,
+    ExecutionStateError,
     ExternalAcknowledgement,
     RealExecutionLedger,
 )
 from .supervised_execution import (
     BoundSupervisedExecutionPlan,
     SupervisedApproval,
+    _require_approval,
+    _require_durable_approval,
     begin_supervised_attempt,
 )
 
@@ -930,6 +934,123 @@ def read_betfair_supervised_action_readback(
     )
 
 
+def _place_action_with_final_durable_authority(
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+    *,
+    action: ExecutionAction,
+    attempt_id: str,
+    profile: BookmakerCapabilityProfile,
+    client: BetfairSupervisedPlaceOrdersClient,
+    provider_order_ref: str,
+    execution_workspace: Path,
+    clock: Callable[[], str],
+) -> BetfairPlaceExecutionReport:
+    """Fsync SUBMITTED and hold durable approval stable through provider I/O.
+
+    The ledger's canonical writer fence is deliberately held across the one
+    irreversible provider call. A durable approval revocation therefore either
+    commits before this operation and denies the send, or cannot commit until
+    the already-authorized provider call has returned. The operation performs
+    every deterministic local authority check before persisting SUBMITTED.
+    """
+
+    def operation() -> BetfairPlaceExecutionReport:
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        if view.plan_fingerprint != bound.execution_plan.fingerprint:
+            raise ExecutionStateError(
+                "durable execution-plan fingerprint changed before final send"
+            )
+        attempts = [
+            item
+            for item in view.attempts
+            if item.attempt.attempt_id == attempt_id
+        ]
+        if len(attempts) != 1:
+            raise ExecutionStateError(
+                "final supervised send requires one durable attempt"
+            )
+        attempt = attempts[0]
+        if (
+            attempt.state is not AttemptState.RESERVED
+            or attempt.attempt.action_id != action.action_id
+            or attempt.action != action
+        ):
+            raise ExecutionStateError(
+                "final supervised send requires the exact RESERVED action"
+            )
+        if attempt.provider_order_ref != provider_order_ref:
+            raise ExecutionStateError(
+                "final supervised send provider order reference drifted"
+            )
+
+        send_at = clock()
+        _require_approval(bound, approval, send_at)
+        _require_durable_approval(ledger, bound, approval)
+        if _time(send_at, "final send time") < _time(
+            attempt.attempt.reserved_at,
+            "attempt reserved_at",
+        ):
+            raise BetfairSupervisedExecutionError(
+                "final send time precedes attempt reservation"
+            )
+        if _time(send_at, "final send time") >= _time(
+            action.expires_at,
+            "action expires_at",
+        ):
+            raise BetfairSupervisedExecutionError(
+                "placeOrders final send is at/after quote expiry"
+            )
+
+        # Re-run every deterministic local provider gate while both the owner
+        # workspace lock and durable ledger writer fence are held. Only after
+        # those checks pass may SUBMITTED become durable.
+        _validate_betfair_place_action(action)
+        client._gate.require(
+            action=action,
+            profile=profile,
+            bound=bound,
+            execution_workspace=execution_workspace,
+        )
+        provider_ref = _text(provider_order_ref, "provider_order_ref")
+        if len(provider_ref) > 32 or any(
+            character not in "0123456789abcdef"
+            for character in provider_ref
+        ):
+            raise BetfairSupervisedExecutionError(
+                "provider_order_ref must be <=32 lowercase hex characters"
+            )
+
+        ledger._append(
+            EventType.ATTEMPT_SUBMITTED,
+            bound.execution_plan.plan_id,
+            action.action_id,
+            attempt_id,
+            {"submitted_at": send_at},
+        )
+        try:
+            return client.place_action(
+                action,
+                profile=profile,
+                bound=bound,
+                provider_order_ref=provider_ref,
+                execution_workspace=execution_workspace,
+            )
+        except BetfairPlaceOrdersAmbiguous:
+            raise
+        except Exception as exc:
+            # SUBMITTED is already durable. Any exception after entering the
+            # provider-call boundary is therefore effect-ambiguous, even if a
+            # custom transport or post-response validator raised it locally.
+            raise BetfairPlaceOrdersAmbiguous(
+                "placeOrders dispatch failed after durable submission; "
+                "authoritative readback required"
+            ) from exc
+
+    return ledger._mutate(operation)
+
+
 def execute_betfair_supervised_action(
     ledger: RealExecutionLedger,
     bound: BoundSupervisedExecutionPlan,
@@ -941,7 +1062,7 @@ def execute_betfair_supervised_action(
     client: BetfairSupervisedPlaceOrdersClient,
     clock: Callable[[], str] | None = None,
 ) -> BetfairSupervisedExecutionResult:
-    """Reserve -> submit -> placeOrders -> report -> canonical ledger transition."""
+    """Reserve -> fenced submit/send -> report -> canonical ledger transition."""
 
     if not isinstance(ledger, RealExecutionLedger):
         raise TypeError("ledger must be RealExecutionLedger")
@@ -957,15 +1078,13 @@ def execute_betfair_supervised_action(
     now = clock or _now
     execution_workspace = ledger.path.parent.resolve()
 
-    # Serialize the current owner authority through the actual provider-write
-    # boundary, not just through local ledger preparation. EconomicGoalStore
-    # successors use this same writer lock, so either a tighter owner revision
-    # becomes durable first and the initial gate rejects before any attempt
-    # mutation, or this already-authorized bounded call reaches placeOrders
-    # before that successor can publish. The provider client still re-reads the
-    # canonical owner contract immediately before transport while the fence is
-    # held. This prevents a known local authority denial from being mislabeled
-    # as provider-effect uncertainty.
+    # Owner authority and durable supervised approval are independently
+    # serialized through the irreversible boundary. EconomicGoalStore
+    # successors share WorkspaceEconomicLock. The final ledger operation then
+    # re-resolves approval/attempt/order-ref truth, fsyncs SUBMITTED, and keeps
+    # the canonical ledger writer fence held through placeOrders. A tighter
+    # owner revision or durable approval revocation therefore wins before the
+    # send or waits until the already-authorized send has returned.
     with WorkspaceEconomicLock(execution_workspace):
         client._gate.require(
             action=action,
@@ -984,22 +1103,20 @@ def execute_betfair_supervised_action(
             attempt_id=attempt_id,
             provider_id=action.bookmaker_id,
         )
-        ledger.mark_submitted(
-            attempt_id,
-            submitted_at=now(),
-        )
         try:
-            report = client.place_action(
-                action,
+            report = _place_action_with_final_durable_authority(
+                ledger,
+                bound,
+                approval,
+                action=action,
+                attempt_id=attempt_id,
                 profile=profile,
-                bound=bound,
+                client=client,
                 provider_order_ref=provider_order_ref,
                 execution_workspace=execution_workspace,
+                clock=now,
             )
-        except (
-            BetfairPlaceOrdersAmbiguous,
-            BetfairSupervisedExecutionError,
-        ):
+        except BetfairPlaceOrdersAmbiguous:
             ledger.mark_unknown(
                 attempt_id,
                 reason=(

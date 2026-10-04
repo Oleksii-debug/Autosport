@@ -1320,7 +1320,11 @@ class SQLiteMarketStore:
                         projection_state[projection_key] = event
 
                 changes_before = self.connection.total_changes
-                accepted = _canonical_append(self, batch)
+                # canonical_events was reconstructed through the import-time captured
+                # batch iterator before the replaceable retry seam ran. Persist that
+                # sealed tuple directly: passing the capability object here would make
+                # Python re-resolve its __iter__ after an untrusted callback.
+                accepted = _canonical_append(self, canonical_events)
                 if not self.connection.in_transaction:
                     raise RuntimeError(
                         "live append hook relinquished transaction ownership"

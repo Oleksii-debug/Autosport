@@ -1414,7 +1414,13 @@ class ProphetXSessionLifecycle:
             )
         except ProphetXSessionLifecycleError:
             raise
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            ValueError,
+            RecursionError,
+        ) as exc:
             raise ProphetXSessionLifecycleError(
                 "ProphetX session state is unreadable or corrupt"
             ) from exc

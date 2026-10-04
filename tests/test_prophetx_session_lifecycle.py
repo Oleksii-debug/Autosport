@@ -1525,6 +1525,47 @@ def test_state_file_duplicate_json_key_fails_closed_before_schema_use(tmp_path):
 
 
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_state_file_oversized_json_integer_fails_closed(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    lifecycle.begin_login(now=NOW, access_token_available=False)
+    raw = lifecycle.state_path.read_text(encoding="utf-8")
+    assert '"generation":0' in raw
+    raw = raw.replace(
+        '"generation":0',
+        '"generation":' + ("9" * 5000),
+        1,
+    )
+    assert len(raw.encode("utf-8")) < 64 * 1024
+    lifecycle.state_path.write_text(raw, encoding="utf-8")
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="unreadable or corrupt",
+    ):
+        lifecycle.read_snapshot()
+
+
+def test_state_file_excessive_json_nesting_fails_closed(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    lifecycle.begin_login(now=NOW, access_token_available=False)
+    raw = lifecycle.state_path.read_text(encoding="utf-8")
+    assert '"generation":0' in raw
+    depth = 1500
+    raw = raw.replace(
+        '"generation":0',
+        '"generation":' + ("[" * depth) + "0" + ("]" * depth),
+        1,
+    )
+    assert len(raw.encode("utf-8")) < 64 * 1024
+    lifecycle.state_path.write_text(raw, encoding="utf-8")
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="unreadable or corrupt",
+    ):
+        lifecycle.read_snapshot()
+
+
 def test_state_file_nonstandard_json_constant_fails_closed(tmp_path, constant):
     lifecycle = _lifecycle(tmp_path)
     lifecycle.begin_login(now=NOW, access_token_available=False)

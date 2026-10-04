@@ -6,7 +6,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autosport.causal_collector import (
+    CanonicalDesktopApplication,
     CollectorDelta,
+    CollectorDeltaStore,
     DesktopDeltaCheckpointStore,
     canonical_event_digest,
     digest_source_payload,
@@ -155,12 +157,25 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 restored.close()
 
-    def test_runtime_preload_excludes_other_source_market_history(self) -> None:
+    def test_runtime_preload_requires_desktop_receipt_and_excludes_other_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            own = _event()
+            delta = _delta(own)
+            collector_store = CollectorDeltaStore(root / "collector_deltas.json")
+            self.assertTrue(collector_store.append(delta))
+
             store = SQLiteMarketStore(root / "market.db")
             try:
-                own = _event()
+                application = CanonicalDesktopApplication(
+                    MarketEventBus(store),
+                    SourceHealthStore(root / "source_health.json"),
+                    root / "desktop_application.json",
+                    clock=_Clock(),
+                )
+                receipt = application.apply(delta, own)
+                self.assertEqual(receipt.canonical_event_digest, canonical_event_digest(own))
+
                 other = MarketEvent.from_dict(
                     {
                         **own.to_dict(),
@@ -168,7 +183,6 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                         "sequence": 2,
                     }
                 )
-                self.assertTrue(store.append(own))
                 self.assertTrue(store.append(other))
                 self.assertEqual(len(store.current_by_source()), 2)
             finally:
@@ -195,10 +209,34 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                         "player-a",
                     )
                 )
-                self.assertEqual(
-                    len(runtime.market_store.current_by_source()),
-                    2,
-                )
+                self.assertEqual(len(runtime.market_store.current_by_source()), 2)
+            finally:
+                runtime.close()
+
+    def test_runtime_preload_excludes_same_source_history_without_desktop_receipt(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                event = _event()
+                self.assertTrue(store.append(event))
+                self.assertEqual(len(store.current_by_source()), 1)
+            finally:
+                store.close()
+
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source("provider-a"),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertEqual(runtime.mirror.snapshot(), ())
+                self.assertEqual(runtime.invalidations.pending_count, 0)
+                self.assertEqual(len(runtime.market_store.current_by_source()), 1)
             finally:
                 runtime.close()
 

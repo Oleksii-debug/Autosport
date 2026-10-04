@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from autosport import _betfair_settlement_provider_row_semantics as provider_semantics
 from autosport import betfair_settlement_revisions as settlement
 from autosport.betfair_account_readonly import (
     ADAPTER_ID as BETFAIR_ADAPTER_ID,
@@ -306,6 +307,48 @@ def test_secure_journal_io_code_drift_fails_before_ingest(
         method,
         "__code__",
         original_code.replace(co_name=f"drifted_{method_name}"),
+    )
+    ledger = RealExecutionLedger(tmp_path / "execution.jsonl")
+
+    with pytest.raises(
+        settlement.BetfairSettlementRevisionError,
+        match="execution identity dispatch changed",
+    ):
+        _guarded_ingest(action=_action(), capture=object(), ledger=ledger)
+
+
+def test_provider_ingest_delegate_rebind_fails_before_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls: list[object] = []
+
+    def forged_delegate(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("rebound provider ingest delegate executed")
+
+    monkeypatch.setattr(provider_semantics, "_ORIGINAL_INGEST", forged_delegate)
+    ledger = RealExecutionLedger(tmp_path / "execution.jsonl")
+
+    with pytest.raises(
+        settlement.BetfairSettlementRevisionError,
+        match="execution identity dispatch changed",
+    ):
+        _guarded_ingest(action=_action(), capture=object(), ledger=ledger)
+
+    assert calls == []
+
+
+def test_provider_ingest_delegate_code_drift_fails_before_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    delegate = provider_semantics._ORIGINAL_INGEST
+    original_code = delegate.__code__
+    monkeypatch.setattr(
+        delegate,
+        "__code__",
+        original_code.replace(co_name="drifted_provider_ingest_delegate"),
     )
     ledger = RealExecutionLedger(tmp_path / "execution.jsonl")
 

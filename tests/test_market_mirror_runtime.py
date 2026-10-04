@@ -189,6 +189,65 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             (),
         )
 
+    def test_reconcile_persisted_preserves_provenance_and_publishes_material_changes(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=4)
+        baseline = self.event(sequence=3, odds="2.30")
+
+        applied = runtime.reconcile_persisted(
+            baseline,
+            append_generation=0,
+        )
+
+        self.assertEqual(applied.status, MirrorUpdate.APPLIED)
+        self.assertEqual(runtime.pending_count, 1)
+        self.assertEqual(
+            runtime.drain().changed_keys,
+            (("provider-a", baseline.quote_key),),
+        )
+        self.assertEqual(
+            mirror.active_snapshot(
+                as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=1),
+            ),
+            (),
+        )
+
+        positive = self.event(sequence=4, odds="2.40")
+        applied_positive = runtime.reconcile_persisted(
+            positive,
+            append_generation=1,
+        )
+
+        self.assertEqual(applied_positive.status, MirrorUpdate.APPLIED)
+        self.assertEqual(
+            runtime.drain().changed_keys,
+            (("provider-a", positive.quote_key),),
+        )
+        self.assertEqual(
+            mirror.active_snapshot(
+                as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=1),
+            ),
+            (positive,),
+        )
+
+    def test_reconcile_persisted_rejects_invalid_generation_before_mutation(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        event = self.event(sequence=1)
+
+        for invalid in (-1, True, 1.0):
+            with self.subTest(append_generation=invalid):
+                with self.assertRaises(ValueError):
+                    runtime.reconcile_persisted(
+                        event,
+                        append_generation=invalid,
+                    )
+
+        self.assertEqual(mirror.snapshot(), ())
+        self.assertEqual(runtime.pending_count, 0)
+
     def test_focused_dependencies_route_only_affected_provider_and_selection(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror)

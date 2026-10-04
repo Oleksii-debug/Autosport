@@ -732,6 +732,348 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_direct_settle_rejects_conflicting_duplicate_evidence_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            first = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:duplicate-id",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="duplicate-evidence",
+                evidence_sha256="1" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            second = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:duplicate-id",
+                quote_outcomes={"event-1|winner|home": "loss"},
+                evidence_id="duplicate-evidence",
+                evidence_sha256="1" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "evidence id has multiple authorities",
+                ):
+                    coordinator._settle(
+                        resolutions=(first, second),
+                        settled_at=clock(),
+                    )
+                self.assertFalse((root / "paper_book.json").exists())
+            finally:
+                store.close()
+
+    def test_direct_settle_rejects_split_event_reference_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            first = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:shared",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="evidence:first",
+                evidence_sha256="2" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            second = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:shared",
+                quote_outcomes={"event-1|winner|away": "loss"},
+                evidence_id="evidence:second",
+                evidence_sha256="3" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "event/reference has multiple evidence authorities",
+                ):
+                    coordinator._settle(
+                        resolutions=(first, second),
+                        settled_at=clock(),
+                    )
+                self.assertFalse((root / "paper_book.json").exists())
+            finally:
+                store.close()
+
+    def test_direct_settle_rejects_future_resolution_before_book_access(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            future = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:future",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="future-evidence",
+                evidence_sha256="4" * 64,
+                available_at="2026-09-19T21:21:00+00:00",
+            )
+            coordinator._load_book = lambda: self.fail("shadowed loader was called")
+            try:
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "failed canonical validation",
+                ):
+                    coordinator._settle(
+                        resolutions=(future,),
+                        settled_at=clock(),
+                    )
+                self.assertFalse((root / "paper_book.json").exists())
+            finally:
+                store.close()
+
+    def test_direct_settle_rejects_resolution_subclass_authority(self) -> None:
+        class DerivedSettlementResolution(SettlementResolution):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            derived = DerivedSettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:derived",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="derived-evidence",
+                evidence_sha256="5" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "non-canonical resolution evidence",
+                ):
+                    coordinator._settle(
+                        resolutions=(derived,),
+                        settled_at=clock(),
+                    )
+            finally:
+                store.close()
+
+    def test_direct_settle_validation_roots_ignore_module_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            future = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:future-rebind",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="future-rebind-evidence",
+                evidence_sha256="6" * 64,
+                available_at="2026-09-19T21:21:00+00:00",
+            )
+            try:
+                with patch.object(
+                    continuous_session_module,
+                    "SettlementResolution",
+                    object,
+                ), patch.object(
+                    continuous_session_module,
+                    "_instant",
+                    lambda *_args, **_kwargs: None,
+                ):
+                    with self.assertRaisesRegex(
+                        ContinuousSessionError,
+                        "failed canonical validation",
+                    ):
+                        coordinator._settle(
+                            resolutions=(future,),
+                            settled_at=clock(),
+                        )
+            finally:
+                store.close()
+
+    def test_direct_settle_ignores_shadowed_book_loader(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="result:loader-shadow",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            forged = PaperBook("100")
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            ticket = forged.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a",),
+            )
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="result:loader-shadow",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="loader-shadow-evidence",
+                evidence_sha256="7" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                coordinator.tick()
+                coordinator._load_book = lambda: forged
+                settled, evidence_ids = coordinator._settle(
+                    resolutions=(resolution,),
+                    settled_at=clock(),
+                )
+                self.assertEqual(settled, ())
+                self.assertEqual(evidence_ids, ("loader-shadow-evidence",))
+                self.assertEqual(forged.balance, Decimal("90"))
+                self.assertEqual(ticket.status.value, "open")
+                self.assertFalse((root / "paper_book.json").exists())
+            finally:
+                store.close()
+
+    def test_direct_settle_keeps_canonical_provider_scoped_path_working(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="result:direct-valid",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                coordinator.tick()
+                leg = TicketLeg(
+                    event_id="event-1",
+                    market_id="winner",
+                    selection_id="home",
+                    locked_odds=Decimal("2.00"),
+                    sport="table_tennis",
+                )
+                book = PaperBook("100")
+                ticket = book.open_ticket(
+                    (leg,),
+                    Decimal("10"),
+                    placed_at="2026-09-19T21:19:30+00:00",
+                    provider_source_ids=("provider-a",),
+                )
+                book.save(root / "paper_book.json")
+                resolution = SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="result:direct-valid",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="direct-valid-evidence",
+                    evidence_sha256="8" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+                settled, evidence_ids = coordinator._settle(
+                    resolutions=(resolution,),
+                    settled_at=clock(),
+                )
+                self.assertEqual(settled, (ticket.ticket_id,))
+                self.assertEqual(evidence_ids, ("direct-valid-evidence",))
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("110"))
+                self.assertEqual(
+                    durable.tickets[ticket.ticket_id].status.value,
+                    "won",
+                )
+            finally:
+                store.close()
+
+    def test_settlement_validation_injection_argument_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "settlement evidence validator is internal product authority",
+                ):
+                    coordinator._settle(
+                        resolutions=(),
+                        settled_at=clock(),
+                        _settlement_resolution_validate=lambda *_args, **_kwargs: None,
+                    )
+            finally:
+                store.close()
+
     def test_unscoped_legacy_ticket_cannot_consume_provider_settlement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

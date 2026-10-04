@@ -263,5 +263,70 @@ class LiveReceiptReconvergenceTests(unittest.TestCase):
             store.close()
 
 
+    def test_live_receipt_authority_ignores_transitive_runtime_helper_rebind(self) -> None:
+        def poisoned(*_args, **_kwargs):
+            raise AssertionError("runtime helper rebind must not control live receipt authority")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            legacy = self._event(sequence=1)
+            advanced = self._event(sequence=2)
+            self.assertTrue(store.append(legacy))
+
+            with (
+                patch.object(storage_module, "_LiveReceiptBatch", new=poisoned),
+                patch.object(storage_module, "_validate_incoming_event", new=poisoned),
+                patch.object(storage_module, "_validate_persistable_sequence", new=poisoned),
+                patch.object(storage_module, "_projection_order_key", new=poisoned),
+                patch.object(storage_module, "_event_order_key", new=poisoned),
+                patch.object(storage_module, "_observed_instant", new=poisoned),
+                patch.object(storage_module, "_timezone_aware_instant", new=poisoned),
+                patch.object(storage_module, "_market_event_dedupe_key", new=poisoned),
+                patch.object(storage_module, "_market_event_quote_key", new=poisoned),
+                patch.object(storage_module, "_event_from_history_row", new=poisoned),
+                patch.object(storage_module, "_event_from_current_payload", new=poisoned),
+                patch.object(storage_module, "_event_from_current_row", new=poisoned),
+                patch.object(storage_module, "_canonical_payload", new=poisoned),
+                patch.object(storage_module, "_canonical_json", new=poisoned),
+                patch.object(storage_module, "_source_payload", new=poisoned),
+                patch.object(storage_module, "_source_payload_from_raw", new=poisoned),
+                patch.object(storage_module, "_load_history_payload", new=poisoned),
+                patch.object(storage_module, "_typed_payload_equal", new=poisoned),
+                patch.object(storage_module, "_encode_market_event", new=poisoned),
+                patch.object(storage_module, "_decode_market_event", new=poisoned),
+                patch.object(storage_module, "_trusted_live_events_from_connection", new=poisoned),
+                patch.object(
+                    storage_module,
+                    "_LIVE_RECEIPT_AUTHORITY",
+                    new="poisoned.runtime.authority",
+                ),
+                patch.object(SQLiteMarketStore, "_insert_one", new=poisoned),
+                patch.object(
+                    SQLiteMarketStore,
+                    "_append_batch_accepted_canonical",
+                    new=poisoned,
+                ),
+                patch.object(
+                    SQLiteMarketStore,
+                    "_insert_live_receipt_authority",
+                    new=poisoned,
+                ),
+            ):
+                repeated = store._append_live_batch_accepted([legacy])
+                accepted = store._append_live_batch_accepted([advanced])
+                trusted = store.trusted_live_events()
+                current = store.trusted_live_current_by_source()
+                legacy_receipt = store.has_trusted_live_receipt(legacy)
+                advanced_receipt = store.has_trusted_live_receipt(advanced)
+
+            self.assertEqual(repeated, [])
+            self.assertEqual(accepted, [advanced])
+            self.assertEqual(trusted, [advanced])
+            self.assertEqual(list(current.values()), [advanced])
+            self.assertFalse(legacy_receipt)
+            self.assertTrue(advanced_receipt)
+            store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

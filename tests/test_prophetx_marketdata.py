@@ -513,6 +513,45 @@ class ProphetXMarketDataTests(unittest.TestCase):
         self.assertNotIn("PROVIDER_ORIGIN_VERIFIED", batch.quality_flags)
         self.assertIn("BOUNDED_PROVIDER_DEPTH", batch.quality_flags)
 
+    def test_injected_empty_named_market_cannot_mint_scoped_empty_truth(self):
+        payload = _market_payload()
+        payload["data"]["markets"][0]["selections"] = []
+        provider, _ = self._provider(payload)
+        batch = provider.read_batch()
+        self.assertEqual(batch.quotes, ())
+        self.assertNotIn("PROVIDER_DECLARED_EMPTY_MARKET", batch.quality_flags)
+        self.assertFalse(
+            any(flag.startswith("PROVIDER_DECLARED_EMPTY_SCOPE:") for flag in batch.quality_flags)
+        )
+        self.assertIn("UNVERIFIED_PROVIDER_ORIGIN", batch.quality_flags)
+
+    def test_verified_multi_event_empty_scopes_do_not_cross_wire(self):
+        provider = self._make_provider("token", (1001, 1002))
+        event_1001 = _response({"data": {"markets": []}})
+        event_1002_payload = _market_payload()
+        event_1002_payload["data"]["markets"][0]["event_id"] = 1002
+        event_1002_payload["data"]["markets"][0]["market_id"] = "market-2"
+        event_1002_payload["data"]["markets"][0]["selections"] = []
+        event_1002 = _response(event_1002_payload)
+
+        def fetch_event(event_id):
+            return (event_1001 if event_id == 1001 else event_1002), True
+
+        with patch.object(provider, "_fetch_event", side_effect=fetch_event):
+            batch = provider.read_batch()
+        scopes = {
+            flag
+            for flag in batch.quality_flags
+            if flag.startswith("PROVIDER_DECLARED_EMPTY_SCOPE:")
+        }
+        self.assertEqual(
+            scopes,
+            {
+                'PROVIDER_DECLARED_EMPTY_SCOPE:{"event_id":"1001","market_id":null}',
+                'PROVIDER_DECLARED_EMPTY_SCOPE:{"event_id":"1002","market_id":"market-2"}',
+            },
+        )
+
     def test_verified_empty_event_preserves_exact_requested_event_scope(self):
         provider = self._make_provider("token", (1001,))
         response = _response({"data": {"markets": []}})

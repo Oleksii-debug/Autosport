@@ -1280,3 +1280,51 @@ def test_monotonic_recovery_alias_rebinding_is_rejected_before_execution(
 
     assert calls == []
 
+
+def test_monotonic_authority_type_rebinding_is_rejected_before_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    _attempt(ledger, plan)
+    ledger_globals = RealExecutionLedger.verified_execution_view.__globals__
+
+    monkeypatch.setitem(
+        ledger_globals,
+        "_MONOTONIC_AUTHORITY_TYPE",
+        object,
+    )
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="canonical execution-ledger read authority changed",
+    ):
+        resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+
+def test_monotonic_recovery_code_mutation_is_rejected_before_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    _attempt(ledger, plan)
+    ledger_globals = RealExecutionLedger.verified_execution_view.__globals__
+    recover = ledger_globals["_MONOTONIC_RECOVER"]
+    calls = []
+
+    def forged_recover(*_args, **_kwargs):
+        calls.append("recover")
+        return None
+
+    assert recover.__closure__ is None
+    assert forged_recover.__closure__ is None
+    monkeypatch.setattr(recover, "__code__", forged_recover.__code__)
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="canonical execution-ledger read authority changed",
+    ):
+        resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+    assert calls == []
+

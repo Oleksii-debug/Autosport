@@ -1307,6 +1307,119 @@ def test_session_rejects_duplicate_iid_occurrence_before_registry_mutation(
     assert RunRegistry(workspace / "run_registry.json")._read()["runs"] == {}
 
 
+def test_session_rejects_runtime_dataset_manifest_outside_frozen_snapshot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    dataset, _dataset_manifest_sha256 = _iid_replay_dataset(
+        tmp_path / "iid-dataset",
+        event,
+    )
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+        dataset_manifest_sha256="0" * 64,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    session = AutosportSession(
+        workspace,
+        initial_bankroll="100",
+        strategy_id="observe-only-v1",
+    )
+    try:
+        with pytest.raises(
+            ProductIidDrawPlanError,
+            match="differs from the frozen DatasetSnapshot",
+        ):
+            session.run_iid_member_dataset(
+                dataset,
+                membership=membership,
+                registry_path=registry_path,
+                sampling_manifest_json=manifest,
+                sampling_frame_json=frame_json,
+                horizon_json=horizon_json,
+                member_index=0,
+                authority_root=authority_root,
+            )
+    finally:
+        session.close()
+
+    assert RunRegistry(workspace / "run_registry.json")._read()["runs"] == {}
+
+
+def test_session_iid_runner_rejects_dataset_loader_rebinding_before_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event = _market_event()
+    dataset, dataset_manifest_sha256 = _iid_replay_dataset(
+        tmp_path / "iid-dataset",
+        event,
+    )
+    frame_json = _frame_for_payload(market_event_payload_sha256(event))
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=_horizon(1),
+        dataset_manifest_sha256=dataset_manifest_sha256,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    session = AutosportSession(
+        workspace,
+        initial_bankroll="100",
+        strategy_id="observe-only-v1",
+    )
+    attacker_called = False
+
+    def forged_loader(_root):
+        nonlocal attacker_called
+        attacker_called = True
+        return dataset
+
+    monkeypatch.setattr(session_module, "load_dataset", forged_loader)
+    try:
+        with pytest.raises(
+            ProductIidDrawPlanError,
+            match="session execution authority dispatch changed",
+        ):
+            session.run_iid_member_dataset(
+                dataset,
+                membership=membership,
+                registry_path=registry_path,
+                sampling_manifest_json=manifest,
+                sampling_frame_json=frame_json,
+                horizon_json=horizon_json,
+                member_index=0,
+                authority_root=authority_root,
+            )
+    finally:
+        session.close()
+
+    assert attacker_called is False
+    assert RunRegistry(workspace / "run_registry.json")._read()["runs"] == {}
+
+
 def test_session_iid_runner_rejects_plan_resolver_rebinding_before_dataset_read(
     tmp_path,
     monkeypatch,

@@ -1258,9 +1258,9 @@ class SQLiteMarketStore:
         materialized = tuple(events)
         if any(type(event) is not _market_event_type for event in materialized):
             raise TypeError("live receipt authority requires exact MarketEvent values")
-        # Python special-method lookup consults the class at runtime. Capture and
-        # call the canonical constructor/iterator descriptors explicitly so later
-        # descriptor rebinding cannot rewrite authority-bearing payload reconstruction.
+        # Snapshot canonical payloads before exposing the non-authoritative batch
+        # object. Durable reconstruction below never dispatches through that object's
+        # runtime constructor, iterator, or payload-slot reads.
         canonical_payloads = tuple(
             _canonical_payload_fn(event) for event in materialized
         )

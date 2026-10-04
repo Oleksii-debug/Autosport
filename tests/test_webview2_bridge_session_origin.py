@@ -143,6 +143,28 @@ def test_bridge_rejects_unregistered_autosport_controller_subclass(tmp_path) -> 
         AutosportWebBridge(controller)
 
 
+def test_bridge_rejects_base_controller_method_rebind_before_construction(
+    tmp_path,
+) -> None:
+    controller = AutosportWebController(tmp_path / "workspace")
+    original_dispatch = AutosportWebController.__dict__["dispatch"]
+
+    try:
+        AutosportWebController.dispatch = lambda self, raw: {  # type: ignore[method-assign]
+            "request_id": raw.get("request_id", "forged"),
+            "status": "forged",
+        }
+        with pytest.raises(
+            WindowsWebBridgeTrustError,
+            match="base controller method authority changed",
+        ):
+            AutosportWebBridge(controller)
+    finally:
+        AutosportWebController.dispatch = original_dispatch  # type: ignore[method-assign]
+
+    controller.close()
+
+
 def test_bridge_accepts_and_seals_canonical_emergency_stop_controller(
     tmp_path,
 ) -> None:

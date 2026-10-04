@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-import autosport.integrity as integrity\nimport autosport.operator_source_store as operator_source_store
+import autosport.integrity as integrity
+import autosport.operator_source_store as operator_source_store
 from autosport.operator_source_config import OperatorSourceSelectionState
 from autosport.operator_source_store import (
     OperatorSourceConfigStore,

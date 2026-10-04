@@ -285,7 +285,6 @@ class BetfairProviderConstraintObservation(
         _utc_fn=_utc,
         _canonical_sha256_fn=_canonical_sha256,
         _decimal_text_fn=_decimal_text,
-        _schema_version=SCHEMA_VERSION,
         _error_type=BetfairProviderConstraintError,
     ):
         if provider_id != _provider_id:
@@ -465,6 +464,7 @@ class BetfairProviderConstraintResolution(
         _positive_decimal_fn=_positive_decimal,
         _canonical_sha256_fn=_canonical_sha256,
         _decimal_text_fn=_decimal_text,
+        _schema_version=SCHEMA_VERSION,
         _error_type=BetfairProviderConstraintError,
     ):
         if type(state) is not _state_type:

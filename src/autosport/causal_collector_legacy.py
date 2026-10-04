@@ -1004,13 +1004,14 @@ class DesktopDeltaConsumer:
         cutoff: datetime,
         clock: Callable[[], str] | None,
         not_before: datetime | None = None,
+        _instant_parser=_instant,
     ) -> str:
         """Validate one exact operational ACK-clock sample for this handoff."""
         if clock is None:
             acknowledged = cutoff
         else:
             try:
-                acknowledged = _instant(
+                acknowledged = _instant_parser(
                     clock(),
                     "acknowledged_at",
                 )
@@ -1027,8 +1028,8 @@ class DesktopDeltaConsumer:
                     "desktop acknowledgement clock moved backward after receipt delivery"
                 )
 
-        available = _instant(delta.desktop_available_at, "desktop_available_at")
-        applied = _instant(receipt.applied_at, "applied_at")
+        available = _instant_parser(delta.desktop_available_at, "desktop_available_at")
+        applied = _instant_parser(receipt.applied_at, "applied_at")
         if not (available <= applied <= acknowledged):
             raise ApplicationReceiptError(
                 "application timing must satisfy desktop_available_at <= applied_at <= acknowledged_at"
@@ -1044,8 +1045,10 @@ class DesktopDeltaConsumer:
         _validate_receipt,
         _canonical_digest,
         _market_event_type,
+        _acknowledged_at,
+        _instant_parser,
     ) -> tuple[str, ...]:
-        now = _instant(as_of, "as_of")
+        now = _instant_parser(as_of, "as_of")
         available = self.collector.deltas_available_through(as_of=as_of, view=view)
         delivered: list[str] = []
         for delta in available:
@@ -1091,7 +1094,7 @@ class DesktopDeltaConsumer:
                         )
                     acknowledgement_clock = self._acknowledgement_clock
                     on_application_receipt = self._on_application_receipt
-                    acknowledged_at = self._acknowledged_at(
+                    acknowledged_at = _acknowledged_at(self,
                         delta,
                         durable_receipt,
                         cutoff=now,
@@ -1100,12 +1103,12 @@ class DesktopDeltaConsumer:
                     if on_application_receipt is not None:
                         on_application_receipt(delta, durable_receipt)
                         if acknowledgement_clock is not None:
-                            acknowledged_at = self._acknowledged_at(
+                            acknowledged_at = _acknowledged_at(self,
                                 delta,
                                 durable_receipt,
                                 cutoff=now,
                                 clock=acknowledgement_clock,
-                                not_before=_instant(
+                                not_before=_instant_parser(
                                     acknowledged_at,
                                     "pre_delivery_acknowledged_at",
                                 ),
@@ -1134,7 +1137,7 @@ class DesktopDeltaConsumer:
                     raise ApplicationReceiptError("application receipt is not bound to this delta/digest")
                 acknowledgement_clock = self._acknowledgement_clock
                 on_application_receipt = self._on_application_receipt
-                acknowledged_at = self._acknowledged_at(
+                acknowledged_at = _acknowledged_at(self,
                     delta,
                     receipt,
                     cutoff=now,
@@ -1143,12 +1146,12 @@ class DesktopDeltaConsumer:
                 if on_application_receipt is not None:
                     on_application_receipt(delta, receipt)
                     if acknowledgement_clock is not None:
-                        acknowledged_at = self._acknowledged_at(
+                        acknowledged_at = _acknowledged_at(self,
                             delta,
                             receipt,
                             cutoff=now,
                             clock=acknowledgement_clock,
-                            not_before=_instant(
+                            not_before=_instant_parser(
                                 acknowledged_at,
                                 "pre_delivery_acknowledged_at",
                             ),
@@ -1169,6 +1172,8 @@ def _bind_desktop_delta_consumer_drain(implementation):
     validate_receipt = DesktopApplicationReceipt.validate
     canonical_digest = canonical_event_digest
     market_event_type = MarketEvent
+    acknowledged_at = DesktopDeltaConsumer._acknowledged_at
+    instant_parser = _instant
 
     def drain(
         self,
@@ -1184,6 +1189,8 @@ def _bind_desktop_delta_consumer_drain(implementation):
             _validate_receipt=validate_receipt,
             _canonical_digest=canonical_digest,
             _market_event_type=market_event_type,
+            _acknowledged_at=acknowledged_at,
+            _instant_parser=instant_parser,
         )
 
     return drain

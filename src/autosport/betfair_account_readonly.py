@@ -1649,39 +1649,45 @@ def _install_market_book_depth_authority():
     canonical_urlopen = (canonical_post.__kwdefaults__ or {}).get("_urlopen")
     canonical_rpc = canonical_client_type._rpc
     canonical_rpc_code = canonical_rpc.__code__
+    # Authority decisions must not resolve mutable builtins dynamically. A caller
+    # can otherwise shadow the canonical transport at instance level while
+    # rebinding builtins.vars/type/getattr around acquisition.
+    canonical_type = type
+    canonical_getattr = getattr
+    canonical_vars = vars
     if canonical_urlopen is None or canonical_urlopen is not urlopen:
         raise RuntimeError("canonical Betfair urlopen origin is unavailable")
 
     def canonical_rpc_dispatch(source: object) -> bool:
-        if "_rpc" in vars(source):
+        if "_rpc" in canonical_vars(source):
             return False
-        bound_rpc = getattr(source, "_rpc", None)
+        bound_rpc = canonical_getattr(source, "_rpc", None)
         return (
             canonical_client_type._rpc is canonical_rpc
             and canonical_rpc.__code__ is canonical_rpc_code
-            and getattr(bound_rpc, "__self__", None) is source
-            and getattr(bound_rpc, "__func__", None) is canonical_rpc
+            and canonical_getattr(bound_rpc, "__self__", None) is source
+            and canonical_getattr(bound_rpc, "__func__", None) is canonical_rpc
         )
 
     def source_origin_authoritative(source: object) -> bool:
-        if type(source) is not canonical_client_type:
+        if canonical_type(source) is not canonical_client_type:
             return False
-        transport = getattr(source, "_transport", None)
-        if type(transport) is not canonical_transport_type:
+        transport = canonical_getattr(source, "_transport", None)
+        if canonical_type(transport) is not canonical_transport_type:
             return False
-        if getattr(source, "_market_book_origin_transport", None) is not transport:
+        if canonical_getattr(source, "_market_book_origin_transport", None) is not transport:
             return False
-        if getattr(source, "_clock", None) is not canonical_clock:
+        if canonical_getattr(source, "_clock", None) is not canonical_clock:
             return False
-        if getattr(source, "_market_book_origin_clock", None) is not canonical_clock:
+        if canonical_getattr(source, "_market_book_origin_clock", None) is not canonical_clock:
             return False
-        if "post" in vars(transport):
+        if "post" in canonical_vars(transport):
             return False
         return (
             canonical_clock.__code__ is canonical_clock_code
             and canonical_clock.__defaults__ == canonical_clock_defaults
             and canonical_rpc_dispatch(source)
-            and type(transport).post is canonical_post
+            and canonical_type(transport).post is canonical_post
             and canonical_post.__code__ is canonical_post_code
             and (canonical_post.__kwdefaults__ or {}).get("_urlopen")
             is canonical_urlopen
@@ -1855,39 +1861,45 @@ def _install_market_price_ladder_authority():
     canonical_urlopen = (canonical_post.__kwdefaults__ or {}).get("_urlopen")
     canonical_rpc = canonical_client_type._rpc
     canonical_rpc_code = canonical_rpc.__code__
+    # Authority decisions must not resolve mutable builtins dynamically. A caller
+    # can otherwise shadow the canonical transport at instance level while
+    # rebinding builtins.vars/type/getattr around acquisition.
+    canonical_type = type
+    canonical_getattr = getattr
+    canonical_vars = vars
     if canonical_urlopen is None or canonical_urlopen is not urlopen:
         raise RuntimeError("canonical Betfair urlopen origin is unavailable")
 
     def canonical_rpc_dispatch(source: object) -> bool:
-        if "_rpc" in vars(source):
+        if "_rpc" in canonical_vars(source):
             return False
-        bound_rpc = getattr(source, "_rpc", None)
+        bound_rpc = canonical_getattr(source, "_rpc", None)
         return (
             canonical_client_type._rpc is canonical_rpc
             and canonical_rpc.__code__ is canonical_rpc_code
-            and getattr(bound_rpc, "__self__", None) is source
-            and getattr(bound_rpc, "__func__", None) is canonical_rpc
+            and canonical_getattr(bound_rpc, "__self__", None) is source
+            and canonical_getattr(bound_rpc, "__func__", None) is canonical_rpc
         )
 
     def source_origin_authoritative(source: object) -> bool:
-        if type(source) is not canonical_client_type:
+        if canonical_type(source) is not canonical_client_type:
             return False
-        transport = getattr(source, "_transport", None)
-        if type(transport) is not canonical_transport_type:
+        transport = canonical_getattr(source, "_transport", None)
+        if canonical_type(transport) is not canonical_transport_type:
             return False
-        if getattr(source, "_market_book_origin_transport", None) is not transport:
+        if canonical_getattr(source, "_market_book_origin_transport", None) is not transport:
             return False
-        if getattr(source, "_clock", None) is not canonical_clock:
+        if canonical_getattr(source, "_clock", None) is not canonical_clock:
             return False
-        if getattr(source, "_market_book_origin_clock", None) is not canonical_clock:
+        if canonical_getattr(source, "_market_book_origin_clock", None) is not canonical_clock:
             return False
-        if "post" in vars(transport):
+        if "post" in canonical_vars(transport):
             return False
         return (
             canonical_clock.__code__ is canonical_clock_code
             and canonical_clock.__defaults__ == canonical_clock_defaults
             and canonical_rpc_dispatch(source)
-            and type(transport).post is canonical_post
+            and canonical_type(transport).post is canonical_post
             and canonical_post.__code__ is canonical_post_code
             and (canonical_post.__kwdefaults__ or {}).get("_urlopen")
             is canonical_urlopen

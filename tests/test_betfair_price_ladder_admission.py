@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal, localcontext
@@ -686,6 +687,27 @@ def test_injected_transport_receipt_cannot_mint_provider_authority():
         match="lacks canonical direct Betfair provider IO origin",
     ):
         _assess(receipt, Decimal("2.00"))
+
+
+def test_builtin_vars_rebinding_cannot_hide_transport_instance_override(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-key", "session-token"),
+        venue_id="betfair",
+        account_id="acct-1",
+    )
+    forged = PriceLadderTransport("FINEST")
+    client._transport.post = forged.post
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "vars", lambda _value: {})
+        receipt = client.read_market_price_ladder("1.234")
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="lacks canonical direct Betfair provider IO origin",
+        ):
+            _assess(receipt, Decimal("2.01"))
 
 
 def test_provider_parser_rebinding_during_io_cannot_mint_ladder_authority(

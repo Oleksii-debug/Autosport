@@ -1,3 +1,4 @@
+import builtins
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -975,6 +976,25 @@ def test_injected_transport_and_clock_cannot_mint_positive_provider_origin() -> 
                 receipt,
                 action_id=ACTION_ID,
                 max_snapshot_age=timedelta(seconds=1),
+            )
+
+
+def test_builtin_vars_rebinding_cannot_hide_market_book_transport_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _canonical_client()
+    forged = MarketBookTransport()
+    source._transport.post = forged.post
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "vars", lambda _value: {})
+        receipt = source.read_market_book_depth("1.234", 42)
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="lacks canonical direct Betfair provider IO origin",
+        ):
+            betfair_account_readonly.assert_market_book_depth_authoritative(
+                receipt
             )
 
 

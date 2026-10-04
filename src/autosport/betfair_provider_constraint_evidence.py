@@ -20,7 +20,6 @@ from enum import Enum
 import hashlib
 import json
 from operator import attrgetter, itemgetter
-from typing import Iterable
 
 PROVIDER_ID = "betfair"
 ORDER_FAMILY = "LIMIT_STANDARD_SIZE"
@@ -43,77 +42,100 @@ class BetfairConstraintResolutionState(str, Enum):
     CONFLICTING_UNVERIFIED = "CONFLICTING_UNVERIFIED"
 
 
-def _canonical_text(value: object, field: str) -> str:
+def _canonical_text(
+    value: object,
+    field: str,
+    _max_text_length=_MAX_CANONICAL_TEXT_LENGTH,
+    _error_type=BetfairProviderConstraintError,
+) -> str:
     if (
         type(value) is not str
         or not value
         or value != value.strip()
         or "\x00" in value
-        or len(value) > _MAX_CANONICAL_TEXT_LENGTH
+        or len(value) > _max_text_length
     ):
-        raise BetfairProviderConstraintError(
+        raise _error_type(
             f"{field} must be bounded canonical non-empty text"
         )
     return value
 
 
-def _scope(value: object) -> str:
-    raw = _canonical_text(value, "jurisdiction_scope")
+def _scope(
+    value: object,
+    _canonical_text_fn=_canonical_text,
+    _error_type=BetfairProviderConstraintError,
+) -> str:
+    raw = _canonical_text_fn(value, "jurisdiction_scope")
     if not raw.isascii() or any(
         not (character.isupper() or character.isdigit() or character == "_")
         for character in raw
     ):
-        raise BetfairProviderConstraintError(
+        raise _error_type(
             "jurisdiction_scope must be uppercase ASCII token text"
         )
     return raw
 
 
-def _currency(value: object) -> str:
-    raw = _canonical_text(value, "currency_code")
+def _currency(
+    value: object,
+    _canonical_text_fn=_canonical_text,
+    _error_type=BetfairProviderConstraintError,
+) -> str:
+    raw = _canonical_text_fn(value, "currency_code")
     if (
         len(raw) != 3
         or not raw.isascii()
         or not raw.isalpha()
         or raw != raw.upper()
     ):
-        raise BetfairProviderConstraintError(
+        raise _error_type(
             "currency_code must be three-letter uppercase ASCII"
         )
     return raw
 
 
-def _sha256(value: object, field: str) -> str:
-    raw = _canonical_text(value, field)
+def _sha256(
+    value: object,
+    field: str,
+    _canonical_text_fn=_canonical_text,
+    _error_type=BetfairProviderConstraintError,
+) -> str:
+    raw = _canonical_text_fn(value, field)
     if len(raw) != 64 or any(ch not in "0123456789abcdef" for ch in raw):
-        raise BetfairProviderConstraintError(
-            f"{field} must be lowercase SHA-256 hex"
-        )
+        raise _error_type(f"{field} must be lowercase SHA-256 hex")
     return raw
 
 
-def _utc(value: object, field: str) -> datetime:
+def _utc(
+    value: object,
+    field: str,
+    _datetime_type=datetime,
+    _utc_zone=timezone.utc,
+    _error_type=BetfairProviderConstraintError,
+) -> datetime:
     if (
-        type(value) is not datetime
+        type(value) is not _datetime_type
         or value.tzinfo is None
         or value.utcoffset() is None
     ):
-        raise BetfairProviderConstraintError(
-            f"{field} must be timezone-aware datetime"
-        )
-    return value.astimezone(timezone.utc)
+        raise _error_type(f"{field} must be timezone-aware datetime")
+    return value.astimezone(_utc_zone)
 
 
-def _positive_decimal(value: object, field: str) -> Decimal:
-    if type(value) is not Decimal or not value.is_finite() or value <= 0:
-        raise BetfairProviderConstraintError(
-            f"{field} must be exact finite positive Decimal"
-        )
+def _positive_decimal(
+    value: object,
+    field: str,
+    _decimal_type=Decimal,
+    _max_digits=_MAX_DECIMAL_DIGITS,
+    _max_abs_exponent=_MAX_ABS_EXPONENT,
+    _error_type=BetfairProviderConstraintError,
+) -> Decimal:
+    if type(value) is not _decimal_type or not value.is_finite() or value <= 0:
+        raise _error_type(f"{field} must be exact finite positive Decimal")
     _sign, digits, exponent = value.as_tuple()
-    if len(digits) > _MAX_DECIMAL_DIGITS or abs(exponent) > _MAX_ABS_EXPONENT:
-        raise BetfairProviderConstraintError(
-            f"{field} exceeds bounded Decimal shape"
-        )
+    if len(digits) > _max_digits or abs(exponent) > _max_abs_exponent:
+        raise _error_type(f"{field} exceeds bounded Decimal shape")
     return value
 
 
@@ -125,16 +147,19 @@ def _decimal_text(value: Decimal) -> str:
     return raw
 
 
-def _canonical_sha256(payload: object) -> str:
-    raw = json.dumps(
+def _canonical_sha256(
+    payload: object,
+    _json_dumps=json.dumps,
+    _sha256_fn=hashlib.sha256,
+) -> str:
+    raw = _json_dumps(
         payload,
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
-
+    return _sha256_fn(raw).hexdigest()
 
 def _build_constraint_evidence_meta():
     """Seal hard-false authority claims away from mutable Python getters."""
@@ -538,178 +563,198 @@ class BetfairProviderConstraintResolution(
 _BetfairConstraintEvidenceMeta.seal(BetfairProviderConstraintResolution)
 
 
-def _result(
-    *,
-    state: BetfairConstraintResolutionState,
-    jurisdiction_scope: str,
-    currency_code: str,
-    as_of: datetime,
-    candidates: Iterable[BetfairProviderConstraintObservation],
-    semantic_sha256: str | None = None,
-    min_standard_size: Decimal | None = None,
-    min_payout: Decimal | None = None,
-    lower_minimum_payout_enabled: bool | None = None,
-) -> BetfairProviderConstraintResolution:
-    generations = tuple(
-        sorted({observation.generation_sha256 for observation in candidates})
-    )
-    payload = {
-        "schema": "autosport.betfair_standard_limit_constraint_resolution",
-        "schema_version": SCHEMA_VERSION,
-        "state": state.value,
-        "provider_id": PROVIDER_ID,
-        "jurisdiction_scope": jurisdiction_scope,
-        "currency_code": currency_code,
-        "as_of": as_of.isoformat(),
-        "candidate_generation_sha256s": generations,
-        "semantic_sha256": semantic_sha256,
-        "min_standard_size": (
-            None
-            if min_standard_size is None
-            else _decimal_text(min_standard_size)
-        ),
-        "min_payout": (
-            None if min_payout is None else _decimal_text(min_payout)
-        ),
-        "lower_minimum_payout_enabled": lower_minimum_payout_enabled,
-    }
-    return BetfairProviderConstraintResolution(
-        state=state,
-        provider_id=PROVIDER_ID,
-        jurisdiction_scope=jurisdiction_scope,
-        currency_code=currency_code,
-        as_of=as_of,
-        candidate_generation_sha256s=generations,
-        semantic_sha256=semantic_sha256,
-        min_standard_size=min_standard_size,
-        min_payout=min_payout,
-        lower_minimum_payout_enabled=lower_minimum_payout_enabled,
-        resolution_sha256=_canonical_sha256(payload),
-    )
+def _build_constraint_resolver():
+    """Capture the structural resolver graph once at module load."""
 
+    observation_type = BetfairProviderConstraintObservation
+    result_type = BetfairProviderConstraintResolution
+    state_type = BetfairConstraintResolutionState
+    error_type = BetfairProviderConstraintError
 
-def resolve_betfair_standard_limit_constraint_evidence(
-    *,
-    observations: tuple[BetfairProviderConstraintObservation, ...],
-    as_of: datetime,
-    jurisdiction_scope: str,
-    currency_code: str,
-) -> BetfairProviderConstraintResolution:
-    """Resolve structurally applicable provider-rule observations, fail closed.
+    provider_id = PROVIDER_ID
+    order_family = ORDER_FAMILY
+    schema_version = SCHEMA_VERSION
+    max_observations = _MAX_OBSERVATIONS
 
-    The return value is never current-provider or execution authority. It only
-    states whether public/versioned observations are structurally consistent at
-    one causal decision cut.
-    """
+    utc_fn = _utc
+    scope_fn = _scope
+    currency_fn = _currency
+    decimal_text_fn = _decimal_text
+    canonical_sha256_fn = _canonical_sha256
 
-    if type(observations) is not tuple:
-        raise BetfairProviderConstraintError("observations must be tuple")
-    if len(observations) > _MAX_OBSERVATIONS:
-        raise BetfairProviderConstraintError(
-            f"observations exceeds bounded limit {_MAX_OBSERVATIONS}"
+    generation_getter = observation_type.__dict__["generation_sha256"].fget
+    semantic_getter = observation_type.__dict__["semantic_sha256"].fget
+
+    def make_result(
+        *,
+        state: BetfairConstraintResolutionState,
+        jurisdiction_scope: str,
+        currency_code: str,
+        as_of: datetime,
+        candidates: tuple[BetfairProviderConstraintObservation, ...],
+        semantic_sha256: str | None = None,
+        min_standard_size: Decimal | None = None,
+        min_payout: Decimal | None = None,
+        lower_minimum_payout_enabled: bool | None = None,
+    ) -> BetfairProviderConstraintResolution:
+        generations = tuple(
+            sorted({generation_getter(item) for item in candidates})
         )
-    if any(
-        type(item) is not BetfairProviderConstraintObservation
-        for item in observations
-    ):
-        raise BetfairProviderConstraintError(
-            "observations must contain exact BetfairProviderConstraintObservation"
-        )
-    unique_by_generation = {
-        item.generation_sha256: item for item in observations
-    }
-    normalized_observations = tuple(
-        unique_by_generation[generation]
-        for generation in sorted(unique_by_generation)
-    )
-    current = _utc(as_of, "as_of")
-    scope = _scope(jurisdiction_scope)
-    currency = _currency(currency_code)
-
-    matching = tuple(
-        item
-        for item in normalized_observations
-        if item.provider_id == PROVIDER_ID
-        and item.jurisdiction_scope == scope
-        and item.currency_code == currency
-        and item.order_family == ORDER_FAMILY
-    )
-    if not matching:
-        return _result(
-            state=BetfairConstraintResolutionState.NO_EVIDENCE,
-            jurisdiction_scope=scope,
-            currency_code=currency,
-            as_of=current,
-            candidates=(),
+        payload = {
+            "schema": "autosport.betfair_standard_limit_constraint_resolution",
+            "schema_version": schema_version,
+            "state": state.value,
+            "provider_id": provider_id,
+            "jurisdiction_scope": jurisdiction_scope,
+            "currency_code": currency_code,
+            "as_of": as_of.isoformat(),
+            "candidate_generation_sha256s": generations,
+            "semantic_sha256": semantic_sha256,
+            "min_standard_size": (
+                None
+                if min_standard_size is None
+                else decimal_text_fn(min_standard_size)
+            ),
+            "min_payout": (
+                None if min_payout is None else decimal_text_fn(min_payout)
+            ),
+            "lower_minimum_payout_enabled": lower_minimum_payout_enabled,
+        }
+        return result_type(
+            state=state,
+            provider_id=provider_id,
+            jurisdiction_scope=jurisdiction_scope,
+            currency_code=currency_code,
+            as_of=as_of,
+            candidate_generation_sha256s=generations,
+            semantic_sha256=semantic_sha256,
+            min_standard_size=min_standard_size,
+            min_payout=min_payout,
+            lower_minimum_payout_enabled=lower_minimum_payout_enabled,
+            resolution_sha256=canonical_sha256_fn(payload),
         )
 
-    causally_available = tuple(
-        item
-        for item in matching
-        if _utc(item.available_at, "available_at") <= current
-    )
-    if not causally_available:
-        # Future observations did not exist for this product decision cut.
-        # They must not alter historical state, candidate identity, or digest.
-        return _result(
-            state=BetfairConstraintResolutionState.NO_EVIDENCE,
-            jurisdiction_scope=scope,
-            currency_code=currency,
-            as_of=current,
-            candidates=(),
-        )
+    def resolve_betfair_standard_limit_constraint_evidence(
+        *,
+        observations: tuple[BetfairProviderConstraintObservation, ...],
+        as_of: datetime,
+        jurisdiction_scope: str,
+        currency_code: str,
+    ) -> BetfairProviderConstraintResolution:
+        """Resolve structurally applicable observations at one causal cut."""
 
-    applicable = tuple(
-        item
-        for item in causally_available
-        if _utc(item.effective_from, "effective_from") <= current
-        and (
-            item.effective_until is None
-            or current < _utc(item.effective_until, "effective_until")
-        )
-    )
-    if not applicable:
-        return _result(
-            state=BetfairConstraintResolutionState.NO_APPLICABLE_RULE,
-            jurisdiction_scope=scope,
-            currency_code=currency,
-            as_of=current,
-            candidates=causally_available,
-        )
+        if type(observations) is not tuple:
+            raise error_type("observations must be tuple")
+        if len(observations) > max_observations:
+            raise error_type(
+                f"observations exceeds bounded limit {max_observations}"
+            )
+        if any(type(item) is not observation_type for item in observations):
+            raise error_type(
+                "observations must contain exact "
+                "BetfairProviderConstraintObservation"
+            )
 
-    reviewed_current = tuple(
-        item
-        for item in applicable
-        if current < _utc(item.review_expires_at, "review_expires_at")
-    )
-    if not reviewed_current:
-        return _result(
-            state=BetfairConstraintResolutionState.REVIEW_EXPIRED,
-            jurisdiction_scope=scope,
-            currency_code=currency,
-            as_of=current,
-            candidates=applicable,
+        unique_by_generation = {
+            generation_getter(item): item for item in observations
+        }
+        normalized_observations = tuple(
+            unique_by_generation[generation]
+            for generation in sorted(unique_by_generation)
         )
+        current = utc_fn(as_of, "as_of")
+        scope = scope_fn(jurisdiction_scope)
+        currency = currency_fn(currency_code)
 
-    semantics = {item.semantic_sha256 for item in reviewed_current}
-    if len(semantics) != 1:
-        return _result(
-            state=BetfairConstraintResolutionState.CONFLICTING_UNVERIFIED,
+        matching = tuple(
+            item
+            for item in normalized_observations
+            if item.provider_id == provider_id
+            and item.jurisdiction_scope == scope
+            and item.currency_code == currency
+            and item.order_family == order_family
+        )
+        if not matching:
+            return make_result(
+                state=state_type.NO_EVIDENCE,
+                jurisdiction_scope=scope,
+                currency_code=currency,
+                as_of=current,
+                candidates=(),
+            )
+
+        causally_available = tuple(
+            item
+            for item in matching
+            if utc_fn(item.available_at, "available_at") <= current
+        )
+        if not causally_available:
+            # Future evidence did not exist for this product decision cut.
+            return make_result(
+                state=state_type.NO_EVIDENCE,
+                jurisdiction_scope=scope,
+                currency_code=currency,
+                as_of=current,
+                candidates=(),
+            )
+
+        applicable = tuple(
+            item
+            for item in causally_available
+            if utc_fn(item.effective_from, "effective_from") <= current
+            and (
+                item.effective_until is None
+                or current < utc_fn(item.effective_until, "effective_until")
+            )
+        )
+        if not applicable:
+            return make_result(
+                state=state_type.NO_APPLICABLE_RULE,
+                jurisdiction_scope=scope,
+                currency_code=currency,
+                as_of=current,
+                candidates=causally_available,
+            )
+
+        reviewed_current = tuple(
+            item
+            for item in applicable
+            if current < utc_fn(item.review_expires_at, "review_expires_at")
+        )
+        if not reviewed_current:
+            return make_result(
+                state=state_type.REVIEW_EXPIRED,
+                jurisdiction_scope=scope,
+                currency_code=currency,
+                as_of=current,
+                candidates=applicable,
+            )
+
+        semantics = {semantic_getter(item) for item in reviewed_current}
+        if len(semantics) != 1:
+            return make_result(
+                state=state_type.CONFLICTING_UNVERIFIED,
+                jurisdiction_scope=scope,
+                currency_code=currency,
+                as_of=current,
+                candidates=reviewed_current,
+            )
+
+        exemplar = reviewed_current[0]
+        return make_result(
+            state=state_type.CONSISTENT_UNVERIFIED,
             jurisdiction_scope=scope,
             currency_code=currency,
             as_of=current,
             candidates=reviewed_current,
+            semantic_sha256=semantic_getter(exemplar),
+            min_standard_size=exemplar.min_standard_size,
+            min_payout=exemplar.min_payout,
+            lower_minimum_payout_enabled=exemplar.lower_minimum_payout_enabled,
         )
 
-    exemplar = reviewed_current[0]
-    return _result(
-        state=BetfairConstraintResolutionState.CONSISTENT_UNVERIFIED,
-        jurisdiction_scope=scope,
-        currency_code=currency,
-        as_of=current,
-        candidates=reviewed_current,
-        semantic_sha256=exemplar.semantic_sha256,
-        min_standard_size=exemplar.min_standard_size,
-        min_payout=exemplar.min_payout,
-        lower_minimum_payout_enabled=exemplar.lower_minimum_payout_enabled,
-    )
+    return resolve_betfair_standard_limit_constraint_evidence
+
+
+resolve_betfair_standard_limit_constraint_evidence = _build_constraint_resolver()
+del _build_constraint_resolver

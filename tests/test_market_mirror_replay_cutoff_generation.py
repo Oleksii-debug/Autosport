@@ -932,6 +932,71 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 external.close()
                 store.close()
 
+    def test_submicrosecond_local_timestamp_cannot_round_back_into_cutoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                event = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00.0000004+00:00",
+                    ingest_ts="2026-09-16T19:00:00.0000004+00:00",
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "observed_ts precision finer than microseconds is unsupported",
+                ):
+                    store.append(event)
+
+                self.assertEqual(store.events(), [])
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_event_commit_order"
+                    ).fetchone(),
+                    (0,),
+                )
+            finally:
+                store.close()
+
+    def test_submicrosecond_source_time_cannot_round_future_evidence_to_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                store.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                        ingest_ts="2026-09-16T19:00:00+00:00",
+                        source_ts="2026-09-16T19:00:01.0000004+00:00",
+                    )
+                )
+
+                snapshot = self.replay(store)
+                self.assertEqual(snapshot.events, ())
+            finally:
+                store.close()
+
+    def test_zero_only_submicrosecond_tail_is_exact_and_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                self.assertTrue(
+                    store.append(
+                        self.event(
+                            sequence=1,
+                            odds="2.00",
+                            observed_ts="2026-09-16T19:00:00.123456000+00:00",
+                            ingest_ts="2026-09-16T19:00:00.123456000+00:00",
+                        )
+                    )
+                )
+                snapshot = self.replay(store)
+                self.assertEqual(len(snapshot.events), 1)
+                self.assertEqual(snapshot.events[0].sequence, 1)
+            finally:
+                store.close()
+
     def test_invalid_selector_does_not_issue_durable_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

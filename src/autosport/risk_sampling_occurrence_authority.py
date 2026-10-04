@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .integrity import atomic_write_json, durable_path_lock
+from .run_registry import RunRegistry
+from .run_transaction import RunTransaction, RunTransactionError
 from .risk_sampling_dependence import (
     ResolvedFixedNIidSamplingStructure,
     RiskSamplingDependenceError,
@@ -635,3 +638,423 @@ __all__ = [
     "resolve_product_iid_expected_draw_plan",
     "verify_product_iid_expected_draw_plan",
 ]
+
+
+_RUN_ADMISSION_SCHEMA = "AUTOSPORT_PRODUCT_IID_RUN_ADMISSION_V1"
+_RUN_ADMISSION_PLAN = resolve_product_iid_expected_draw_plan
+_RUN_ADMISSION_PLAN_CODE = getattr(_RUN_ADMISSION_PLAN, "__code__", None)
+_RUN_ADMISSION_REGISTRY_TYPE = RunRegistry
+_RUN_ADMISSION_REGISTRY_READ = RunRegistry._read
+_RUN_ADMISSION_REGISTRY_READ_CODE = getattr(
+    _RUN_ADMISSION_REGISTRY_READ,
+    "__code__",
+    None,
+)
+_RUN_ADMISSION_TX_TYPE = RunTransaction
+_RUN_ADMISSION_TX_BASE = RunTransaction.verified_base_paper_book_snapshot
+_RUN_ADMISSION_TX_TERMINAL = RunTransaction.verified_terminal_paper_book_snapshot
+_RUN_ADMISSION_TX_BASE_CODE = getattr(_RUN_ADMISSION_TX_BASE, "__code__", None)
+_RUN_ADMISSION_TX_TERMINAL_CODE = getattr(
+    _RUN_ADMISSION_TX_TERMINAL,
+    "__code__",
+    None,
+)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ProductIidRunAdmissionReceipt:
+    """Product-issued pre-run binding to one exact expected draw transcript.
+
+    This is stronger than an expected draw plan because the receipt must exist before
+    RunRegistry.begin and must survive in RunRegistry, RunTransaction, and the
+    canonical run summary. It still does not claim that simulator code consumed every
+    draw; execution consumption remains a separate authority boundary.
+    """
+
+    experiment_id: str
+    member_id: str
+    member_index: int
+    stream_sha256: str
+    expected_draw_plan_sha256: str
+    expected_draw_transcript_sha256: str
+    sampling_manifest_sha256: str
+    sampling_frame_sha256: str
+    horizon_sha256: str
+    state_sha256: str
+    receipt_sha256: str
+    run_admission_bound: bool
+
+    def __new__(
+        cls,
+        *args: object,
+        **kwargs: object,
+    ) -> "ProductIidRunAdmissionReceipt":
+        raise TypeError(
+            "ProductIidRunAdmissionReceipt is product-issued; "
+            "use issue_product_iid_run_admission"
+        )
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError("ProductIidRunAdmissionReceipt must not be subclassed")
+
+    @property
+    def product_precommit_bound(self) -> bool:
+        return True
+
+    @property
+    def execution_consumption_proven(self) -> bool:
+        return False
+
+    @property
+    def occurrence_ancestry_proven(self) -> bool:
+        return False
+
+    @property
+    def iid_qualified(self) -> bool:
+        return False
+
+    @property
+    def grants_real_money_authority(self) -> bool:
+        return False
+
+
+_RUN_ADMISSION_TYPE = ProductIidRunAdmissionReceipt
+
+
+def _require_run_admission_dispatch() -> None:
+    if (
+        resolve_product_iid_expected_draw_plan is not _RUN_ADMISSION_PLAN
+        or getattr(_RUN_ADMISSION_PLAN, "__code__", None)
+        is not _RUN_ADMISSION_PLAN_CODE
+        or RunRegistry is not _RUN_ADMISSION_REGISTRY_TYPE
+        or _RUN_ADMISSION_REGISTRY_TYPE._read is not _RUN_ADMISSION_REGISTRY_READ
+        or getattr(_RUN_ADMISSION_REGISTRY_READ, "__code__", None)
+        is not _RUN_ADMISSION_REGISTRY_READ_CODE
+        or RunTransaction is not _RUN_ADMISSION_TX_TYPE
+        or _RUN_ADMISSION_TX_TYPE.verified_base_paper_book_snapshot
+        is not _RUN_ADMISSION_TX_BASE
+        or _RUN_ADMISSION_TX_TYPE.verified_terminal_paper_book_snapshot
+        is not _RUN_ADMISSION_TX_TERMINAL
+        or getattr(_RUN_ADMISSION_TX_BASE, "__code__", None)
+        is not _RUN_ADMISSION_TX_BASE_CODE
+        or getattr(_RUN_ADMISSION_TX_TERMINAL, "__code__", None)
+        is not _RUN_ADMISSION_TX_TERMINAL_CODE
+        or ProductIidRunAdmissionReceipt is not _RUN_ADMISSION_TYPE
+    ):
+        raise ProductIidDrawPlanError(
+            "IID run-admission authority dispatch changed"
+        )
+
+
+def _run_admission_state_path(
+    workspace: Path,
+    *,
+    experiment_id: str,
+    member_index: int,
+) -> Path:
+    key = _sha_bytes(
+        (
+            "autosport-product-iid-run-admission-v1\n"
+            f"{experiment_id}\n{member_index}"
+        ).encode("utf-8")
+    )[:24]
+    return workspace / f".risk-iid-run-admission-{key}.json"
+
+
+def _run_admission_registry_item(
+    workspace: Path,
+    member_id: str,
+) -> dict[str, Any] | None:
+    registry = _RUN_ADMISSION_REGISTRY_TYPE(
+        workspace / "run_registry.json"
+    )
+    try:
+        state = _RUN_ADMISSION_REGISTRY_READ(registry)
+    except (OSError, ValueError) as exc:
+        raise ProductIidDrawPlanError(
+            "IID run-admission cannot read RunRegistry"
+        ) from exc
+    _require_run_admission_dispatch()
+    runs = state.get("runs") if type(state) is dict else None
+    if type(runs) is not dict:
+        raise ProductIidDrawPlanError(
+            "IID run-admission RunRegistry state is invalid"
+        )
+    matches = [
+        dict(item)
+        for item in runs.values()
+        if type(item) is dict and item.get("run_id") == member_id
+    ]
+    if len(matches) > 1:
+        raise ProductIidDrawPlanError(
+            "IID run-admission member run identity is ambiguous"
+        )
+    return matches[0] if matches else None
+
+
+def _run_admission_core(
+    plan: ProductIidExpectedDrawPlan,
+    *,
+    member_index: int,
+) -> dict[str, object]:
+    if type(plan) is not _PLAN_TYPE:
+        raise ProductIidDrawPlanError(
+            "IID run-admission expected draw plan type is invalid"
+        )
+    if type(member_index) is not int or member_index < 0:
+        raise ProductIidDrawPlanError(
+            "member_index must be a non-negative exact integer"
+        )
+    if member_index >= len(plan.member_draws):
+        raise ProductIidDrawPlanError(
+            "member_index is outside the expected draw plan"
+        )
+    draw = plan.member_draws[member_index]
+    return {
+        "schema": _RUN_ADMISSION_SCHEMA,
+        "experiment_id": plan.experiment_id,
+        "member_id": draw.member_id,
+        "member_index": draw.member_index,
+        "stream_sha256": draw.stream_sha256,
+        "expected_draw_plan_sha256": plan.plan_sha256,
+        "expected_draw_transcript_sha256": draw.draw_transcript_sha256,
+        "sampling_manifest_sha256": plan.sampling_manifest_sha256,
+        "sampling_frame_sha256": plan.sampling_frame_sha256,
+        "horizon_sha256": plan.horizon_sha256,
+    }
+
+
+def _issue_run_admission_receipt(
+    state: dict[str, object],
+    *,
+    run_admission_bound: bool,
+) -> ProductIidRunAdmissionReceipt:
+    state_sha256 = _sha_bytes(_canonical_json(state))
+    receipt_payload = {
+        "schema": _RUN_ADMISSION_SCHEMA,
+        "state_sha256": state_sha256,
+        "experiment_id": state["experiment_id"],
+        "member_id": state["member_id"],
+        "member_index": state["member_index"],
+        "stream_sha256": state["stream_sha256"],
+        "expected_draw_plan_sha256": state["expected_draw_plan_sha256"],
+        "expected_draw_transcript_sha256": (
+            state["expected_draw_transcript_sha256"]
+        ),
+        "sampling_manifest_sha256": state["sampling_manifest_sha256"],
+        "sampling_frame_sha256": state["sampling_frame_sha256"],
+        "horizon_sha256": state["horizon_sha256"],
+    }
+    result = object.__new__(_RUN_ADMISSION_TYPE)
+    for field_name, value in (
+        ("experiment_id", state["experiment_id"]),
+        ("member_id", state["member_id"]),
+        ("member_index", state["member_index"]),
+        ("stream_sha256", state["stream_sha256"]),
+        ("expected_draw_plan_sha256", state["expected_draw_plan_sha256"]),
+        (
+            "expected_draw_transcript_sha256",
+            state["expected_draw_transcript_sha256"],
+        ),
+        ("sampling_manifest_sha256", state["sampling_manifest_sha256"]),
+        ("sampling_frame_sha256", state["sampling_frame_sha256"]),
+        ("horizon_sha256", state["horizon_sha256"]),
+        ("state_sha256", state_sha256),
+        ("receipt_sha256", _sha_bytes(_canonical_json(receipt_payload))),
+        ("run_admission_bound", run_admission_bound),
+    ):
+        object.__setattr__(result, field_name, value)
+    return result
+
+
+def _resolve_run_admission_state(
+    *,
+    membership: ResolvedFixedNRiskMembership,
+    registry_path: str | Path,
+    workspace: Path,
+    sampling_manifest_json: str,
+    sampling_frame_json: str,
+    horizon_json: str,
+    member_index: int,
+    authority_root: str | Path | None,
+    require_completed_run: bool,
+) -> ProductIidRunAdmissionReceipt:
+    _require_run_admission_dispatch()
+    plan = _RUN_ADMISSION_PLAN(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=sampling_manifest_json,
+        sampling_frame_json=sampling_frame_json,
+        horizon_json=horizon_json,
+        authority_root=authority_root,
+    )
+    _require_run_admission_dispatch()
+    state_expected = _run_admission_core(
+        plan,
+        member_index=member_index,
+    )
+    path = _run_admission_state_path(
+        workspace,
+        experiment_id=plan.experiment_id,
+        member_index=member_index,
+    )
+    try:
+        raw = path.read_text(encoding="utf-8")
+        state = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ProductIidDrawPlanError(
+            "IID run-admission state cannot be re-resolved"
+        ) from exc
+    if type(state) is not dict or state != state_expected:
+        raise ProductIidDrawPlanError(
+            "IID run-admission state differs from frozen expected draws"
+        )
+    prepared = _issue_run_admission_receipt(
+        state,
+        run_admission_bound=False,
+    )
+    if not require_completed_run:
+        return prepared
+
+    item = _run_admission_registry_item(
+        workspace,
+        prepared.member_id,
+    )
+    if item is None or item.get("status") != "completed":
+        raise ProductIidDrawPlanError(
+            "IID run-admission requires the exact completed member run"
+        )
+    if (
+        item.get("sampling_draw_admission_receipt_sha256")
+        != prepared.receipt_sha256
+    ):
+        raise ProductIidDrawPlanError(
+            "completed run does not bind the exact IID draw-admission receipt"
+        )
+    tx = _RUN_ADMISSION_TX_TYPE(workspace, prepared.member_id)
+    try:
+        _RUN_ADMISSION_TX_BASE(tx)
+        _RUN_ADMISSION_TX_TERMINAL(tx)
+        _RUN_ADMISSION_REGISTRY_TYPE(
+            workspace / "run_registry.json"
+        ).verified_completed_summary_for_run(prepared.member_id)
+    except (RunTransactionError, OSError, ValueError, KeyError) as exc:
+        raise ProductIidDrawPlanError(
+            "IID draw-admission completed transaction cannot be re-resolved"
+        ) from exc
+    _require_run_admission_dispatch()
+    return _issue_run_admission_receipt(
+        state,
+        run_admission_bound=True,
+    )
+
+
+def issue_product_iid_run_admission(
+    membership: ResolvedFixedNRiskMembership,
+    *,
+    registry_path: str | Path,
+    workspace: str | Path,
+    sampling_manifest_json: str,
+    sampling_frame_json: str,
+    horizon_json: str,
+    member_index: int,
+    authority_root: str | Path | None = None,
+) -> ProductIidRunAdmissionReceipt:
+    """Persist the exact expected draw transcript before the member run begins."""
+
+    if type(membership) is not _MEMBERSHIP_TYPE:
+        raise TypeError(
+            "membership must be an exact ResolvedFixedNRiskMembership"
+        )
+    root = Path(workspace).expanduser().resolve(strict=True)
+    plan = _RUN_ADMISSION_PLAN(
+        membership,
+        registry_path=registry_path,
+        workspace=root,
+        sampling_manifest_json=sampling_manifest_json,
+        sampling_frame_json=sampling_frame_json,
+        horizon_json=horizon_json,
+        authority_root=authority_root,
+    )
+    _require_run_admission_dispatch()
+    state = _run_admission_core(
+        plan,
+        member_index=member_index,
+    )
+    member_id = str(state["member_id"])
+    path = _run_admission_state_path(
+        root,
+        experiment_id=plan.experiment_id,
+        member_index=member_index,
+    )
+    with durable_path_lock(path):
+        if path.exists():
+            return _resolve_run_admission_state(
+                membership=membership,
+                registry_path=registry_path,
+                workspace=root,
+                sampling_manifest_json=sampling_manifest_json,
+                sampling_frame_json=sampling_frame_json,
+                horizon_json=horizon_json,
+                member_index=member_index,
+                authority_root=authority_root,
+                require_completed_run=False,
+            )
+        if _run_admission_registry_item(root, member_id) is not None:
+            raise ProductIidDrawPlanError(
+                "IID run-admission must be issued before RunRegistry.begin"
+            )
+        if _RUN_ADMISSION_TX_TYPE(root, member_id).root.exists():
+            raise ProductIidDrawPlanError(
+                "IID run-admission must be issued before RunTransaction.start"
+            )
+        atomic_write_json(path, state)
+    return _issue_run_admission_receipt(
+        state,
+        run_admission_bound=False,
+    )
+
+
+def resolve_product_iid_run_admission(
+    membership: ResolvedFixedNRiskMembership,
+    *,
+    registry_path: str | Path,
+    workspace: str | Path,
+    sampling_manifest_json: str,
+    sampling_frame_json: str,
+    horizon_json: str,
+    member_index: int,
+    authority_root: str | Path | None = None,
+) -> ProductIidRunAdmissionReceipt:
+    """Prove a completed run durably retained its pre-run expected-draw admission."""
+
+    if type(membership) is not _MEMBERSHIP_TYPE:
+        raise TypeError(
+            "membership must be an exact ResolvedFixedNRiskMembership"
+        )
+    root = Path(workspace).expanduser().resolve(strict=True)
+    return _resolve_run_admission_state(
+        membership=membership,
+        registry_path=registry_path,
+        workspace=root,
+        sampling_manifest_json=sampling_manifest_json,
+        sampling_frame_json=sampling_frame_json,
+        horizon_json=horizon_json,
+        member_index=member_index,
+        authority_root=authority_root,
+        require_completed_run=True,
+    )
+
+
+__all__.extend(
+    [
+        "ProductIidRunAdmissionReceipt",
+        "issue_product_iid_run_admission",
+        "resolve_product_iid_run_admission",
+    ]
+)

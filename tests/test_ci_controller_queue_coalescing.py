@@ -1302,6 +1302,74 @@ def test_explicit_run_boundary_checker_rejects_request_code_mutation_during_get(
     )
 
 
+def test_explicit_run_boundary_rejects_request_kwdefault_rebase_before_get(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_request = scoped_controller.GitHubApi._request
+    defaults = canonical_request.__kwdefaults__
+    assert defaults is not None
+    invoked = {"value": False}
+
+    def forbidden_urlopen(_request, *, timeout: int):
+        assert timeout == 20
+        invoked["value"] = True
+        raise AssertionError("mutated request defaults must revoke identity read authority")
+
+    monkeypatch.setitem(defaults, "_json_parse_int", str)
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        forbidden_urlopen,
+    )
+
+    assert not _explicit_run_identity_is_current(
+        api,
+        run_id=7012,
+        expected_head_sha=HEAD,
+        pr_number=303,
+    )
+    assert not invoked["value"]
+
+
+def test_live_pr_boundary_rejects_request_kwdefault_rebase_before_get(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_request = scoped_controller.GitHubApi._request
+    defaults = canonical_request.__kwdefaults__
+    assert defaults is not None
+    invoked = {"value": False}
+
+    def forbidden_urlopen(_request, *, timeout: int):
+        assert timeout == 20
+        invoked["value"] = True
+        raise AssertionError(
+            "mutated request defaults must revoke qualification read authority"
+        )
+
+    monkeypatch.setitem(defaults, "_json_parse_int", str)
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        forbidden_urlopen,
+    )
+
+    with pytest.raises(CancellationError, match="live PR qualification dispatch changed"):
+        _trusted_live_pr_qualification(api, 303)
+    assert not invoked["value"]
+
+
 def test_live_pr_boundary_rejects_transitive_request_shadow(monkeypatch) -> None:
     api = WorkflowScopedGitHubApi(
         repository="owner/repo",

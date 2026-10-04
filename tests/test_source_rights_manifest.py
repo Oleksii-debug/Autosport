@@ -234,20 +234,20 @@ class SourceRightsManifestTests(unittest.TestCase):
             ):
                 load_source_rights_manifest(path)
 
-    def test_manifest_source_artifact_is_read_once(self) -> None:
+    def test_manifest_source_artifact_is_opened_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(Path(tmp))
-            original_read_bytes = Path.read_bytes
-            reads: list[Path] = []
+            original_open = Path.open
+            opens: list[Path] = []
 
-            def tracked_read_bytes(target: Path) -> bytes:
-                reads.append(target)
-                return original_read_bytes(target)
+            def tracked_open(target: Path, *args, **kwargs):
+                opens.append(target)
+                return original_open(target, *args, **kwargs)
 
-            with patch.object(Path, "read_bytes", tracked_read_bytes):
+            with patch.object(Path, "open", tracked_open):
                 manifest = load_source_rights_manifest(path)
 
-            self.assertEqual(reads, [path])
+            self.assertEqual(opens, [path])
             self.assertEqual(
                 manifest.manifest_sha256,
                 hashlib.sha256(manifest.manifest_bytes).hexdigest(),

@@ -198,23 +198,31 @@ def _source_payload(
     return _source_from_raw(_encode(event))
 
 
-class _LiveReceiptBatch:
-    """Immutable live value snapshot that can recognize its retry-hook generations."""
+_LIVE_RECEIPT_ISSUE_TOKEN = object()
 
-    __slots__ = ("_payloads", "_issued_generations")
+
+class _LiveReceiptBatch:
+    """Immutable internally-issued live snapshot for retry-hook generations."""
+
+    __slots__ = ("_payloads", "_issued_generations", "_issue_token")
 
     def __init__(
         self,
         events: tuple[MarketEvent, ...],
         *,
+        _issue_token: object,
+        _expected_issue_token=_LIVE_RECEIPT_ISSUE_TOKEN,
         _canonical_payload_fn=_canonical_payload,
     ) -> None:
+        if _issue_token is not _expected_issue_token:
+            raise PermissionError("live receipt capability was not internally issued")
         object.__setattr__(
             self,
             "_payloads",
             tuple(_canonical_payload_fn(event) for event in events),
         )
         object.__setattr__(self, "_issued_generations", [])
+        object.__setattr__(self, "_issue_token", _issue_token)
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("live receipt batch is immutable")
@@ -233,9 +241,12 @@ class _LiveReceiptBatch:
         self,
         events: Iterable[MarketEvent],
         *,
+        _expected_issue_token=_LIVE_RECEIPT_ISSUE_TOKEN,
         _market_event_type: type[MarketEvent] = MarketEvent,
         _canonical_payload_fn=_canonical_payload,
     ) -> bool:
+        if self._issue_token is not _expected_issue_token:
+            return False
         if events is self:
             return True
         if type(events) is not tuple:
@@ -1122,6 +1133,7 @@ class SQLiteMarketStore:
         *,
         _event_type: type[MarketEvent] = MarketEvent,
         _capability_type: type[_LiveReceiptBatch] = _LiveReceiptBatch,
+        _expected_issue_token=_LIVE_RECEIPT_ISSUE_TOKEN,
         _canonical_payload_fn=_canonical_payload,
         _dedupe_key=_market_event_dedupe_key,
         _quote_key=_market_event_quote_key,
@@ -1132,8 +1144,11 @@ class SQLiteMarketStore:
         if type(event) is not _event_type:
             raise TypeError("live receipt authority requires an exact MarketEvent")
         capability = self._active_live_receipt_batch
-        if type(capability) is not _capability_type:
-            raise RuntimeError("live receipt authority requires an active live batch capability")
+        if (
+            type(capability) is not _capability_type
+            or capability._issue_token is not _expected_issue_token
+        ):
+            raise RuntimeError("live receipt authority requires an internally issued live batch")
         payload = _canonical_payload_fn(event)
         if payload not in capability._payloads:
             raise RuntimeError("live receipt authority event is outside the active live batch")
@@ -1179,6 +1194,7 @@ class SQLiteMarketStore:
         _market_event_type: type[MarketEvent] = MarketEvent,
         _capability_type: type[_LiveReceiptBatch] = _LiveReceiptBatch,
         _capability_init=_LiveReceiptBatch.__init__,
+        _issue_token=_LIVE_RECEIPT_ISSUE_TOKEN,
         _object_new=object.__new__,
         _dedupe_key=_market_event_dedupe_key,
         _canonical_payload_fn=_canonical_payload,
@@ -1199,7 +1215,7 @@ class SQLiteMarketStore:
         if any(type(event) is not _market_event_type for event in materialized):
             raise TypeError("live receipt authority requires exact MarketEvent values")
         capability = _object_new(_capability_type)
-        _capability_init(capability, materialized)
+        _capability_init(capability, materialized, _issue_token=_issue_token)
         requested_counts: dict[tuple[str, str], int] = {}
         for event in materialized:
             identity = (_dedupe_key(event), _canonical_payload_fn(event))
@@ -1411,3 +1427,4 @@ def _seal_live_receipt_authority_call_surfaces() -> None:
 
 _seal_live_receipt_authority_call_surfaces()
 del _seal_live_receipt_authority_call_surfaces
+del _LIVE_RECEIPT_ISSUE_TOKEN

@@ -396,6 +396,38 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 materialize_exposure=True,
             )
 
+    def test_exposure_scope_cannot_be_retrofitted_after_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            trigger_id = "trigger-retro-scope"
+            run_id = runtime.expected_run_id(
+                current_prepared,
+                trigger_id,
+            )
+            ledger.reserve_run(
+                run_id=run_id,
+                trigger_id=trigger_id,
+                plan=current_prepared.execution_plan,
+                config=runtime.config,
+                started_at=STARTED_AT,
+                observation_evidence_ids={},
+            )
+            event_count = len(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "cannot be retroactively published",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id=trigger_id,
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+            self.assertEqual(len(ledger.events()), event_count)
+            self.assertEqual(book.tickets, {})
+
     def test_attempt_before_ticket_restart_materializes_same_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

@@ -56,8 +56,10 @@ class PortfolioAwareCandidateOptimizer:
     """
     Generate bounded candidates, then rerank them by their change to the whole paper portfolio.
 
-    The beam generator's independent-probability EV is only a screening/tie-break signal. Final risk
-    ranking comes from ScenarioSearchEngine on the supplied canonical scenario space.
+    The beam generator's independent-probability EV is only a screening/tie-break signal.
+    Terminal risk proof is available only when ScenarioSearchEngine reports an exhaustive exact
+    terminal space; exact extrema inside caller-supplied scenario models remain secondary ranking
+    evidence and never upgrade the conservative primary risk value.
     """
 
     def __init__(

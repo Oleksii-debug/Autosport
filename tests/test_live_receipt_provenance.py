@@ -919,6 +919,39 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(len(live.snapshot()), 1)
             store.close()
 
+    def test_mirror_subclass_cannot_launder_trusted_live_authority(self) -> None:
+        class ForgingMirror(MarketMirror):
+            def apply(self, event):
+                raise AssertionError("subclass apply must not receive trusted authority")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "live store bootstrap requires an exact MarketMirror",
+            ):
+                ForgingMirror.from_live_store(store)
+            with self.assertRaisesRegex(
+                TypeError,
+                "trusted live replay requires an exact MarketMirror",
+            ):
+                ForgingMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(2026, 10, 4, 3, 0, 3, tzinfo=timezone.utc),
+                    max_age=timedelta(seconds=30),
+                    require_live_receipt_authority=True,
+                )
+
+            generic = ForgingMirror()
+            with self.assertRaisesRegex(
+                AssertionError,
+                "subclass apply must not receive trusted authority",
+            ):
+                generic.apply(store.events()[0])
+            store.close()
+
     def test_store_subclass_cannot_forge_live_bootstrap_or_replay_authority(self) -> None:
         class ForgingStore(SQLiteMarketStore):
             def trusted_live_events(self):

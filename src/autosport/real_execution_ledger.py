@@ -5,7 +5,6 @@ import json
 import math
 import os
 import threading
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation

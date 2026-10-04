@@ -39,6 +39,19 @@ class ProductProposalRiskExecutionEvidenceTargetChronologyTests(unittest.TestCas
         self.assertEqual(self.precommit.ruin_threshold, original)
         self.assertTrue(self.precommit.binding_identity_proven)
 
+    def test_write_once_descriptors_do_not_expose_backing_slot_handles(self) -> None:
+        row = self._row("member-a", source="source-a")
+        result = self._result()
+        descriptors = (
+            type(self.precommit).__dict__["ruin_threshold"],
+            type(row).__dict__["minimum_equity"],
+            type(result).__dict__["ruin_probability_upper_bound"],
+        )
+        for descriptor in descriptors:
+            with self.subTest(descriptor=descriptor):
+                self.assertFalse(hasattr(descriptor, "_slot"))
+                self.assertFalse(hasattr(descriptor, "slot"))
+
     def test_precommit_issuer_rejects_binding_descriptor_rebinding(self) -> None:
         binding_type = precommit_authority.ProductProposalRiskEvaluationPrecommit
         original = binding_type.__dict__["ruin_threshold"]

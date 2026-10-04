@@ -4163,6 +4163,22 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertFalse((workspace / "decisions.jsonl").exists())
             loop.close()
 
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=stale_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=3)),
+            )
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "intent quote is not bound to focused market snapshot",
+            ):
+                resumed.run_cycle()
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            resumed.close()
+
     def test_pending_restart_recovers_before_polling_new_quote(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

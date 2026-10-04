@@ -22,6 +22,7 @@ from autosport.supervised_execution import (
     SupervisedExecutionError,
     revoke_supervised_approval,
 )
+from autosport.workspace_lock import WorkspaceEconomicLock
 from test_betfair_supervised_execution import (
     APPROVAL_EXPIRES_AT,
     QUOTE_EXPIRES_AT,
@@ -40,6 +41,8 @@ def _crash_during_provider_send_worker(workspace: str) -> None:
 
     supervised_execution._trusted_now = lambda: RESERVED_AT
     profile, bound, approval, ledger, action, goal_store = _prepared(workspace)
+    trusted_times = iter((RESERVED_AT, SUBMITTED_AT))
+    supervised_execution._trusted_now = lambda: next(trusted_times, SUBMITTED_AT)
 
     def crash_after_submitted(_request):
         os._exit(91)
@@ -578,13 +581,14 @@ def test_final_writer_lock_conflict_fails_closed_before_submission(
         transport = _Transport(lambda request: _response(request))
         client = _enabled_client(profile, transport, store=goal_store)
         original_bind = ledger.bind_provider_order_reference
+        competing_writer = WorkspaceEconomicLock(
+            Path(tmp),
+            file_name=ledger._lock_path.name,
+        )
 
         def bind_then_block_final_writer(*args, **kwargs):
             provider_ref = original_bind(*args, **kwargs)
-            ledger._lock_path.write_text(
-                "synthetic competing writer",
-                encoding="utf-8",
-            )
+            competing_writer.acquire()
             return provider_ref
 
         monkeypatch.setattr(
@@ -593,17 +597,20 @@ def test_final_writer_lock_conflict_fails_closed_before_submission(
             bind_then_block_final_writer,
         )
 
-        with pytest.raises(ExecutionLedgerBusyError):
-            execute_betfair_supervised_action(
-                ledger,
-                bound,
-                approval,
-                action_id=action.action_id,
-                attempt_id="attempt-final-writer-busy",
-                profile=profile,
-                client=client,
-                clock=lambda: SUBMITTED_AT,
-            )
+        try:
+            with pytest.raises(ExecutionLedgerBusyError):
+                execute_betfair_supervised_action(
+                    ledger,
+                    bound,
+                    approval,
+                    action_id=action.action_id,
+                    attempt_id="attempt-final-writer-busy",
+                    profile=profile,
+                    client=client,
+                    clock=lambda: SUBMITTED_AT,
+                )
+        finally:
+            competing_writer.release()
 
         assert transport.calls == []
         _assert_reserved_without_submission(

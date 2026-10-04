@@ -85,6 +85,22 @@ class MarketMirrorTests(unittest.TestCase):
         self.assertEqual(result.current_sequence, 2)
         self.assertEqual(mirror.snapshot(), (refresh,))
 
+
+    def test_malformed_semantic_contract_degrades_to_material_update(self) -> None:
+        mirror = MarketMirror()
+        first = self.prophetx_refresh_event(sequence=1)
+        malformed_payload = self.prophetx_refresh_event(sequence=2).to_dict()
+        malformed_payload["metadata"]["semantic_state_contract"] = (
+            "autosport.prophetx-rest-market-state.v999"
+        )
+        malformed = MarketEvent.from_dict(malformed_payload)
+
+        self.assertEqual(mirror.apply(first).status, MirrorUpdate.APPLIED)
+        result = mirror.apply(malformed)
+
+        self.assertEqual(result.status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.snapshot(), (malformed,))
+
     def test_semantic_contract_still_reports_economic_change_as_applied(self) -> None:
         mirror = MarketMirror()
         first = self.prophetx_refresh_event(sequence=1, odds="2.00")

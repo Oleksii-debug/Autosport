@@ -942,6 +942,100 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             loop.close()
 
+    def test_decision_frontier_freezes_history_before_post_cutoff_peer_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            predecessor = self._event(
+                sequence=1,
+                observed=self.START + timedelta(seconds=1),
+            )
+            future_successor = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.10"),
+                observed_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                source_id="provider-a",
+                sequence=2,
+                status="open",
+                source_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=4)).isoformat(),
+            )
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many(
+                    (predecessor, future_successor)
+                )
+            finally:
+                seed_store.close()
+
+            clock = _ManualClock(self.START + timedelta(seconds=2))
+            factory = _EmptyIntentFactory()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=self._scientific_registry(
+                    workspace,
+                    self._strategy_version(),
+                ),
+                provider=_EmptyProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            drain = loop.mirror_updates.drain
+            peer_published = False
+
+            def publish_after_frontier(*, max_items: int):
+                nonlocal peer_published
+                if not peer_published:
+                    peer_store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        MarketEventBus(peer_store).publish_many(
+                            (
+                                self._event(
+                                    sequence=3,
+                                    odds="2.20",
+                                    observed=self.START + timedelta(seconds=2),
+                                ),
+                            )
+                        )
+                    finally:
+                        peer_store.close()
+                    peer_published = True
+                return drain(max_items=max_items)
+
+            with patch.object(
+                loop.mirror_updates,
+                "drain",
+                side_effect=publish_after_frontier,
+            ):
+                first = loop.run_cycle()
+
+            self.assertTrue(peer_published)
+            self.assertEqual(first.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls[-1],
+                ("input-a", (("selection-a", 1, "open"),)),
+            )
+            self.assertEqual(
+                loop._availability_deadlines["input-a"],
+                self.START + timedelta(seconds=4),
+            )
+
+            second = loop.run_cycle()
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls[-1],
+                ("input-a", (("selection-a", 3, "open"),)),
+            )
+            loop.close()
+
     def test_stale_instance_cannot_overwrite_newer_pending_progress(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

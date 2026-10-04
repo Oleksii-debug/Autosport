@@ -44,14 +44,18 @@ class SessionStoppedError(ContinuousSessionError):
 
 
 def _bind_canonical_settlement_engine(method):
-    """Inject the import-time exact SettlementEngine through a closure-owned seam."""
+    """Inject settlement constructor/scope authority through closure-owned seams."""
 
     canonical_engine_type = SettlementEngine
+    canonical_scope_resolver = _canonical_open_quote_keys_for_book
 
     def guarded(self, *args, **kwargs):
         if "_settlement_engine_type" in kwargs:
             raise TypeError("settlement engine origin is internal product authority")
+        if "_settlement_scope_resolver" in kwargs:
+            raise TypeError("settlement scope origin is internal product authority")
         kwargs["_settlement_engine_type"] = canonical_engine_type
+        kwargs["_settlement_scope_resolver"] = canonical_scope_resolver
         return method(self, *args, **kwargs)
 
     guarded.__name__ = method.__name__
@@ -762,6 +766,44 @@ class _ContinuousSessionState:
         self._update(lambda raw: raw.__setitem__("last_error_code", code))
 
 
+def _canonical_open_quote_keys_for_book(
+    coordinator,
+    book: PaperBook,
+    event_identity: str,
+) -> set[str]:
+    """Resolve the exact provider/sport/native-event scope allowed to mutate P&L."""
+
+    record = coordinator.lifecycle.get(event_identity)
+    if record is None:
+        raise ContinuousSessionError(
+            "settlement event identity is absent from durable lifecycle"
+        )
+    source_id = coordinator.collector.source_id
+    if record.source_id != source_id:
+        raise ContinuousSessionError(
+            "settlement event source is outside continuous session authority"
+        )
+    return {
+        leg.quote_key
+        for ticket in book.tickets.values()
+        if ticket.status.value == "open"
+        # Settlement is an economic mutation, not merely a compatibility read.
+        # Legacy tickets without provider provenance remain loadable, but they
+        # cannot safely consume provider-scoped outcome truth. A multi-provider
+        # ticket is likewise ambiguous because PaperTicket provenance is
+        # ticket-level rather than leg-level; fail closed until every leg can be
+        # bound to one provider explicitly.
+        if ticket.provider_source_ids == (source_id,)
+        for leg in ticket.legs
+        # Canonical product tickets store the provider-native event id and sport
+        # on every leg. Historical full-identity aliases and sport-less legs
+        # remain readable, but cannot authorize P&L because either shape can
+        # collide across provider/sport namespaces.
+        if leg.event_id == record.event_id
+        if leg.sport == record.sport
+    }
+
+
 class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
     """Compose existing collector/lifecycle/mirror/settlement authorities into one durable loop.
 
@@ -1024,6 +1066,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         resolutions: tuple[SettlementResolution, ...],
         settled_at: str,
         _settlement_engine_type: type[SettlementEngine],
+        _settlement_scope_resolver: Callable[[object, PaperBook, str], set[str]],
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if not resolutions:
             return (), ()
@@ -1043,7 +1086,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "settlement engine constructor returned non-canonical type"
                 )
             for resolution in unique.values():
-                allowed = self._open_quote_keys_for_book(book, resolution.event_identity)
+                allowed = _settlement_scope_resolver(
+                    self,
+                    book,
+                    resolution.event_identity,
+                )
                 scoped = {
                     quote_key: outcome
                     for quote_key, outcome in resolution.quote_outcomes.items()
@@ -1061,41 +1108,6 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 book.save(self.paper_book_path)
 
         return settled, tuple(unique)
-
-    def _open_quote_keys_for_book(
-        self,
-        book: PaperBook,
-        event_identity: str,
-    ) -> set[str]:
-        record = self.lifecycle.get(event_identity)
-        if record is None:
-            raise ContinuousSessionError(
-                "settlement event identity is absent from durable lifecycle"
-            )
-        source_id = self.collector.source_id
-        if record.source_id != source_id:
-            raise ContinuousSessionError(
-                "settlement event source is outside continuous session authority"
-            )
-        return {
-            leg.quote_key
-            for ticket in book.tickets.values()
-            if ticket.status.value == "open"
-            # Settlement is an economic mutation, not merely a compatibility read.
-            # Legacy tickets without provider provenance remain loadable, but they
-            # cannot safely consume provider-scoped outcome truth.  A multi-provider
-            # ticket is likewise ambiguous because PaperTicket provenance is
-            # ticket-level rather than leg-level; fail closed until every leg can be
-            # bound to one provider explicitly.
-            if ticket.provider_source_ids == (source_id,)
-            for leg in ticket.legs
-            # Canonical product tickets store the provider-native event id and sport
-            # on every leg.  Historical full-identity aliases and sport-less legs
-            # remain readable, but cannot authorize P&L because either shape can
-            # collide across provider/sport namespaces.
-            if leg.event_id == record.event_id
-            if leg.sport == record.sport
-        }
 
     def tick(self) -> ContinuousTickResult:
         self._require_running()

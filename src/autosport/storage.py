@@ -656,7 +656,7 @@ class SQLiteMarketStore:
     """
 
     def __init__(self, path: str | Path = "autosport.db") -> None:
-        self.path = Path(path)
+        self.path = Path(path).absolute()
         self._connection_lock = RLock()
         self.connection = sqlite3.connect(self.path, check_same_thread=False)
         try:

@@ -78,6 +78,32 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
     def semantic_events(snapshot) -> tuple[dict[str, object], ...]:
         return tuple(event.to_dict() for event in snapshot.events)
 
+    def test_relative_database_path_keeps_cutoff_authority_bound_to_opened_workspace(self) -> None:
+        original_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as opened_directory, tempfile.TemporaryDirectory() as later_directory:
+            try:
+                os.chdir(opened_directory)
+                expected_path = (Path(opened_directory) / "market.db").absolute()
+                store = SQLiteMarketStore("market.db")
+                try:
+                    store.append(
+                        self.event(
+                            sequence=1,
+                            odds="2.00",
+                            observed_ts="2026-09-16T19:00:00+00:00",
+                        )
+                    )
+                    os.chdir(later_directory)
+
+                    self.assertEqual(store.path, expected_path)
+                    authority = store._replay_cutoff_authority()
+                    self.assertEqual(authority.workspace, expected_path.parent)
+                    self.assertEqual(len(self.replay(store).events), 1)
+                finally:
+                    store.close()
+            finally:
+                os.chdir(original_cwd)
+
     def test_late_backdated_append_cannot_rewrite_frozen_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

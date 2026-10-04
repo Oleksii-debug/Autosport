@@ -29,6 +29,12 @@ from autosport.paper import PaperBook
 from autosport.paper_settlement_learning import PaperSettlementLearningBridge
 from autosport.replay import ReplayEngine, market_event_payload_sha256
 from autosport.risk import PaperRiskPolicy
+from autosport.risk_of_ruin_evaluator import (
+    RiskEvidenceClass,
+    RiskOfRuinEvaluationRequest,
+    RiskPathObservation,
+    RiskTargetKind,
+)
 from autosport.risk_path_observation_authority import (
     ProductRunCapitalPathEvidence,
     ProductRunCapitalPathError,
@@ -43,6 +49,13 @@ from autosport.risk_iid_qualification_authority import (
     verify_product_fixed_n_iid_qualification,
 )
 import autosport.risk_iid_qualification_authority as iid_qualification
+from autosport.risk_path_observation_set_authority import (
+    ProductFixedNRiskObservationSet,
+    ProductFixedNRiskObservationSetError,
+    resolve_product_fixed_n_risk_observations,
+    verify_product_fixed_n_risk_observations,
+)
+import autosport.risk_path_observation_set_authority as observation_set_authority
 from autosport.risk_sampling_membership import ResolvedFixedNRiskMembership
 from autosport.risk_sampling_occurrence_authority import (
     issue_product_iid_run_admission,
@@ -758,6 +771,187 @@ def test_fixed_n_iid_qualification_verifier_rejects_resolver_rebinding(
         match="verifier authority dispatch changed",
     ):
         verify_product_fixed_n_iid_qualification(
+            candidate,
+            membership=membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridges=(bridge,),
+            authority_root=authority_root,
+        )
+    assert attacker_called is False
+
+
+def test_product_fixed_n_risk_observations_match_evaluator_manifest(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        bridge,
+        initial_capital_sha256,
+        _stake_policy_sha256,
+    ) = _qualified_fixed_n_fixture(tmp_path, monkeypatch)
+
+    cohort = resolve_product_fixed_n_risk_observations(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+
+    assert type(cohort) is ProductFixedNRiskObservationSet
+    assert cohort.planned_member_ids == (RUN_ID,)
+    assert len(cohort.observations) == 1
+    observation = cohort.observations[0]
+    assert type(observation) is RiskPathObservation
+    assert observation.independent_unit_id == RUN_ID
+    assert observation.dependence_group_id.startswith("iid-stream:")
+    assert observation.minimum_equity == Decimal("90")
+    assert observation.outcome_available_at == "2026-09-03T10:00:30+00:00"
+    assert len(observation.source_evidence_sha256) == 64
+    assert cohort.fixed_n_complete is True
+    assert cohort.product_observation_provenance is True
+    assert cohort.iid_qualified is True
+    assert cohort.grants_real_money_authority is False
+
+    request = RiskOfRuinEvaluationRequest(
+        target_kind=RiskTargetKind.SINGLE,
+        bankroll_id="risk-path-bankroll",
+        currency="USD",
+        base_portfolio_sha256=initial_capital_sha256,
+        capital_state_sha256=initial_capital_sha256,
+        target_sha256="7" * 64,
+        evaluated_stakes=(Decimal("10"),),
+        research_protocol_sha256=membership.protocol_sha256,
+        reproducibility_bundle_sha256=cohort.source_evidence_sha256,
+        dataset_snapshot_id=membership.dataset_snapshot_id,
+        dataset_manifest_sha256=membership.dataset_manifest_sha256,
+        causal_cutoff="2026-09-03T10:00:31+00:00",
+        evaluated_at="2026-09-03T10:00:31+00:00",
+        confidence_level=Decimal("0.95"),
+        ruin_threshold=Decimal("0"),
+        planned_independent_units=1,
+        evidence_class=RiskEvidenceClass.PAPER,
+        observations=cohort.observations,
+    )
+    assert request.observation_manifest_sha256 == cohort.observation_manifest_sha256
+
+
+def test_product_fixed_n_risk_observation_truth_cannot_be_caller_minted_or_subclassed() -> None:
+    with pytest.raises(TypeError, match="product-resolved"):
+        ProductFixedNRiskObservationSet(
+            experiment_id="forged",
+            planned_member_ids=(RUN_ID,),
+            qualification_sha256="1" * 64,
+            occurrence_root_sha256="2" * 64,
+            observations=(),
+            observation_manifest_sha256="3" * 64,
+            source_evidence_sha256="4" * 64,
+        )
+
+    with pytest.raises(TypeError, match="must not be subclassed"):
+        class ForgedObservationSet(ProductFixedNRiskObservationSet):
+            pass
+
+
+def test_product_fixed_n_risk_observation_verifier_rejects_object_new_forgery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        bridge,
+        _initial_capital_sha256,
+        _stake_policy_sha256,
+    ) = _qualified_fixed_n_fixture(tmp_path, monkeypatch)
+    canonical = resolve_product_fixed_n_risk_observations(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+    forged = object.__new__(ProductFixedNRiskObservationSet)
+    for field_name in ProductFixedNRiskObservationSet.__dataclass_fields__:
+        object.__setattr__(forged, field_name, getattr(canonical, field_name))
+    object.__setattr__(forged, "source_evidence_sha256", "0" * 64)
+
+    with pytest.raises(
+        ProductFixedNRiskObservationSetError,
+        match="differs from canonical durable evidence",
+    ):
+        verify_product_fixed_n_risk_observations(
+            forged,
+            membership=membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridges=(bridge,),
+            authority_root=authority_root,
+        )
+
+
+def test_product_fixed_n_risk_observation_verifier_rejects_resolver_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        bridge,
+        _initial_capital_sha256,
+        _stake_policy_sha256,
+    ) = _qualified_fixed_n_fixture(tmp_path, monkeypatch)
+    candidate = resolve_product_fixed_n_risk_observations(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+    attacker_called = False
+
+    def forged_resolver(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        return candidate
+
+    monkeypatch.setattr(
+        observation_set_authority,
+        "resolve_product_fixed_n_risk_observations",
+        forged_resolver,
+    )
+    with pytest.raises(
+        ProductFixedNRiskObservationSetError,
+        match="verifier authority dispatch changed",
+    ):
+        verify_product_fixed_n_risk_observations(
             candidate,
             membership=membership,
             registry_path=registry_path,

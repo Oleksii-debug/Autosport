@@ -372,6 +372,7 @@ class PaperSettlementLearningBridge:
         self.agent_loop = agent_loop
         self.economic_goal = economic_goal
         self.risk_policy = risk_policy
+        agent_loop_snapshot = self.agent_loop.snapshot()
         self.settlement_learning_configuration_sha256 = _digest(
             {
                 "implementation_id": self.settlement_learning_handoff_implementation_id,
@@ -381,6 +382,19 @@ class PaperSettlementLearningBridge:
                     self.decision_ledger.path.resolve(strict=False)
                 ),
                 "agent_loop_path": str(self.agent_loop.path.resolve(strict=False)),
+                "agent_loop_identity": {
+                    "loop_id": agent_loop_snapshot.loop_id,
+                    "environment_id": agent_loop_snapshot.environment_id,
+                    "episode_id": agent_loop_snapshot.episode_id,
+                    "policy_id": agent_loop_snapshot.policy_id,
+                    "economic_goal_fingerprint": (
+                        agent_loop_snapshot.economic_goal_fingerprint
+                    ),
+                    "risk_fingerprint": agent_loop_snapshot.risk_fingerprint,
+                    "source_sha256": agent_loop_snapshot.source_sha256,
+                    "config_sha256": agent_loop_snapshot.config_sha256,
+                    "activation_binding_id": agent_loop_snapshot.activation_binding_id,
+                },
                 "economic_goal_fingerprint": provenance_for(
                     self.economic_goal
                 ).contract_sha256,

@@ -797,6 +797,20 @@ class PaperExecutionRealityTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 PaperExecutionStateError,
+                "run_id does not match canonical",
+            ):
+                ledger.reserve_run(
+                    run_id=run_id,
+                    trigger_id="trigger-invalid-reservation",
+                    plan=current,
+                    config=model,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={},
+                )
+            self.assertFalse(path.exists())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
                 "both observed and synthetically suspended",
             ):
                 ledger.reserve_run(

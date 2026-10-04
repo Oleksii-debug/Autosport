@@ -1832,6 +1832,7 @@ def _build_main(
     snapshot_identity_impl,
     trusted_qualification_impl,
     event_identity_impl,
+    orphan_effect_impl,
 ):
     """Freeze scoped-controller orchestration roots outside caller metadata."""
 
@@ -1868,6 +1869,7 @@ def _build_main(
     snapshot_identity_code = getattr(snapshot_identity_impl, "__code__", None)
     trusted_qualification_code = getattr(trusted_qualification_impl, "__code__", None)
     event_identity_code = getattr(event_identity_impl, "__code__", None)
+    orphan_effect_code = getattr(orphan_effect_impl, "__code__", None)
 
     api_init_defaults = freeze_default_metadata(api_init)
     active_runs_defaults = freeze_default_metadata(active_runs_impl)
@@ -1877,6 +1879,7 @@ def _build_main(
     snapshot_identity_defaults = freeze_default_metadata(snapshot_identity_impl)
     trusted_qualification_defaults = freeze_default_metadata(trusted_qualification_impl)
     event_identity_defaults = freeze_default_metadata(event_identity_impl)
+    orphan_effect_defaults = freeze_default_metadata(orphan_effect_impl)
 
     def main(argv: list[str] | None) -> int:
         # Production dispatch roots are closure-owned from module composition time.
@@ -1939,6 +1942,15 @@ def _build_main(
                 and getattr(event_identity_impl, "__code__", None) is event_identity_code
                 and default_metadata_current(
                     event_identity_impl, event_identity_defaults
+                )
+                and (
+                    module_globals.get("_cancel_run_or_defer_active_conflict")
+                    is orphan_effect_impl
+                )
+                and getattr(orphan_effect_impl, "__code__", None)
+                is orphan_effect_code
+                and default_metadata_current(
+                    orphan_effect_impl, orphan_effect_defaults
                 )
             )
 
@@ -2042,6 +2054,8 @@ def _build_main(
             orphan_cancelled = orphan_impl(
                 api,
                 exclude_run_ids=orphan_excluded_run_ids,
+                _cancel_effect=orphan_effect_impl,
+                _cancel_effect_code=orphan_effect_code,
             )
             require_main_dispatch()
 
@@ -2090,6 +2104,7 @@ main = _build_main(
     snapshot_identity_impl=_explicit_singleton_pr_for_current_run,
     trusted_qualification_impl=_trusted_live_pr_qualification,
     event_identity_impl=_validated_event_pr_identity,
+    orphan_effect_impl=_cancel_run_or_defer_active_conflict,
 )
 del _build_main
 

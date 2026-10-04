@@ -419,6 +419,43 @@ def test_main_rejects_preentry_orphan_method_rebind(monkeypatch) -> None:
     assert forged_calls == []
 
 
+def test_main_rejects_preentry_orphan_effect_rebind(
+    monkeypatch,
+    capsys,
+) -> None:
+    forged_calls: list[int] = []
+
+    def forged_effect(_api, run_id: int) -> bool:
+        forged_calls.append(run_id)
+        return True
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_cancel_run_or_defer_active_conflict",
+        forged_effect,
+    )
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert scoped_controller.main(_scoped_main_args()) == 2
+    assert "controller orchestration authority changed" in capsys.readouterr().err
+    assert forged_calls == []
+
+
+def test_scoped_main_closure_owns_canonical_orphan_effect() -> None:
+    closure = {
+        name: cell.cell_contents
+        for name, cell in zip(
+            scoped_controller.main.__code__.co_freevars,
+            scoped_controller.main.__closure__ or (),
+        )
+    }
+    effect = scoped_controller._cancel_run_or_defer_active_conflict
+
+    assert closure["orphan_effect_impl"] is effect
+    assert closure["orphan_effect_code"] is effect.__code__
+
+
 def test_main_rejects_preentry_sweep_code_mutation(monkeypatch) -> None:
     target = scoped_controller.cancel_superseded_explicit_pr_runs
 

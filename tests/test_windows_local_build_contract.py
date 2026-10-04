@@ -296,3 +296,31 @@ def test_local_windows_build_requires_clean_webview_environment_storage_witness(
     assert witness in script
     assert failure in script
     assert script.index(witness) < script.index(truth_gate)
+
+def test_local_windows_build_requires_exact_first_run_storage_proof_boundaries() -> None:
+    script = _build_script_text()
+
+    workspace_witness = (
+        "$freshFirstRunEvidenceA.workspace_canonical_atomic_publication_proven "
+        "-ne $true"
+    )
+    webview_host_witness = (
+        "$freshFirstRunEvidenceA.webview_host_writability_proven -ne $true"
+    )
+    webview_child_boundary = (
+        "$freshFirstRunEvidenceA.webview_child_profile_access_proven -ne $false"
+    )
+    truth_gate = "$freshFirstRunEvidenceA.real_money_execution -ne $false"
+
+    assert workspace_witness in script
+    assert webview_host_witness in script
+    assert webview_child_boundary in script
+    assert script.index(workspace_witness) < script.index(truth_gate)
+    assert script.index(webview_host_witness) < script.index(truth_gate)
+    assert script.index(webview_child_boundary) < script.index(truth_gate)
+    assert "extracted_first_run_workspace_atomic_publication_status = 'PASS'" in script
+    assert "extracted_first_run_webview_host_writability_status = 'PASS'" in script
+    assert (
+        "extracted_first_run_webview_child_profile_access_proven = $false"
+        in script
+    )

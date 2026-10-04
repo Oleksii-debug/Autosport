@@ -460,7 +460,12 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 locked_odds=Decimal("2.00"),
                 sport="table_tennis",
             )
-            book.open_ticket((leg,), Decimal("10"), placed_at="2026-09-19T21:19:30+00:00")
+            book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a",),
+            )
             book.save(root / "paper_book.json")
 
             quote_key = leg.quote_key
@@ -554,6 +559,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 (leg,),
                 Decimal("10"),
                 placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a",),
             )
             book.save(root / "paper_book.json")
             authority = _RecordingAuthority()
@@ -631,6 +637,237 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 self.assertEqual(durable.balance, Decimal("90"))
                 self.assertEqual(durable.tickets[ticket.ticket_id].status.value, "open")
                 self.assertEqual(coordinator.status().cycles_completed, 1)
+            finally:
+                store.close()
+
+    def test_unscoped_legacy_ticket_cannot_consume_provider_settlement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:unscoped",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+            )
+            book.save(root / "paper_book.json")
+            authority = _OutcomeAuthority(
+                SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="provider-result:unscoped",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="unscoped-provider-outcome",
+                    evidence_sha256="0" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                result = coordinator.tick()
+                self.assertEqual(result.settled_ticket_ids, ())
+                self.assertEqual(
+                    result.settlement_evidence_ids,
+                    ("unscoped-provider-outcome",),
+                )
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("90"))
+                self.assertEqual(durable.tickets[ticket.ticket_id].status.value, "open")
+            finally:
+                store.close()
+
+    def test_multi_provider_ticket_without_leg_provenance_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:ambiguous-provider",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a", "provider-b"),
+            )
+            book.save(root / "paper_book.json")
+            authority = _OutcomeAuthority(
+                SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="provider-result:ambiguous-provider",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="ambiguous-provider-outcome",
+                    evidence_sha256="0" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                result = coordinator.tick()
+                self.assertEqual(result.settled_ticket_ids, ())
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("90"))
+                self.assertEqual(durable.tickets[ticket.ticket_id].status.value, "open")
+            finally:
+                store.close()
+
+    def test_sportless_legacy_leg_cannot_authorize_pnl(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:sportless",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+            )
+            book = PaperBook("100")
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a",),
+            )
+            book.save(root / "paper_book.json")
+            authority = _OutcomeAuthority(
+                SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="provider-result:sportless",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="sportless-outcome",
+                    evidence_sha256="0" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                result = coordinator.tick()
+                self.assertEqual(result.settled_ticket_ids, ())
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("90"))
+                self.assertEqual(durable.tickets[ticket.ticket_id].status.value, "open")
+            finally:
+                store.close()
+
+    def test_full_event_identity_alias_cannot_replace_native_leg_event_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:identity-alias",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            self.assertNotEqual(event.identity, event.event_id)
+            leg = TicketLeg(
+                event_id=event.identity,
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a",),
+            )
+            book.save(root / "paper_book.json")
+            authority = _OutcomeAuthority(
+                SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="provider-result:identity-alias",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="identity-alias-outcome",
+                    evidence_sha256="0" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                result = coordinator.tick()
+                self.assertEqual(result.settled_ticket_ids, ())
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("90"))
+                self.assertEqual(durable.tickets[ticket.ticket_id].status.value, "open")
             finally:
                 store.close()
 
@@ -785,6 +1022,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 (leg,),
                 Decimal("10"),
                 placed_at="2026-09-19T21:19:10+00:00",
+                provider_source_ids=("provider-a",),
                 bankroll_id=goal.bankroll_id,
                 currency=goal.currency,
             )
@@ -1004,11 +1242,13 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 (first_leg,),
                 Decimal("10"),
                 placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a",),
             )
             book.open_ticket(
                 (second_leg,),
                 Decimal("10"),
                 placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a",),
             )
             book.save(root / "paper_book.json")
             before = PaperBook.load(root / "paper_book.json")
@@ -1135,6 +1375,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 (leg,),
                 Decimal("10"),
                 placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a",),
             )
             book.save(root / "paper_book.json")
             resolution = SettlementResolution(
@@ -1308,6 +1549,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 (leg,),
                 Decimal("10"),
                 placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a",),
             )
             book.save(root / "paper_book.json")
             authority = _OutcomeAuthority(
@@ -1408,6 +1650,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 (leg,),
                 Decimal("10"),
                 placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a",),
             )
             book.save(root / "paper_book.json")
             resolution = SettlementResolution(
@@ -1502,6 +1745,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 (leg,),
                 Decimal("10"),
                 placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a",),
             )
             book.save(root / "paper_book.json")
             authority = _OutcomeAuthority(
@@ -1574,6 +1818,7 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 (leg,),
                 Decimal("10"),
                 placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a",),
             )
             book.save(root / "paper_book.json")
             resolution = SettlementResolution(

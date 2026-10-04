@@ -141,3 +141,46 @@ def test_deleting_closure_scope_anchor_cannot_reenable_unanchored_scope(tmp_path
 
     assert not redirected_dir.exists()
     assert not original_state_path.exists()
+
+
+def test_replacing_closure_scope_anchor_cannot_reanchor_poisoned_scope(tmp_path):
+    lifecycle = ProphetXSessionLifecycle(tmp_path, scope=_scope())
+    original_state_path = lifecycle.state_path
+    redirected_dir = tmp_path / "registry-replacement-poisoned-pool"
+
+    records = _scope_authority_records()
+    original = records[id(lifecycle)]
+    assert original[0]() is lifecycle
+
+    object.__setattr__(lifecycle, "_scope_dir", redirected_dir)
+    object.__setattr__(
+        lifecycle,
+        "_state_path",
+        redirected_dir / "prophetx-session-state.json",
+    )
+    state = object.__getattribute__(lifecycle, "__dict__")
+    records[id(lifecycle)] = (
+        original[0],
+        state["workspace"],
+        state["_scope_environment"],
+        state["_scope_access_key_identity_sha256"],
+        state["_scope_credential_revision"],
+        state["_scope_integration_role"],
+        state["_scope_dir"],
+        state["_state_path"],
+    )
+
+    try:
+        with pytest.raises(
+            ProphetXSessionLifecycleError,
+            match="session scope authority changed",
+        ):
+            lifecycle.begin_login(
+                now=NOW,
+                access_token_available=False,
+            )
+    finally:
+        records[id(lifecycle)] = original
+
+    assert not redirected_dir.exists()
+    assert not original_state_path.exists()

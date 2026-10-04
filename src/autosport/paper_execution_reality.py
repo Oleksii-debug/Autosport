@@ -580,13 +580,49 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 raise PaperExecutionStateError(
                     "attempt cannot be appended after RUN_COMPLETED"
                 )
-            action_ids = reservations[0]["payload"]["action_ids"]
+            reservation = reservations[0]["payload"]
+            action_ids = reservation["action_ids"]
             if (
                 attempt.sequence >= len(action_ids)
                 or action_ids[attempt.sequence] != attempt.action_id
             ):
                 raise PaperExecutionStateError(
                     "attempt does not extend reserved action order"
+                )
+            if (
+                attempt.plan_id != reservation["plan_id"]
+                or attempt.model_fingerprint
+                != reservation["model_fingerprint"]
+            ):
+                raise PaperExecutionStateError(
+                    "attempt conflicts with reserved plan/model identity"
+                )
+            observation_ids = reservation[
+                "observation_evidence_ids"
+            ]
+            suspended_ids = frozenset(
+                reservation.get("suspended_action_ids", [])
+            )
+            evidence_id = observation_ids.get(attempt.action_id)
+            if evidence_id is None:
+                if (
+                    attempt.evidence_grade is not EvidenceGrade.SYNTHETIC
+                    or attempt.evidence_id is not None
+                    or attempt.evidence_sha256 is not None
+                    or attempt.suspended
+                    is not (attempt.action_id in suspended_ids)
+                ):
+                    raise PaperExecutionStateError(
+                        "attempt conflicts with reserved synthetic authority"
+                    )
+            elif (
+                attempt.evidence_grade is EvidenceGrade.SYNTHETIC
+                or attempt.evidence_id != evidence_id
+                or attempt.evidence_sha256 is None
+                or attempt.suspended
+            ):
+                raise PaperExecutionStateError(
+                    "attempt conflicts with reserved observed authority"
                 )
             if (
                 existing_attempts

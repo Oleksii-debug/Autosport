@@ -1616,13 +1616,15 @@ class PersistentLiveDecisionLoop:
             else self.dependencies.decision_view
         )
         history_store: SQLiteMarketStore | None = None
+        history_events: tuple[tuple[MarketEvent, int], ...] | None = None
         owns_history_store = False
         try:
             for input_id in input_ids:
-                if self.dependencies.requires_current_history_fallback(
+                history_fallback = self.dependencies.requires_current_history_fallback(
                     input_id,
                     as_of=as_of,
-                ):
+                )
+                if history_fallback:
                     if history_store is None:
                         history_store = self._default_market_store
                         if history_store is None:
@@ -1630,9 +1632,16 @@ class PersistentLiveDecisionLoop:
                                 self.workspace / "market.db"
                             )
                             owns_history_store = True
-                    snapshot = self.dependencies.current_history_view(
+                    if history_events is None:
+                        history_events = tuple(
+                            history_store.events_with_append_generation()
+                        )
+                    (
+                        snapshot,
+                        next_history_availability,
+                    ) = self.dependencies.decision_state_from_proven_history(
                         input_id,
-                        history_store,
+                        history_events,
                         as_of=as_of,
                         max_age=self.max_quote_age,
                     )
@@ -1642,12 +1651,19 @@ class PersistentLiveDecisionLoop:
                         as_of=as_of,
                         max_age=self.max_quote_age,
                     )
+                    next_history_availability = None
                 snapshots[input_id] = snapshot
                 self._input_market_sha256[input_id] = _canonical_json_sha256(
                     [event.to_dict() for event in snapshot.events]
                 )
                 self._record_freshness_deadline(input_id, snapshot)
-                self._record_availability_deadline(input_id, as_of)
+                if history_fallback:
+                    self._set_availability_deadline(
+                        input_id,
+                        next_history_availability,
+                    )
+                else:
+                    self._record_availability_deadline(input_id, as_of)
         finally:
             if owns_history_store and history_store is not None:
                 history_store.close()
@@ -1701,39 +1717,11 @@ class PersistentLiveDecisionLoop:
                 (deadline, input_id, generation),
             )
 
-    def _record_availability_deadline(
+    def _set_availability_deadline(
         self,
         input_id: str,
-        as_of: datetime,
+        deadline: datetime | None,
     ) -> None:
-        """Schedule reevaluation when currently future causal evidence becomes usable."""
-
-        boundary = as_of.astimezone(timezone.utc)
-        deadlines: list[datetime] = []
-        causal = self.dependencies.causal_view(input_id)
-        for event in causal.events:
-            if event.status not in MarketMirror._DECISION_ELIGIBLE_STATUSES:
-                continue
-            source_time = MarketMirror._utc_timestamp(
-                event.source_ts or event.observed_ts
-            )
-            observed_time = MarketMirror._utc_timestamp(event.observed_ts)
-            ingest_time = MarketMirror._utc_timestamp(event.ingest_ts)
-            if (
-                source_time is None
-                or observed_time is None
-                or ingest_time is None
-            ):
-                continue
-            available_at = max(source_time, observed_time, ingest_time)
-            availability_age = available_at - source_time
-            if (
-                boundary < available_at
-                and timedelta(0) <= availability_age <= self.max_quote_age
-            ):
-                deadlines.append(available_at)
-
-        deadline = min(deadlines) if deadlines else None
         generation = self._availability_generations.get(input_id, 0) + 1
         self._availability_generations[input_id] = generation
         self._availability_deadlines[input_id] = deadline
@@ -1742,6 +1730,29 @@ class PersistentLiveDecisionLoop:
                 self._availability_heap,
                 (deadline, input_id, generation),
             )
+
+    def _record_availability_deadline(
+        self,
+        input_id: str,
+        as_of: datetime,
+    ) -> None:
+        """Schedule the next transition when future causal evidence becomes knowable."""
+
+        boundary = as_of.astimezone(timezone.utc)
+        deadlines: list[datetime] = []
+        causal = self.dependencies.causal_view(input_id)
+        for event in causal.events:
+            causal_times = MarketMirror._event_causal_times(event)
+            if causal_times is None:
+                continue
+            available_at = max(causal_times)
+            if boundary < available_at:
+                deadlines.append(available_at)
+
+        self._set_availability_deadline(
+            input_id,
+            min(deadlines) if deadlines else None,
+        )
 
     def _activate_available_inputs(
         self,

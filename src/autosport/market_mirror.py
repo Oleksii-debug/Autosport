@@ -124,6 +124,20 @@ class MarketMirror:
         return as_of.astimezone(timezone.utc), max_age
 
     @classmethod
+    def _event_causal_times(
+        cls,
+        event: MarketEvent,
+    ) -> tuple[datetime, datetime, datetime] | None:
+        """Return normalized source/observed/ingest clocks when all are usable."""
+
+        source_time = cls._utc_timestamp(event.source_ts or event.observed_ts)
+        observed_time = cls._utc_timestamp(event.observed_ts)
+        ingest_time = cls._utc_timestamp(event.ingest_ts)
+        if source_time is None or observed_time is None or ingest_time is None:
+            return None
+        return source_time, observed_time, ingest_time
+
+    @classmethod
     def _event_causally_available(
         cls,
         event: MarketEvent,
@@ -132,16 +146,9 @@ class MarketMirror:
     ) -> bool:
         """Return whether all causal clocks make one event usable at boundary."""
 
-        source_time = cls._utc_timestamp(event.source_ts or event.observed_ts)
-        observed_time = cls._utc_timestamp(event.observed_ts)
-        ingest_time = cls._utc_timestamp(event.ingest_ts)
-        return (
-            source_time is not None
-            and observed_time is not None
-            and ingest_time is not None
-            and source_time <= boundary
-            and observed_time <= boundary
-            and ingest_time <= boundary
+        causal_times = cls._event_causal_times(event)
+        return causal_times is not None and all(
+            timestamp <= boundary for timestamp in causal_times
         )
 
     @classmethod

@@ -267,6 +267,117 @@ class FocusedMirrorDependencyIndex:
             **self._selectors(dependency),
         )
 
+    def decision_state_from_proven_history(
+        self,
+        input_id: str,
+        events_with_generation: tuple[tuple[MarketEvent, int], ...],
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+    ) -> tuple[MirrorSnapshot, datetime | None]:
+        """Resolve one input from a caller-owned snapshot already proven by storage."""
+
+        dependency = self._dependency(input_id)
+        boundary, age_limit = MarketMirror._decision_boundary(
+            as_of=as_of,
+            max_age=max_age,
+        )
+        snapshot = MarketMirror._decision_view_from_proven_history(
+            events_with_generation,
+            boundary=boundary,
+            max_age=age_limit,
+            **self._selectors(dependency),
+        )
+        state: dict[MirrorQuoteKey, tuple[MarketEvent, int]] = {}
+        future_candidates: list[
+            tuple[datetime, MirrorQuoteKey, MarketEvent, int]
+        ] = []
+        for event, append_generation in events_with_generation:
+            if not dependency.matches(event):
+                continue
+            key = (event.source_id, event.quote_key)
+            causal_times = MarketMirror._event_causal_times(event)
+            if append_generation == 0:
+                previous = state.get(key)
+                if previous is None or event.sequence > previous[0].sequence:
+                    state[key] = (event, append_generation)
+                continue
+            if append_generation < 0 or causal_times is None:
+                continue
+            available_at = max(causal_times)
+            if available_at <= boundary:
+                previous = state.get(key)
+                if previous is None or event.sequence > previous[0].sequence:
+                    state[key] = (event, append_generation)
+            else:
+                future_candidates.append(
+                    (available_at, key, event, append_generation)
+                )
+
+        def visible_identity(
+            item: tuple[MarketEvent, int] | None,
+            *,
+            at: datetime,
+        ) -> str | None:
+            if item is None or item[1] <= 0:
+                return None
+            event = item[0]
+            if not MarketMirror._decision_visible_event(
+                event,
+                boundary=at,
+                max_age=age_limit,
+            ):
+                return None
+            return event.dedupe_key
+
+        ordered = sorted(
+            future_candidates,
+            key=lambda item: (item[0], item[1], item[2].sequence),
+        )
+        index = 0
+        while index < len(ordered):
+            available_at = ordered[index][0]
+            before: dict[MirrorQuoteKey, str | None] = {}
+            while (
+                index < len(ordered)
+                and ordered[index][0] == available_at
+            ):
+                _when, key, event, append_generation = ordered[index]
+                if key not in before:
+                    before[key] = visible_identity(
+                        state.get(key),
+                        at=available_at,
+                    )
+                previous = state.get(key)
+                if previous is None or event.sequence > previous[0].sequence:
+                    state[key] = (event, append_generation)
+                index += 1
+
+            if any(
+                before[key]
+                != visible_identity(state.get(key), at=available_at)
+                for key in before
+            ):
+                return snapshot, available_at
+        return snapshot, None
+
+    def current_history_decision_state(
+        self,
+        input_id: str,
+        store: SQLiteMarketStore,
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+    ) -> tuple[MirrorSnapshot, datetime | None]:
+        """Resolve live state and its earliest future transition from verified history."""
+
+        return self.decision_state_from_proven_history(
+            input_id,
+            tuple(store.events_with_append_generation()),
+            as_of=as_of,
+            max_age=max_age,
+        )
+
     def decision_view(
         self,
         input_id: str,

@@ -8,6 +8,7 @@ from fractions import Fraction
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 from pathlib import Path
+from market_outcome_test_support import issue_synthetic_market_outcome_authority
 
 from autosport.domain import MarketEvent, MarketType
 from autosport.external_validity_baseline import (

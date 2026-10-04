@@ -404,9 +404,9 @@ def observe_workspace_once(
             # migration rows only as audit/sequence fences; only positive product-issued
             # appends may become decision-causal live state.
             for persisted_event, append_generation in store.events_with_append_generation():
-                mirror._apply_with_causal_authority(
+                mirror_updates.reconcile_persisted(
                     persisted_event,
-                    decision_causal=append_generation > 0,
+                    append_generation=append_generation,
                 )
 
         bus = MarketEventBus(store)

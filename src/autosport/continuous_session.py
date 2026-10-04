@@ -604,12 +604,11 @@ class _ContinuousSessionState:
             ).isoformat(),
         }
 
-    def validate_settlement_evidence(
+    def _merge_settlement_evidence(
         self,
-        *,
+        raw: dict[str, Any],
         settlement_evidence: tuple[SettlementResolution, ...],
-    ) -> None:
-        raw = self._read()
+    ) -> tuple[list[dict[str, str]], dict[str, str | None]]:
         known = {
             item["evidence_id"]: item
             for item in raw["settlement_evidence"]
@@ -645,6 +644,34 @@ class _ContinuousSessionState:
             known[evidence.evidence_id] = normalized
             known_pairs[pair] = normalized
             outcome_digests[evidence.evidence_id] = outcomes_digest
+        return (
+            list(sorted(known.values(), key=lambda item: item["evidence_id"])),
+            dict(sorted(outcome_digests.items())),
+        )
+
+    def validate_settlement_evidence(
+        self,
+        *,
+        settlement_evidence: tuple[SettlementResolution, ...],
+    ) -> None:
+        self._merge_settlement_evidence(self._read(), settlement_evidence)
+
+    def record_settlement_evidence(
+        self,
+        *,
+        settlement_evidence: tuple[SettlementResolution, ...],
+    ) -> None:
+        """Durably bind settlement interpretation before any PAPER economic commit."""
+
+        def mutate(raw: dict[str, Any]) -> None:
+            evidence, outcome_digests = self._merge_settlement_evidence(
+                raw,
+                settlement_evidence,
+            )
+            raw["settlement_evidence"] = evidence
+            raw["settlement_outcome_digests"] = outcome_digests
+
+        self._update(mutate)
 
     def record_source_projection(
         self,
@@ -711,47 +738,12 @@ class _ContinuousSessionState:
             if full_refresh:
                 raw["last_full_refresh_at"] = timestamp.isoformat()
 
-            known = {
-                item["evidence_id"]: item
-                for item in raw["settlement_evidence"]
-            }
-            known_pairs = {
-                (item["event_identity"], item["settlement_ref"]): item
-                for item in raw["settlement_evidence"]
-            }
-            outcome_digests = dict(raw["settlement_outcome_digests"])
-            for evidence in settlement_evidence:
-                existing = known.get(evidence.evidence_id)
-                normalized = self._normalized_settlement_evidence(evidence)
-                outcomes_digest = _settlement_outcomes_sha256(evidence)
-                if existing is not None and existing != normalized:
-                    raise ContinuousSessionError(
-                        "settlement evidence id conflicts with durable evidence"
-                    )
-                pair = (evidence.event_identity, evidence.settlement_ref)
-                pair_existing = known_pairs.get(pair)
-                if pair_existing is not None and pair_existing != normalized:
-                    raise ContinuousSessionError(
-                        "settlement event/reference conflicts with durable evidence"
-                    )
-                previous_digest = outcome_digests.get(evidence.evidence_id)
-                if existing is not None and previous_digest is None:
-                    raise ContinuousSessionError(
-                        "legacy settlement evidence lacks durable outcome interpretation"
-                    )
-                if previous_digest is not None and previous_digest != outcomes_digest:
-                    raise ContinuousSessionError(
-                        "settlement outcome interpretation conflicts with durable evidence"
-                    )
-                known[evidence.evidence_id] = normalized
-                known_pairs[pair] = normalized
-                outcome_digests[evidence.evidence_id] = outcomes_digest
-            raw["settlement_evidence"] = list(
-                sorted(known.values(), key=lambda item: item["evidence_id"])
+            evidence, outcome_digests = self._merge_settlement_evidence(
+                raw,
+                settlement_evidence,
             )
-            raw["settlement_outcome_digests"] = dict(
-                sorted(outcome_digests.items())
-            )
+            raw["settlement_evidence"] = evidence
+            raw["settlement_outcome_digests"] = outcome_digests
 
         self._update(mutate)
 
@@ -1152,7 +1144,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     newly_registered.append(input_id)
 
             resolutions = self._settlement_resolutions(as_of=now)
-            self._state.validate_settlement_evidence(
+            # Settlement identity and quote-outcome interpretation are part of the
+            # economic commit protocol. Persist them before any learner side effect or
+            # PaperBook mutation so a crash cannot leave committed P&L whose causal
+            # settlement interpretation is absent on restart.
+            self._state.record_settlement_evidence(
                 settlement_evidence=resolutions
             )
             if self.settlement_learning_handoff is not None:

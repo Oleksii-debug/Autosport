@@ -1341,6 +1341,7 @@ def _seal_live_receipt_authority_call_surfaces() -> None:
     """Hide canonical dependency bindings from callers of receipt-authority APIs."""
 
     live_append_impl = SQLiteMarketStore._append_live_batch_accepted
+    rebuild_trusted_current_impl = SQLiteMarketStore._rebuild_trusted_live_current_quotes
     append_impl = SQLiteMarketStore.append_batch_accepted
     has_receipt_impl = SQLiteMarketStore.has_trusted_live_receipt
     trusted_events_impl = SQLiteMarketStore.trusted_live_events
@@ -1351,6 +1352,11 @@ def _seal_live_receipt_authority_call_surfaces() -> None:
         events: Iterable[MarketEvent],
     ) -> list[MarketEvent]:
         return live_append_impl(self, events)
+
+    def _rebuild_trusted_live_current_quotes(
+        self: SQLiteMarketStore,
+    ) -> None:
+        return rebuild_trusted_current_impl(self)
 
     def append_batch_accepted(
         self: SQLiteMarketStore,
@@ -1373,6 +1379,7 @@ def _seal_live_receipt_authority_call_surfaces() -> None:
         return trusted_current_impl(self)
 
     SQLiteMarketStore._append_live_batch_accepted = _append_live_batch_accepted
+    SQLiteMarketStore._rebuild_trusted_live_current_quotes = _rebuild_trusted_live_current_quotes
     SQLiteMarketStore.append_batch_accepted = append_batch_accepted
     SQLiteMarketStore.has_trusted_live_receipt = has_trusted_live_receipt
     SQLiteMarketStore.trusted_live_events = trusted_live_events

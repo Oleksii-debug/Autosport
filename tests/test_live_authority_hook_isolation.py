@@ -76,6 +76,15 @@ class LiveAuthorityHookIsolationTests(unittest.TestCase):
 
             self.assertEqual(store._append_live_batch_accepted([event]), [event])
             self.assertTrue(store.has_trusted_live_receipt(event))
+
+            with self.assertRaises(TypeError):
+                store._rebuild_trusted_live_current_quotes(
+                    _trusted_events=lambda _connection: [],
+                )
+            self.assertEqual(
+                store.trusted_live_current_by_source(),
+                {(event.source_id, event.quote_key): event},
+            )
             store.close()
 
     def test_live_bus_seam_rejects_dependency_override_but_canonical_path_works(self) -> None:

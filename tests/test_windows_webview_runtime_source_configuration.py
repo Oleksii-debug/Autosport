@@ -9,6 +9,7 @@ import pytest
 
 import autosport.product_gui_worker as product_gui_worker_module
 from autosport.operator_source_config import OperatorSourceSelectionState
+from autosport.operator_source_store import OperatorSourceConfigStore
 from autosport.product_entrypoint import ProductEntrypointError
 from autosport.windows_webview_shell import AutosportWebController
 
@@ -81,6 +82,44 @@ def test_fresh_workspace_is_configuration_required_without_env_syntax(
     assert "Виберіть підтримуване джерело" in projection["status"]
     assert "AUTOSPORT_PRODUCT_SOURCE_FACTORY" not in projection["status"]
     assert controller._product_runtime_can_start(source_ready=False) is False
+
+
+def test_aliased_persisted_source_is_actionably_invalid_and_reconfigurable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AUTOSPORT_PRODUCT_SOURCE_FACTORY", raising=False)
+    controller = _controller(tmp_path)
+    canonical = controller._operator_source_store().path
+    external = tmp_path / "external-source-config.json"
+    external_store = OperatorSourceConfigStore(external)
+    external_config = external_store.write_source_id(_SOURCE_ID)
+    external_bytes = external.read_bytes()
+    try:
+        canonical.symlink_to(external)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable on this runner: {exc}")
+
+    selection, entry = controller._resolve_operator_source()
+    projection = controller._product_source_projection(selection, entry)
+    blocked = controller._action_product_runtime_start({})
+
+    assert selection.state is OperatorSourceSelectionState.INVALID
+    assert entry is None
+    assert projection["state"] == "invalid"
+    assert projection["can_configure"] is True
+    assert "недійсне або пошкоджене" in projection["status"]
+    assert blocked["status"] == "rejected"
+    assert controller.product_worker.start_calls == []
+
+    repaired = controller._action_product_source_configure({"source_id": _SOURCE_ID})
+
+    assert repaired["status"] == "completed"
+    assert not canonical.is_symlink()
+    assert controller._operator_source_store().read().source_id == _SOURCE_ID
+    assert external.read_bytes() == external_bytes
+    assert external_store.read() == external_config
+
 
 
 def test_operator_selection_persists_and_reopens_exactly(

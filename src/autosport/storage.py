@@ -2631,8 +2631,10 @@ class SQLiteMarketStore:
             if generation > 0
         ]
 
-    def current_by_source(self) -> dict[tuple[str, str], MarketEvent]:
-        """Return only a projection proven to equal independently trusted history."""
+    def current_by_source_with_append_generation(
+        self,
+    ) -> dict[tuple[str, str], tuple[MarketEvent, int]]:
+        """Return proven current projection values together with append provenance."""
 
         authority = self._market_append_authority()
         with self._market_append_issuance_lock(authority):
@@ -2644,20 +2646,38 @@ class SQLiteMarketStore:
                     self._validate_causal_replay_state()
                     self._require_product_issued_positive_history(authority)
 
+                    qualified_columns = ",".join(
+                        f"m.{column}" for column in _HISTORY_COLUMNS
+                    )
                     history_rows = self.connection.execute(
-                        f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
+                        f"""SELECT c.append_generation, {qualified_columns}
+                            FROM market_events AS m
+                            JOIN market_event_commit_order AS c
+                              ON c.dedupe_key = m.dedupe_key"""
                     ).fetchall()
-                    expected: dict[tuple[str, str], MarketEvent] = {}
+                    expected: dict[
+                        tuple[str, str],
+                        tuple[MarketEvent, int],
+                    ] = {}
                     for history_row in history_rows:
-                        event = _event_from_history_row(history_row)
+                        if len(history_row) != len(_HISTORY_COLUMNS) + 1:
+                            raise ValueError(
+                                "current projection provenance row has unexpected shape"
+                            )
+                        append_generation = history_row[0]
+                        if type(append_generation) is not int or append_generation < 0:
+                            raise ValueError(
+                                "current projection append generation is invalid"
+                            )
+                        event = _event_from_history_row(tuple(history_row[1:]))
                         key = (event.source_id, event.quote_key)
                         previous = expected.get(key)
                         if (
                             previous is None
                             or _projection_order_key(event)
-                            > _projection_order_key(previous)
+                            > _projection_order_key(previous[0])
                         ):
-                            expected[key] = event
+                            expected[key] = (event, append_generation)
 
                     rows = self.connection.execute(
                         f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes"
@@ -2674,17 +2694,31 @@ class SQLiteMarketStore:
 
                     if current.keys() != expected.keys() or any(
                         _canonical_payload(current[key])
-                        != _canonical_payload(expected[key])
+                        != _canonical_payload(expected[key][0])
                         for key in expected
                     ):
                         raise ValueError(
                             "current quote projection diverges from canonical market history"
                         )
+                    current_with_generation = {
+                        key: (current[key], expected[key][1])
+                        for key in current
+                    }
                     self._commit_stable_database_path()
                 except BaseException:
                     self.connection.rollback()
                     raise
-                return current
+                return current_with_generation
+
+    def current_by_source(self) -> dict[tuple[str, str], MarketEvent]:
+        """Return only a projection proven to equal independently trusted history."""
+
+        return {
+            key: event
+            for key, (event, _append_generation) in (
+                self.current_by_source_with_append_generation().items()
+            )
+        }
 
     def current(self) -> dict[str, MarketEvent]:
         current: dict[str, MarketEvent] = {}

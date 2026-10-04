@@ -777,20 +777,29 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
-                source_ts = "2026-09-16T18:59:59+00:00"
-                original = self.event(
-                    sequence=1,
-                    odds="2.00",
+                original = MarketEvent(
+                    event_id="event-1",
+                    market_id="market-1",
+                    selection_id="selection-1",
+                    decimal_odds=Decimal("2.00"),
                     observed_ts="2026-09-16T18:59:59+00:00",
                     ingest_ts="2026-09-16T18:59:59+00:00",
-                    source_ts=source_ts,
-                )
-                retry = self.event(
+                    source_id="provider-a",
                     sequence=1,
-                    odds="2.00",
+                    status="open",
+                    source_ts=None,
+                )
+                retry = MarketEvent(
+                    event_id="event-1",
+                    market_id="market-1",
+                    selection_id="selection-1",
+                    decimal_odds=Decimal("2.00"),
                     observed_ts="2026-09-16T19:00:02+00:00",
                     ingest_ts="2026-09-16T19:00:02+00:00",
-                    source_ts=source_ts,
+                    source_id="provider-a",
+                    sequence=1,
+                    status="open",
+                    source_ts=None,
                 )
                 self.assertEqual(original.dedupe_key, retry.dedupe_key)
                 self.assertTrue(store.append(original))

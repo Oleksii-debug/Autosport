@@ -126,6 +126,19 @@ def test_paper_value_prepared_binding_carries_market_semantics(tmp_path) -> None
     assert prepared.exposure_bindings[0].market_semantics_id == _S1
 
 
+def test_paper_value_action_identity_changes_with_market_semantics(tmp_path) -> None:
+    runtime = _runtime(tmp_path)
+
+    first = _prepared(runtime, _S1)
+    second = _prepared(runtime, _S2)
+
+    first_action = first.execution_plan.actions[0]
+    second_action = second.execution_plan.actions[0]
+    assert first_action.quote_id != second_action.quote_id
+    assert first_action.action_id != second_action.action_id
+    assert first.execution_plan.plan_id != second.execution_plan.plan_id
+
+
 def test_paper_value_materialization_preserves_market_semantics(tmp_path) -> None:
     runtime = _runtime(tmp_path)
     prepared = _prepared(runtime)

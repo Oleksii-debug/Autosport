@@ -75,6 +75,7 @@ class _AlternateResolverSource(_Source):
             raise AssertionError("alternate resolver requires an open market")
         return event
 
+
 def _event() -> MarketEvent:
     return MarketEvent.from_dict(
         {
@@ -893,6 +894,7 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 )
 
             self.assertIsNotNone(original_identity)
+
     def test_restart_rejects_changed_resolver_with_same_source_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

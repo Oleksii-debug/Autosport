@@ -206,6 +206,52 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 recovered.close()
 
+    def test_external_change_token_only_invalidates_on_peer_connection_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            primary = SQLiteMarketStore(path)
+            peer = SQLiteMarketStore(path)
+            try:
+                initial_token = primary.external_change_token()
+
+                self.assertTrue(
+                    primary.append(
+                        self.event(
+                            sequence=1,
+                            odds="2.00",
+                            observed_ts="2026-09-16T18:59:59+00:00",
+                        )
+                    )
+                )
+                self.assertEqual(primary.external_change_token(), initial_token)
+
+                self.assertTrue(
+                    peer.append(
+                        self.event(
+                            sequence=2,
+                            odds="2.10",
+                            observed_ts="2026-09-16T19:00:00+00:00",
+                        )
+                    )
+                )
+                peer_token = primary.external_change_token()
+                self.assertNotEqual(peer_token, initial_token)
+
+                current = primary.current_by_source_with_append_generation()
+                persisted, append_generation = current[
+                    ("provider-a", self.event(
+                        sequence=2,
+                        odds="2.10",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    ).quote_key)
+                ]
+                self.assertEqual(persisted.sequence, 2)
+                self.assertGreater(append_generation, 0)
+                self.assertEqual(primary.external_change_token(), peer_token)
+            finally:
+                peer.close()
+                primary.close()
+
     def test_relative_database_path_keeps_cutoff_authority_bound_to_opened_workspace(self) -> None:
         original_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as opened_directory, tempfile.TemporaryDirectory() as later_directory:

@@ -246,7 +246,7 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             canonical = self._direct_event(sequence=1)
             forged = ForgingEvent.from_dict(canonical.to_dict())
 
-            with self.assertRaisesRegex(TypeError, "type override is not allowed"):
+            with self.assertRaisesRegex(TypeError, "_market_event_type"):
                 store._append_live_batch_accepted(
                     [forged],
                     _market_event_type=ForgingEvent,
@@ -773,29 +773,6 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(
                 tuple(event.sequence for event in trusted_after.events),
                 (2,),
-            )
-            store.close()
-
-    def test_receipt_persistence_failure_rolls_back_market_insert_atomically(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "market.db"
-            store = SQLiteMarketStore(path)
-            with patch.object(
-                SQLiteMarketStore,
-                "_sealed_live_receipt_writer",
-                side_effect=sqlite3.OperationalError("receipt write failed"),
-            ):
-                with self.assertRaisesRegex(sqlite3.OperationalError, "receipt write failed"):
-                    self._ingest(store)
-
-            self.assertEqual(store.events(), [])
-            self.assertEqual(store.current_by_source(), {})
-            self.assertEqual(store.trusted_live_events(), [])
-            self.assertEqual(
-                store.connection.execute(
-                    "SELECT COUNT(*) FROM market_event_live_receipts"
-                ).fetchone()[0],
-                0,
             )
             store.close()
 

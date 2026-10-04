@@ -502,6 +502,62 @@ def test_resolution_issuance_rejects_structural_authority_rebinding(
     assert hostile_called is False
 
 
+def test_record_decision_rejects_private_writer_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger = _ledger(tmp_path)
+    hostile_called = False
+
+    def hostile_writer(self, **_kwargs):
+        nonlocal hostile_called
+        del self
+        hostile_called = True
+        raise AssertionError("hostile private writer executed")
+
+    monkeypatch.setattr(
+        ManualNvdaAcceptanceLedger,
+        "_record_structural_decision",
+        hostile_writer,
+    )
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="decision issuance authority changed",
+    ):
+        _record(ledger, _transcript())
+    assert hostile_called is False
+
+
+def test_resolution_issuance_rejects_private_resolver_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript)
+    hostile_called = False
+
+    def hostile_resolver(self, **_kwargs):
+        nonlocal hostile_called
+        del self
+        hostile_called = True
+        raise AssertionError("hostile private resolver executed")
+
+    monkeypatch.setattr(
+        ManualNvdaAcceptanceLedger,
+        "_resolve_structural_current",
+        hostile_resolver,
+    )
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="resolution issuance authority changed",
+    ):
+        _resolve(ledger, transcript)
+    assert hostile_called is False
+
+
 def test_resolution_verifier_rejects_instance_events_override(tmp_path):
     transcript = _transcript()
     ledger = _ledger(tmp_path)

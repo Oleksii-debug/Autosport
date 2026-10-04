@@ -5017,6 +5017,85 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(health_store.get("provider-a").status, "failed")
             resumed.close()
 
+    def test_committed_ambiguous_provider_gap_restart_requires_every_bound_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_failure(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=400)).isoformat(),
+                error=ProviderUnavailableError("provider-a offline"),
+            )
+            health_store.record_failure(
+                "provider-b",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                error=ProviderUnavailableError("provider-b offline"),
+            )
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [ProviderUnavailableError("observation unavailable")],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            first.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            first.register_input(
+                "input-b",
+                source_ids="provider-b",
+                selection_ids="selection-b",
+            )
+            gap = first.run_cycle()
+            self.assertEqual(gap.status, LiveCycleStatus.PROVIDER_GAP)
+            first.close()
+
+            health_path = workspace / "source_health.json"
+            raw = json.loads(health_path.read_text(encoding="utf-8"))
+            entry = raw["history"]["provider-a"][0]
+            healthy = dict(entry["state"])
+            healthy.update(
+                {
+                    "status": "healthy",
+                    "poll_count": 1,
+                    "total_received": 0,
+                    "total_accepted": 0,
+                    "total_rejected": 0,
+                    "total_failures": 0,
+                    "consecutive_failures": 0,
+                    "last_success_at": entry["recorded_at"],
+                    "last_error_at": None,
+                    "last_error": None,
+                    "last_cursor": None,
+                    "latest_source_ts": None,
+                    "quality_flags": [],
+                }
+            )
+            entry["state"] = healthy
+            raw["sources"]["provider-a"] = healthy
+            health_path.write_text(
+                json.dumps(raw, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "does not prove the failed canonical provider",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                )
+
     def test_committed_provider_gap_restart_requires_bound_failed_health(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

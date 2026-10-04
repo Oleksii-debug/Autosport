@@ -2708,6 +2708,53 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_durable_settlement_outcome_digest_ignores_module_retargeting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-1",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:digest-root",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="digest-root-evidence",
+                evidence_sha256="6" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                with patch.object(
+                    continuous_session_module,
+                    "_settlement_outcomes_sha256",
+                    lambda _evidence: "f" * 64,
+                ):
+                    coordinator._state.record_settlement_evidence(
+                        settlement_evidence=(resolution,)
+                    )
+                coordinator._state.validate_settlement_evidence(
+                    settlement_evidence=(resolution,)
+                )
+                raw = json.loads(
+                    (root / "continuous_session.json").read_text(encoding="utf-8")
+                )
+                self.assertNotEqual(
+                    raw["settlement_outcome_digests"]["digest-root-evidence"],
+                    "f" * 64,
+                )
+            finally:
+                store.close()
+
     def test_same_settlement_evidence_cannot_change_quote_outcome_after_pnl_commit(
         self,
     ) -> None:

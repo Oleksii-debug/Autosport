@@ -595,6 +595,7 @@ class CollectorDeltaTests(unittest.TestCase):
                 consumer.drain(as_of="2026-01-01T00:00:04+00:00")
             self.assertEqual(deliveries, [])
             self.assertFalse(checkpoint.has_ack(delta.delta_id))
+
     def test_consumer_rejects_misbound_durable_receipt_before_delivery(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

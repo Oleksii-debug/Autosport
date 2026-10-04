@@ -80,9 +80,10 @@ class MirrorSnapshot:
 def _trusted_mirror_event_key(
     event: MarketEvent,
     *,
+    _event_type: type[MarketEvent] = MarketEvent,
     _quote_key=MarketEvent.quote_key.fget,
 ) -> tuple[str, str]:
-    if type(event) is not MarketEvent:
+    if type(event) is not _event_type:
         raise TypeError("trusted mirror event must be an exact MarketEvent")
     if _quote_key is None:
         raise RuntimeError("canonical quote_key descriptor is unavailable")

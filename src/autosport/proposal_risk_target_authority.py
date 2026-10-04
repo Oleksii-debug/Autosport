@@ -99,6 +99,46 @@ _LEDGER_RESOLVE = JsonlDecisionLedger.verified_economic_decision_for_material_ac
 _LEDGER_RESOLVE_CODE = getattr(_LEDGER_RESOLVE, "__code__", None)
 _LEDGER_RECORDS = JsonlDecisionLedger.verified_records
 _LEDGER_RECORDS_CODE = getattr(_LEDGER_RECORDS, "__code__", None)
+_LEDGER_APPEND_GLOBALS = _LEDGER_APPEND.__globals__
+_LEDGER_BIND_ECONOMIC_GOAL = _LEDGER_APPEND_GLOBALS.get("bind_economic_goal")
+_LEDGER_BIND_ECONOMIC_GOAL_CODE = getattr(_LEDGER_BIND_ECONOMIC_GOAL, "__code__", None)
+_LEDGER_RESOLVE_GLOBALS = _LEDGER_RESOLVE.__globals__
+_LEDGER_VERIFY_ECONOMIC_GOAL_BINDING = _LEDGER_RESOLVE_GLOBALS.get(
+    "verify_economic_goal_binding"
+)
+_LEDGER_VERIFY_ECONOMIC_GOAL_BINDING_CODE = getattr(
+    _LEDGER_VERIFY_ECONOMIC_GOAL_BINDING, "__code__", None
+)
+_LEDGER_INTERNAL_METHOD_WITNESSES = tuple(
+    (
+        name,
+        JsonlDecisionLedger.__dict__[name],
+        getattr(
+            getattr(JsonlDecisionLedger.__dict__[name], "__func__", JsonlDecisionLedger.__dict__[name]),
+            "__code__",
+            None,
+        ),
+    )
+    for name in (
+        "_require_utf8_text",
+        "_validate_json_value",
+        "_canonical_record",
+        "_validate_record",
+        "_json_object_without_duplicate_keys",
+        "_reject_non_finite_json",
+        "_append_validated",
+        "_verify_bytes",
+        "verified_snapshot",
+    )
+)
+_DECISION_RECORD_METHOD_WITNESSES = tuple(
+    (
+        name,
+        DecisionRecord.__dict__[name],
+        getattr(DecisionRecord.__dict__[name], "__code__", None),
+    )
+    for name in ("__post_init__", "to_dict")
+)
 _PROVENANCE_FOR = provenance_for
 _PROVENANCE_FOR_CODE = getattr(_PROVENANCE_FOR, "__code__", None)
 _ENSURE_DURABLE_FILE = ensure_durable_file
@@ -475,6 +515,45 @@ def _require_dispatch() -> None:
         if getattr(function, "__code__", None) is not code:
             raise ProductProposalRiskTargetError(
                 f"proposal-risk target dispatch authority changed: {name}"
+            )
+    if (
+        _LEDGER_APPEND.__globals__ is not _LEDGER_APPEND_GLOBALS
+        or _LEDGER_APPEND_GLOBALS.get("bind_economic_goal")
+        is not _LEDGER_BIND_ECONOMIC_GOAL
+        or getattr(_LEDGER_BIND_ECONOMIC_GOAL, "__code__", None)
+        is not _LEDGER_BIND_ECONOMIC_GOAL_CODE
+    ):
+        raise ProductProposalRiskTargetError(
+            "proposal-risk target dispatch authority changed: economic ledger binding"
+        )
+    if (
+        _LEDGER_RESOLVE.__globals__ is not _LEDGER_RESOLVE_GLOBALS
+        or _LEDGER_RESOLVE_GLOBALS.get("verify_economic_goal_binding")
+        is not _LEDGER_VERIFY_ECONOMIC_GOAL_BINDING
+        or getattr(_LEDGER_VERIFY_ECONOMIC_GOAL_BINDING, "__code__", None)
+        is not _LEDGER_VERIFY_ECONOMIC_GOAL_BINDING_CODE
+    ):
+        raise ProductProposalRiskTargetError(
+            "proposal-risk target dispatch authority changed: economic ledger resolver binding"
+        )
+    for name, expected, code in _LEDGER_INTERNAL_METHOD_WITNESSES:
+        current = JsonlDecisionLedger.__dict__.get(name)
+        current_function = getattr(current, "__func__", current)
+        if (
+            current is not expected
+            or getattr(current_function, "__code__", None) is not code
+        ):
+            raise ProductProposalRiskTargetError(
+                f"proposal-risk target dispatch authority changed: Decision Ledger {name}"
+            )
+    for name, expected, code in _DECISION_RECORD_METHOD_WITNESSES:
+        current = DecisionRecord.__dict__.get(name)
+        if (
+            current is not expected
+            or getattr(current, "__code__", None) is not code
+        ):
+            raise ProductProposalRiskTargetError(
+                f"proposal-risk target dispatch authority changed: DecisionRecord {name}"
             )
     if getattr(_PROVENANCE_FOR, "__code__", None) is not _PROVENANCE_FOR_CODE:
         raise ProductProposalRiskTargetError(

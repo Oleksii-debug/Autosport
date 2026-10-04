@@ -1113,6 +1113,42 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertFalse(checkpoint.has_ack(delta.delta_id))
 
 
+    def test_consumer_default_causal_view_metadata_rebind_fails_closed(self):
+        payload = event_payload()
+        event = MarketEvent.from_dict(payload)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            delta = self.make_delta(payload=payload)
+            collector.append(delta)
+            apply_calls = []
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda _: event,
+                apply_event=lambda *_: apply_calls.append(True),
+                lookup_application_receipt=lambda _: None,
+            )
+
+            original_kwdefaults = DesktopDeltaConsumer.drain.__kwdefaults__
+            forged_defaults = dict(original_kwdefaults or {})
+            forged_defaults["view"] = CausalView.RESTATED_RESEARCH
+            DesktopDeltaConsumer.drain.__kwdefaults__ = forged_defaults
+            try:
+                with self.assertRaisesRegex(
+                    ApplicationReceiptError,
+                    "default causal-view metadata changed",
+                ):
+                    consumer.drain(as_of="2026-01-01T00:00:05+00:00")
+            finally:
+                DesktopDeltaConsumer.drain.__kwdefaults__ = original_kwdefaults
+
+            self.assertEqual(apply_calls, [])
+            self.assertFalse(checkpoint.has_ack(delta.delta_id))
+
+
     def test_consumer_rejects_market_event_subclass_before_application_or_ack(self):
         expected_payload = event_payload()
 

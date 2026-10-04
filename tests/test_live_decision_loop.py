@@ -52,6 +52,7 @@ from autosport.providers import ProviderBatch, ProviderUnavailableError
 from autosport.scientific_registry import ScientificRegistry, StrategyVersion
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 from autosport.storage import SQLiteMarketStore
+from autosport.workspace_lock import WorkspaceEconomicLockBusyError
 
 
 class _ManualClock:
@@ -3948,6 +3949,83 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 ("input-a", (("selection-a", 2, "open"),)),
             )
             resumed.close()
+
+    def test_pending_publication_holds_market_append_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            peer_store = SQLiteMarketStore(workspace / "market.db")
+            blocked = {"value": False}
+            attempted = {"value": False}
+
+            import autosport.live_decision_loop as live_loop_module
+
+            real_atomic_write_json = live_loop_module.atomic_write_json
+
+            def append_during_pending(path, payload):
+                if (
+                    Path(path)
+                    == workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+                    and payload.get("phase") == "pending"
+                    and not attempted["value"]
+                ):
+                    attempted["value"] = True
+                    try:
+                        peer_store.append(
+                            self._event(
+                                selection="selection-a",
+                                sequence=2,
+                                odds="2.10",
+                                observed=self.START
+                                + timedelta(milliseconds=500),
+                            )
+                        )
+                    except WorkspaceEconomicLockBusyError:
+                        blocked["value"] = True
+                    else:
+                        self.fail(
+                            "peer append entered market authority during "
+                            "PENDING publication"
+                        )
+                return real_atomic_write_json(path, payload)
+
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            try:
+                with patch(
+                    "autosport.live_decision_loop.atomic_write_json",
+                    side_effect=append_during_pending,
+                ):
+                    decided = loop.run_cycle()
+
+                self.assertEqual(decided.status, LiveCycleStatus.DECIDED)
+                self.assertTrue(attempted["value"])
+                self.assertTrue(blocked["value"])
+                progress = json.loads(
+                    loop.progress_path.read_text(encoding="utf-8")
+                )
+                self.assertEqual(progress["market_append_generation"], 1)
+
+                self.assertTrue(
+                    peer_store.append(
+                        self._event(
+                            selection="selection-a",
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START + timedelta(milliseconds=500),
+                        )
+                    )
+                )
+            finally:
+                loop.close()
+                peer_store.close()
 
     def test_pending_restart_ignores_malformed_later_tail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

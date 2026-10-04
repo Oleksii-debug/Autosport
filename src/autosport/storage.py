@@ -8,11 +8,11 @@ import re
 import sqlite3
 import stat
 import uuid
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
-from typing import Final, Iterable
+from typing import Final, Iterable, Iterator
 
 from .domain import MarketEvent
 from .monotonic_workspace_authority import (
@@ -2395,6 +2395,88 @@ class SQLiteMarketStore:
                     self.connection.rollback()
                     raise
 
+    def _events_at_append_boundary_unlocked(
+        self,
+        max_generation: int,
+    ) -> list[tuple[MarketEvent, int]]:
+        qualified_columns = ",".join(
+            f"m.{column}" for column in _HISTORY_COLUMNS
+        )
+        rows = self.connection.execute(
+            f"""SELECT c.append_generation, {qualified_columns}
+                FROM market_events AS m
+                JOIN market_event_commit_order AS c
+                  ON c.dedupe_key = m.dedupe_key
+                WHERE c.append_generation = 0
+                   OR (
+                       c.append_generation > 0
+                       AND c.append_generation <= ?
+                   )""",
+            (max_generation,),
+        ).fetchall()
+
+        events_with_generation: list[tuple[MarketEvent, int]] = []
+        for row in rows:
+            if len(row) != len(_HISTORY_COLUMNS) + 1:
+                raise ValueError(
+                    "market event append-generation row has unexpected shape"
+                )
+            generation = row[0]
+            if type(generation) is not int or generation < 0:
+                raise ValueError(
+                    "market event append generation must be a non-negative int"
+                )
+            event = _event_from_history_row(tuple(row[1:]))
+            events_with_generation.append((event, generation))
+        return sorted(
+            events_with_generation,
+            key=lambda item: _event_order_key(item[0]),
+        )
+
+    @contextmanager
+    def guard_current_append_authority_with_boundary(
+        self,
+        max_generation: int,
+    ) -> Iterator[list[tuple[MarketEvent, int]]]:
+        """Hold exact current market authority until economic publication completes.
+
+        The append issuance lock fences all cooperating product writers. BEGIN
+        IMMEDIATE additionally reserves the SQLite writer slot so direct writers
+        cannot change the proven market database between verification and the
+        caller's durable publication step.
+        """
+
+        if type(max_generation) is not int or max_generation < 0:
+            raise ValueError("max_generation must be a non-negative int")
+
+        authority = self._market_append_authority()
+        with self._market_append_issuance_lock(authority):
+            with self._connection_lock:
+                self.connection.execute("BEGIN IMMEDIATE")
+                try:
+                    _validate_canonical_table(self.connection, "market_events")
+                    self._validate_causal_replay_state()
+                    self._require_product_issued_positive_history(authority)
+                    current_head = self._positive_append_generation_head()
+                    if max_generation > current_head:
+                        raise MonotonicAuthorityRollbackError(
+                            "requested market append boundary exceeds "
+                            "committed authority"
+                        )
+                    self._require_committed_append_authority_through(
+                        authority,
+                        max_generation,
+                    )
+                    prefix = self._events_at_append_boundary_unlocked(
+                        max_generation
+                    )
+                    self._require_database_path_identity()
+                    yield prefix
+                    self._commit_stable_database_path()
+                except BaseException:
+                    self.connection.rollback()
+                    raise
+
     def require_current_append_authority_with_boundary(
         self,
         max_generation: int,
@@ -2411,27 +2493,10 @@ class SQLiteMarketStore:
         if type(max_generation) is not int or max_generation < 0:
             raise ValueError("max_generation must be a non-negative int")
 
-        authority = self._market_append_authority()
-        with self._market_append_issuance_lock(authority):
-            with self._connection_lock:
-                self.connection.execute("BEGIN")
-                try:
-                    _validate_canonical_table(self.connection, "market_events")
-                    self._validate_causal_replay_state()
-                    self._require_product_issued_positive_history(authority)
-                    current_head = self._positive_append_generation_head()
-                    if max_generation > current_head:
-                        raise MonotonicAuthorityRollbackError(
-                            "requested market append boundary exceeds committed authority"
-                        )
-                    self._require_committed_append_authority_through(
-                        authority,
-                        max_generation,
-                    )
-                    self._commit_stable_database_path()
-                except BaseException:
-                    self.connection.rollback()
-                    raise
+        with self.guard_current_append_authority_with_boundary(
+            max_generation
+        ):
+            pass
 
     def events_at_committed_append_boundary(
         self,
@@ -2467,43 +2532,16 @@ class SQLiteMarketStore:
                         authority,
                         max_generation,
                     )
-                    qualified_columns = ",".join(
-                        f"m.{column}" for column in _HISTORY_COLUMNS
+                    events_with_generation = (
+                        self._events_at_append_boundary_unlocked(
+                            max_generation
+                        )
                     )
-                    rows = self.connection.execute(
-                        f"""SELECT c.append_generation, {qualified_columns}
-                            FROM market_events AS m
-                            JOIN market_event_commit_order AS c
-                              ON c.dedupe_key = m.dedupe_key
-                            WHERE c.append_generation = 0
-                               OR (
-                                   c.append_generation > 0
-                                   AND c.append_generation <= ?
-                               )""",
-                        (max_generation,),
-                    ).fetchall()
-
-                    events_with_generation: list[tuple[MarketEvent, int]] = []
-                    for row in rows:
-                        if len(row) != len(_HISTORY_COLUMNS) + 1:
-                            raise ValueError(
-                                "market event append-generation row has unexpected shape"
-                            )
-                        generation = row[0]
-                        if type(generation) is not int or generation < 0:
-                            raise ValueError(
-                                "market event append generation must be a non-negative int"
-                            )
-                        event = _event_from_history_row(tuple(row[1:]))
-                        events_with_generation.append((event, generation))
                     self._commit_stable_database_path()
                 except BaseException:
                     self.connection.rollback()
                     raise
-        return sorted(
-            events_with_generation,
-            key=lambda item: _event_order_key(item[0]),
-        )
+        return events_with_generation
 
     def events_with_append_generation(
         self,

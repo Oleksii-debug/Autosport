@@ -2530,140 +2530,146 @@ class PersistentLiveDecisionLoop:
             if self._decision_market_frontier_as_of == decision_time
             else None
         )
-        if market_append_generation is not None:
-            store = self._default_market_store
-            owns_store = store is None
-            if store is None:
-                store = SQLiteMarketStore(self.workspace / "market.db")
-            try:
-                # append_generation_hint() is intentionally not authority. Economic
-                # publication proves both the exact sampled boundary and the complete
-                # current tail: a later canonical product append is safe and belongs to
-                # the next cycle, but an unissued/tampered tail must fail closed before
-                # PENDING becomes durable. Restart recovery later consumes only the
-                # already-proven immutable prefix.
-                store.require_current_append_authority_with_boundary(
-                    market_append_generation
-                )
-                boundary, age_limit = MarketMirror._decision_boundary(
-                    as_of=decision_time,
-                    max_age=self.max_quote_age,
-                )
-                durable_snapshot = MarketMirror._decision_view_from_proven_history(
-                    store.events_at_committed_append_boundary(
-                        market_append_generation
-                    ),
-                    boundary=boundary,
-                    max_age=age_limit,
-                    source_ids=None,
-                    sports=None,
-                    event_ids=None,
-                    market_ids=None,
-                    selection_ids=None,
-                )
-                durable_market_state_sha256 = self._market_state_sha256_for_events(
-                    durable_snapshot.events
-                )
-                if durable_market_state_sha256 != market_state_sha256:
+        store = self._default_market_store
+        owns_store = store is None and market_append_generation is not None
+        if owns_store:
+            store = SQLiteMarketStore(self.workspace / "market.db")
+
+        def publish_pending() -> None:
+            with WorkspaceEconomicLock(self.workspace):
+                durable_control = self._load_control()
+                if durable_control is None:
+                    durable_control = _Control(self.loop_id, LiveControlState.RUNNING)
+                if (
+                    durable_control != self._control
+                    or durable_control.state is not LiveControlState.RUNNING
+                ):
                     raise LiveDecisionProgressError(
-                        "decision-visible market state is not durable at sampled "
-                        "append frontier"
+                        "live decision control changed concurrently before pending publication"
                     )
-            finally:
-                if owns_store:
-                    store.close()
-        with WorkspaceEconomicLock(self.workspace):
-            durable_control = self._load_control()
-            if durable_control is None:
-                durable_control = _Control(self.loop_id, LiveControlState.RUNNING)
-            if (
-                durable_control != self._control
-                or durable_control.state is not LiveControlState.RUNNING
-            ):
-                raise LiveDecisionProgressError(
-                    "live decision control changed concurrently before pending publication"
-                )
 
-            durable_progress = self._load_progress()
-            if durable_progress != self._progress:
-                raise LiveDecisionProgressError(
-                    "live decision progress changed concurrently before pending publication"
-                )
-            durable_input_specs = self._load_input_registry() or ()
-            if durable_input_specs != tuple(self._input_specs.values()):
-                raise LiveDecisionProgressError(
-                    "live dependency registry changed concurrently before pending publication"
-                )
+                durable_progress = self._load_progress()
+                if durable_progress != self._progress:
+                    raise LiveDecisionProgressError(
+                        "live decision progress changed concurrently before pending publication"
+                    )
+                durable_input_specs = self._load_input_registry() or ()
+                if durable_input_specs != tuple(self._input_specs.values()):
+                    raise LiveDecisionProgressError(
+                        "live dependency registry changed concurrently before pending publication"
+                    )
 
-            # The snapshot is written before the cursor: a crash before cursor
-            # publication leaves only ignorable stale snapshot bytes, while every
-            # visible PENDING cursor has an exact pre-action portfolio witness.
-            #
-            # The pre-action artifact is recovery evidence, not an alternate
-            # persistence path for the live PaperBook.  In PAPER mode #623 owns
-            # that exact live object at workspace/paper_book.json; publishing the
-            # same object here would either rebind or cross-path-save its durable
-            # generation.  Reuse the canonical risk shadow capability to create
-            # a detached exact semantic clone with product-issued opening/causal
-            # authority but no live generation/path binding.  Its first save
-            # therefore establishes only the dedicated recovery-snapshot lineage.
-            live_context_sha256 = self._decision_context_sha256()
-            snapshot = self.authority.risk_policy._shadow_book_for_allocation(
-                self.book
-            )
-            if (
-                type(snapshot) is not PaperBook
-                or snapshot is self.book
-                or not self._same_book_state(snapshot, self.book)
-            ):
-                raise LiveDecisionProgressError(
-                    "cannot detach exact pre-action PaperBook"
+                # The snapshot is written before the cursor: a crash before cursor
+                # publication leaves only ignorable stale snapshot bytes, while every
+                # visible PENDING cursor has an exact pre-action portfolio witness.
+                #
+                # The pre-action artifact is recovery evidence, not an alternate
+                # persistence path for the live PaperBook.  In PAPER mode #623 owns
+                # that exact live object at workspace/paper_book.json; publishing the
+                # same object here would either rebind or cross-path-save its durable
+                # generation.  Reuse the canonical risk shadow capability to create
+                # a detached exact semantic clone with product-issued opening/causal
+                # authority but no live generation/path binding.  Its first save
+                # therefore establishes only the dedicated recovery-snapshot lineage.
+                live_context_sha256 = self._decision_context_sha256()
+                snapshot = self.authority.risk_policy._shadow_book_for_allocation(
+                    self.book
                 )
-            snapshot_context_sha256 = self._decision_context_sha256_for_book(
-                snapshot
-            )
-            if snapshot_context_sha256 != live_context_sha256:
-                raise LiveDecisionProgressError(
-                    "pre-action PaperBook context changed before durability"
+                if (
+                    type(snapshot) is not PaperBook
+                    or snapshot is self.book
+                    or not self._same_book_state(snapshot, self.book)
+                ):
+                    raise LiveDecisionProgressError(
+                        "cannot detach exact pre-action PaperBook"
+                    )
+                snapshot_context_sha256 = self._decision_context_sha256_for_book(
+                    snapshot
                 )
+                if snapshot_context_sha256 != live_context_sha256:
+                    raise LiveDecisionProgressError(
+                        "pre-action PaperBook context changed before durability"
+                    )
 
-            # A new detached shadow is created for every decision cycle so the live
-            # canonical PaperBook never acquires the recovery-artifact path authority.
-            # When a previous pre-action artifact already exists, explicitly adopt
-            # that artifact's *current* durable generation before replacement.  This
-            # is a product-owned capability resolved from the sealed persistence graph
-            # below; generic PaperBook.save() remains fail-closed for unbound/stale
-            # objects and for cross-path publication.
-            _paperbook_authority._bind_book(snapshot, self.pre_action_book_path)
-            snapshot.save(self.pre_action_book_path)
-            durable_pre_action = PaperBook.load(self.pre_action_book_path)
-            durable_context_sha256 = self._decision_context_sha256_for_book(
-                durable_pre_action
-            )
-            current_context_sha256 = self._decision_context_sha256()
-            if (
-                not self._same_book_state(durable_pre_action, self.book)
-                or durable_context_sha256 != live_context_sha256
-                or current_context_sha256 != live_context_sha256
-            ):
-                raise LiveDecisionProgressError(
-                    "pre-action PaperBook durability verification failed"
+                # A new detached shadow is created for every decision cycle so the live
+                # canonical PaperBook never acquires the recovery-artifact path authority.
+                # When a previous pre-action artifact already exists, explicitly adopt
+                # that artifact's *current* durable generation before replacement.  This
+                # is a product-owned capability resolved from the sealed persistence graph
+                # below; generic PaperBook.save() remains fail-closed for unbound/stale
+                # objects and for cross-path publication.
+                _paperbook_authority._bind_book(snapshot, self.pre_action_book_path)
+                snapshot.save(self.pre_action_book_path)
+                durable_pre_action = PaperBook.load(self.pre_action_book_path)
+                durable_context_sha256 = self._decision_context_sha256_for_book(
+                    durable_pre_action
                 )
-            pending = _Progress(
-                loop_id=self.loop_id,
-                phase=_PHASE_PENDING,
-                decision_ts=decision_ts,
-                market_state_sha256=market_state_sha256,
-                market_append_generation=market_append_generation,
-                decision_context_sha256=durable_context_sha256,
-                affected_input_ids=affected_input_ids,
-                registered_input_ids=self.dependencies.input_ids,
-                decision_id=None,
-                plan_sha256=None,
-                ledger_offset=self._ledger_end_offset(),
-                gate=gate,
-            )
-            atomic_write_json(self.progress_path, pending.to_dict())
+                current_context_sha256 = self._decision_context_sha256()
+                if (
+                    not self._same_book_state(durable_pre_action, self.book)
+                    or durable_context_sha256 != live_context_sha256
+                    or current_context_sha256 != live_context_sha256
+                ):
+                    raise LiveDecisionProgressError(
+                        "pre-action PaperBook durability verification failed"
+                    )
+                pending = _Progress(
+                    loop_id=self.loop_id,
+                    phase=_PHASE_PENDING,
+                    decision_ts=decision_ts,
+                    market_state_sha256=market_state_sha256,
+                    market_append_generation=market_append_generation,
+                    decision_context_sha256=durable_context_sha256,
+                    affected_input_ids=affected_input_ids,
+                    registered_input_ids=self.dependencies.input_ids,
+                    decision_id=None,
+                    plan_sha256=None,
+                    ledger_offset=self._ledger_end_offset(),
+                    gate=gate,
+                )
+                atomic_write_json(self.progress_path, pending.to_dict())
+        try:
+            if market_append_generation is None:
+                publish_pending()
+            else:
+                assert store is not None
+                # The guard spans both the complete current-tail proof and durable
+                # PENDING publication. No cooperating append or direct SQLite writer
+                # can change canonical market truth inside this interval.
+                with store.guard_current_append_authority_with_boundary(
+                    market_append_generation
+                ) as durable_history:
+                    boundary, age_limit = MarketMirror._decision_boundary(
+                        as_of=decision_time,
+                        max_age=self.max_quote_age,
+                    )
+                    durable_snapshot = (
+                        MarketMirror._decision_view_from_proven_history(
+                            durable_history,
+                            boundary=boundary,
+                            max_age=age_limit,
+                            source_ids=None,
+                            sports=None,
+                            event_ids=None,
+                            market_ids=None,
+                            selection_ids=None,
+                        )
+                    )
+                    durable_market_state_sha256 = (
+                        self._market_state_sha256_for_events(
+                            durable_snapshot.events
+                        )
+                    )
+                    if durable_market_state_sha256 != market_state_sha256:
+                        raise LiveDecisionProgressError(
+                            "decision-visible market state is not durable at "
+                            "sampled append frontier"
+                        )
+                    publish_pending()
+        finally:
+            if owns_store:
+                assert store is not None
+                store.close()
         self._progress = pending
 
     def _load_input_registry(self) -> tuple[_InputSpec, ...] | None:

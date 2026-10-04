@@ -34,6 +34,7 @@ def _install_guard() -> None:
         "_workspace_path",
         "_sha",
         "_decimal_text",
+        "_instant",
         "_canonical_json",
         "_digest",
         "_current_economic_state",

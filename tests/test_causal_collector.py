@@ -2058,6 +2058,89 @@ class CollectorDeltaTests(unittest.TestCase):
                 reopened.apply(delta, event)
             market_store.close()
 
+    def test_canonical_application_rechecks_health_after_completion_callback(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "canonical-application.json"
+            health_path = root / "health.json"
+            market_store = SQLiteMarketStore(root / "market.db")
+            health_store = SourceHealthStore(health_path)
+            pristine_health = health_path.read_text(encoding="utf-8")
+            clock_calls = []
+
+            def rollback_health_clock():
+                clock_calls.append(True)
+                if len(clock_calls) == 2:
+                    health_path.write_text(pristine_health, encoding="utf-8")
+                    return "2026-01-01T00:00:06+00:00"
+                return "2026-01-01T00:00:05+00:00"
+
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                health_store,
+                state_path,
+                clock=rollback_health_clock,
+            )
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "health effect changed before application completion",
+            ):
+                application.apply(delta, event)
+
+            progress = application._state.progress(delta)
+            self.assertIsNotNone(progress)
+            self.assertTrue(progress["market_applied"])
+            self.assertTrue(progress["health_applied"])
+            self.assertIsNone(progress["completed_at"])
+            self.assertEqual(clock_calls, [True, True])
+            market_store.close()
+
+    def test_canonical_application_rechecks_market_after_completion_callback(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "canonical-application.json"
+            market_store = SQLiteMarketStore(root / "market.db")
+            clock_calls = []
+
+            def rollback_market_clock():
+                clock_calls.append(True)
+                if len(clock_calls) == 2:
+                    with market_store.connection:
+                        market_store.connection.execute(
+                            "DELETE FROM current_quotes WHERE source_id=?",
+                            (event.source_id,),
+                        )
+                        market_store.connection.execute(
+                            "DELETE FROM market_events WHERE dedupe_key=?",
+                            (event.dedupe_key,),
+                        )
+                    return "2026-01-01T00:00:06+00:00"
+                return "2026-01-01T00:00:05+00:00"
+
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                SourceHealthStore(root / "health.json"),
+                state_path,
+                clock=rollback_market_clock,
+            )
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "market effect changed before application completion",
+            ):
+                application.apply(delta, event)
+
+            progress = application._state.progress(delta)
+            self.assertIsNotNone(progress)
+            self.assertTrue(progress["market_applied"])
+            self.assertTrue(progress["health_applied"])
+            self.assertIsNone(progress["completed_at"])
+            self.assertEqual(clock_calls, [True, True])
+            market_store.close()
+
     def test_canonical_application_revalidates_journal_after_completion_clock_callback(self):
         event = MarketEvent.from_dict(event_payload())
         delta = self.make_delta(payload=event.to_dict())

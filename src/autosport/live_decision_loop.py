@@ -2518,6 +2518,30 @@ class PersistentLiveDecisionLoop:
                 store.require_current_append_authority_with_boundary(
                     market_append_generation
                 )
+                boundary, age_limit = MarketMirror._decision_boundary(
+                    as_of=decision_time,
+                    max_age=self.max_quote_age,
+                )
+                durable_snapshot = MarketMirror._decision_view_from_proven_history(
+                    store.events_at_committed_append_boundary(
+                        market_append_generation
+                    ),
+                    boundary=boundary,
+                    max_age=age_limit,
+                    source_ids=None,
+                    sports=None,
+                    event_ids=None,
+                    market_ids=None,
+                    selection_ids=None,
+                )
+                durable_market_state_sha256 = self._market_state_sha256_for_events(
+                    durable_snapshot.events
+                )
+                if durable_market_state_sha256 != market_state_sha256:
+                    raise LiveDecisionProgressError(
+                        "decision-visible market state is not durable at sampled "
+                        "append frontier"
+                    )
             finally:
                 if owns_store:
                     store.close()

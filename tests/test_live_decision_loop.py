@@ -3478,6 +3478,39 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed_observer.calls, 1)
             self.assertEqual(len(ledger.verified_records()), 2)
 
+    def test_custom_observer_cannot_publish_mirror_only_market_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+
+            def mirror_only_observer(updates):
+                updates.accept_persisted(event)
+                return object()
+
+            loop = self._loop(
+                workspace,
+                observer=mirror_only_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "market state is not durable at sampled append frontier",
+            ):
+                loop.run_cycle()
+
+            self.assertFalse(loop.progress_path.exists())
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                self.assertEqual(store.events(), [])
+                self.assertEqual(store.append_generation_hint(), 0)
+            finally:
+                store.close()
+            loop.close()
+
     def test_custom_observer_pending_restart_uses_append_frontier(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

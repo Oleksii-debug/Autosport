@@ -247,8 +247,12 @@ class MarketMirror:
         if not isinstance(event, MarketEvent):
             raise TypeError("event must be a MarketEvent")
 
-        prior = self.event_for_quote_key(event.source_id, event.quote_key)
-        accepted = store.append_batch_accepted((event,))
+        admitted_event = self._snapshot_event(event)
+        prior = self.event_for_quote_key(
+            admitted_event.source_id,
+            admitted_event.quote_key,
+        )
+        accepted = store.append_batch_accepted((admitted_event,))
         if accepted:
             if len(accepted) != 1:
                 raise RuntimeError("single market append returned invalid accepted cardinality")
@@ -261,8 +265,8 @@ class MarketMirror:
         # storage duplicate cannot advance live state: same-sequence retries remain
         # idempotent and lower sequences remain stale. Avoid an O(history) trusted
         # reread on the ordinary duplicate-poll path.
-        if prior is not None and prior.sequence >= event.sequence:
-            return self.apply(event)
+        if prior is not None and prior.sequence >= admitted_event.sequence:
+            return self.apply(admitted_event)
 
         # Storage intentionally treats a retry of one source-local sequence as the
         # same provider observation even when local receipt clocks changed. On a
@@ -273,9 +277,9 @@ class MarketMirror:
             (
                 (persisted, append_generation)
                 for persisted, append_generation in store.events_with_append_generation(
-                    event.event_id
+                    admitted_event.event_id
                 )
-                if persisted.dedupe_key == event.dedupe_key
+                if persisted.dedupe_key == admitted_event.dedupe_key
             ),
             None,
         )

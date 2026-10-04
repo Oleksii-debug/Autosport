@@ -25,6 +25,7 @@ from autosport.supervised_confirmation import SupervisedConfirmationAuthority
 
 _prepared = provider_tests._prepared
 _Transport = provider_tests._Transport
+_TimeoutTransport = provider_tests._TimeoutTransport
 _enabled_client = provider_tests._enabled_client
 _response = provider_tests._response
 SUBMITTED_AT = provider_tests.SUBMITTED_AT
@@ -55,6 +56,8 @@ def _confirmation(
     *,
     attempt_id: str,
     review_suffix: str = "exact",
+    confirmation_at: datetime = _CONFIRMATION_AT,
+    ttl_seconds: int = 30,
 ):
     workspace = Path(root).resolve()
     spec = betfair_execution_confirmation_spec(
@@ -67,7 +70,7 @@ def _confirmation(
     )
     authority = SupervisedConfirmationAuthority(
         workspace / CONFIRMATION_FILENAME,
-        clock=lambda: _CONFIRMATION_AT,
+        clock=lambda: confirmation_at,
     )
     review = authority.prepare_review(
         review_id=spec.review_id,
@@ -78,7 +81,7 @@ def _confirmation(
         approval_evidence_sha256=spec.approval_evidence_sha256,
         risk_evidence_sha256=spec.risk_evidence_sha256,
         review_payload=spec.review_payload,
-        ttl_seconds=30,
+        ttl_seconds=ttl_seconds,
     )
     receipt = authority.confirm_review(
         review_id=review.review_id,
@@ -311,3 +314,271 @@ def test_pre_admission_owner_stop_does_not_consume_confirmation() -> None:
             require_unconsumed=True,
         )
         assert binding.receipt.consumed_at is None
+
+
+def _audit_receipt(authority, review, receipt):
+    return authority.resolve_receipt_binding(
+        receipt_id=receipt.receipt_id,
+        expected_review_sha256=review.review_sha256,
+        require_unconsumed=False,
+    )
+
+
+def test_wrong_review_digest_fails_closed_and_leaves_receipt_unconsumed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-wrong-review-digest"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        authority, review, receipt = _confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _accepted_transport(action)
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="confirmation denied final provider send",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256="0" * 64,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.SUBMITTED
+        assert _audit_receipt(authority, review, receipt).receipt.consumed_at is None
+
+
+def test_confirmation_from_other_workspace_cannot_authorize_final_send() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-foreign-workspace-confirmation"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        foreign = Path(tmp) / "foreign-confirmation-workspace"
+        authority, review, receipt = _confirmation(
+            foreign,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _accepted_transport(action)
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="confirmation denied final provider send",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.SUBMITTED
+        assert _audit_receipt(authority, review, receipt).receipt.consumed_at is None
+
+
+def test_expired_confirmation_fails_closed_after_durable_submit() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-expired-confirmation"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        authority, review, receipt = _confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+            confirmation_at=datetime.fromisoformat(
+                "2026-09-19T08:00:02+00:00"
+            ),
+            ttl_seconds=1,
+        )
+        transport = _accepted_transport(action)
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="confirmation denied final provider send",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.SUBMITTED
+        assert _audit_receipt(authority, review, receipt).receipt.consumed_at is None
+
+
+def test_confirmation_cannot_outlive_underlying_supervised_approval() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-overlong-confirmation"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        authority, review, receipt = _confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+            ttl_seconds=3600,
+        )
+        transport = _accepted_transport(action)
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="confirmation denied final provider send",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.SUBMITTED
+        assert _audit_receipt(authority, review, receipt).receipt.consumed_at is None
+
+
+@pytest.mark.parametrize(
+    "authority_target",
+    ("confirmation_consumer", "verified_execution_view"),
+)
+def test_final_send_fails_closed_if_confirmation_authority_graph_changes(
+    monkeypatch,
+    authority_target: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = f"attempt-authority-drift-{authority_target}"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        authority, review, receipt = _confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _accepted_transport(action)
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        if authority_target == "confirmation_consumer":
+            monkeypatch.setattr(
+                "autosport.betfair_execution_confirmation."
+                "consume_betfair_execution_confirmation",
+                lambda *args, **kwargs: None,
+            )
+        else:
+            monkeypatch.setattr(
+                provider_tests.betfair_supervised_execution.RealExecutionLedger,
+                "verified_execution_view",
+                lambda *args, **kwargs: None,
+            )
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="authority changed|authority",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
+        assert _audit_receipt(authority, review, receipt).receipt.consumed_at is None
+
+
+def test_transport_ambiguity_after_confirmation_consumption_never_retransmits() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-confirmed-transport-ambiguity"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        authority, review, receipt = _confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _TimeoutTransport()
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+            confirmation_receipt_id=receipt.receipt_id,
+            confirmation_review_sha256=review.review_sha256,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert len(transport.calls) == 1
+        consumed = _audit_receipt(authority, review, receipt).receipt
+        assert consumed.consumed_at is not None
+        assert consumed.consumed_by is not None
+
+        restarted = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+            confirmation_receipt_id=receipt.receipt_id,
+            confirmation_review_sha256=review.review_sha256,
+        )
+        assert restarted.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert restarted.attempt_state is AttemptState.UNKNOWN
+        assert len(transport.calls) == 1
+        after_restart = _audit_receipt(authority, review, receipt).receipt
+        assert after_restart.consumed_by == consumed.consumed_by
+        assert after_restart.consumed_at == consumed.consumed_at

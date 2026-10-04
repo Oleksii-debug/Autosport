@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -737,6 +738,41 @@ class MarketMirrorTests(unittest.TestCase):
 
         self.assertEqual(mirror.revision, 1)
         self.assertEqual(mirror.snapshot(), (first,))
+
+    def test_persist_and_apply_uses_store_before_mirror_lock_order(self) -> None:
+        class RecordingRLock:
+            def __init__(self, name, order):
+                self._name = name
+                self._order = order
+                self._lock = threading.RLock()
+                self._local = threading.local()
+
+            def __enter__(self):
+                depth = getattr(self._local, "depth", 0)
+                self._lock.acquire()
+                if depth == 0:
+                    self._order.append(self._name)
+                self._local.depth = depth + 1
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                self._local.depth -= 1
+                self._lock.release()
+                return False
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            mirror = MarketMirror()
+            order = []
+            store._connection_lock = RecordingRLock("store", order)
+            mirror._lock = RecordingRLock("mirror", order)
+            try:
+                result = mirror.persist_and_apply(store, self.event())
+                self.assertEqual(result.status, MirrorUpdate.APPLIED)
+                self.assertEqual(order[:2], ["store", "mirror"])
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
 
     def test_revision_guard_blocks_durable_append_before_it_can_outrun_mirror(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

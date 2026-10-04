@@ -246,19 +246,16 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
             "10",
             placed_at="2026-09-21T08:00:00+00:00",
         )
-        canonical_ticket_type = type(first)
-        copies = 0
+        original_validate = (
+            portfolio_module._validate_open_ticket_economics_for_analysis
+        )
+        validations = 0
 
-        def copy_then_settle(*args, **kwargs):
-            nonlocal copies
-            snapshot = canonical_ticket_type(*args, **kwargs)
-            copies += 1
-            if copies == 1:
-                # The unsafe interleaving is deterministic:
-                # first was copied OPEN, then first and second settle before
-                # the second source ticket is inspected.  A naive one-pass
-                # copy would publish {first OPEN, second absent}, a state that
-                # never existed at one instant.
+        def validate_then_settle(ticket_id, stake, legs):
+            nonlocal validations
+            original_validate(ticket_id, stake, legs)
+            validations += 1
+            if validations == 1:
                 book.settle(
                     first.ticket_id,
                     {first_leg.quote_key},
@@ -269,11 +266,10 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
                     {second_leg.quote_key},
                     settled_at="2026-09-21T08:00:02+00:00",
                 )
-            return snapshot
 
         with patch(
-            "autosport.portfolio.PaperTicket",
-            side_effect=copy_then_settle,
+            "autosport.portfolio._validate_open_ticket_economics_for_analysis",
+            side_effect=validate_then_settle,
         ):
             with self.assertRaisesRegex(
                 ValueError,
@@ -304,6 +300,73 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "open ticket .* payout must be zero"):
             PortfolioEngine.affected_tickets([ticket], leg.quote_key)
 
+
+    def test_snapshot_rejects_paperticket_subclass_before_attribute_dispatch(self) -> None:
+        _book, ticket, leg = self._open_ticket()
+        canonical_ticket_type = type(ticket)
+
+        class HostilePaperTicket(canonical_ticket_type):
+            def __getattribute__(self, name):
+                if name in {
+                    "ticket_id",
+                    "stake",
+                    "legs",
+                    "placed_at",
+                    "status",
+                    "payout",
+                    "settled_at",
+                    "provider_source_ids",
+                }:
+                    raise AssertionError(
+                        "PaperTicket subclass attribute dispatch executed"
+                    )
+                return super().__getattribute__(name)
+
+        hostile = HostilePaperTicket(
+            ticket_id="hostile-ticket-subclass",
+            stake=Decimal("10"),
+            legs=(leg,),
+            placed_at="2026-09-21T08:00:00+00:00",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "ticket must be exact PaperTicket",
+        ):
+            PortfolioEngine.scenario_profit([hostile], {leg.quote_key})
+
+    def test_ticket_and_status_global_rebind_cannot_redirect_snapshot_root(self) -> None:
+        _book, ticket, leg = self._open_ticket()
+
+        class PoisonPaperTicket:
+            def __new__(cls, *args, **kwargs):
+                raise AssertionError("rebound PaperTicket constructor executed")
+
+        class PoisonTicketStatus:
+            OPEN = object()
+
+        with patch.object(
+            portfolio_module,
+            "PaperTicket",
+            PoisonPaperTicket,
+        ), patch.object(
+            portfolio_module,
+            "TicketStatus",
+            PoisonTicketStatus,
+        ):
+            self.assertEqual(
+                PortfolioEngine.scenario_profit([ticket], {leg.quote_key}),
+                Decimal("10"),
+            )
+            self.assertEqual(
+                PortfolioEngine.scenario_profit_settlements(
+                    [ticket],
+                    {leg.quote_key: "win"},
+                ),
+                Decimal("10"),
+            )
+            report = PortfolioEngine().analyse([ticket])
+            self.assertEqual(report.worst_case, Decimal("-10"))
+            self.assertEqual(report.best_case, Decimal("10"))
 
     def test_direct_scenario_profit_rejects_decimal_subclass_before_virtual_dispatch(self) -> None:
         class HostileDecimal(Decimal):

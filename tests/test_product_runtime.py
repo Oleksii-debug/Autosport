@@ -642,6 +642,58 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 object.__setattr__(runtime, "coordinator", original)
                 runtime.close()
 
+    def test_coordinator_and_desktop_type_dispatch_are_immutable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_autonomous_product_runtime(
+                workspace=Path(directory),
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            coordinator = runtime.coordinator
+            desktop = coordinator.desktop_consumer
+            try:
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product coordinator class member '__getattribute__' is immutable",
+                ):
+                    type.__setattr__(
+                        type(coordinator),
+                        "__getattribute__",
+                        object.__getattribute__,
+                    )
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product coordinator class identity is immutable",
+                ):
+                    object.__setattr__(
+                        coordinator,
+                        "__class__",
+                        type("ForgedCoordinator", (), {}),
+                    )
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product desktop class member '__getattribute__' is immutable",
+                ):
+                    type.__setattr__(
+                        type(desktop),
+                        "__getattribute__",
+                        object.__getattribute__,
+                    )
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product desktop class identity is immutable",
+                ):
+                    object.__setattr__(
+                        desktop,
+                        "__class__",
+                        type("ForgedDesktop", (), {}),
+                    )
+                self.assertEqual(runtime.status().source_id, "provider-a")
+            finally:
+                runtime.close()
+
     def test_runtime_and_collector_type_dispatch_are_immutable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_autonomous_product_runtime(

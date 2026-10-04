@@ -805,8 +805,10 @@ class ProphetXSessionLifecycle:
     def consume_effect_authority(
         self,
         admission: ProphetXLoginAdmission,
+        *,
+        now: datetime,
     ) -> bool:
-        """Consume one coordinator-issued login/renewal side-effect authority."""
+        """Consume one effect authority and durably bind its dispatch horizon."""
 
         if type(admission) is not ProphetXLoginAdmission:
             return False
@@ -818,6 +820,7 @@ class ProphetXSessionLifecycle:
         attempt = admission.attempt_id
         if attempt is None:
             return False
+        timestamp = _aware_utc(now, "now")
 
         with self._thread_lock:
             if (
@@ -852,6 +855,38 @@ class ProphetXSessionLifecycle:
                     )
                     if admission.retry_at != expected_retry:
                         return False
+                    self._require_monotonic_transition(current, timestamp)
+                    if (
+                        admission.action
+                        is ProphetXLoginAdmissionAction.START_RENEWAL
+                        and (
+                            current.access_expires_at is None
+                            or timestamp >= current.access_expires_at
+                        )
+                    ):
+                        return False
+
+                    dispatch_hold = max(
+                        current.slot_hold_until,
+                        timestamp + CONSERVATIVE_SESSION_SLOT_HOLD,
+                    )
+                    dispatched = ProphetXSessionSnapshot(
+                        state=current.state,
+                        generation=current.generation + 1,
+                        credential_revision=current.credential_revision,
+                        integration_role=current.integration_role,
+                        last_transition_at=timestamp,
+                        attempt_id=current.attempt_id,
+                        attempt_started_at=timestamp,
+                        session_lineage_id=current.session_lineage_id,
+                        access_expires_at=current.access_expires_at,
+                        slot_hold_started_at=timestamp,
+                        slot_hold_until=dispatch_hold,
+                        transient_failures=current.transient_failures,
+                        last_failure_class=current.last_failure_class,
+                        last_renewal_failure_class=current.last_renewal_failure_class,
+                    )
+                    self._write_state(dispatched)
                     self._issued_effect_admissions.pop(attempt, None)
                     return True
             except WorkspaceEconomicLockBusyError:

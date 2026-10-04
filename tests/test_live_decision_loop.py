@@ -1622,7 +1622,10 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     agent="test",
                     observed_ts=clock.value.isoformat(),
                     action="DIAGNOSTIC",
-                    payload={"kind": "unrelated"},
+                    payload={
+                        "kind": "unrelated",
+                        "blob": "x" * 20_000,
+                    },
                     context_hash="diagnostic-context",
                     decision_id="diagnostic-unrelated-record",
                 )

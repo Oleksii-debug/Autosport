@@ -461,6 +461,192 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 durable["bindings"][ticket.ticket_id]["settlement_intent"]
             )
 
+    def test_prepare_rejects_settlement_resolution_subclass(self) -> None:
+        class DerivedSettlementResolution(SettlementResolution):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                _runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            derived = DerivedSettlementResolution(
+                event_identity=f"provider-a:{leg.event_id}",
+                settlement_ref="derived-result",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="derived-evidence",
+                evidence_sha256="1" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "non-canonical settlement evidence",
+            ):
+                bridge.prepare_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(derived,),
+                    at="2026-09-19T21:20:00+00:00",
+                )
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            self.assertIsNone(
+                durable["bindings"][ticket.ticket_id]["settlement_intent"]
+            )
+
+    def test_prepare_future_evidence_rejects_validate_method_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                _runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            future = SettlementResolution(
+                event_identity=f"provider-a:{leg.event_id}",
+                settlement_ref="future-result",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="future-evidence",
+                evidence_sha256="2" * 64,
+                available_at="2026-09-19T21:21:00+00:00",
+            )
+            with patch.object(
+                SettlementResolution,
+                "validate",
+                lambda *_args, **_kwargs: None,
+            ):
+                with self.assertRaisesRegex(
+                    PaperSettlementLearningBridgeError,
+                    "failed causal validation",
+                ):
+                    bridge.prepare_settlement(
+                        paper_book_path=root / "paper_book.json",
+                        resolutions=(future,),
+                        at="2026-09-19T21:20:00+00:00",
+                    )
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            self.assertIsNone(
+                durable["bindings"][ticket.ticket_id]["settlement_intent"]
+            )
+
+    def test_reconcile_future_evidence_rejects_validate_method_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            book = PaperBook.load(root / "paper_book.json")
+            engine = SettlementEngine()
+            engine.record({leg.quote_key: "win"})
+            self.assertEqual(engine.settle_ready(book), [ticket.ticket_id])
+            book.save(root / "paper_book.json")
+            future = SettlementResolution(
+                event_identity=f"provider-a:{leg.event_id}",
+                settlement_ref="future-result",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="future-evidence",
+                evidence_sha256="3" * 64,
+                available_at="2026-09-19T21:21:00+00:00",
+            )
+            with patch.object(
+                SettlementResolution,
+                "validate",
+                lambda *_args, **_kwargs: None,
+            ):
+                with self.assertRaisesRegex(
+                    PaperSettlementLearningBridgeError,
+                    "failed causal validation",
+                ):
+                    bridge.reconcile_after_settlement(
+                        paper_book_path=root / "paper_book.json",
+                        resolutions=(future,),
+                        settled_ticket_ids=(ticket.ticket_id,),
+                        at="2026-09-19T21:20:00+00:00",
+                    )
+            self.assertIs(runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                durable["bindings"][ticket.ticket_id]["status"],
+                "BOUND",
+            )
+            self.assertIsNone(
+                durable["bindings"][ticket.ticket_id]["outbox"]
+            )
+
     def test_prepare_rejects_multiple_evidence_authorities_for_same_quote(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

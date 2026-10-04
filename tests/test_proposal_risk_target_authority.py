@@ -360,6 +360,40 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             ):
                 self._issue()
 
+    def test_nested_decision_ledger_snapshot_rebinding_fails_closed(self) -> None:
+        original = JsonlDecisionLedger.verified_snapshot
+
+        def fake(self: JsonlDecisionLedger) -> object:
+            return original(self)
+
+        with patch.object(
+            JsonlDecisionLedger,
+            "verified_snapshot",
+            fake,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "Decision Ledger verified_snapshot",
+            ):
+                self._issue()
+
+    def test_decision_record_serializer_rebinding_fails_closed(self) -> None:
+        original = proposal_target_authority.DecisionRecord.to_dict
+
+        def fake(self: object) -> object:
+            return original(self)
+
+        with patch.object(
+            proposal_target_authority.DecisionRecord,
+            "to_dict",
+            fake,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "DecisionRecord to_dict",
+            ):
+                self._issue()
+
     def test_internal_product_state_helper_rebinding_fails_closed(self) -> None:
         original = proposal_target_authority._current_product_state
 

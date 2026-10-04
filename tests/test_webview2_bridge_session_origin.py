@@ -354,3 +354,43 @@ def test_bridge_does_not_hold_document_trust_lock_across_long_close() -> None:
     assert errors == []
     with pytest.raises(WindowsWebBridgeTrustError):
         bridge.get_state()
+
+
+class _ThreadStartFailureWebview(_FakeWebview):
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_result: list[object] | None = None
+
+    def start(self, *, gui: str, **kwargs) -> None:
+        self.requested_gui = gui
+        assert self.window.events.initialized.fire("edgechromium") == [True]
+        self.window.events.before_load.fire()
+        self.close_result = self.window.events.closing.fire()
+
+
+def test_native_close_falls_back_synchronously_if_teardown_thread_cannot_start(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    fake = _ThreadStartFailureWebview()
+    controller = _Controller()
+    bridge = AutosportWebBridge(controller)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    def fail_thread_creation(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("synthetic thread creation failure")
+
+    monkeypatch.setattr(
+        "autosport.windows_webview_shell.threading.Thread",
+        fail_thread_creation,
+    )
+
+    assert launch_windows_shell(bridge, storage_path=tmp_path / "webview") == 0
+
+    # The callback must explicitly allow close only because canonical teardown
+    # completed synchronously. A thread-start exception must never be swallowed
+    # by pywebview into an implicit, unsafe native close.
+    assert fake.close_result == [True]
+    assert controller.events == [("close", None)]
+    assert fake.window.destroy_calls == 0

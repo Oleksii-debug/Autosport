@@ -11,6 +11,7 @@ from autosport.decision_ledger import (
     JsonlDecisionLedger,
 )
 from autosport.integrity import sha256_file
+from autosport.replay import ReplayExecutionReceipt
 from autosport.run_registry import RunRegistry
 from autosport.session import AutosportSession
 
@@ -46,6 +47,18 @@ class DatasetSessionTests(unittest.TestCase):
             self.assertRegex(
                 summary["replay_applied_event_payload_sequence_sha256"],
                 r"^[0-9a-f]{64}$",
+            )
+            self.assertIs(
+                type(result.replay.execution_receipt),
+                ReplayExecutionReceipt,
+            )
+            self.assertEqual(
+                summary["replay_execution_receipt_sha256"],
+                result.replay.execution_receipt.receipt_sha256,
+            )
+            self.assertEqual(
+                summary["replay_dataset_hash"],
+                result.replay.execution_receipt.dataset_hash,
             )
             self.assertFalse(summary["real_money_execution"])
             session.close()

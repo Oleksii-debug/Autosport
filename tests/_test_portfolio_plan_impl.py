@@ -1271,6 +1271,33 @@ class PortfolioPlanTests(unittest.TestCase):
         self.assertFalse(authority.terminal_space_exact)
         self.assertIn("exhaustive but not exact", plan.reason)
 
+        tampered_checks = tuple(
+            (
+                name,
+                ("7" * 64 if name == "routing_feasibility" else digest),
+            )
+            for name, digest in witness.execution_check_sha256s
+        )
+        tampered_witness = replace(
+            witness,
+            execution_check_sha256s=tampered_checks,
+        )
+        tampered = build_portfolio_plan(
+            book,
+            intents,
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+            terminal_state_evidence=tampered_witness,
+            market_outcome_authorities=(authority,),
+        )
+        self.assertEqual(tampered.action, PortfolioAction.WAIT)
+        self.assertEqual(tampered.stakes, (Decimal("0"), Decimal("0")))
+        self.assertIn(
+            "execution assumptions do not match verified completeness",
+            tampered.reason,
+        )
+
     def test_terminal_economics_fails_closed_if_paperbook_changes_during_proof(self) -> None:
         goal = self._goal()
         authority = self._betfair_authority()

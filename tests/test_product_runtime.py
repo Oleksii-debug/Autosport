@@ -250,6 +250,7 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 self.assertEqual(runtime.status().source_id, "provider-a")
             finally:
                 runtime.close()
+
     def test_builder_closure_binds_canonical_application_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -349,7 +350,12 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                             self.assertIs(current, original)
 
                 original_apply = desktop.apply_event
-                desktop.__dict__["apply_event"] = lambda _delta, _event: None
+                raw_desktop_state = object.__getattribute__(desktop, "__dict__")
+                raw_desktop_state["apply_event"] = lambda _delta, _event: None
+                raw_desktop_state["_product_authority_snapshot"] = tuple(
+                    (name, raw_desktop_state.get(name))
+                    for name in desktop._SNAPSHOT_FIELDS
+                )
                 with self.assertRaisesRegex(
                     ProductCompositionError,
                     "changed after composition",
@@ -360,7 +366,16 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                         delta.delta_id
                     )
                 )
-                desktop.__dict__["apply_event"] = original_apply
+                raw_desktop_state["apply_event"] = original_apply
+                raw_desktop_state.pop("_product_authority_snapshot", None)
+
+                raw_desktop_state["drain"] = lambda **_kwargs: ()
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "drain authority changed",
+                ):
+                    desktop.drain(as_of=clock.value)
+                raw_desktop_state.pop("drain")
 
                 self.assertTrue(runtime.collector.delta_store.append(delta))
                 self.assertEqual(

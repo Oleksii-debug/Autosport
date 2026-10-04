@@ -33,6 +33,8 @@ class _Controller:
 class _Window:
     def __init__(self, url: str = "http://127.0.0.1:41000/index.html") -> None:
         self.current_url = url
+        self.original_url = None
+        self.real_url = url
         self.events = SimpleNamespace(
             initialized=_Event(),
             before_load=_Event(),
@@ -76,6 +78,7 @@ class _FakeWebview:
 
     def create_window(self, *args, **kwargs):
         self.api = kwargs["js_api"]
+        self.window.original_url = args[1]
         return self.window
 
     def start(self, *, gui: str, **kwargs) -> None:
@@ -261,6 +264,63 @@ def test_launch_binds_bridge_before_pywebview_api_use(monkeypatch) -> None:
     assert fake.requested_gui == "edgechromium"
     assert fake.window.events.before_load.handlers
     assert controller.events == [("state", None), ("close", None)]
+
+
+class _ForeignFirstDocumentWebview(_FakeWebview):
+    def __init__(self) -> None:
+        super().__init__()
+        self.window.current_url = "https://foreign.example/"
+        self.window.real_url = "https://foreign.example/"
+        self.first_document_rejected = False
+
+    def start(self, *, gui: str, **kwargs) -> None:
+        del kwargs
+        self.requested_gui = gui
+        assert self.window.events.initialized.fire("edgechromium") == [True]
+        assert self.window.events.before_load.fire() == [False]
+        with pytest.raises(WindowsWebBridgeTrustError):
+            self.api.get_state()
+        self.first_document_rejected = True
+
+
+def test_first_remote_document_never_becomes_bridge_trust_on_first_load(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    fake = _ForeignFirstDocumentWebview()
+    controller = _Controller()
+    bridge = AutosportWebBridge(controller)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    with pytest.raises(
+        WindowsWebViewUnavailable,
+        match="lost its trusted WebView document binding",
+    ):
+        launch_windows_shell(bridge, storage_path=tmp_path / "webview")
+
+    assert fake.first_document_rejected is True
+    assert controller.events == [("close", None)]
+
+
+def test_bind_expected_url_rejects_tocou_navigation_before_initial_trust() -> None:
+    controller = _Controller()
+    bridge = AutosportWebBridge(controller)
+    window = _Window()
+
+    with pytest.raises(
+        WindowsWebBridgeTrustError,
+        match="initial packaged document URL",
+    ):
+        bridge._bind_trusted_window(
+            window,
+            expected_url="http://127.0.0.1:41000/other.html",
+        )
+
+    with pytest.raises(WindowsWebBridgeTrustError):
+        bridge.get_state()
+    assert controller.events == []
+    bridge._close_from_host()
+    assert controller.events == [("close", None)]
 
 
 def test_navigation_before_load_revokes_bridge_and_fails_launch(monkeypatch) -> None:

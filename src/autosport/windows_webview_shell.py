@@ -7,6 +7,7 @@ import threading
 import tempfile
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from .calculation_manual import ManualCalculationEvidence, ManualCalculationService
 from .causal_collector import GapState, SyncState
@@ -251,6 +252,55 @@ def _write_webview2_runtime_witness(path: Path, browser_version: str) -> None:
 
 def web_shell_index_path() -> Path:
     return Path(__file__).resolve().with_name(WEB_SHELL_DIRNAME) / WEB_SHELL_INDEX
+
+
+def _require_packaged_launch_document(
+    window: object,
+    *,
+    expected_original_url: str,
+) -> str:
+    """Bind bridge eligibility to pywebview's exact packaged local-page resolution."""
+
+    try:
+        original_url = getattr(window, "original_url")
+        real_url = getattr(window, "real_url")
+    except Exception as exc:
+        raise WindowsWebBridgeTrustError(
+            "The WebView bridge cannot verify packaged launch identity"
+        ) from exc
+    if (
+        type(original_url) is not str
+        or original_url != expected_original_url
+        or type(real_url) is not str
+        or not real_url
+        or real_url.strip() != real_url
+        or any(ord(char) < 0x20 for char in real_url)
+    ):
+        raise WindowsWebBridgeTrustError(
+            "The WebView bridge rejected packaged launch identity drift"
+        )
+    try:
+        parsed = urlsplit(real_url)
+        port = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise WindowsWebBridgeTrustError(
+            "The WebView bridge observed an invalid packaged launch URL"
+        ) from exc
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or port is None
+        or port < 1
+        or parsed.username is not None
+        or parsed.password is not None
+        or bool(parsed.query)
+        or bool(parsed.fragment)
+        or not parsed.path.endswith("/" + Path(expected_original_url).name)
+    ):
+        raise WindowsWebBridgeTrustError(
+            "The WebView bridge refused a non-local packaged launch URL"
+        )
+    return real_url
 
 
 def _safe_exception_text(exc: BaseException) -> str:
@@ -2211,7 +2261,12 @@ class AutosportWebBridge:
         with self._trust_lock:
             self._trust_revoked = True
 
-    def _bind_trusted_window(self, window: object) -> None:
+    def _bind_trusted_window(
+        self,
+        window: object,
+        *,
+        expected_url: str | None = None,
+    ) -> None:
         """Bind once to the exact first document seen before API injection.
 
         The same trusted URL may reload inside the same native window. Any other
@@ -2224,6 +2279,11 @@ class AutosportWebBridge:
                     "The WebView bridge launch trust is no longer active"
                 )
             current_url = self._current_window_url(window)
+            if expected_url is not None and current_url != expected_url:
+                self._trust_revoked = True
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge rejected the initial packaged document URL"
+                )
             if self._trusted_window is None:
                 self._trusted_window = window
                 self._trusted_url = current_url
@@ -2394,6 +2454,7 @@ def launch_windows_shell(
     api = _require_canonical_web_bridge_surface(
         AutosportWebBridge() if bridge is None else bridge
     )
+    expected_original_url = str(asset)
     canonical_bridge = True
     required_renderer = "edgechromium"
     renderer_observed = False
@@ -2454,7 +2515,11 @@ def launch_windows_shell(
                 trusted_document_violation = True
                 return False
         try:
-            api._bind_trusted_window(window)
+            expected_real_url = _require_packaged_launch_document(
+                window,
+                expected_original_url=expected_original_url,
+            )
+            api._bind_trusted_window(window, expected_url=expected_real_url)
         except WindowsWebBridgeTrustError:
             api._revoke_trust()
             trusted_document_violation = True

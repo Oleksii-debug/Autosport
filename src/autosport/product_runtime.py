@@ -2095,11 +2095,8 @@ def _build_autonomous_product_runtime_impl(
     _checkpoint_type,
     _coordinator_type,
     _start_transition_store_type,
-    _start_transition_pending,
-    _start_transition_begin,
-    _start_transition_mark_completed,
-    _start_transition_mark_rolled_back,
-    _start_transition_mark_recovery_required,
+    _start_transition_read,
+    _start_transition_write,
 ) -> AutonomousProductRuntime:
     """Construct or restore one canonical headless PAPER product runtime.
 
@@ -2763,9 +2760,23 @@ def _build_autonomous_product_runtime_impl(
         raw_start_transition_store = _start_transition_store_type(
             root / "product_start_transition.json"
         )
+        start_transition_path = object.__getattribute__(
+            raw_start_transition_store,
+            "path",
+        )
+        pending_start_phases = frozenset({"STARTING", "RECOVERY_REQUIRED"})
+
+        def read_product_start_transition():
+            return _start_transition_read(raw_start_transition_store)
+
+        def write_product_start_transition(payload):
+            _start_transition_write(start_transition_path, payload)
 
         def product_start_pending(_proxy):
-            return _start_transition_pending(raw_start_transition_store)
+            raw = read_product_start_transition()
+            if raw is None or raw["phase"] not in pending_start_phases:
+                return None
+            return dict(raw)
 
         def product_start_begin(
             _proxy,
@@ -2773,28 +2784,95 @@ def _build_autonomous_product_runtime_impl(
             collector_was_stopped,
             session_pre_state,
         ):
-            return _start_transition_begin(
-                raw_start_transition_store,
-                collector_was_stopped=collector_was_stopped,
-                session_pre_state=session_pre_state,
+            if type(collector_was_stopped) is not bool:
+                raise ProductCompositionError(
+                    "product START collector pre-state must be boolean"
+                )
+            if session_pre_state not in {"RUNNING", "PAUSED", "STOPPED"}:
+                raise ProductCompositionError(
+                    "product START session pre-state is invalid"
+                )
+            if collector_was_stopped != (session_pre_state == "STOPPED"):
+                raise ProductCompositionError(
+                    "product START pre-state authorities disagree"
+                )
+            current = read_product_start_transition()
+            if current is not None and current["phase"] in pending_start_phases:
+                raise ProductCompositionError(
+                    "unfinished product START transition requires recovery"
+                )
+            generation = 1 if current is None else int(current["generation"]) + 1
+            write_product_start_transition(
+                {
+                    "schema": "autosport.product_runtime_start_transition",
+                    "schema_version": 1,
+                    "generation": generation,
+                    "phase": "STARTING",
+                    "collector_was_stopped": collector_was_stopped,
+                    "session_pre_state": session_pre_state,
+                }
             )
+            verified = read_product_start_transition()
+            if (
+                verified is None
+                or verified["generation"] != generation
+                or verified["phase"] != "STARTING"
+            ):
+                raise ProductCompositionError(
+                    "durable product START transition publication could not be verified"
+                )
+            return generation
+
+        def mark_product_start_transition(
+            generation,
+            phase,
+            *,
+            allowed_from,
+        ):
+            current = read_product_start_transition()
+            if current is None or current["generation"] != generation:
+                raise ProductCompositionError(
+                    "durable product START transition generation changed"
+                )
+            current_phase = current["phase"]
+            if current_phase == phase:
+                return
+            if current_phase not in allowed_from:
+                raise ProductCompositionError(
+                    "durable product START transition phase changed unexpectedly"
+                )
+            updated = dict(current)
+            updated["phase"] = phase
+            write_product_start_transition(updated)
+            verified = read_product_start_transition()
+            if (
+                verified is None
+                or verified["generation"] != generation
+                or verified["phase"] != phase
+            ):
+                raise ProductCompositionError(
+                    "durable product START transition update could not be verified"
+                )
 
         def product_start_mark_completed(_proxy, generation):
-            return _start_transition_mark_completed(
-                raw_start_transition_store,
+            mark_product_start_transition(
                 generation,
+                "COMPLETED",
+                allowed_from=frozenset({"STARTING"}),
             )
 
         def product_start_mark_rolled_back(_proxy, generation):
-            return _start_transition_mark_rolled_back(
-                raw_start_transition_store,
+            mark_product_start_transition(
                 generation,
+                "ROLLED_BACK",
+                allowed_from=frozenset({"STARTING", "RECOVERY_REQUIRED"}),
             )
 
         def product_start_mark_recovery_required(_proxy, generation):
-            return _start_transition_mark_recovery_required(
-                raw_start_transition_store,
+            mark_product_start_transition(
                 generation,
+                "RECOVERY_REQUIRED",
+                allowed_from=frozenset({"STARTING", "RECOVERY_REQUIRED"}),
             )
 
         ProductStartTransitionStoreProxy = build_sealed_product_proxy_type(
@@ -2856,11 +2934,8 @@ def _bind_autonomous_product_runtime_builder(
     checkpoint_type,
     coordinator_type,
     start_transition_store_type,
-    start_transition_pending,
-    start_transition_begin,
-    start_transition_mark_completed,
-    start_transition_mark_rolled_back,
-    start_transition_mark_recovery_required,
+    start_transition_read,
+    start_transition_write,
 ):
     """Expose the product builder without mutable restart/delivery dispatch."""
 
@@ -2907,11 +2982,8 @@ def _bind_autonomous_product_runtime_builder(
             _checkpoint_type=checkpoint_type,
             _coordinator_type=coordinator_type,
             _start_transition_store_type=start_transition_store_type,
-            _start_transition_pending=start_transition_pending,
-            _start_transition_begin=start_transition_begin,
-            _start_transition_mark_completed=start_transition_mark_completed,
-            _start_transition_mark_rolled_back=start_transition_mark_rolled_back,
-            _start_transition_mark_recovery_required=start_transition_mark_recovery_required,
+            _start_transition_read=start_transition_read,
+            _start_transition_write=start_transition_write,
         )
 
     build_autonomous_product_runtime.__doc__ = implementation.__doc__
@@ -2945,11 +3017,8 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     DesktopDeltaCheckpointStore,
     _ProductContinuousSessionCoordinator,
     _ProductStartTransitionStore,
-    _ProductStartTransitionStore.pending,
-    _ProductStartTransitionStore.begin,
-    _ProductStartTransitionStore.mark_completed,
-    _ProductStartTransitionStore.mark_rolled_back,
-    _ProductStartTransitionStore.mark_recovery_required,
+    _read_product_start_transition,
+    atomic_write_json,
 )
 del _ProductDesktopDeltaConsumer
 del _ProductContinuousSessionCoordinator

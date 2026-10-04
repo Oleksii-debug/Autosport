@@ -99,3 +99,25 @@ def test_revocation_that_wins_fence_blocks_later_submission_authority(tmp_path) 
 
     assert _is_active(ledger, plan) is False
     assert ledger.verify_integrity() == 3
+
+
+def test_context_manager_rebind_cannot_bypass_revocation_fence(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, plan = _ledger_with_active_approval(tmp_path)
+    owner = WorkspaceEconomicLock(tmp_path)
+    owner.acquire()
+    try:
+        monkeypatch.setattr(
+            WorkspaceEconomicLock,
+            "__enter__",
+            lambda self: self,
+        )
+        with pytest.raises(
+            ExecutionLedgerBusyError,
+            match="fenced by active economic execution",
+        ):
+            _revoke(ledger, plan)
+        assert _is_active(ledger, plan) is True
+    finally:
+        owner.release()

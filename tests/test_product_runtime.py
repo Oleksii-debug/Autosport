@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.product_runtime as product_runtime_module
 from autosport.causal_collector import (
     CollectorDelta,
     DesktopDeltaCheckpointStore,
@@ -259,6 +260,71 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 )
             finally:
                 restored.close()
+
+    def test_restart_reader_module_rebind_cannot_authorize_generic_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            applied = _event()
+            delta = _delta(applied)
+            source = _Source(resolved_event=applied)
+
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                self.assertEqual(
+                    runtime.coordinator.desktop_consumer.drain(as_of=clock.value),
+                    (delta.delta_id,),
+                )
+            finally:
+                runtime.close()
+
+            generic_newer = MarketEvent.from_dict(
+                {
+                    **applied.to_dict(),
+                    "decimal_odds": "9.99",
+                    "sequence": 99,
+                    "observed_ts": "2026-09-20T13:58:05+00:00",
+                    "ingest_ts": "2026-09-20T13:58:06+00:00",
+                    "metadata": {"origin": "generic-import"},
+                }
+            )
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                self.assertTrue(store.append(generic_newer))
+            finally:
+                store.close()
+
+            def forged_restart_reader(**_kwargs):
+                return (generic_newer,)
+
+            with patch.object(
+                product_runtime_module,
+                "_desktop_applied_current_for_source",
+                forged_restart_reader,
+                create=True,
+            ):
+                restored = product_runtime_module.build_autonomous_product_runtime(
+                    workspace=root,
+                    source=source,
+                    clock=clock,
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+                try:
+                    snapshot = restored.mirror.snapshot()
+                    self.assertEqual(len(snapshot), 1)
+                    self.assertEqual(snapshot[0].dedupe_key, applied.dedupe_key)
+                    self.assertEqual(snapshot[0].sequence, 1)
+                    self.assertEqual(str(snapshot[0].decimal_odds), "1.80")
+                finally:
+                    restored.close()
 
     def test_restart_receipt_digest_ignores_runtime_event_serializer_rebind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

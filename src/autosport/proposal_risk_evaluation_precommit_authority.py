@@ -63,6 +63,44 @@ _LOCK_TYPE = WorkspaceEconomicLock
 _ENSURE_DURABLE_FILE = ensure_durable_file
 _ENSURE_DURABLE_FILE_CODE = getattr(_ENSURE_DURABLE_FILE, "__code__", None)
 
+_JSON_DUMPS = json.dumps
+_HASHLIB_SHA256 = hashlib.sha256
+_LEDGER_INTERNAL_METHOD_WITNESSES = tuple(
+    (
+        name,
+        JsonlDecisionLedger.__dict__[name],
+        getattr(
+            getattr(
+                JsonlDecisionLedger.__dict__[name],
+                "__func__",
+                JsonlDecisionLedger.__dict__[name],
+            ),
+            "__code__",
+            None,
+        ),
+    )
+    for name in (
+        "_require_utf8_text",
+        "_validate_json_value",
+        "_canonical_record",
+        "_validate_record",
+        "_json_object_without_duplicate_keys",
+        "_reject_non_finite_json",
+        "_append_validated",
+        "_verify_bytes",
+        "verified_snapshot",
+        "verify_integrity",
+    )
+)
+_DECISION_RECORD_METHOD_WITNESSES = tuple(
+    (
+        name,
+        DecisionRecord.__dict__[name],
+        getattr(DecisionRecord.__dict__[name], "__code__", None),
+    )
+    for name in ("__post_init__", "to_dict")
+)
+
 
 class ProductProposalRiskEvaluationPrecommitError(RuntimeError):
     """The target/scientific evaluation join cannot be product-resolved safely."""
@@ -324,12 +362,36 @@ def _require_dispatch() -> None:
         or ensure_durable_file is not _ENSURE_DURABLE_FILE
         or getattr(_ENSURE_DURABLE_FILE, "__code__", None)
         is not _ENSURE_DURABLE_FILE_CODE
+        or _JSON_DUMPS is not json.dumps
+        or _HASHLIB_SHA256 is not hashlib.sha256
         or ProductProposalRiskEvaluationPrecommit is not _BINDING_TYPE
         or _BINDING_FIELDS is not _BINDING_FIELDS_CANONICAL
     ):
         raise ProductProposalRiskEvaluationPrecommitError(
             "proposal risk evaluation precommit authority dispatch changed"
         )
+
+    for name, expected, code in _LEDGER_INTERNAL_METHOD_WITNESSES:
+        current = JsonlDecisionLedger.__dict__.get(name)
+        current_function = getattr(current, "__func__", current)
+        if (
+            current is not expected
+            or getattr(current_function, "__code__", None) is not code
+        ):
+            raise ProductProposalRiskEvaluationPrecommitError(
+                "proposal risk evaluation precommit Decision Ledger authority "
+                f"changed: {name}"
+            )
+    for name, expected, code in _DECISION_RECORD_METHOD_WITNESSES:
+        current = DecisionRecord.__dict__.get(name)
+        if (
+            current is not expected
+            or getattr(current, "__code__", None) is not code
+        ):
+            raise ProductProposalRiskEvaluationPrecommitError(
+                "proposal risk evaluation precommit DecisionRecord authority "
+                f"changed: {name}"
+            )
 
     helper_witnesses = globals().get(
         "_PROPOSAL_RISK_EVALUATION_PRECOMMIT_HELPER_WITNESSES"

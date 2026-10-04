@@ -1798,6 +1798,123 @@ def _build_autonomous_product_runtime_impl(
 
             product_outcome_authority = ProductSettlementOutcomeAuthorityProxy()
 
+        product_settlement_learning_handoff: SettlementLearningHandoff | None = None
+        if settlement_learning_handoff is not None:
+            declared_learning_authority_fields = getattr(
+                type(settlement_learning_handoff),
+                "_AUTHORITY_FIELDS",
+                frozenset(),
+            )
+            if type(declared_learning_authority_fields) is not frozenset or any(
+                type(name) is not str or not name
+                for name in declared_learning_authority_fields
+            ):
+                raise ProductCompositionError(
+                    "settlement learning _AUTHORITY_FIELDS must be a frozenset of non-empty strings"
+                )
+            learning_authority_snapshot: tuple[tuple[str, object], ...] = tuple(
+                (
+                    name,
+                    object.__getattribute__(settlement_learning_handoff, name),
+                )
+                for name in sorted(declared_learning_authority_fields)
+            )
+            learning_prepare = getattr(
+                settlement_learning_handoff,
+                "prepare_settlement",
+                None,
+            )
+            learning_reconcile = getattr(
+                settlement_learning_handoff,
+                "reconcile_after_settlement",
+                None,
+            )
+            if learning_prepare is not None and not callable(learning_prepare):
+                raise ProductCompositionError(
+                    "settlement learning prepare_settlement must be callable or absent"
+                )
+            if not callable(learning_reconcile):
+                raise ProductCompositionError(
+                    "settlement learning reconcile_after_settlement must be callable"
+                )
+
+            def require_settlement_learning_authority() -> None:
+                for name, expected in learning_authority_snapshot:
+                    try:
+                        current = object.__getattribute__(
+                            settlement_learning_handoff,
+                            name,
+                        )
+                    except AttributeError as exc:
+                        raise ProductCompositionError(
+                            f"settlement learning authority field {name!r} disappeared after composition"
+                        ) from exc
+                    if current is not expected:
+                        raise ProductCompositionError(
+                            f"settlement learning authority field {name!r} changed after composition"
+                        )
+
+            if learning_prepare is None:
+                class ProductSettlementLearningHandoffProxy:
+                    __slots__ = ()
+
+                    def reconcile_after_settlement(
+                        self,
+                        *,
+                        paper_book_path,
+                        resolutions,
+                        settled_ticket_ids,
+                        at,
+                    ):
+                        require_settlement_learning_authority()
+                        result = learning_reconcile(
+                            paper_book_path=paper_book_path,
+                            resolutions=resolutions,
+                            settled_ticket_ids=settled_ticket_ids,
+                            at=at,
+                        )
+                        require_settlement_learning_authority()
+                        return result
+            else:
+                class ProductSettlementLearningHandoffProxy:
+                    __slots__ = ()
+
+                    def prepare_settlement(
+                        self,
+                        *,
+                        paper_book_path,
+                        resolutions,
+                        at,
+                    ):
+                        require_settlement_learning_authority()
+                        result = learning_prepare(
+                            paper_book_path=paper_book_path,
+                            resolutions=resolutions,
+                            at=at,
+                        )
+                        require_settlement_learning_authority()
+                        return result
+
+                    def reconcile_after_settlement(
+                        self,
+                        *,
+                        paper_book_path,
+                        resolutions,
+                        settled_ticket_ids,
+                        at,
+                    ):
+                        require_settlement_learning_authority()
+                        result = learning_reconcile(
+                            paper_book_path=paper_book_path,
+                            resolutions=resolutions,
+                            settled_ticket_ids=settled_ticket_ids,
+                            at=at,
+                        )
+                        require_settlement_learning_authority()
+                        return result
+
+            product_settlement_learning_handoff = ProductSettlementLearningHandoffProxy()
+
         source_fetch_catalog_page = source.fetch_catalog_page
         source_fetch_deltas = source.fetch_deltas
 
@@ -2081,7 +2198,7 @@ def _build_autonomous_product_runtime_impl(
             invalidation_buffer=invalidations,
             dependency_index=dependencies,
             outcome_authority=product_outcome_authority,
-            settlement_learning_handoff=settlement_learning_handoff,
+            settlement_learning_handoff=product_settlement_learning_handoff,
             clock=resolved_clock,
             initial_bankroll=manifest.initial_bankroll,
         )

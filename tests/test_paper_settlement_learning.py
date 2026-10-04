@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -204,6 +205,38 @@ def _settle(
     return book, resolutions
 
 
+def _mutate_bridge_binding(root: Path, mutate) -> None:
+    path = root / "paper_learning_bridge.json"
+    state = json.loads(path.read_text(encoding="utf-8"))
+    binding = next(iter(state["bindings"].values()))
+    mutate(binding)
+    bare = {
+        "schema": state["schema"],
+        "schema_version": state["schema_version"],
+        "bindings": state["bindings"],
+    }
+    state["state_sha256"] = hashlib.sha256(
+        json.dumps(
+            bare,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    path.write_text(
+        json.dumps(
+            state,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 class PaperSettlementLearningBridgeTests(unittest.TestCase):
     def test_canonical_bridge_configuration_and_product_identity_survive_reopen(
         self,
@@ -308,6 +341,168 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 self.assertNotEqual(changed, baseline)
             finally:
                 PaperSettlementLearningBridge._AUTHORITY_FIELDS = original_fields
+
+    def test_reopen_rejects_binding_owned_by_another_economic_goal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            goal, risk, ticket, decision, environment, baseline, runtime, observation, action, bridge = _fixture(
+                root,
+                legs=(leg,),
+            )
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _mutate_bridge_binding(
+                root,
+                lambda binding: binding.__setitem__(
+                    "economic_goal_fingerprint",
+                    "0" * 64,
+                ),
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "durable bridge binding belongs to another economic goal",
+            ):
+                PaperSettlementLearningBridge(
+                    root / "paper_learning_bridge.json",
+                    paper_book_path=root / "paper_book.json",
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                    economic_goal=goal,
+                    risk_policy=risk,
+                )
+
+    def test_reopen_rejects_binding_owned_by_another_risk_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            goal, risk, ticket, decision, environment, baseline, runtime, observation, action, bridge = _fixture(
+                root,
+                legs=(leg,),
+            )
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _mutate_bridge_binding(
+                root,
+                lambda binding: binding.__setitem__("risk_fingerprint", "1" * 64),
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "durable bridge binding belongs to another risk policy",
+            ):
+                PaperSettlementLearningBridge(
+                    root / "paper_learning_bridge.json",
+                    paper_book_path=root / "paper_book.json",
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                    economic_goal=goal,
+                    risk_policy=risk,
+                )
+
+    def test_reopen_rejects_binding_from_another_agent_loop_episode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            goal, risk, ticket, decision, environment, baseline, runtime, observation, action, bridge = _fixture(
+                root,
+                legs=(leg,),
+            )
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _mutate_bridge_binding(
+                root,
+                lambda binding: binding.__setitem__("environment_id", "2" * 64),
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "durable bridge binding belongs to another AgentLoop episode",
+            ):
+                PaperSettlementLearningBridge(
+                    root / "paper_learning_bridge.json",
+                    paper_book_path=root / "paper_book.json",
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                    economic_goal=goal,
+                    risk_policy=risk,
+                )
+
+    def test_reopen_rejects_baseline_from_another_agent_loop_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            goal, risk, ticket, decision, environment, baseline, runtime, observation, action, bridge = _fixture(
+                root,
+                legs=(leg,),
+            )
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _mutate_bridge_binding(
+                root,
+                lambda binding: binding["baseline_checkpoint"].__setitem__(
+                    "policy_id",
+                    "other-policy",
+                ),
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "durable bridge baseline belongs to another AgentLoop identity",
+            ):
+                PaperSettlementLearningBridge(
+                    root / "paper_learning_bridge.json",
+                    paper_book_path=root / "paper_book.json",
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                    economic_goal=goal,
+                    risk_policy=risk,
+                )
 
     def test_outbox_survives_failure_before_agent_loop_ack(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

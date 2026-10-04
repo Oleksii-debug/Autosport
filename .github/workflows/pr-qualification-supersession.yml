@@ -34,10 +34,11 @@ permissions:
 # exact source workflow, so at most one running and one pending trusted sweep are needed.
 # CI/Windows also emit push or workflow_dispatch runs and Endurance emits manual runs;
 # concurrency is evaluated before the job-level pull_request guard, so those non-PR
-# events must be run-unique or a skipped controller could evict the useful pending PR
-# sweep. The source run id is scheduler isolation only and grants no cancellation authority.
+# events therefore share a fixed non-PR lane per exact source workflow. That lane
+# coalesces skipped non-PR controllers without evicting the separate useful PR sweep.
+# The non-PR lane is scheduler isolation only and grants no cancellation authority.
 concurrency:
-  group: pr-qualification-supersession-${{ github.event.workflow_run.workflow_id }}-${{ github.event.workflow_run.event == 'pull_request' && 'pr' || format('non-pr-{0}', github.event.workflow_run.id) }}
+  group: pr-qualification-supersession-${{ github.event.workflow_run.workflow_id }}-${{ github.event.workflow_run.event == 'pull_request' && 'pr' || 'non-pr' }}
   cancel-in-progress: false
 
 jobs:

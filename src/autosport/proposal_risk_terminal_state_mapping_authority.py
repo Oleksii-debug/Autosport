@@ -1155,6 +1155,15 @@ def resolve_product_proposal_risk_terminal_state_mapping(
         scenario_population,
     )
 
+    if (
+        len(scenario_population.member_scenario_ids) != len(precommit.planned_member_ids)
+        or len(scenario_population.member_mapping_sha256s)
+        != len(precommit.planned_member_ids)
+    ):
+        raise ProductProposalRiskTerminalStateMappingError(
+            "durable scenario population member vectors lost fixed-N cardinality"
+        )
+
     member_state_vector_sha256s: list[str] = []
     for index, (scenario_id, mapping_sha256) in enumerate(
         zip(
@@ -1237,7 +1246,6 @@ def resolve_product_proposal_risk_terminal_state_mapping(
         "grants_state_mutation_authority": False,
     }
     resolution_sha256 = _digest(result_material)
-    instance = object.__new__(_RESULT_TYPE)
     values = {
         "workspace_instance_id": precommit.workspace_instance_id,
         "precommit_binding_sha256": precommit.binding_sha256,
@@ -1253,9 +1261,18 @@ def resolve_product_proposal_risk_terminal_state_mapping(
         "member_state_vector_sha256s": tuple(member_state_vector_sha256s),
         "resolution_sha256": resolution_sha256,
     }
+    return _mint_result(values)
+
+
+def _mint_result(
+    values: dict[str, object],
+    *,
+    _bind_mapping=_BIND_MAPPING,
+) -> ProductProposalRiskTerminalStateMapping:
+    instance = object.__new__(_RESULT_TYPE)
     for name in _RESULT_FIELDS:
         object.__setattr__(instance, name, values[name])
-    _BIND_MAPPING(instance)
+    _bind_mapping(instance)
     return instance
 
 
@@ -1335,6 +1352,7 @@ _HELPER_WITNESSES_EXPECTED = tuple(
         "_candidate_mapping_material",
         "_derive_binding_from_parents",
         "_resolve_terminal_parents",
+        "_mint_result",
     )
 )
 

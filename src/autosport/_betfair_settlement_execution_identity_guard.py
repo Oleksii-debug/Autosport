@@ -220,4 +220,10 @@ _STORE_TYPE.ingest = _ingest_with_exact_authority
 _settlement._match_order = _match_order_with_execution_identity
 _settlement._require_attempt_receipt_owner = _require_owner_with_exact_ledger_dispatch
 
+# Install the credential-origin composition only after the settlement/currency and
+# exact execution-identity guards above own their canonical dispatch seams.
+from . import _betfair_settlement_credential_origin_guard as _credential_origin_guard
+
+del _credential_origin_guard
+
 __all__: list[str] = []

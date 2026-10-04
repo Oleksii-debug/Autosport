@@ -35,6 +35,7 @@ class _Window:
         self.events = SimpleNamespace(
             initialized=_Event(),
             before_load=_Event(),
+            closing=_Event(),
         )
 
     def get_current_url(self):
@@ -205,3 +206,72 @@ def test_navigation_before_load_revokes_bridge_and_fails_launch(monkeypatch) -> 
 
     assert fake.bridge_rejected_after_navigation is True
     assert controller.events == [("close", None)]
+
+
+class _FailingCloseController(_Controller):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_close = True
+
+    def close(self) -> None:
+        self.events.append(("close", None))
+        if self.fail_close:
+            raise RuntimeError("synthetic teardown failure")
+
+
+class _NativeClosingWebview(_FakeWebview):
+    def __init__(self, controller: _FailingCloseController | _Controller) -> None:
+        super().__init__()
+        self.controller = controller
+        self.first_close_result: list[object] | None = None
+        self.second_close_result: list[object] | None = None
+        self.state_after_failed_close: dict[str, object] | None = None
+
+    def start(self, *, gui: str, **kwargs) -> None:
+        self.requested_gui = gui
+        assert self.window.events.initialized.fire("edgechromium") == [True]
+        self.window.events.before_load.fire()
+        self.first_close_result = self.window.events.closing.fire()
+        if self.first_close_result == [False]:
+            # The trusted bridge must remain usable after a vetoed native close.
+            self.state_after_failed_close = self.api.get_state()
+            assert isinstance(self.controller, _FailingCloseController)
+            self.controller.fail_close = False
+            self.second_close_result = self.window.events.closing.fire()
+
+
+def test_native_window_close_finishes_canonical_teardown_before_allowing_close(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    controller = _Controller()
+    fake = _NativeClosingWebview(controller)
+    bridge = AutosportWebBridge(controller)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    assert launch_windows_shell(bridge, storage_path=tmp_path / "webview") == 0
+
+    assert fake.window.events.closing.handlers
+    assert fake.first_close_result == [True]
+    assert controller.events == [("close", None)]
+
+
+def test_native_window_close_vetoes_teardown_failure_and_preserves_trusted_retry(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    controller = _FailingCloseController()
+    fake = _NativeClosingWebview(controller)
+    bridge = AutosportWebBridge(controller)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    assert launch_windows_shell(bridge, storage_path=tmp_path / "webview") == 0
+
+    assert fake.first_close_result == [False]
+    assert fake.state_after_failed_close == {"ok": True, "state": {"status": "ok"}}
+    assert fake.second_close_result == [True]
+    assert controller.events == [
+        ("close", None),
+        ("state", None),
+        ("close", None),
+    ]

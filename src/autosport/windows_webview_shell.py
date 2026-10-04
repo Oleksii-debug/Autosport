@@ -1997,26 +1997,44 @@ class AutosportWebController:
 
     def close(self) -> None:
         with self._lock:
+            if getattr(self, "_close_complete", False):
+                return
+            if self._closing:
+                raise RuntimeError("Autosport close is already in progress")
             self._closing = True
 
-        # Request cooperative STOP first so the long-running product runtime can
-        # wind down while one-shot economic workers finish their committed tasks.
-        self.product_worker.request_stop("app_close")
+        try:
+            # Request cooperative STOP first so the long-running product runtime can
+            # wind down while one-shot economic workers finish their committed tasks.
+            self.product_worker.request_stop("app_close")
 
-        # These workers deliberately use daemon=False because replay/live/recovery
-        # can cross durable economic boundaries.  The only operator surface must
-        # therefore remain in close() until each committed task has terminalized.
-        for worker in (
-            self.replay_worker,
-            self.live_worker,
-            self.recovery_worker,
-            self.evidence_export_worker,
-        ):
-            self._wait_for_terminal_worker(worker)
+            # These workers deliberately use daemon=False because replay/live/recovery
+            # can cross durable economic boundaries.  The only operator surface must
+            # therefore remain in close() until each committed task has terminalized.
+            for worker in (
+                self.replay_worker,
+                self.live_worker,
+                self.recovery_worker,
+                self.evidence_export_worker,
+            ):
+                self._wait_for_terminal_worker(worker)
 
-        join_product = getattr(self.product_worker, "join", None)
-        if callable(join_product):
-            join_product()
+            join_product = getattr(self.product_worker, "join", None)
+            if callable(join_product):
+                join_product()
+        except BaseException as exc:
+            if not isinstance(exc, Exception):
+                raise
+            with self._lock:
+                self._closing = False
+                self._fail(
+                    "Не вдалося безпечно завершити фонову роботу. "
+                    "Вікно залишено відкритим; перевірте стан і повторіть завершення."
+                )
+            raise
+
+        with self._lock:
+            self._close_complete = True
 
 
 class AutosportWebBridge:
@@ -2120,11 +2138,14 @@ class AutosportWebBridge:
         return {"ok": True, "state": self._controller.state()}
 
     def close(self) -> None:
+        # Do not revoke the only trusted operator surface until canonical teardown
+        # has actually completed. If teardown fails, the caller receives the error
+        # and the still-bound window can present state and retry the safe close.
         with self._trust_lock:
             self._assert_trusted_session_locked()
+            self._controller.close()
             self._host_shutdown = True
             self._trust_revoked = True
-        self._controller.close()
 
     def _close_from_host(self) -> None:
         """Host-only finalizer; intentionally not exposed through pywebview API."""
@@ -2132,9 +2153,9 @@ class AutosportWebBridge:
         with self._trust_lock:
             if self._host_shutdown:
                 return
+            self._controller.close()
             self._host_shutdown = True
             self._trust_revoked = True
-        self._controller.close()
 
 
 def launch_windows_shell(
@@ -2208,6 +2229,20 @@ def launch_windows_shell(
             return
         trusted_document_observed = True
 
+    def close_trusted_window_safely() -> bool:
+        """Keep the native window present until canonical teardown is proven."""
+
+        if not canonical_bridge:
+            return True
+        try:
+            api._close_from_host()
+        except Exception:
+            # pywebview treats False from the blocking closing event as a veto.
+            # Controller.close() already published bounded operator-safe failure
+            # state and reset its retry fence.
+            return False
+        return True
+
     try:
         window = webview.create_window(
             title or text("ui.app.title"),
@@ -2225,6 +2260,10 @@ def launch_windows_shell(
             # injects window.pywebview into each document. Re-check every load so
             # a navigated document cannot inherit the privileged Python API.
             window.events.before_load += bind_trusted_document
+            # closing is also blocking. Safe teardown therefore finishes while the
+            # semantic operator window is still present, and a teardown failure
+            # vetoes native close instead of orphaning unresolved economic work.
+            window.events.closing += close_trusted_window_safely
         webview.start(
             gui=required_renderer,
             storage_path=str(storage_path),

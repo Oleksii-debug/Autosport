@@ -504,13 +504,116 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
                 "append_batch_accepted",
                 side_effect=forge_generation,
             ):
-                accepted = store._append_live_batch_accepted([event])
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "live append returned a non-canonical MarketEvent",
+                ):
+                    store._append_live_batch_accepted([event])
 
-            self.assertEqual(len(accepted), 1)
-            self.assertIs(type(accepted[0]), ForgingEvent)
             self.assertEqual(store.events(), [event])
             self.assertFalse(store.has_trusted_live_receipt(event))
             self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
+    def test_live_retry_hook_cannot_report_non_durable_event_as_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self._direct_event(sequence=1)
+
+            def lying_hook(events):
+                return list(events)
+
+            with patch.object(store, "append_batch_accepted", side_effect=lying_hook):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "without durable receipt authority",
+                ):
+                    store._append_live_batch_accepted([event])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
+    def test_live_retry_hook_cannot_report_event_outside_requested_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            requested = self._direct_event(sequence=1)
+            other = self._direct_event(sequence=2, odds="2.20")
+            self.assertEqual(store._append_live_batch_accepted([other]), [other])
+
+            def lying_hook(_events):
+                return [other]
+
+            with patch.object(store, "append_batch_accepted", side_effect=lying_hook):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "outside the requested batch",
+                ):
+                    store._append_live_batch_accepted([requested])
+
+            self.assertFalse(store.has_trusted_live_receipt(requested))
+            self.assertTrue(store.has_trusted_live_receipt(other))
+            store.close()
+
+    def test_live_retry_hook_cannot_rereport_preexisting_receipt_as_new_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self._direct_event(sequence=1)
+            self.assertEqual(store._append_live_batch_accepted([event]), [event])
+
+            def lying_hook(events):
+                return list(events)
+
+            with patch.object(store, "append_batch_accepted", side_effect=lying_hook):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "pre-existing receipt as newly accepted",
+                ):
+                    store._append_live_batch_accepted([event])
+
+            self.assertEqual(store.trusted_live_events(), [event])
+            store.close()
+
+    def test_live_retry_hook_cannot_mutate_accepted_payload_after_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self._direct_event(sequence=1)
+            canonical_append = store.append_batch_accepted
+
+            def mutating_hook(events):
+                accepted = canonical_append(events)
+                accepted[0].metadata["post_commit_edit"] = True
+                return accepted
+
+            with patch.object(store, "append_batch_accepted", side_effect=mutating_hook):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "outside the requested batch",
+                ):
+                    store._append_live_batch_accepted([event])
+
+            trusted = store.trusted_live_events()
+            self.assertEqual(len(trusted), 1)
+            self.assertNotIn("post_commit_edit", trusted[0].metadata)
+            store.close()
+
+    def test_live_retry_hook_must_preserve_list_return_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self._direct_event(sequence=1)
+            canonical_append = store.append_batch_accepted
+
+            def tuple_hook(events):
+                return tuple(canonical_append(events))
+
+            with patch.object(store, "append_batch_accepted", side_effect=tuple_hook):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "live append must return a list",
+                ):
+                    store._append_live_batch_accepted([event])
+
+            self.assertEqual(store.trusted_live_events(), [event])
             store.close()
 
     def test_live_receipt_authority_does_not_leak_into_reentrant_generic_batch(self) -> None:

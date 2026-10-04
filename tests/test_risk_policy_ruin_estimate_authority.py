@@ -52,6 +52,12 @@ def _observations(
     *,
     experiment_id: str = "experiment-1",
     planned_member_ids: tuple[str, ...] = MEMBERS,
+    research_protocol_sha256: str = "1" * 64,
+    dataset_snapshot_id: str = "dataset-1",
+    dataset_manifest_sha256: str = "2" * 64,
+    sampling_manifest_sha256: str = "4" * 64,
+    initial_capital_state_sha256: str = "5" * 64,
+    stake_policy_sha256: str = "6" * 64,
 ) -> ProductFixedNRiskObservationSet:
     values = (
         RiskPathObservation(
@@ -79,6 +85,13 @@ def _observations(
     result = object.__new__(ProductFixedNRiskObservationSet)
     for name, item in {
         "experiment_id": experiment_id,
+        "research_protocol_sha256": research_protocol_sha256,
+        "dataset_snapshot_id": dataset_snapshot_id,
+        "dataset_manifest_sha256": dataset_manifest_sha256,
+        "risk_method": "clopper-pearson-one-sided-fixed-n-iid-v1",
+        "sampling_manifest_sha256": sampling_manifest_sha256,
+        "initial_capital_state_sha256": initial_capital_state_sha256,
+        "stake_policy_sha256": stake_policy_sha256,
         "planned_member_ids": planned_member_ids,
         "qualification_sha256": "8" * 64,
         "occurrence_root_sha256": "9" * 64,
@@ -140,6 +153,31 @@ def test_membership_rebinding_fails_closed() -> None:
                 planned_member_ids=("run-001", "run-002", "other-run")
             ),
         )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "tampered_value"),
+    (
+        ("research_protocol_sha256", "f" * 64),
+        ("dataset_snapshot_id", "other-dataset"),
+        ("dataset_manifest_sha256", "f" * 64),
+        ("sampling_manifest_sha256", "f" * 64),
+        ("initial_capital_state_sha256", "f" * 64),
+        ("stake_policy_sha256", "f" * 64),
+    ),
+)
+def test_precommit_observation_root_rebinding_fails_closed(
+    field_name: str,
+    tampered_value: str,
+) -> None:
+    observations = _observations()
+    object.__setattr__(observations, field_name, tampered_value)
+
+    with pytest.raises(
+        ProductFixedNRiskPolicyEstimateError,
+        match="authority are inconsistent",
+    ):
+        _derive_policy_estimate_material(_precommit(), observations)
 
 
 def test_duplicate_observation_member_fails_closed() -> None:

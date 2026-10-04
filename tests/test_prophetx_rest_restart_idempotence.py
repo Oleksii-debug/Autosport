@@ -10,7 +10,10 @@ from threading import Event, Thread
 import unittest
 from unittest.mock import patch
 
-from autosport.ingestion import IngestionEngine
+from autosport.ingestion import (
+    CommittedIngestionHealthError,
+    IngestionEngine,
+)
 from autosport.ingestion_health import SourceHealthStore
 from autosport.market_bus import MarketEventBus
 from autosport.market_state_identity import (
@@ -443,6 +446,62 @@ class ProphetXRestRestartIdempotenceTests(unittest.TestCase):
             self.assertEqual(state.total_received, 4)
             self.assertEqual(state.total_accepted, 2)
             self.assertTrue(state.last_cursor.startswith("acquisition:2:sha256:"))
+        finally:
+            store.close()
+
+    def test_suppressed_duplicate_health_commit_failure_repairs_liveness_once(
+        self,
+    ) -> None:
+        provider = self._provider(
+            self._authority(create=True),
+            [_payload(), _payload()],
+            response_salts=["first", "second-raw"],
+        )
+        store = SQLiteMarketStore(self.market_path)
+        health = SourceHealthStore(self.health_path)
+        bus = MarketEventBus(store)
+        delivered = []
+        bus.subscribe(delivered.append)
+        engine = IngestionEngine(
+            bus,
+            health_store=health,
+            clock=_SequenceClock(
+                [
+                    "2026-10-04T12:00:10+00:00",
+                    "2026-10-04T12:00:11+00:00",
+                ]
+            ),
+        )
+        try:
+            first = engine.poll_once(provider)
+            self.assertEqual((first.received, first.accepted), (2, 2))
+            before_delivery = tuple(delivered)
+            real_record_success = health.record_success
+
+            with patch.object(
+                health,
+                "record_success",
+                side_effect=OSError("simulated health publication failure"),
+            ):
+                with self.assertRaises(CommittedIngestionHealthError) as raised:
+                    engine.poll_once(provider)
+
+            outcome = raised.exception.outcome
+            self.assertEqual((outcome.received, outcome.accepted), (2, 0))
+            self.assertTrue(outcome.cursor.startswith("acquisition:2:sha256:"))
+            self.assertEqual(tuple(delivered), before_delivery)
+            self.assertEqual(len(store.events()), 2)
+
+            repaired = outcome.record_health(health)
+            self.assertEqual(repaired.poll_count, 2)
+            self.assertEqual(repaired.total_received, 4)
+            self.assertEqual(repaired.total_accepted, 2)
+            self.assertEqual(repaired.last_cursor, outcome.cursor)
+
+            with self.assertRaisesRegex(RuntimeError, "cannot prove"):
+                outcome.record_health(health)
+
+            self.assertIs(health.record_success, real_record_success)
         finally:
             store.close()
 

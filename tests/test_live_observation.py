@@ -276,6 +276,14 @@ class LiveObservationTests(unittest.TestCase):
                 ),
                 2,
             )
+            invalidations = updates.drain(max_items=10)
+            self.assertFalse(invalidations.full_refresh_required)
+            self.assertFalse(invalidations.has_more)
+            self.assertIn(
+                (legacy.source_id, legacy.quote_key),
+                invalidations.changed_keys,
+            )
+            self.assertEqual(len(invalidations.changed_keys), 3)
 
     def test_worker_refuses_second_start_until_terminal_message_is_consumed(self):
         # Build the real observation result outside the worker timing window. This

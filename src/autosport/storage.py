@@ -1234,23 +1234,11 @@ class SQLiteMarketStore:
         committed_head, committed_state_sha256 = (
             self._append_authority_committed_tip(history)
         )
-        database_head = self._positive_append_generation_head()
-        if database_head != committed_head:
-            raise MonotonicAuthorityRollbackError(
-                "positive market append chronology is missing, forged, or unproven"
-            )
-        return committed_head, committed_state_sha256
 
-    def _require_product_issued_positive_history(
-        self,
-        authority: MonotonicWorkspaceAuthority,
-    ) -> None:
-        # Cutoff issuance runs this while holding BEGIN IMMEDIATE, so an
-        # uncooperating direct SQLite writer cannot change the corpus between this
-        # proof and cutoff publication.
-        committed_head, committed_state_sha256 = (
-            self._recover_positive_append_authority(authority)
-        )
+        # A matching numeric head is not sufficient authority.  A direct SQLite
+        # writer can coherently rewrite an already-issued positive MarketEvent while
+        # preserving every generation number.  Recompute the complete product-owned
+        # chain before any caller is allowed to extend or rely on that authority.
         entries = self._validated_positive_append_entries()
         observed_state_sha256 = self._append_state_from_entries(
             entries,
@@ -1264,6 +1252,17 @@ class SQLiteMarketStore:
             raise MonotonicAuthorityRollbackError(
                 "positive market append chronology is missing, forged, or unproven"
             )
+        return committed_head, committed_state_sha256
+
+    def _require_product_issued_positive_history(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+    ) -> None:
+        # Cutoff issuance runs this while holding BEGIN IMMEDIATE, so an
+        # uncooperating direct SQLite writer cannot change the corpus between this
+        # proof and cutoff publication.  _recover_positive_append_authority performs
+        # the full baseline + positive-chain digest proof, not merely a head check.
+        self._recover_positive_append_authority(authority)
 
     def _replay_cutoff_authority(self) -> MonotonicWorkspaceAuthority:
         database_path = self.path.absolute()

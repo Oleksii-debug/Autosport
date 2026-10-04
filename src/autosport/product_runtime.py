@@ -1877,6 +1877,7 @@ def _build_autonomous_product_runtime_impl(
     _runtime_lease_type,
     _source_resolver_identity_fn,
     _settlement_authority_identity_fn,
+    _settlement_learning_handoff_identity_fn,
     _manifest_store_type,
     _lifecycle_type,
     _market_store_type,
@@ -1938,11 +1939,17 @@ def _build_autonomous_product_runtime_impl(
             source_id=source_id,
             outcome_authority=outcome_authority,
         )
+        settlement_learning_handoff_identity = (
+            _settlement_learning_handoff_identity_fn(
+                handoff=settlement_learning_handoff,
+            )
+        )
         manifest = _manifest_store_type(root / "product_composition.json").load_or_create(
             source_id=source_id,
             initial_bankroll=normalized_bankroll,
             source_resolver_identity=source_resolver_identity,
             settlement_authority_identity=settlement_authority_identity,
+            settlement_learning_handoff_identity=settlement_learning_handoff_identity,
         )
 
         declared_source_authority_fields = getattr(
@@ -2059,6 +2066,16 @@ def _build_autonomous_product_runtime_impl(
                 )
 
             def require_settlement_learning_authority() -> None:
+                current_identity = _settlement_learning_handoff_identity_fn(
+                    handoff=settlement_learning_handoff,
+                )
+                if (
+                    current_identity
+                    != manifest.settlement_learning_handoff_identity
+                ):
+                    raise ProductCompositionError(
+                        "settlement learning handoff authority changed after product composition"
+                    )
                 for name, expected in learning_authority_snapshot:
                     try:
                         current = object.__getattribute__(
@@ -2456,6 +2473,7 @@ def _bind_autonomous_product_runtime_builder(
     runtime_lease_type,
     source_resolver_identity_fn,
     settlement_authority_identity_fn,
+    settlement_learning_handoff_identity_fn,
     manifest_store_type,
     lifecycle_type,
     market_store_type,
@@ -2501,6 +2519,7 @@ def _bind_autonomous_product_runtime_builder(
             _runtime_lease_type=runtime_lease_type,
             _source_resolver_identity_fn=source_resolver_identity_fn,
             _settlement_authority_identity_fn=settlement_authority_identity_fn,
+            _settlement_learning_handoff_identity_fn=settlement_learning_handoff_identity_fn,
             _manifest_store_type=manifest_store_type,
             _lifecycle_type=lifecycle_type,
             _market_store_type=market_store_type,
@@ -2533,6 +2552,7 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     _ProductRuntimeLease,
     _source_resolver_identity,
     _settlement_authority_identity,
+    _settlement_learning_handoff_identity,
     _ManifestStore,
     ContinuousEventLifecycle,
     SQLiteMarketStore,

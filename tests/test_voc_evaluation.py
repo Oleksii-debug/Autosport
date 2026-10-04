@@ -463,7 +463,14 @@ class _FixtureOutcomeScoreAuthority:
 
     def resolve(self, evaluation_id, *, as_of):
         value = self._records.get(evaluation_id)
-        if value is None or value.available_at > as_of:
+        if value is None:
+            return None
+        # Preserve the fixture as a non-authoritative transport seam for hostile
+        # return values. The production resolver owns exact result-type admission;
+        # do not dispatch fields on a noncanonical object before that gate runs.
+        if type(value) is not OutcomeDerivedVOCScore:
+            return value
+        if value.available_at > as_of:
             return None
         return value
 

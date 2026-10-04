@@ -562,6 +562,59 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_replay_rejects_temp_history_shadow_even_when_bytes_match(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                event = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(event))
+                expected = self.semantic_events(self.replay(store))
+
+                store.connection.execute(
+                    """CREATE TEMP TABLE market_events (
+                        dedupe_key TEXT PRIMARY KEY,
+                        quote_key TEXT NOT NULL,
+                        event_id TEXT NOT NULL,
+                        market_id TEXT NOT NULL,
+                        selection_id TEXT NOT NULL,
+                        decimal_odds TEXT NOT NULL,
+                        observed_ts TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL
+                    )"""
+                )
+                store.connection.execute(
+                    """INSERT INTO temp.market_events
+                       SELECT * FROM main.market_events"""
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "market_events schema is not canonical: temporary schema objects are not allowed",
+                ):
+                    self.replay(store)
+
+                self.assertEqual(
+                    tuple(
+                        row[0]
+                        for row in store.connection.execute(
+                            "SELECT payload_json FROM main.market_events"
+                        ).fetchall()
+                    ),
+                    tuple(
+                        storage_module._canonical_payload(item)
+                        for item in (event,)
+                    ),
+                )
+                self.assertEqual(len(expected), 1)
+            finally:
+                store.close()
+
     def test_late_backdated_append_cannot_rewrite_frozen_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

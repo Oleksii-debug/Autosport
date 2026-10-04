@@ -44,8 +44,11 @@ _STORE_TYPE = _settlement.BetfairSettlementRevisionStore
 _ORIGINAL_INGEST = _STORE_TYPE.ingest
 _ORIGINAL_INGEST_CODE = getattr(_ORIGINAL_INGEST, "__code__", None)
 _ACTION_TO_DICT = vars(_ACTION_TYPE).get("to_dict")
+_ACTION_TO_DICT_CODE = getattr(_ACTION_TO_DICT, "__code__", None)
 _CAPTURE_VERIFY = vars(_CAPTURE_TYPE).get("assert_authoritative")
+_CAPTURE_VERIFY_CODE = getattr(_CAPTURE_VERIFY, "__code__", None)
 _CAPTURE_FINGERPRINT = vars(_CAPTURE_TYPE).get("_authority_fingerprint")
+_CAPTURE_FINGERPRINT_CODE = getattr(_CAPTURE_FINGERPRINT, "__code__", None)
 _ORIGINAL_MATCH_ORDER = _settlement._match_order
 _ORIGINAL_MATCH_ORDER_CODE = getattr(_ORIGINAL_MATCH_ORDER, "__code__", None)
 _ORIGINAL_REQUIRE_OWNER = _settlement._require_attempt_receipt_owner
@@ -61,16 +64,24 @@ _LEDGER_DISPATCH_NAMES = (
 _LEDGER_DISPATCH = {
     name: vars(_LEDGER_TYPE).get(name) for name in _LEDGER_DISPATCH_NAMES
 }
+_LEDGER_DISPATCH_CODE = {
+    name: getattr(value, "__code__", None)
+    for name, value in _LEDGER_DISPATCH.items()
+}
 
 if (
     _ORIGINAL_INGEST_CODE is None
     or not callable(_ACTION_TO_DICT)
+    or _ACTION_TO_DICT_CODE is None
     or not callable(_CAPTURE_VERIFY)
+    or _CAPTURE_VERIFY_CODE is None
     or not callable(_CAPTURE_FINGERPRINT)
+    or _CAPTURE_FINGERPRINT_CODE is None
     or _ORIGINAL_MATCH_ORDER_CODE is None
     or _ORIGINAL_REQUIRE_OWNER_CODE is None
     or _CANONICAL_TIME_CODE is None
     or any(value is None for value in _LEDGER_DISPATCH.values())
+    or any(value is None for value in _LEDGER_DISPATCH_CODE.values())
 ):
     raise RuntimeError("Betfair settlement execution identity dispatch is unavailable")
 
@@ -80,8 +91,12 @@ def _require_dispatch() -> None:
         _STORE_TYPE.ingest is not _ingest_with_exact_authority
         or getattr(_ORIGINAL_INGEST, "__code__", None) is not _ORIGINAL_INGEST_CODE
         or vars(_ACTION_TYPE).get("to_dict") is not _ACTION_TO_DICT
+        or getattr(_ACTION_TO_DICT, "__code__", None) is not _ACTION_TO_DICT_CODE
         or vars(_CAPTURE_TYPE).get("assert_authoritative") is not _CAPTURE_VERIFY
+        or getattr(_CAPTURE_VERIFY, "__code__", None) is not _CAPTURE_VERIFY_CODE
         or vars(_CAPTURE_TYPE).get("_authority_fingerprint") is not _CAPTURE_FINGERPRINT
+        or getattr(_CAPTURE_FINGERPRINT, "__code__", None)
+        is not _CAPTURE_FINGERPRINT_CODE
         or _settlement.ExecutionAction is not _ACTION_TYPE
         or _settlement.BetfairExecutionReadbackEnvelope is not _CAPTURE_TYPE
         or _settlement.BetfairReadOnlyError is not _CAPTURE_ERROR
@@ -101,6 +116,7 @@ def _require_dispatch() -> None:
         or _settlement.ExecutionLedgerError is not _LEDGER_ERROR
         or any(
             vars(_LEDGER_TYPE).get(name) is not expected
+            or getattr(expected, "__code__", None) is not _LEDGER_DISPATCH_CODE[name]
             for name, expected in _LEDGER_DISPATCH.items()
         )
     ):

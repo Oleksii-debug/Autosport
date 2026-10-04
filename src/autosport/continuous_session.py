@@ -523,6 +523,44 @@ def _bind_continuous_state_settlement_integrity(method):
     return guarded
 
 
+def _bind_continuous_state_read_settlement_integrity(method):
+    """Bind pending-outcome digest reproof against later module-global rebinding."""
+
+    canonical_resolution_type = SettlementResolution
+    canonical_json_dumps = json.dumps
+    canonical_sha256 = hashlib.sha256
+
+    def pending_outcomes_digest(item: dict[str, object]) -> str:
+        resolution = canonical_resolution_type(
+            event_identity=item["event_identity"],
+            settlement_ref=item["settlement_ref"],
+            quote_outcomes=dict(item["quote_outcomes"]),
+            evidence_id=item["evidence_id"],
+            evidence_sha256=item["evidence_sha256"],
+            available_at=item["available_at"],
+        )
+        payload = canonical_json_dumps(
+            dict(sorted(resolution.quote_outcomes.items())),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return canonical_sha256(payload).hexdigest()
+
+    def guarded(self):
+        return method(
+            self,
+            _pending_outcomes_digest=pending_outcomes_digest,
+        )
+
+    guarded.__name__ = method.__name__
+    guarded.__qualname__ = method.__qualname__
+    guarded.__doc__ = method.__doc__
+    guarded.__annotations__ = method.__annotations__
+    return guarded
+
+
 class _ContinuousSessionState:
     _SCHEMA = "autosport.continuous_session"
     _VERSION = 4
@@ -770,7 +808,12 @@ class _ContinuousSessionState:
             values.append(normalized)
         return tuple(values)
 
-    def _read(self) -> dict[str, Any]:
+    @_bind_continuous_state_read_settlement_integrity
+    def _read(
+        self,
+        *,
+        _pending_outcomes_digest: Callable[[dict[str, object]], str],
+    ) -> dict[str, Any]:
         try:
             raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:
@@ -855,18 +898,10 @@ class _ContinuousSessionState:
                 raise ContinuousSessionError(
                     "pending settlement resolution is not bound to durable evidence"
                 )
-            pending_resolution = SettlementResolution(
-                event_identity=item["event_identity"],
-                settlement_ref=item["settlement_ref"],
-                quote_outcomes=dict(item["quote_outcomes"]),
-                evidence_id=item["evidence_id"],
-                evidence_sha256=item["evidence_sha256"],
-                available_at=item["available_at"],
-            )
             if (
                 outcome_digests.get(item["evidence_id"]) is None
                 or outcome_digests[item["evidence_id"]]
-                != _settlement_outcomes_sha256(pending_resolution)
+                != _pending_outcomes_digest(item)
             ):
                 raise ContinuousSessionError(
                     "pending settlement outcome digest conflicts with durable evidence"

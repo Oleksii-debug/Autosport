@@ -7,12 +7,14 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+from autosport.domain import MarketEvent
 from autosport.ingestion_health import SourceHealthStore
 from autosport.live_observation import (
     OneShotObservationWorker,
     observe_workspace_once,
     poll_open_market_store_once,
 )
+from autosport.market_bus import MarketEventBus
 from autosport.market_mirror import MarketMirror
 from autosport.market_mirror_runtime import BoundedMirrorInvalidationBuffer
 from autosport.providers import InMemoryProvider, ProviderQuote
@@ -169,6 +171,79 @@ class LiveObservationTests(unittest.TestCase):
                 self.assertEqual(updates.pending_count, 2)
             finally:
                 store.close()
+
+    def test_reused_workspace_buffer_reconciles_missed_trusted_current_and_invalidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "market.db"
+            bootstrap_store = SQLiteMarketStore(path)
+            try:
+                mirror = MarketMirror.from_live_store(bootstrap_store)
+                updates = BoundedMirrorInvalidationBuffer(mirror)
+                self.assertEqual(updates.reconcile_trusted_store(bootstrap_store), ())
+            finally:
+                bootstrap_store.close()
+
+            external = MarketEvent(
+                event_id="match-1",
+                market_id="winner",
+                selection_id="player-c",
+                decimal_odds=Decimal("3.10"),
+                observed_ts="2026-09-12T20:00:01+00:00",
+                source_id="live-fixture",
+                sequence=10,
+                status="open",
+                source_ts="2026-09-12T20:00:00+00:00",
+                ingest_ts=_RECEIVE_TIME,
+            )
+            writer = SQLiteMarketStore(path)
+            try:
+                self.assertEqual(
+                    MarketEventBus(writer)._publish_many_live_ingestion([external]),
+                    1,
+                )
+            finally:
+                writer.close()
+
+            with patch.object(
+                SQLiteMarketStore,
+                "trusted_live_events",
+                side_effect=AssertionError(
+                    "workspace reconciliation must not replay append-only history"
+                ),
+            ):
+                result = observe_workspace_once(
+                    root,
+                    self._provider(),
+                    max_items=10,
+                    clock=lambda: _RECEIVE_TIME,
+                    mirror_updates=updates,
+                )
+
+            self.assertEqual(result.stats.accepted, 2)
+            self.assertEqual(
+                {event.selection_id for event in result.current_quotes},
+                {"player-a", "player-b", "player-c"},
+            )
+            self.assertEqual(
+                {
+                    event.selection_id
+                    for event in mirror.snapshot()
+                    if event.source_id == "live-fixture"
+                },
+                {"player-a", "player-b", "player-c"},
+            )
+            dirty = updates.drain(max_items=10)
+            self.assertFalse(dirty.full_refresh_required)
+            self.assertFalse(dirty.has_more)
+            self.assertEqual(
+                set(dirty.changed_keys),
+                {
+                    ("live-fixture", "match-1|winner|player-a"),
+                    ("live-fixture", "match-1|winner|player-b"),
+                    ("live-fixture", "match-1|winner|player-c"),
+                },
+            )
 
     def test_live_ingestion_receipt_time_fences_historical_replay(self):
         with tempfile.TemporaryDirectory() as tmp:

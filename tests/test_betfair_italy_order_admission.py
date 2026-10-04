@@ -422,3 +422,28 @@ def test_result_diagnostic_state_slots_are_class_sealed():
     ):
         with pytest.raises(TypeError, match="authority surface is sealed"):
             setattr(ItalianLimitBatchAdmission, name, value)
+
+
+def test_result_diagnostic_state_is_instance_immutable():
+    result = evaluate_italian_limit_batch((I(size="1.50"),))
+    assert result.state is ItalianLimitAdmissionState.REJECTED
+
+    with pytest.raises(AttributeError):
+        object.__setattr__(
+            result,
+            "state",
+            ItalianLimitAdmissionState.RULESET_SATISFIED_UNBOUND,
+        )
+    with pytest.raises(AttributeError):
+        object.__setattr__(result, "reason_codes", ())
+    with pytest.raises(AttributeError):
+        object.__setattr__(
+            result,
+            "preselected_returns_eur",
+            (Decimal("4"),),
+        )
+
+    assert result.state is ItalianLimitAdmissionState.REJECTED
+    assert result.ruleset_satisfied_unbound is False
+    assert "I0:BACK_STAKE_BELOW_EUR_2" in result.reason_codes
+    assert result.execution_authorized is False

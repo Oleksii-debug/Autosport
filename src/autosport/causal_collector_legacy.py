@@ -922,8 +922,21 @@ class CanonicalDesktopApplication:
         _market_store_type,
         _market_events,
         _dedupe_getter,
+        _application_store_type,
+        _state_progress,
+        _state_prepare,
+        _state_health_before,
+        _state_health_after,
+        _state_mark_market_applied,
+        _state_mark_health_applied,
+        _state_mark_complete,
+        _state_receipt,
     ) -> DesktopApplicationReceipt:
         delta.validate()
+        if type(self._state) is not _application_store_type:
+            raise ApplicationReceiptError(
+                "canonical application lacks canonical journal authority"
+            )
         if type(event) is not _market_event_type:
             raise DeltaConflictError(
                 "canonical desktop application requires an exact MarketEvent"
@@ -938,7 +951,7 @@ class CanonicalDesktopApplication:
         if digest != delta.canonical_event_digest:
             raise DeltaConflictError("canonical market event digest conflicts with collector delta")
 
-        progress = self._state.progress(delta)
+        progress = _state_progress(self._state, delta)
         if progress is None:
             prepared_at = self.clock()
             prepared = _instant(prepared_at, "prepared_at")
@@ -954,15 +967,15 @@ class CanonicalDesktopApplication:
                 health_before=health_before,
             )
             health_after = outcome.health_before.after_success(outcome).to_state()
-            progress = self._state.prepare(
+            progress = _state_prepare(self._state,
                 delta,
                 prepared_at=prepared_at,
                 health_before=health_before,
                 health_after=health_after,
             )
 
-        expected_before = self._state.health_before(delta)
-        expected_after = self._state.health_after(delta)
+        expected_before = _state_health_before(self._state, delta)
+        expected_after = _state_health_after(self._state, delta)
         reproved_outcome = self._outcome(
             delta,
             event,
@@ -1025,22 +1038,22 @@ class CanonicalDesktopApplication:
                 raise ApplicationReceiptError(
                     "canonical application market effect is not durably provable"
                 )
-            self._state.mark_market_applied(delta)
-            progress = self._state.progress(delta)
+            _state_mark_market_applied(self._state, delta)
+            progress = _state_progress(self._state, delta)
             if progress is None:
                 raise ApplicationReceiptError("canonical application progress disappeared")
 
         if not progress.get("health_applied"):
             current = self.health_store.get(delta.source_id)
             if current == expected_after:
-                self._state.mark_health_applied(delta)
+                _state_mark_health_applied(self._state, delta)
             elif current == expected_before:
                 recorded = reproved_outcome.record_health(self.health_store)
                 if recorded != expected_after:
                     raise ApplicationReceiptError(
                         "canonical health authority returned an unexpected post-state"
                     )
-                self._state.mark_health_applied(delta)
+                _state_mark_health_applied(self._state, delta)
             else:
                 raise ApplicationReceiptError(
                     "canonical source health changed during desktop application; refusing ambiguous retry"
@@ -1097,8 +1110,8 @@ class CanonicalDesktopApplication:
                 "canonical market effect changed before application completion"
             )
 
-        self._state.mark_complete(delta, completed_at=completed_at)
-        receipt = self._state.receipt(delta)
+        _state_mark_complete(self._state, delta, completed_at=completed_at)
+        receipt = _state_receipt(self._state, delta)
         if receipt is None:
             raise ApplicationReceiptError("canonical application did not reach durable completion")
         return receipt
@@ -1114,6 +1127,15 @@ def _bind_canonical_desktop_application_apply(implementation):
     market_store_type = SQLiteMarketStore
     market_events = SQLiteMarketStore.events
     dedupe_getter = MarketEvent.dedupe_key.fget
+    application_store_type = _CanonicalDesktopApplicationStore
+    state_progress = _CanonicalDesktopApplicationStore.progress
+    state_prepare = _CanonicalDesktopApplicationStore.prepare
+    state_health_before = _CanonicalDesktopApplicationStore.health_before
+    state_health_after = _CanonicalDesktopApplicationStore.health_after
+    state_mark_market_applied = _CanonicalDesktopApplicationStore.mark_market_applied
+    state_mark_health_applied = _CanonicalDesktopApplicationStore.mark_health_applied
+    state_mark_complete = _CanonicalDesktopApplicationStore.mark_complete
+    state_receipt = _CanonicalDesktopApplicationStore.receipt
 
     def apply(
         self: CanonicalDesktopApplication,
@@ -1129,6 +1151,15 @@ def _bind_canonical_desktop_application_apply(implementation):
             _market_store_type=market_store_type,
             _market_events=market_events,
             _dedupe_getter=dedupe_getter,
+            _application_store_type=application_store_type,
+            _state_progress=state_progress,
+            _state_prepare=state_prepare,
+            _state_health_before=state_health_before,
+            _state_health_after=state_health_after,
+            _state_mark_market_applied=state_mark_market_applied,
+            _state_mark_health_applied=state_mark_health_applied,
+            _state_mark_complete=state_mark_complete,
+            _state_receipt=state_receipt,
         )
 
     return apply

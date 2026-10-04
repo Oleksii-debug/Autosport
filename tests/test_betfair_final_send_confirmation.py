@@ -936,3 +936,92 @@ def test_final_approval_authority_rebinding_fails_before_submit_or_confirmation(
         assert transport.calls == []
         assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
         assert _audit_receipt(authority, review, receipt).receipt.consumed_at is None
+
+
+
+def test_trusted_approval_expiry_at_final_boundary_stays_reserved_and_unconsumed(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-final-trusted-approval-expiry"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        authority, review, receipt = _confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _accepted_transport(action)
+        client = _enabled_client(profile, transport, store=goal_store)
+        trusted_times = iter(
+            (provider_tests.RESERVED_AT, provider_tests.APPROVAL_EXPIRES_AT)
+        )
+
+        monkeypatch.setattr(
+            provider_tests.betfair_supervised_execution._supervised_execution_runtime,
+            "_trusted_now",
+            lambda: next(trusted_times, provider_tests.APPROVAL_EXPIRES_AT),
+        )
+
+        with pytest.raises(SupervisedExecutionError):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                clock=lambda: provider_tests.RESERVED_AT,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
+        assert _audit_receipt(authority, review, receipt).receipt.consumed_at is None
+
+
+def test_trusted_quote_expiry_at_final_boundary_stays_reserved_and_unconsumed(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        attempt_id = "attempt-final-trusted-quote-expiry"
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        authority, review, receipt = _confirmation(
+            tmp,
+            bound,
+            approval,
+            action,
+            attempt_id=attempt_id,
+        )
+        transport = _accepted_transport(action)
+        client = _enabled_client(profile, transport, store=goal_store)
+        trusted_times = iter(
+            (provider_tests.RESERVED_AT, provider_tests.QUOTE_EXPIRES_AT)
+        )
+
+        monkeypatch.setattr(
+            provider_tests.betfair_supervised_execution._supervised_execution_runtime,
+            "_trusted_now",
+            lambda: next(trusted_times, provider_tests.QUOTE_EXPIRES_AT),
+        )
+
+        with pytest.raises(Exception):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                clock=lambda: provider_tests.RESERVED_AT,
+                confirmation_receipt_id=receipt.receipt_id,
+                confirmation_review_sha256=review.review_sha256,
+            )
+
+        assert transport.calls == []
+        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
+        assert _audit_receipt(authority, review, receipt).receipt.consumed_at is None

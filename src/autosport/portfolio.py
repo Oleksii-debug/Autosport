@@ -176,6 +176,8 @@ def _snapshot_open_tickets_for_analysis(
     the source identities and those fields before publishing the detached cut.
     """
 
+    if type(tickets) is not list:
+        raise ValueError("portfolio tickets must be an exact list")
     source_tickets = tuple(tickets)
     captured: list[tuple[object, ...]] = []
     snapshots: list[PaperTicket] = []

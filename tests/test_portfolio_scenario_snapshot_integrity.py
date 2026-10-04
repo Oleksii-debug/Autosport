@@ -567,5 +567,22 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
             self.assertEqual(report.best_case, Decimal("10"))
 
 
+    def test_ticket_container_subclass_cannot_hide_open_exposure(self) -> None:
+        _book, ticket, leg = self._open_ticket()
+
+        class HidingTicketList(list):
+            def __iter__(self):
+                return iter(())
+
+        tickets = HidingTicketList([ticket])
+
+        with self.assertRaisesRegex(ValueError, "tickets must be an exact list"):
+            PortfolioEngine().analyse(tickets)
+        with self.assertRaisesRegex(ValueError, "tickets must be an exact list"):
+            PortfolioEngine.scenario_profit(tickets, {leg.quote_key})
+        with self.assertRaisesRegex(ValueError, "tickets must be an exact list"):
+            PortfolioEngine.affected_tickets(tickets, leg.quote_key)
+
+
 if __name__ == "__main__":
     unittest.main()

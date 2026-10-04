@@ -1516,6 +1516,12 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     r"^baseline-[0-9a-f]{32}$",
                 )
 
+                # Baseline authority proves that this exact legacy row existed when
+                # the causal authority was activated. It does not prove that the
+                # product had received it by its stored historical timestamp, so a
+                # decision replay must not emit it as causal evidence.
+                self.assertEqual(self.replay(migrated).events, ())
+
                 migrated.append(
                     self.event(
                         sequence=2,
@@ -1536,6 +1542,19 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     row[2] for row in index_terms if len(row) >= 6 and row[5] == 1
                 )
                 self.assertEqual(key_terms, ("append_generation",))
+
+                later = self.replay(
+                    migrated,
+                    as_of=self.CUTOFF + timedelta(seconds=2),
+                )
+                self.assertEqual(
+                    tuple(event.sequence for event in later.events),
+                    (2,),
+                )
+                self.assertNotIn(
+                    legacy_event.dedupe_key,
+                    {event.dedupe_key for event in later.events},
+                )
             finally:
                 migrated.close()
 

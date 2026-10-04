@@ -12,6 +12,59 @@ from autosport.storage import SQLiteMarketStore
 
 
 class LiveReceiptRetryHookIsolationTests(unittest.TestCase):
+    def test_retry_hook_cannot_reenter_private_live_receipt_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = MarketEvent(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.00"),
+                observed_ts="2026-10-04T03:00:01+00:00",
+                source_id="provider-a",
+                sequence=1,
+                market_type=MarketType.WINNER,
+                ingest_ts="2026-10-04T03:00:02+00:00",
+                metadata={"origin": "canonical"},
+            )
+            forged = MarketEvent(
+                event_id="forged-event",
+                market_id="winner",
+                selection_id="selection-z",
+                decimal_odds=Decimal("9.99"),
+                observed_ts="2026-10-04T03:00:03+00:00",
+                source_id="provider-forged",
+                sequence=99,
+                market_type=MarketType.WINNER,
+                ingest_ts="2026-10-04T03:00:04+00:00",
+                metadata={"origin": "forged"},
+            )
+
+            def reenter_live_authority(_events):
+                store._append_live_batch_accepted([forged])
+
+            with patch.object(
+                store,
+                "_before_live_append_attempt",
+                side_effect=reenter_live_authority,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "reentrant live receipt authority dispatch is forbidden",
+                ):
+                    store._append_live_batch_accepted([event])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertEqual(store.trusted_live_current_by_source(), {})
+            self.assertFalse(store.has_trusted_live_receipt(event))
+            self.assertFalse(store.has_trusted_live_receipt(forged))
+
+            # The guard is scoped only to the active call and releases on failure.
+            self.assertEqual(store._append_live_batch_accepted([event]), [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
     def test_lazy_batch_materialization_cannot_redirect_live_store_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

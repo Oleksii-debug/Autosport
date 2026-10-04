@@ -5,7 +5,7 @@ import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from threading import RLock
+from threading import RLock, local
 from typing import Iterable
 
 from .domain import MarketEvent
@@ -168,16 +168,33 @@ def _bind_live_batch_writer(
     receipt_writer,
     market_event_type,
 ):
-    """Capture authority-bearing callables outside mutable runtime descriptors."""
+    """Capture authority callables and reject same-thread recursive issuance."""
+
+    active_calls = local()
 
     def bound(self, events):
-        return implementation(
-            self,
-            events,
-            _market_event_type=market_event_type,
-            _canonical_append=canonical_append,
-            _receipt_writer=receipt_writer,
-        )
+        active_store_ids = getattr(active_calls, "store_ids", None)
+        if active_store_ids is None:
+            active_store_ids = set()
+            active_calls.store_ids = active_store_ids
+        store_id = id(self)
+        if store_id in active_store_ids:
+            raise RuntimeError(
+                "reentrant live receipt authority dispatch is forbidden"
+            )
+        active_store_ids.add(store_id)
+        try:
+            return implementation(
+                self,
+                events,
+                _market_event_type=market_event_type,
+                _canonical_append=canonical_append,
+                _receipt_writer=receipt_writer,
+            )
+        finally:
+            active_store_ids.remove(store_id)
+            if not active_store_ids:
+                del active_calls.store_ids
 
     return bound
 

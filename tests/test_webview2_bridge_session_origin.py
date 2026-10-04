@@ -610,6 +610,36 @@ def test_launch_rejects_instance_shadow_of_allowlisted_bridge_method(
     assert controller.events == []
 
 
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "_bind_trusted_window",
+        "_close_from_host",
+        "_revoke_trust",
+        "_runtime_witness_path",
+    ),
+)
+def test_launch_rejects_instance_shadow_of_host_bridge_method(
+    monkeypatch,
+    tmp_path,
+    method_name,
+) -> None:
+    fake = _FakeWebview()
+    controller = _Controller()
+    bridge = AutosportWebBridge(controller)
+    setattr(bridge, method_name, lambda *args, **kwargs: None)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    with pytest.raises(
+        WindowsWebViewUnavailable,
+        match="rebound WebView bridge host method",
+    ):
+        launch_windows_shell(bridge, storage_path=tmp_path / "webview")
+
+    assert fake.api is None
+    assert controller.events == []
+
+
 def test_launch_binds_bridge_before_pywebview_api_use(monkeypatch) -> None:
     fake = _FakeWebview()
     controller = _Controller()

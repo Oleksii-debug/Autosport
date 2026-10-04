@@ -2667,6 +2667,20 @@ _WEB_BRIDGE_PUBLIC_METHOD_WITNESSES = tuple(
     )
     for name in _WEB_BRIDGE_PUBLIC_METHOD_NAMES
 )
+_WEB_BRIDGE_HOST_METHOD_NAMES = (
+    "_bind_trusted_window",
+    "_close_from_host",
+    "_revoke_trust",
+    "_runtime_witness_path",
+)
+_WEB_BRIDGE_HOST_METHOD_WITNESSES = tuple(
+    (
+        name,
+        AutosportWebBridge.__dict__[name],
+        getattr(AutosportWebBridge.__dict__[name], "__code__", None),
+    )
+    for name in _WEB_BRIDGE_HOST_METHOD_NAMES
+)
 
 
 def _require_canonical_web_bridge_surface(
@@ -2674,6 +2688,8 @@ def _require_canonical_web_bridge_surface(
     *,
     _names=_WEB_BRIDGE_PUBLIC_METHOD_NAMES,
     _witnesses=_WEB_BRIDGE_PUBLIC_METHOD_WITNESSES,
+    _host_names=_WEB_BRIDGE_HOST_METHOD_NAMES,
+    _host_witnesses=_WEB_BRIDGE_HOST_METHOD_WITNESSES,
 ) -> AutosportWebBridge:
     """Reject any JS API object whose callable surface can exceed the product bridge."""
 
@@ -2681,6 +2697,8 @@ def _require_canonical_web_bridge_surface(
         type(api) is not AutosportWebBridge
         or _WEB_BRIDGE_PUBLIC_METHOD_NAMES is not _names
         or _WEB_BRIDGE_PUBLIC_METHOD_WITNESSES is not _witnesses
+        or _WEB_BRIDGE_HOST_METHOD_NAMES is not _host_names
+        or _WEB_BRIDGE_HOST_METHOD_WITNESSES is not _host_witnesses
     ):
         raise WindowsWebViewUnavailable(
             "Autosport refused a non-canonical WebView bridge surface"
@@ -2711,6 +2729,17 @@ def _require_canonical_web_bridge_surface(
         ):
             raise WindowsWebViewUnavailable(
                 "Autosport refused a rebound WebView bridge method"
+            )
+    for name, expected, expected_code in _host_witnesses:
+        current = AutosportWebBridge.__dict__.get(name)
+        bound = getattr(api, name, None)
+        if (
+            current is not expected
+            or getattr(current, "__code__", None) is not expected_code
+            or getattr(bound, "__func__", None) is not expected
+        ):
+            raise WindowsWebViewUnavailable(
+                "Autosport refused a rebound WebView bridge host method"
             )
     return api
 

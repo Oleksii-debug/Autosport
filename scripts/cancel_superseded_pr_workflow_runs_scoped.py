@@ -208,6 +208,9 @@ class WorkflowScopedGitHubApi(GitHubApi):
         *,
         _request_impl=GitHubApi._request,
         _request_code=GitHubApi._request.__code__,
+        _request_defaults=GitHubApi._request.__defaults__,
+        _request_kwdefaults=GitHubApi._request.__kwdefaults__,
+        _request_kwdefault_items=tuple(GitHubApi._request.__kwdefaults__.items()),
         _pulls_per_page: int = _PULLS_PER_PAGE,
         _encode_query=urlencode,
         _encode_query_code=urlencode.__code__,
@@ -247,6 +250,16 @@ class WorkflowScopedGitHubApi(GitHubApi):
             bound = getattr(self, "_request", None)
             return (
                 getattr(_request_impl, "__code__", None) is _request_code
+                and getattr(_request_impl, "__defaults__", None)
+                is _request_defaults
+                and getattr(_request_impl, "__kwdefaults__", None)
+                is _request_kwdefaults
+                and len(_request_kwdefaults) == len(_request_kwdefault_items)
+                and all(
+                    key in _request_kwdefaults
+                    and _request_kwdefaults[key] is value
+                    for key, value in _request_kwdefault_items
+                )
                 and getattr(bound, "__self__", None) is self
                 and getattr(bound, "__func__", None) is _request_impl
                 and getattr(_encode_query, "__code__", None) is _encode_query_code
@@ -400,6 +413,9 @@ class WorkflowScopedGitHubApi(GitHubApi):
         *,
         _request_impl=GitHubApi._request,
         _request_code=GitHubApi._request.__code__,
+        _request_defaults=GitHubApi._request.__defaults__,
+        _request_kwdefaults=GitHubApi._request.__kwdefaults__,
+        _request_kwdefault_items=tuple(GitHubApi._request.__kwdefaults__.items()),
         _pulls_per_page: int = _PULLS_PER_PAGE,
         _encode_query=urlencode,
         _encode_query_code=urlencode.__code__,
@@ -413,6 +429,16 @@ class WorkflowScopedGitHubApi(GitHubApi):
             bound = getattr(self, "_request", None)
             return (
                 getattr(_request_impl, "__code__", None) is _request_code
+                and getattr(_request_impl, "__defaults__", None)
+                is _request_defaults
+                and getattr(_request_impl, "__kwdefaults__", None)
+                is _request_kwdefaults
+                and len(_request_kwdefaults) == len(_request_kwdefault_items)
+                and all(
+                    key in _request_kwdefaults
+                    and _request_kwdefaults[key] is value
+                    for key, value in _request_kwdefault_items
+                )
                 and getattr(bound, "__self__", None) is self
                 and getattr(bound, "__func__", None) is _request_impl
                 and getattr(_encode_query, "__code__", None) is _encode_query_code

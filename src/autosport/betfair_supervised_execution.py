@@ -61,6 +61,18 @@ _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE = ExecutionStopAuthority.admission_lea
 _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE_CODE = (
     _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE.__code__
 )
+_CANONICAL_REQUIRE_SUPERVISED_APPROVAL = (
+    _supervised_execution_runtime._require_approval
+)
+_CANONICAL_REQUIRE_SUPERVISED_APPROVAL_CODE = (
+    _CANONICAL_REQUIRE_SUPERVISED_APPROVAL.__code__
+)
+_CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL = (
+    _supervised_execution_runtime._require_durable_approval
+)
+_CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL_CODE = (
+    _CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL.__code__
+)
 
 # Terminal provider-effect authority must not depend on caller-rebindable method
 # dispatch.  These product-owned implementations are captured once and are used
@@ -2165,6 +2177,37 @@ def execute_betfair_supervised_action(
         ) -> None:
             nonlocal submitted_at
             submitted_at = _supervised_execution_runtime._trusted_now()
+            if (
+                _supervised_execution_runtime._require_approval
+                is not _CANONICAL_REQUIRE_SUPERVISED_APPROVAL
+                or getattr(
+                    _CANONICAL_REQUIRE_SUPERVISED_APPROVAL,
+                    "__code__",
+                    None,
+                )
+                is not _CANONICAL_REQUIRE_SUPERVISED_APPROVAL_CODE
+                or _supervised_execution_runtime._require_durable_approval
+                is not _CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL
+                or getattr(
+                    _CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL,
+                    "__code__",
+                    None,
+                )
+                is not _CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL_CODE
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "final supervised approval authority changed"
+                )
+            _CANONICAL_REQUIRE_SUPERVISED_APPROVAL(
+                bound,
+                approval,
+                submitted_at,
+            )
+            _CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL(
+                ledger,
+                bound,
+                approval,
+            )
             ledger.mark_submitted(
                 attempt_id,
                 submitted_at=submitted_at,

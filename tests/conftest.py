@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import timedelta
+from datetime import datetime, timedelta
 from itertools import count
 import os
 import sys
@@ -186,8 +186,6 @@ def _bind_legacy_paper_value_execution_authority(request, monkeypatch, tmp_path)
     if module_name not in _LEGACY_PAPER_VALUE_MODULES:
         return
     if request.node.name == "test_paper_value_agent_without_execution_authority_does_not_open_ticket":
-        # Preserve this negative boundary test: the legacy positive-action fixture
-        # must not supply the very execution authority it is verifying is absent.
         return
 
     original_context = getattr(module, "AgentContext", None)
@@ -229,10 +227,6 @@ def _bind_legacy_paper_value_execution_authority(request, monkeypatch, tmp_path)
     monkeypatch.setattr(module, "AgentContext", execution_bound_context)
 
 
-# These files predate the #662 product-semantic splice and exercise provider membership,
-# persistence/recovery, and PAPER transition behavior rather than semantic provenance.
-# Keep their old fixture path private and narrowly scoped; all other tests see the
-# production fail-closed gate.
 _LEGACY_PROVIDER_SEMANTIC_FIXTURES = {
     "test_provider_evaluation_universe.py",
     "test_evaluation_universe_execution_binding.py",
@@ -252,9 +246,7 @@ def _legacy_provider_semantic_fixture_bridge(request):
 
 # The final #1212 Betfair provider-truth suites predate the #1155 STOP-admission
 # composition. Their positive provider cases must now supply the same explicit
-# durable ARMED authority production requires. Keep the bridge exact and local to
-# the deliberately recomposed carrier; the dedicated STOP-composition suite is
-# intentionally excluded so missing/STOPPED/corrupt authority remains fail-closed.
+# durable ARMED authority production requires. Keep the bridge exact and local.
 _RECOMPOSED_BETFAIR_PROVIDER_MODULES = frozenset(
     {
         "test_betfair_supervised_execution",
@@ -268,6 +260,12 @@ _RECOMPOSED_BETFAIR_PROVIDER_MODULES = frozenset(
         "test_betfair_placeorders_urllib_opener_origin",
     }
 )
+_BETFAIR_FINAL_CONFIRMATION_MODULES = frozenset(
+    {"test_betfair_final_send_confirmation"}
+)
+_BETFAIR_STOP_PROFILE_MODULES = (
+    _RECOMPOSED_BETFAIR_PROVIDER_MODULES | _BETFAIR_FINAL_CONFIRMATION_MODULES
+)
 
 
 @pytest.fixture(autouse=True)
@@ -276,12 +274,9 @@ def _bind_recomposed_betfair_stop_authority(request, monkeypatch):
     if module is None:
         return
     module_name = module.__name__.rsplit(".", 1)[-1]
-    if module_name not in _RECOMPOSED_BETFAIR_PROVIDER_MODULES:
+    if module_name not in _BETFAIR_STOP_PROFILE_MODULES:
         return
 
-    # These restored provider suites use a frozen 2026-09-19 approval timeline.
-    # Their original module-local autouse clock does not follow helpers imported by
-    # sibling test modules, so bind the same reserve instant at this shared bridge.
     monkeypatch.setattr(
         "autosport.supervised_execution._trusted_now",
         lambda: "2026-09-19T08:00:03+00:00",
@@ -313,13 +308,88 @@ def _bind_recomposed_betfair_stop_authority(request, monkeypatch):
     monkeypatch.setattr(module, "_prepared", prepared_with_armed_stop)
 
 
+# Restored provider suites also predate the final-send operator-confirmation gate.
+# Give only those legacy suites an explicit durable test review+receipt. The new
+# dedicated confirmation suite is deliberately excluded so it can prove missing,
+# mismatched and consumed receipts fail closed at the real provider boundary.
+@pytest.fixture(autouse=True)
+def _bind_recomposed_betfair_operator_confirmation(request, monkeypatch):
+    module = request.module
+    if module is None:
+        return
+    module_name = module.__name__.rsplit(".", 1)[-1]
+    if module_name not in _RECOMPOSED_BETFAIR_PROVIDER_MODULES:
+        return
+    original_execute = getattr(module, "execute_betfair_supervised_action", None)
+    if not callable(original_execute):
+        return
+
+    from autosport.betfair_execution_confirmation import (
+        CONFIRMATION_FILENAME,
+        betfair_execution_confirmation_spec,
+    )
+    from autosport.supervised_confirmation import SupervisedConfirmationAuthority
+
+    receipt_cache: dict[tuple[str, str, str, str], tuple[str, str]] = {}
+    confirmation_now = datetime.fromisoformat("2026-09-19T08:00:02.200000+00:00")
+
+    def execute_with_confirmation(ledger, bound, approval, *args, **kwargs):
+        if (
+            kwargs.get("confirmation_receipt_id") is None
+            and kwargs.get("confirmation_review_sha256") is None
+        ):
+            action_id = kwargs.get("action_id")
+            attempt_id = kwargs.get("attempt_id")
+            if type(action_id) is str and type(attempt_id) is str:
+                workspace = Path(ledger.path).parent.resolve()
+                key = (
+                    str(workspace),
+                    bound.execution_plan.plan_id,
+                    action_id,
+                    attempt_id,
+                )
+                receipt_identity = receipt_cache.get(key)
+                if receipt_identity is None:
+                    spec = betfair_execution_confirmation_spec(
+                        bound,
+                        approval,
+                        action_id=action_id,
+                        attempt_id=attempt_id,
+                        review_id=f"pytest-final-send-review-{attempt_id}",
+                        risk_evidence_sha256="f" * 64,
+                    )
+                    authority = SupervisedConfirmationAuthority(
+                        workspace / CONFIRMATION_FILENAME,
+                        clock=lambda: confirmation_now,
+                    )
+                    review = authority.prepare_review(
+                        review_id=spec.review_id,
+                        decision_id=spec.decision_id,
+                        bookmaker_id=spec.bookmaker_id,
+                        account_id=spec.account_id,
+                        decision_sha256=spec.decision_sha256,
+                        approval_evidence_sha256=spec.approval_evidence_sha256,
+                        risk_evidence_sha256=spec.risk_evidence_sha256,
+                        review_payload=spec.review_payload,
+                        ttl_seconds=120,
+                    )
+                    receipt = authority.confirm_review(
+                        review_id=review.review_id,
+                        expected_review_sha256=review.review_sha256,
+                    )
+                    receipt_identity = (receipt.receipt_id, review.review_sha256)
+                    receipt_cache[key] = receipt_identity
+                kwargs["confirmation_receipt_id"] = receipt_identity[0]
+                kwargs["confirmation_review_sha256"] = receipt_identity[1]
+        return original_execute(ledger, bound, approval, *args, **kwargs)
+
+    monkeypatch.setattr(module, "execute_betfair_supervised_action", execute_with_confirmation)
+
+
 # #1891 makes a RUNNING closed-registry runtime profile an independent provider-write
-# prerequisite. The restored #1212 positive suites predate that authority. Give only
-# those exact suites a process-local test issuance for each workspace they prepare;
-# every other suite remains capable of proving that missing/stale profile authority
-# fails closed. The STOP-ledger falsifier gets only this profile prerequisite so it
-# can still isolate missing STOP as the deterministic denial under test.
-_BETFAIR_TRUSTED_PROFILE_MODULES = _RECOMPOSED_BETFAIR_PROVIDER_MODULES | {
+# prerequisite. Give only the exact provider/final-confirmation suites a process-local
+# test issuance for each workspace they prepare.
+_BETFAIR_TRUSTED_PROFILE_MODULES = _BETFAIR_STOP_PROFILE_MODULES | {
     "test_betfair_stop_ledger_boundary"
 }
 _PROFILE_FACTORY_SPEC = "autosport.product_source:create_parlay_product_source"
@@ -413,14 +483,7 @@ def _bind_recomposed_betfair_trusted_runtime_profile(request, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _deterministic_betfair_mid_frame_reconnect_clock(request, monkeypatch):
-    """Isolate the partial-frame recovery test from wall-clock scheduling jitter.
-
-    The production transport deliberately applies reconnect backoff after an abnormal
-    established-session failure. Dedicated backoff tests assert that contract. The
-    partial-frame test has a different purpose: proving stale bytes cannot cross a
-    reconnect boundary. Advance a deterministic monotonic clock only for that one
-    scenario so it reaches the next eligible reconnect instant without sleeping.
-    """
+    """Isolate the partial-frame recovery test from wall-clock scheduling jitter."""
 
     if Path(str(request.node.fspath)).name != "test_betfair_stream_transport.py":
         return

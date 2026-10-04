@@ -615,6 +615,55 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_hardlink_database_alias_is_rejected_before_authority_remint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            primary_path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(primary_path)
+            store.close()
+
+            alias_path = Path(directory) / "market-hardlink.db"
+            try:
+                os.link(primary_path, alias_path)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"hard links unavailable on this platform: {exc}")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "market database pathname must be a single-link regular file",
+            ):
+                SQLiteMarketStore(alias_path)
+
+    def test_open_store_rejects_database_path_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            moved_path = Path(directory) / "market-moved.db"
+            store = SQLiteMarketStore(path)
+            try:
+                self.assertTrue(
+                    store.append(
+                        self.event(
+                            sequence=1,
+                            odds="2.00",
+                            observed_ts="2026-09-16T19:00:00+00:00",
+                        )
+                    )
+                )
+                try:
+                    os.replace(path, moved_path)
+                    path.touch()
+                except OSError as exc:
+                    self.skipTest(
+                        f"open SQLite pathname replacement unavailable on this platform: {exc}"
+                    )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "market database pathname no longer identifies the opened database",
+                ):
+                    store.events()
+            finally:
+                store.close()
+
     def test_late_backdated_append_cannot_rewrite_frozen_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

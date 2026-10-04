@@ -1014,10 +1014,11 @@ class BetdaqEconomicReadbackClient:
         client = self._account_client
         request_identity = _economic_request_identity(method, request_attributes)
         protocol_authority = _canonical_economic_protocol_authority()
+        secure_endpoint, external_ns, _, _ = protocol_authority
         headers = {
             "Accept": "text/xml",
             "Content-Type": "text/xml; charset=utf-8",
-            "SOAPAction": f'"{_CANONICAL_EXTERNAL_NS}{method}"',
+            "SOAPAction": f'"{external_ns}{method}"',
         }
         with client._call_lock:
             # Snapshot the exact authenticated identity used to construct the secure
@@ -1075,7 +1076,7 @@ class BetdaqEconomicReadbackClient:
             try:
                 payload = https_post(
                     transport,
-                    _CANONICAL_SECURE_ENDPOINT,
+                    secure_endpoint,
                     headers=headers,
                     body=body,
                     timeout_seconds=client._timeout_seconds,
@@ -1181,12 +1182,13 @@ def _request_xml(
     method: str,
     attributes: dict[str, str],
 ) -> bytes:
-    ET.register_namespace("soap", _CANONICAL_SOAP11_NS)
-    envelope = ET.Element(f"{{{_CANONICAL_SOAP11_NS}}}Envelope")
-    header = ET.SubElement(envelope, f"{{{_CANONICAL_SOAP11_NS}}}Header")
+    _, external_ns, soap11_ns, _ = _canonical_economic_protocol_authority()
+    ET.register_namespace("soap", soap11_ns)
+    envelope = ET.Element(f"{{{soap11_ns}}}Envelope")
+    header = ET.SubElement(envelope, f"{{{soap11_ns}}}Header")
     ET.SubElement(
         header,
-        f"{{{_CANONICAL_EXTERNAL_NS}}}ExternalApiHeader",
+        f"{{{external_ns}}}ExternalApiHeader",
         {
             "version": credentials.version,
             "languageCode": credentials.language_code,
@@ -1195,8 +1197,8 @@ def _request_xml(
             "applicationIdentifier": credentials.application_identifier,
         },
     )
-    body = ET.SubElement(envelope, f"{{{_CANONICAL_SOAP11_NS}}}Body")
-    method_element = ET.SubElement(body, f"{{{_CANONICAL_EXTERNAL_NS}}}{method}")
+    body = ET.SubElement(envelope, f"{{{soap11_ns}}}Body")
+    method_element = ET.SubElement(body, f"{{{external_ns}}}{method}")
     if method == "GetOrderDetails":
         request_name = "getOrderDetailsRequest"
     elif method == "ListAccountPostings":
@@ -1209,7 +1211,7 @@ def _request_xml(
         )
     ET.SubElement(
         method_element,
-        f"{{{_CANONICAL_EXTERNAL_NS}}}{request_name}",
+        f"{{{external_ns}}}{request_name}",
         attributes,
     )
     return ET.tostring(envelope, encoding="utf-8", xml_declaration=True)

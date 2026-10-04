@@ -413,6 +413,17 @@ class MarketMirror:
         if not isinstance(store, SQLiteMarketStore):
             raise TypeError("store must be a SQLiteMarketStore")
         boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
+
+        # Validate and materialize every request selector before issuing the durable
+        # forward-observed cutoff. A malformed selector must not permanently freeze
+        # an otherwise valid decision instant, and one-shot iterables must not be
+        # consumed once for validation and then silently disappear during filtering.
+        selected_sources = cls._selector(source_ids, name="source_ids")
+        selected_sports = cls._selector(sports, name="sports")
+        selected_events = cls._selector(event_ids, name="event_ids")
+        selected_markets = cls._selector(market_ids, name="market_ids")
+        selected_selections = cls._selector(selection_ids, name="selection_ids")
+
         mirror = cls()
         replay_events = store.replay_events_at_frozen_cutoff(
             as_of=boundary.isoformat()
@@ -427,11 +438,11 @@ class MarketMirror:
         return mirror.active_view(
             as_of=boundary,
             max_age=age_limit,
-            source_ids=source_ids,
-            sports=sports,
-            event_ids=event_ids,
-            market_ids=market_ids,
-            selection_ids=selection_ids,
+            source_ids=selected_sources,
+            sports=selected_sports,
+            event_ids=selected_events,
+            market_ids=selected_markets,
+            selection_ids=selected_selections,
         )
 
     @classmethod

@@ -975,7 +975,8 @@ class PaperSettlementLearningBridge:
         leg_keys = {leg.quote_key for leg in ticket.legs}
         known: dict[str, str] = {}
         used: dict[str, dict[str, object]] = {}
-        leg_by_key = {leg.quote_key: leg for leg in ticket.legs}
+        quote_authority: dict[str, str] = {}
+        event_ref_authority: dict[tuple[str, str], str] = {}
         expected_event_identity_by_key = {
             leg.quote_key: f"{source_id}:{leg.event_id}"
             for leg in ticket.legs
@@ -1003,6 +1004,25 @@ class PaperSettlementLearningBridge:
                     raise PaperSettlementLearningBridgeError(
                         "settlement evidence provider/event identity differs from bound ticket leg"
                     )
+                previous_authority = quote_authority.get(key)
+                if (
+                    previous_authority is not None
+                    and previous_authority != resolution.evidence_id
+                ):
+                    raise PaperSettlementLearningBridgeError(
+                        "bound quote has multiple settlement evidence authorities"
+                    )
+                quote_authority[key] = resolution.evidence_id
+            event_ref = (resolution.event_identity, resolution.settlement_ref)
+            previous_event_ref_authority = event_ref_authority.get(event_ref)
+            if (
+                previous_event_ref_authority is not None
+                and previous_event_ref_authority != resolution.evidence_id
+            ):
+                raise PaperSettlementLearningBridgeError(
+                    "settlement event/reference has multiple evidence authorities"
+                )
+            event_ref_authority[event_ref] = resolution.evidence_id
             for key, value in scoped.items():
                 previous = known.get(key)
                 if previous is not None and previous != value:

@@ -813,6 +813,25 @@ def test_product_fixed_n_risk_observations_match_evaluator_manifest(
     )
 
     assert type(cohort) is ProductFixedNRiskObservationSet
+    assert cohort.research_protocol_sha256 == membership.protocol_sha256
+    assert cohort.dataset_snapshot_id == membership.dataset_snapshot_id
+    assert cohort.dataset_manifest_sha256 == membership.dataset_manifest_sha256
+    assert cohort.risk_method == membership.risk_method
+    assert cohort.initial_capital_state_sha256 == initial_capital_sha256
+    assert cohort.sampling_manifest_sha256 == hashlib.sha256(
+        manifest.encode("utf-8")
+    ).hexdigest()
+    qualification = resolve_product_fixed_n_iid_qualification(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+    assert cohort.stake_policy_sha256 == qualification.stake_policy_sha256
     assert cohort.planned_member_ids == (RUN_ID,)
     assert len(cohort.observations) == 1
     observation = cohort.observations[0]

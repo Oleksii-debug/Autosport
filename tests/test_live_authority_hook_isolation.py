@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import autosport.storage as storage_module
 from autosport.domain import MarketEvent, MarketType
 from autosport.ingestion import IngestionEngine
 from autosport.market_bus import MarketEventBus
@@ -110,6 +111,31 @@ class LiveAuthorityHookIsolationTests(unittest.TestCase):
                 self.assertEqual(store.trusted_live_current_by_source(), {})
             finally:
                 store.close()
+
+    def test_exact_capability_forgery_cannot_promote_public_batch(self) -> None:
+        capability_type = storage_module._LiveReceiptBatch
+        event = self._event()
+        with self.assertRaises(TypeError):
+            capability_type((event,))
+        with self.assertRaisesRegex(
+            PermissionError,
+            "not internally issued",
+        ):
+            capability_type((event,), _issue_token=object())
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            forged = object.__new__(capability_type)
+            object.__setattr__(forged, "_issue_token", object())
+            store._active_live_receipt_batch = forged
+            try:
+                self.assertEqual(store.append_batch_accepted([event]), [event])
+            finally:
+                store._active_live_receipt_batch = None
+
+            self.assertFalse(store.has_trusted_live_receipt(event))
+            self.assertEqual(store.trusted_live_current_by_source(), {})
+            store.close()
 
     def test_live_bus_seam_rejects_dependency_override_but_canonical_path_works(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

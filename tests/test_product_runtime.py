@@ -162,6 +162,19 @@ def _replacement_source_resolve_event(self, delta):
     return self.resolved_event
 
 
+def _replacement_learning_reconcile(
+    self,
+    *,
+    paper_book_path,
+    resolutions,
+    settled_ticket_ids,
+    at,
+):
+    if at == "never":
+        raise AssertionError("replacement learning handoff executable semantics")
+    return ("forged",)
+
+
 def _replacement_fetch_catalog_page(self, checkpoint):
     return CatalogPage(
         source_id=self.source_id,
@@ -324,7 +337,7 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 runtime.close()
 
-    def test_product_learning_handoff_uses_captured_method_after_class_rebind(self) -> None:
+    def test_product_learning_handoff_rejects_class_method_rebind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             handoff = _LearningHandoff()
@@ -336,23 +349,138 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 initial_bankroll="100",
                 settlement_learning_handoff=handoff,
             )
-            original = _LearningHandoff.prepare_settlement
+            original = _LearningHandoff.reconcile_after_settlement
             try:
-                def forged(*_args, **_kwargs):
-                    raise AssertionError("rebound handoff method must not become product authority")
-
-                _LearningHandoff.prepare_settlement = forged
-                self.assertEqual(
-                    runtime.coordinator.settlement_learning_handoff.prepare_settlement(
+                _LearningHandoff.reconcile_after_settlement = (
+                    _replacement_learning_reconcile
+                )
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "settlement learning handoff authority changed after product composition",
+                ):
+                    runtime.coordinator.settlement_learning_handoff.reconcile_after_settlement(
                         paper_book_path=root / "paper_book.json",
                         resolutions=(),
+                        settled_ticket_ids=(),
                         at="2026-09-20T13:58:00+00:00",
-                    ),
-                    ("prepared",),
+                    )
+            finally:
+                _LearningHandoff.reconcile_after_settlement = original
+                runtime.close()
+
+    def test_settlement_learning_handoff_identity_is_stable_across_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+                settlement_learning_handoff=_LearningHandoff(),
+            )
+            expected = first.manifest.settlement_learning_handoff_identity
+            first.close()
+
+            restarted = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+                settlement_learning_handoff=_LearningHandoff(),
+            )
+            try:
+                self.assertIsNotNone(expected)
+                self.assertEqual(
+                    restarted.manifest.settlement_learning_handoff_identity,
+                    expected,
                 )
             finally:
-                _LearningHandoff.prepare_settlement = original
-                runtime.close()
+                restarted.close()
+
+    def test_restart_rejects_removed_settlement_learning_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+                settlement_learning_handoff=_LearningHandoff(),
+            )
+            runtime.close()
+
+            with self.assertRaisesRegex(
+                ProductCompositionError,
+                "settlement learning handoff identity conflicts with durable product composition",
+            ):
+                build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+
+    def test_restart_rejects_changed_settlement_learning_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+                settlement_learning_handoff=_LearningHandoff("c" * 64),
+            )
+            runtime.close()
+
+            with self.assertRaisesRegex(
+                ProductCompositionError,
+                "settlement learning handoff identity conflicts with durable product composition",
+            ):
+                build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                    settlement_learning_handoff=_LearningHandoff("d" * 64),
+                )
+
+    def test_restart_rejects_changed_settlement_learning_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+                settlement_learning_handoff=_LearningHandoff(),
+            )
+            runtime.close()
+            original = _LearningHandoff.reconcile_after_settlement
+            try:
+                _LearningHandoff.reconcile_after_settlement = (
+                    _replacement_learning_reconcile
+                )
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "settlement learning handoff identity conflicts with durable product composition",
+                ):
+                    build_autonomous_product_runtime(
+                        workspace=root,
+                        source=_Source(),
+                        clock=_Clock(),
+                        sleep=lambda _: None,
+                        initial_bankroll="100",
+                        settlement_learning_handoff=_LearningHandoff(),
+                    )
+            finally:
+                _LearningHandoff.reconcile_after_settlement = original
 
     def test_product_collector_rejects_post_build_source_reassignment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

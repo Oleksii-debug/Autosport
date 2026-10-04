@@ -827,14 +827,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         backlog = False
 
         for _ in range(self.max_invalidation_batches_per_tick):
-            batch = self.invalidation_buffer.drain(
-                max_items=self.max_invalidation_items_per_batch
+            batch, routed = self.invalidation_buffer.drain_and_route(
+                self.dependency_index,
+                max_items=self.max_invalidation_items_per_batch,
             )
             if not isinstance(batch, MirrorInvalidationBatch):
                 raise ContinuousSessionError(
                     "invalidation buffer returned an invalid batch"
                 )
-            routed = self.dependency_index.affected_inputs(batch)
             affected.extend(routed)
             full_refresh_required = full_refresh_required or batch.full_refresh_required
             if not batch.has_more:

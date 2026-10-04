@@ -2760,6 +2760,80 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 second.close()
                 first.close()
 
+    def test_positive_committed_cutoff_stays_readable_during_new_append_prepare(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            first = SQLiteMarketStore(path)
+            second = SQLiteMarketStore(path)
+            writer_at_machine_commit = threading.Event()
+            release_writer = threading.Event()
+            foreign_recovery = threading.Event()
+            writer_errors: list[BaseException] = []
+            original_recover = MonotonicWorkspaceAuthority.recover
+
+            first_event = self.event(
+                sequence=1,
+                odds="2.00",
+                observed_ts="2026-09-16T19:00:00+00:00",
+            )
+            self.assertTrue(first.append(first_event))
+            sealed = self.replay(second)
+            self.assertEqual(self.semantic_events(sealed), (first_event.to_dict(),))
+
+            def guarded_recover(authority, **kwargs):
+                tx_id = kwargs.get("tx_id")
+                if isinstance(tx_id, str) and tx_id.startswith("append-2-2-"):
+                    if threading.current_thread().name == "append-writer":
+                        writer_at_machine_commit.set()
+                        if not release_writer.wait(timeout=5):
+                            raise TimeoutError("append writer was not released")
+                    else:
+                        foreign_recovery.set()
+                return original_recover(authority, **kwargs)
+
+            def append_from_first() -> None:
+                try:
+                    first.append(
+                        self.event(
+                            sequence=2,
+                            odds="2.10",
+                            observed_ts="2026-09-16T19:00:02+00:00",
+                        )
+                    )
+                except BaseException as exc:  # pragma: no cover - thread handoff
+                    writer_errors.append(exc)
+
+            try:
+                with patch.object(
+                    MonotonicWorkspaceAuthority,
+                    "recover",
+                    new=guarded_recover,
+                ):
+                    writer = threading.Thread(
+                        target=append_from_first,
+                        name="append-writer",
+                    )
+                    writer.start()
+                    self.assertTrue(writer_at_machine_commit.wait(timeout=5))
+
+                    repeated = self.replay(second)
+                    self.assertEqual(self.semantic_events(repeated), (first_event.to_dict(),))
+                    self.assertFalse(foreign_recovery.is_set())
+
+                    release_writer.set()
+                    writer.join(timeout=5)
+                    self.assertFalse(writer.is_alive())
+
+                self.assertEqual(writer_errors, [])
+                self.assertEqual(
+                    self.semantic_events(self.replay(second)),
+                    (first_event.to_dict(),),
+                )
+            finally:
+                release_writer.set()
+                second.close()
+                first.close()
+
     def test_distinct_new_cutoff_still_requires_append_lock_when_old_cutoff_exists(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"
@@ -3573,6 +3647,67 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
                     "workspace state is missing, rolled back, or unproven",
+                ):
+                    self.replay(store)
+            finally:
+                store.close()
+
+    def test_cutoff_with_unissued_positive_generation_is_rejected_even_if_cutoff_authority_committed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                event = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.direct_insert_positive_generation(
+                    store,
+                    event,
+                    generation=1,
+                )
+
+                canonical_as_of = storage_module._canonical_replay_cutoff(
+                    self.CUTOFF.isoformat()
+                )
+                cutoff_id = storage_module._replay_cutoff_id(canonical_as_of)
+                corpus_sha256 = store._frozen_replay_corpus_sha256(1)
+                binding_sha256 = storage_module._replay_cutoff_binding_sha256(
+                    cutoff_id=cutoff_id,
+                    canonical_as_of=canonical_as_of,
+                    max_append_generation=1,
+                    corpus_sha256=corpus_sha256,
+                )
+                rows = ((cutoff_id, canonical_as_of, 1),)
+                intended_state_sha256 = storage_module._replay_cutoff_state_sha256(
+                    rows,
+                    sealed_corpus_sha256=corpus_sha256,
+                )
+                assert intended_state_sha256 is not None
+                authority = store._replay_cutoff_authority()
+                tx_id = f"{cutoff_id[:32]}-{'0' * 32}"
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=intended_state_sha256,
+                    semantic_binding_sha256=binding_sha256,
+                )
+                store.connection.execute(
+                    """INSERT INTO market_replay_cutoffs
+                       (cutoff_id, as_of, max_append_generation)
+                       VALUES (?, ?, ?)""",
+                    (cutoff_id, canonical_as_of, 1),
+                )
+                store.connection.commit()
+                authority.recover(
+                    observed_state_sha256=intended_state_sha256,
+                    tx_id=tx_id,
+                    semantic_binding_sha256=binding_sha256,
+                )
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "cutoff exceeds independently committed append authority",
                 ):
                     self.replay(store)
             finally:

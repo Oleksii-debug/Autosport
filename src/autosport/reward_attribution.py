@@ -50,40 +50,75 @@ REQUIRED_COMPONENTS: Final = (
 )
 
 
-def _text(value: object, name: str) -> str:
-    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
-        raise RewardAttributionError(f"{name} must be canonical non-empty text")
+def _text(
+    value: object,
+    name: str,
+    *,
+    _error_type=RewardAttributionError,
+    _str_type=str,
+    _type=type,
+) -> str:
+    if (
+        _type(value) is not _str_type
+        or not value
+        or value != value.strip()
+        or "\x00" in value
+    ):
+        raise _error_type(f"{name} must be canonical non-empty text")
     try:
         value.encode("utf-8", errors="strict")
     except UnicodeEncodeError as exc:
-        raise RewardAttributionError(f"{name} must be valid UTF-8") from exc
+        raise _error_type(f"{name} must be valid UTF-8") from exc
     return value
 
 
-def _sha256(value: object, name: str) -> str:
-    text = _text(value, name)
-    if len(text) != 64 or any(character not in _HEX for character in text):
-        raise RewardAttributionError(f"{name} must be lowercase SHA-256")
+def _sha256(
+    value: object,
+    name: str,
+    *,
+    _text_impl=_text,
+    _hex=_HEX,
+    _error_type=RewardAttributionError,
+) -> str:
+    text = _text_impl(value, name)
+    if len(text) != 64 or any(character not in _hex for character in text):
+        raise _error_type(f"{name} must be lowercase SHA-256")
     return text
 
 
-def _exact_keys(raw: Mapping[str, Any], expected: set[str], name: str) -> None:
-    if type(raw) is not dict or set(raw) != expected:
-        raise RewardAttributionError(f"{name} keys mismatch")
+def _exact_keys(
+    raw: Mapping[str, Any],
+    expected: set[str],
+    name: str,
+    *,
+    _error_type=RewardAttributionError,
+    _dict_type=dict,
+    _set_type=set,
+    _type=type,
+) -> None:
+    if _type(raw) is not _dict_type or _set_type(raw) != expected:
+        raise _error_type(f"{name} keys mismatch")
 
 
-def _digest(payload: Mapping[str, Any]) -> str:
+def _digest(
+    payload: Mapping[str, Any],
+    *,
+    _json_dumps=json.dumps,
+    _sha256_constructor=hashlib.sha256,
+    _dict_type=dict,
+    _error_type=RewardAttributionError,
+) -> str:
     try:
-        encoded = json.dumps(
-            dict(payload),
+        encoded = _json_dumps(
+            _dict_type(payload),
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
             allow_nan=False,
         ).encode("utf-8")
     except (TypeError, ValueError, UnicodeEncodeError) as exc:
-        raise RewardAttributionError("attribution payload is not canonical JSON") from exc
-    return hashlib.sha256(encoded).hexdigest()
+        raise _error_type("attribution payload is not canonical JSON") from exc
+    return _sha256_constructor(encoded).hexdigest()
 
 
 @dataclass(frozen=True, order=True, slots=True)
@@ -94,10 +129,14 @@ class AttributionAuthorityRef:
     evidence_id: str
     sha256: str
 
-    def __post_init__(self) -> None:
-        _text(self.family, "authority family")
-        _text(self.evidence_id, "authority evidence_id")
-        _sha256(self.sha256, "authority sha256")
+    def __post_init__(
+        self,
+        _text_impl=_text,
+        _sha256_impl=_sha256,
+    ) -> None:
+        _text_impl(self.family, "authority family")
+        _text_impl(self.evidence_id, "authority evidence_id")
+        _sha256_impl(self.sha256, "authority sha256")
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -130,60 +169,68 @@ class RewardComponentAttribution:
     authority_refs: tuple[AttributionAuthorityRef, ...] = ()
     counterfactual_ref: AttributionAuthorityRef | None = None
 
-    def __post_init__(self) -> None:
-        if type(self.component) is not RewardAttributionComponent:
-            raise RewardAttributionError(
+    def __post_init__(
+        self,
+        _component_type=RewardAttributionComponent,
+        _truth_type=AttributionTruth,
+        _ref_type=AttributionAuthorityRef,
+        _unknown_truth=AttributionTruth.UNKNOWN,
+        _simulated_truth=AttributionTruth.SIMULATED,
+        _observed_truth=AttributionTruth.OBSERVED,
+        _error_type=RewardAttributionError,
+        _tuple_type=tuple,
+        _set_type=set,
+        _sorted=sorted,
+        _type=type,
+        _any=any,
+    ) -> None:
+        if _type(self.component) is not _component_type:
+            raise _error_type(
                 "component must be exact RewardAttributionComponent"
             )
-        if type(self.truth) is not AttributionTruth:
-            raise RewardAttributionError("truth must be exact AttributionTruth")
-        if type(self.authority_refs) is not tuple or any(
-            type(item) is not AttributionAuthorityRef for item in self.authority_refs
+        if _type(self.truth) is not _truth_type:
+            raise _error_type("truth must be exact AttributionTruth")
+        if _type(self.authority_refs) is not _tuple_type or _any(
+            _type(item) is not _ref_type for item in self.authority_refs
         ):
-            raise RewardAttributionError(
+            raise _error_type(
                 "authority_refs must contain exact AttributionAuthorityRef values"
             )
         if (
             self.counterfactual_ref is not None
-            and type(self.counterfactual_ref) is not AttributionAuthorityRef
+            and _type(self.counterfactual_ref) is not _ref_type
         ):
-            raise RewardAttributionError(
+            raise _error_type(
                 "counterfactual_ref must be exact AttributionAuthorityRef or None"
             )
-        if tuple(sorted(self.authority_refs)) != self.authority_refs:
-            raise RewardAttributionError("authority_refs must be sorted")
-        if len(set(self.authority_refs)) != len(self.authority_refs):
-            raise RewardAttributionError("authority_refs must be unique")
-        authority_identities = tuple(
+        if _tuple_type(_sorted(self.authority_refs)) != self.authority_refs:
+            raise _error_type("authority_refs must be sorted")
+        if len(_set_type(self.authority_refs)) != len(self.authority_refs):
+            raise _error_type("authority_refs must be unique")
+        authority_identities = _tuple_type(
             (item.family, item.evidence_id) for item in self.authority_refs
         )
-        if len(set(authority_identities)) != len(authority_identities):
-            raise RewardAttributionError(
+        if len(_set_type(authority_identities)) != len(authority_identities):
+            raise _error_type(
                 "authority_refs cannot bind one authority identity to multiple digests"
             )
 
-        if self.truth is AttributionTruth.UNKNOWN:
+        if self.truth is _unknown_truth:
             if self.authority_refs or self.counterfactual_ref is not None:
-                raise RewardAttributionError(
+                raise _error_type(
                     "UNKNOWN attribution cannot carry positive authority assertions"
                 )
         elif not self.authority_refs:
-            raise RewardAttributionError(
+            raise _error_type(
                 "OBSERVED/SIMULATED attribution requires explicit authority_refs"
             )
 
-        if (
-            self.truth is AttributionTruth.SIMULATED
-            and self.counterfactual_ref is None
-        ):
-            raise RewardAttributionError(
+        if self.truth is _simulated_truth and self.counterfactual_ref is None:
+            raise _error_type(
                 "SIMULATED attribution requires counterfactual authority"
             )
-        if (
-            self.truth is AttributionTruth.OBSERVED
-            and self.counterfactual_ref is not None
-        ):
-            raise RewardAttributionError(
+        if self.truth is _observed_truth and self.counterfactual_ref is not None:
+            raise _error_type(
                 "OBSERVED attribution cannot carry counterfactual_ref"
             )
 
@@ -245,14 +292,27 @@ class RewardAttributionEvidence:
     schema: str = SCHEMA
     schema_version: int = SCHEMA_VERSION
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _schema=SCHEMA,
+        _schema_version=SCHEMA_VERSION,
+        _sha256_impl=_sha256,
+        _component_type=RewardComponentAttribution,
+        _required_components=REQUIRED_COMPONENTS,
+        _error_type=RewardAttributionError,
+        _str_type=str,
+        _int_type=int,
+        _tuple_type=tuple,
+        _type=type,
+        _any=any,
+    ) -> None:
         if (
-            type(self.schema) is not str
-            or self.schema != SCHEMA
-            or type(self.schema_version) is not int
-            or self.schema_version != SCHEMA_VERSION
+            _type(self.schema) is not _str_type
+            or self.schema != _schema
+            or _type(self.schema_version) is not _int_type
+            or self.schema_version != _schema_version
         ):
-            raise RewardAttributionError("unsupported reward attribution schema")
+            raise _error_type("unsupported reward attribution schema")
         for name in (
             "environment_id",
             "episode_id",
@@ -261,16 +321,16 @@ class RewardAttributionEvidence:
             "reward_id",
             "transition_id",
         ):
-            _sha256(getattr(self, name), name)
-        if type(self.components) is not tuple or any(
-            type(item) is not RewardComponentAttribution for item in self.components
+            _sha256_impl(getattr(self, name), name)
+        if _type(self.components) is not _tuple_type or _any(
+            _type(item) is not _component_type for item in self.components
         ):
-            raise RewardAttributionError(
+            raise _error_type(
                 "components must contain exact RewardComponentAttribution values"
             )
-        actual = tuple(item.component for item in self.components)
-        if actual != REQUIRED_COMPONENTS:
-            raise RewardAttributionError(
+        actual = _tuple_type(item.component for item in self.components)
+        if actual != _required_components:
+            raise _error_type(
                 "components must contain exactly FORECAST, SELECTION, SIZING, "
                 "EXECUTION, DATA_QUALITY in canonical order"
             )
@@ -286,7 +346,7 @@ class RewardAttributionEvidence:
                 if existing_digest is None:
                     authority_digests[identity] = ref.sha256
                 elif existing_digest != ref.sha256:
-                    raise RewardAttributionError(
+                    raise _error_type(
                         "attribution envelope cannot bind one authority identity "
                         "to multiple digests"
                     )
@@ -300,8 +360,8 @@ class RewardAttributionEvidence:
         return False
 
     @property
-    def semantic_key(self) -> str:
-        return _digest(
+    def semantic_key(self, _digest_impl=_digest) -> str:
+        return _digest_impl(
             {
                 "schema": self.schema,
                 "schema_version": self.schema_version,
@@ -315,20 +375,30 @@ class RewardAttributionEvidence:
         )
 
     @property
-    def evidence_id(self) -> str:
-        return _digest(self.payload())
+    def evidence_id(self, _digest_impl=_digest) -> str:
+        return _digest_impl(self.payload())
 
-    def require_policy_update_eligible(self) -> None:
-        raise RewardAttributionError(
+    def require_policy_update_eligible(
+        self,
+        _error_type=RewardAttributionError,
+    ) -> None:
+        raise _error_type(
             "schema v1 is contract-only: product-owned attribution resolution is required"
         )
 
-    def component(self, component: RewardAttributionComponent) -> RewardComponentAttribution:
-        if type(component) is not RewardAttributionComponent:
-            raise RewardAttributionError(
+    def component(
+        self,
+        component: RewardAttributionComponent,
+        _component_type=RewardAttributionComponent,
+        _required_components=REQUIRED_COMPONENTS,
+        _error_type=RewardAttributionError,
+        _type=type,
+    ) -> RewardComponentAttribution:
+        if _type(component) is not _component_type:
+            raise _error_type(
                 "component lookup requires exact RewardAttributionComponent"
             )
-        return self.components[REQUIRED_COMPONENTS.index(component)]
+        return self.components[_required_components.index(component)]
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -401,29 +471,45 @@ class RewardAttributionEvidence:
         return evidence
 
 
-def unknown_reward_attribution(
+def _build_unknown_reward_attribution(
     *,
-    environment_id: str,
-    episode_id: str,
-    action_id: str,
-    outcome_id: str,
-    reward_id: str,
-    transition_id: str,
-) -> RewardAttributionEvidence:
-    """Create the only safe baseline when no component authority has been resolved."""
+    _evidence_type=RewardAttributionEvidence,
+    _component_type=RewardComponentAttribution,
+    _unknown_truth=AttributionTruth.UNKNOWN,
+    _required_components=REQUIRED_COMPONENTS,
+    _tuple_type=tuple,
+):
+    """Compose the public UNKNOWN baseline from canonical implementation roots."""
 
-    return RewardAttributionEvidence(
-        environment_id=environment_id,
-        episode_id=episode_id,
-        action_id=action_id,
-        outcome_id=outcome_id,
-        reward_id=reward_id,
-        transition_id=transition_id,
-        components=tuple(
-            RewardComponentAttribution(component, AttributionTruth.UNKNOWN)
-            for component in REQUIRED_COMPONENTS
-        ),
-    )
+    def unknown_reward_attribution(
+        *,
+        environment_id: str,
+        episode_id: str,
+        action_id: str,
+        outcome_id: str,
+        reward_id: str,
+        transition_id: str,
+    ) -> RewardAttributionEvidence:
+        """Create the only safe baseline when no component authority has been resolved."""
+
+        return _evidence_type(
+            environment_id=environment_id,
+            episode_id=episode_id,
+            action_id=action_id,
+            outcome_id=outcome_id,
+            reward_id=reward_id,
+            transition_id=transition_id,
+            components=_tuple_type(
+                _component_type(component, _unknown_truth)
+                for component in _required_components
+            ),
+        )
+
+    return unknown_reward_attribution
+
+
+unknown_reward_attribution = _build_unknown_reward_attribution()
+del _build_unknown_reward_attribution
 
 
 __all__ = [

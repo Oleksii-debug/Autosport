@@ -666,6 +666,57 @@ class PaperSettlementLearningBridge:
                     raise PaperSettlementLearningBridgeError(
                         "settlement intent belongs to another ticket binding"
                     )
+
+            status = binding["status"]
+            outbox = binding.get("outbox")
+            ack = binding.get("ack")
+            if status == BOUND:
+                if outbox is not None or ack is not None:
+                    raise PaperSettlementLearningBridgeError(
+                        "BOUND bridge binding cannot contain learner outbox or acknowledgement"
+                    )
+                continue
+            if type(outbox) is not dict:
+                raise PaperSettlementLearningBridgeError(
+                    "resolved bridge binding requires durable learner outbox"
+                )
+            outcome, reward, transition, checkpoint = self._outbox_objects(outbox)
+            if (
+                outbox["binding_id"] != binding["binding_id"]
+                or outbox["ticket_id"] != ticket_id
+            ):
+                raise PaperSettlementLearningBridgeError(
+                    "durable learner outbox belongs to another ticket binding"
+                )
+            if status == OUTBOX:
+                if ack is not None:
+                    raise PaperSettlementLearningBridgeError(
+                        "OUTBOX bridge binding cannot contain acknowledgement"
+                    )
+                continue
+            if type(ack) is not dict or set(ack) != {
+                "outbox_id",
+                "transition_id",
+                "outcome_id",
+                "reward_id",
+                "next_checkpoint_id",
+                "acked_at",
+            }:
+                raise PaperSettlementLearningBridgeError(
+                    "ACKED bridge binding requires canonical acknowledgement"
+                )
+            canonical_acked_at = _instant_id(ack["acked_at"], "acked_at")
+            if (
+                ack["outbox_id"] != outbox["outbox_id"]
+                or ack["transition_id"] != transition.transition_id
+                or ack["outcome_id"] != outcome.outcome_id
+                or ack["reward_id"] != reward.reward_id
+                or ack["next_checkpoint_id"] != checkpoint.checkpoint_id
+                or ack["acked_at"] != canonical_acked_at
+            ):
+                raise PaperSettlementLearningBridgeError(
+                    "durable learner acknowledgement differs from outbox"
+                )
         return state
 
     def _runtime_matches(
@@ -1480,6 +1531,60 @@ class PaperSettlementLearningBridge:
     def _outbox_objects(
         outbox: dict[str, object],
     ) -> tuple[Outcome, RewardEvidence, Transition, EnvironmentCheckpoint]:
+        expected_fields = {
+            "outbox_id",
+            "binding_id",
+            "ticket_id",
+            "ticket_status",
+            "ticket_payout",
+            "net_reward",
+            "known_quote_outcomes",
+            "settlement_evidence",
+            "settlement_bundle_sha256",
+            "outcome",
+            "reward",
+            "transition",
+            "next_checkpoint",
+        }
+        if type(outbox) is not dict or set(outbox) != expected_fields:
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox fields mismatch"
+            )
+        semantic = {
+            key: outbox[key]
+            for key in expected_fields
+            if key != "outbox_id"
+        }
+        if _sha(outbox["outbox_id"], "outbox_id") != _digest(semantic):
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox digest mismatch"
+            )
+        evidence = outbox["settlement_evidence"]
+        if (
+            type(evidence) is not list
+            or _sha(
+                outbox["settlement_bundle_sha256"],
+                "settlement_bundle_sha256",
+            )
+            != _digest(evidence)
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "durable learner settlement bundle digest mismatch"
+            )
+        _sha(outbox["binding_id"], "outbox binding_id")
+        _text(outbox["ticket_id"], "outbox ticket_id")
+        try:
+            TicketStatus(outbox["ticket_status"])
+            ticket_payout = Decimal(_text(outbox["ticket_payout"], "ticket_payout"))
+            net_reward = Decimal(_text(outbox["net_reward"], "net_reward"))
+        except (ValueError, ArithmeticError) as exc:
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox economics are not canonical"
+            ) from exc
+        if not ticket_payout.is_finite() or not net_reward.is_finite():
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox economics must be finite"
+            )
         try:
             raw_outcome = outbox["outcome"]
             raw_reward = outbox["reward"]
@@ -1529,6 +1634,24 @@ class PaperSettlementLearningBridge:
             )
         return outcome, reward, transition, checkpoint
 
+    @staticmethod
+    def _require_outbox_matches_ticket(
+        binding: dict[str, object],
+        ticket: PaperTicket,
+    ) -> None:
+        outbox = binding.get("outbox")
+        if type(outbox) is not dict:
+            raise PaperSettlementLearningBridgeError(
+                "resolved bridge binding requires durable learner outbox"
+            )
+        if (
+            ticket.status.value != outbox["ticket_status"]
+            or str(ticket.payout) != outbox["ticket_payout"]
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "PaperBook changed after learner outbox publication"
+            )
+
     def reconcile_after_settlement(
         self,
         *,
@@ -1562,9 +1685,10 @@ class PaperSettlementLearningBridge:
             book = PaperBook.load(self.paper_book_path)
             changed = False
             for ticket_id, binding in state["bindings"].items():
-                if binding["status"] == ACKED:
-                    continue
                 ticket = self._bound_ticket(book, binding)
+                if binding["status"] == ACKED:
+                    self._require_outbox_matches_ticket(binding, ticket)
+                    continue
                 if binding["status"] == BOUND:
                     intent = binding.get("settlement_intent")
                     evidence = resolutions
@@ -1586,13 +1710,7 @@ class PaperSettlementLearningBridge:
                     changed = True
                 else:
                     outbox = binding["outbox"]
-                    if (
-                        ticket.status.value != outbox["ticket_status"]
-                        or str(ticket.payout) != outbox["ticket_payout"]
-                    ):
-                        raise PaperSettlementLearningBridgeError(
-                            "PaperBook changed after learner outbox publication"
-                        )
+                    self._require_outbox_matches_ticket(binding, ticket)
                 pending.append((ticket_id, binding["outbox"]))
             if changed:
                 self._write(state)

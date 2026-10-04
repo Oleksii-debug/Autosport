@@ -2222,6 +2222,7 @@ class SQLiteMarketStore:
                     self._recover_replay_cutoff_authority(
                         authority,
                         observed_state_sha256,
+                        cutoff_rows=cutoff_rows,
                     )
 
                 # Re-read and independently prove the exact durable state after
@@ -2240,6 +2241,7 @@ class SQLiteMarketStore:
                     self._recover_replay_cutoff_authority(
                         authority,
                         observed_state_sha256,
+                        cutoff_rows=cutoff_rows,
                     )
                     current_row = next(
                         (

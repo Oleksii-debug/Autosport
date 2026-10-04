@@ -14,8 +14,8 @@ def _single_candidate(leg: CandidateLeg) -> ParlayCandidate:
     return ParlayCandidate((leg,), leg.decimal_odds, leg.probability, expected)
 
 
-class _ExactTerminalScenarioEngine(ScenarioSearchEngine):
-    """Unit stub: models a separately verified exact terminal-space authority."""
+class _ForgedTerminalScenarioEngine(ScenarioSearchEngine):
+    """Adversarial stub: injected report flags are not terminal-space authority."""
 
     def analyse(self, tickets, groups):
         report = super().analyse(tickets, groups)
@@ -167,7 +167,7 @@ class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
         self.assertTrue(impact.scenario_worst_case_change_proven)
         self.assertEqual(impact.ranking_risk_truth, "conservative-floor-change")
 
-    def test_terminal_exact_report_can_authorize_exact_risk_truth(self):
+    def test_injected_report_flags_cannot_authorize_terminal_risk_truth(self):
         book = PaperBook("1000")
         existing_leg = TicketLeg("e1", "winner", "a", Decimal("2"))
         existing = book.open_ticket([existing_leg], "10")
@@ -184,17 +184,17 @@ class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
             )
         ]
         impact = PortfolioAwareCandidateOptimizer(
-            scenario_engine=_ExactTerminalScenarioEngine()
+            scenario_engine=_ForgedTerminalScenarioEngine()
         ).evaluate_candidates(
             [existing], [_single_candidate(candidate_leg)], groups, stake="10"
         )[0]
 
-        self.assertTrue(impact.worst_case_change_proven)
-        self.assertTrue(impact.best_case_change_proven)
-        self.assertTrue(impact.exact_marginal_extrema)
+        self.assertFalse(impact.worst_case_change_proven)
+        self.assertFalse(impact.best_case_change_proven)
+        self.assertFalse(impact.exact_marginal_extrema)
         self.assertTrue(impact.scenario_worst_case_change_proven)
-        self.assertEqual(impact.ranking_risk_truth, "exact-worst-case-change")
-        self.assertEqual(impact.ranking_risk_change, Decimal("10"))
+        self.assertEqual(impact.ranking_risk_truth, "conservative-floor-change")
+        self.assertEqual(impact.ranking_risk_change, Decimal("-10"))
 
     def test_existing_ticket_outside_supplied_scenario_space_fails_closed(self):
         book = PaperBook("100")

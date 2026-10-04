@@ -34,6 +34,13 @@ class MirrorInvalidationBatch:
     semantic_refresh_keys: tuple[MirrorQuoteKey, ...] = ()
 
     def __post_init__(self) -> None:
+        if type(self.full_refresh_required) is not bool or type(self.has_more) is not bool:
+            raise TypeError("invalidation batch flags must be booleans")
+        if len(set(self.changed_keys)) != len(self.changed_keys):
+            raise ValueError("changed invalidation keys must be unique")
+        if len(set(self.semantic_refresh_keys)) != len(self.semantic_refresh_keys):
+            raise ValueError("semantic refresh keys must be unique")
+
         changed = frozenset(self.changed_keys)
         semantic_refresh = frozenset(self.semantic_refresh_keys)
         if not semantic_refresh.issubset(changed):

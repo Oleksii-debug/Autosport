@@ -932,6 +932,102 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 external.close()
                 store.close()
 
+    def test_invalid_selector_does_not_issue_durable_cutoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                store.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "source_ids entries must be non-empty strings",
+                ):
+                    MarketMirror.replay_view_from_store(
+                        store,
+                        as_of=self.CUTOFF,
+                        max_age=timedelta(minutes=2),
+                        source_ids=("provider-a", ""),
+                    )
+
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (0,),
+                )
+                self.assertEqual(
+                    store._replay_cutoff_authority().read_history(),
+                    (),
+                )
+            finally:
+                store.close()
+
+    def test_one_shot_selector_is_preserved_after_prevalidation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                store.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
+                source_ids = (source_id for source_id in ("provider-a",))
+
+                snapshot = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=self.CUTOFF,
+                    max_age=timedelta(minutes=2),
+                    source_ids=source_ids,
+                )
+
+                self.assertEqual(len(snapshot.events), 1)
+                self.assertEqual(snapshot.events[0].source_id, "provider-a")
+            finally:
+                store.close()
+
+    def test_malformed_history_is_not_blessed_by_first_cutoff_issuance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                event = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                store.append(event)
+                store.connection.execute(
+                    "UPDATE market_events SET payload_json=? WHERE dedupe_key=?",
+                    ('{"broken":', event.dedupe_key),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "stored market event payload must be valid JSON",
+                ):
+                    self.replay(store)
+
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (0,),
+                )
+                self.assertEqual(
+                    store._replay_cutoff_authority().read_history(),
+                    (),
+                )
+            finally:
+                store.close()
+
     def test_cutoff_issuance_recovers_after_sqlite_commit_before_authority_commit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

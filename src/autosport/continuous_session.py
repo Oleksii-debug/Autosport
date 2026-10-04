@@ -230,6 +230,7 @@ class _ContinuousSessionCoordinatorMeta(type):
             "_settle",
             "_settlement_resolutions",
             "_pending_settlement_resolutions",
+            "_retained_pending_settlement_ids",
             "_recovered_settlement_resolutions",
             "__setattr__",
             "__delattr__",
@@ -258,6 +259,7 @@ class _ContinuousSessionCoordinatorMeta(type):
             "_settle",
             "_settlement_resolutions",
             "_pending_settlement_resolutions",
+            "_retained_pending_settlement_ids",
             "_recovered_settlement_resolutions",
             "__setattr__",
             "__delattr__",
@@ -275,6 +277,7 @@ class _ContinuousSessionCoordinatorMeta(type):
             "_settle",
             "_settlement_resolutions",
             "_pending_settlement_resolutions",
+            "_retained_pending_settlement_ids",
             "_recovered_settlement_resolutions",
             "__setattr__",
             "__delattr__",
@@ -1099,24 +1102,32 @@ class _ContinuousSessionState:
         self,
         *,
         settlement_evidence: tuple[SettlementResolution, ...],
+        retain_pending_evidence_ids: tuple[str, ...],
     ) -> None:
-        """Clear replay work only after its economic/learning commit completed."""
+        """Clear completed replay work while retaining truth needed by open tickets."""
+
+        if type(retain_pending_evidence_ids) is not tuple:
+            raise TypeError("retain_pending_evidence_ids must be a tuple")
+        retained = {
+            _text(evidence_id, "retain_pending_evidence_id")
+            for evidence_id in retain_pending_evidence_ids
+        }
+        if len(retained) != len(retain_pending_evidence_ids):
+            raise ContinuousSessionError(
+                "retain_pending_evidence_ids contains duplicate identity"
+            )
 
         def mutate(raw: dict[str, Any]) -> None:
             evidence, outcome_digests, pending = self._merge_settlement_evidence(
                 raw,
                 settlement_evidence,
             )
-            completed_ids = {
-                resolution.evidence_id
-                for resolution in settlement_evidence
-            }
             raw["settlement_evidence"] = evidence
             raw["settlement_outcome_digests"] = outcome_digests
             raw["pending_settlement_resolutions"] = [
                 item
                 for item in pending
-                if item["evidence_id"] not in completed_ids
+                if item["evidence_id"] in retained
             ]
 
         self._update(mutate)
@@ -1176,8 +1187,19 @@ class _ContinuousSessionState:
         at: str,
         full_refresh: bool,
         settlement_evidence: tuple[SettlementResolution, ...],
+        retain_pending_evidence_ids: tuple[str, ...],
     ) -> None:
         timestamp = _instant(at, "at")
+        if type(retain_pending_evidence_ids) is not tuple:
+            raise TypeError("retain_pending_evidence_ids must be a tuple")
+        retained = {
+            _text(evidence_id, "retain_pending_evidence_id")
+            for evidence_id in retain_pending_evidence_ids
+        }
+        if len(retained) != len(retain_pending_evidence_ids):
+            raise ContinuousSessionError(
+                "retain_pending_evidence_ids contains duplicate identity"
+            )
 
         def mutate(raw: dict[str, Any]) -> None:
             raw["cycles_completed"] = int(raw["cycles_completed"]) + 1
@@ -1190,16 +1212,12 @@ class _ContinuousSessionState:
                 raw,
                 settlement_evidence,
             )
-            completed_ids = {
-                evidence.evidence_id
-                for evidence in settlement_evidence
-            }
             raw["settlement_evidence"] = evidence
             raw["settlement_outcome_digests"] = outcome_digests
             raw["pending_settlement_resolutions"] = [
                 item
                 for item in pending
-                if item["evidence_id"] not in completed_ids
+                if item["evidence_id"] in retained
             ]
 
         self._update(mutate)
@@ -1968,6 +1986,75 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         return settled, tuple(unique)
 
+    @_seal_settlement_consumer_entry
+    @_bind_canonical_settlement_engine
+    def _retained_pending_settlement_ids(
+        self,
+        *,
+        resolutions: tuple[SettlementResolution, ...],
+        settled_at: str,
+        _settlement_engine_type: type[SettlementEngine],
+        _settlement_scope_resolver: Callable[[object, PaperBook, str], set[str]],
+        _settlement_resolution_type: type[SettlementResolution],
+        _settlement_resolution_validate: Callable[..., None],
+        _settlement_instant: Callable[..., datetime],
+        _paper_book_type: type[PaperBook],
+        _paper_book_load: Callable[[str | Path], PaperBook],
+        _paper_book_save: Callable[[PaperBook, str | Path], None],
+        _workspace_lock_type: type[WorkspaceEconomicLock],
+    ) -> tuple[str, ...]:
+        """Retain staged truth while any canonical open ticket can still consume it."""
+
+        if type(resolutions) is not tuple:
+            raise TypeError("settlement resolutions must be a tuple")
+        if not resolutions:
+            return ()
+        canonical_settled_at = _settlement_instant(
+            settled_at,
+            "settled_at",
+        ).isoformat()
+        retained: list[str] = []
+        seen: set[str] = set()
+        with _workspace_lock_type(self.workspace):
+            if not self.paper_book_path.exists():
+                return ()
+            book = _paper_book_load(self.paper_book_path)
+            if type(book) is not _paper_book_type:
+                raise ContinuousSessionError(
+                    "settlement book loader returned non-canonical type"
+                )
+            for resolution in resolutions:
+                if type(resolution) is not _settlement_resolution_type:
+                    raise ContinuousSessionError(
+                        "pending retention contains non-canonical resolution evidence"
+                    )
+                try:
+                    _settlement_resolution_validate(
+                        resolution,
+                        as_of=canonical_settled_at,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ContinuousSessionError(
+                        "pending retention resolution failed canonical validation"
+                    ) from exc
+                allowed = _settlement_scope_resolver(
+                    self,
+                    book,
+                    resolution.event_identity,
+                    resolution.settlement_ref,
+                    canonical_settled_at,
+                )
+                if (
+                    any(
+                        quote_key in allowed
+                        for quote_key in resolution.quote_outcomes
+                    )
+                    and resolution.evidence_id not in seen
+                ):
+                    retained.append(resolution.evidence_id)
+                    seen.add(resolution.evidence_id)
+        return tuple(retained)
+
     def tick(self) -> ContinuousTickResult:
         self._require_running()
         now = self.clock()
@@ -2009,8 +2096,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                             settled_ticket_ids=settled,
                             at=now,
                         )
+                    retained_pending_ids = self._retained_pending_settlement_ids(
+                        resolutions=recovery_resolutions,
+                        settled_at=now,
+                    )
                     self._state.complete_pending_settlement_commit(
                         settlement_evidence=recovery_resolutions,
+                        retain_pending_evidence_ids=retained_pending_ids,
                     )
 
                 self._state.record_failure(code="ProviderUnavailableError")
@@ -2123,11 +2215,16 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     at=now,
                 )
 
+            retained_pending_ids = self._retained_pending_settlement_ids(
+                resolutions=resolutions,
+                settled_at=now,
+            )
             cycle_index = self._state.snapshot().cycles_completed + 1
             self._state.record_success(
                 at=now,
                 full_refresh=full_refresh,
                 settlement_evidence=resolutions,
+                retain_pending_evidence_ids=retained_pending_ids,
             )
             return ContinuousTickResult(
                 session_id=self.session_id,
@@ -2172,6 +2269,9 @@ _ContinuousSessionCoordinatorMeta._settlement_resolutions = (
 )
 _ContinuousSessionCoordinatorMeta._pending_settlement_resolutions = (
     _build_settlement_consumer_class_guard("_pending_settlement_resolutions")
+)
+_ContinuousSessionCoordinatorMeta._retained_pending_settlement_ids = (
+    _build_settlement_consumer_class_guard("_retained_pending_settlement_ids")
 )
 _ContinuousSessionCoordinatorMeta._recovered_settlement_resolutions = (
     _build_settlement_consumer_class_guard("_recovered_settlement_resolutions")

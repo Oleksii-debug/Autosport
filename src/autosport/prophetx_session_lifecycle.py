@@ -884,15 +884,25 @@ class ProphetXSessionLifecycle:
                         lineage = None
                         expiry = None
                     elif timestamp >= current.access_expires_at:
+                        retry_horizon = timestamp + self._retry_delay(failures)
                         if timestamp < current.slot_hold_until:
                             state = (
                                 ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
                             )
-                            hold = current.slot_hold_until
+                            # The old provider slot is still conservatively occupied.
+                            # Never let its natural-expiry horizon undercut the bounded
+                            # retry/provider-health delay produced by this failed refresh.
+                            hold = max(current.slot_hold_until, retry_horizon)
+                            retry = None
                         else:
-                            state = ProphetXSessionState.EXPIRED
+                            state = (
+                                ProphetXSessionState.PROVIDER_UNAVAILABLE
+                                if failure
+                                is ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE
+                                else ProphetXSessionState.AUTH_RETRYABLE_FAILURE
+                            )
                             hold = None
-                        retry = None
+                            retry = retry_horizon
                         lineage = None
                         expiry = None
                     else:

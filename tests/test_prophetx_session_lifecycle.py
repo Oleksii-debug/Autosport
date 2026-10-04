@@ -918,6 +918,103 @@ def test_credential_rejected_during_renewal_stays_fail_closed(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    ("failure", "expected_state"),
+    [
+        (
+            ProphetXRenewalFailureClass.RETRYABLE,
+            ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
+        ),
+        (
+            ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE,
+            ProphetXSessionState.PROVIDER_UNAVAILABLE,
+        ),
+    ],
+)
+def test_late_renewal_failure_keeps_bounded_retry_before_replacement_login(
+    tmp_path,
+    failure,
+    expected_state,
+):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
+    started = lifecycle.begin_renewal(
+        now=due_at,
+        refresh_token_lineage_id=active.session_lineage_id,
+    )
+
+    failed_at = active.slot_hold_until + timedelta(seconds=1)
+    failed = lifecycle.complete_renewal_failure(
+        attempt_id=started.attempt_id,
+        now=failed_at,
+        failure=failure,
+    )
+
+    assert failed.state is expected_state
+    assert failed.retry_not_before is not None
+    assert failed.retry_not_before > failed_at
+    assert failed.slot_hold_until is None
+    assert failed.last_renewal_failure_class is failure
+
+    blocked = lifecycle.begin_login(
+        now=failed_at + timedelta(seconds=1),
+        access_token_available=False,
+    )
+    assert blocked.action is ProphetXLoginAdmissionAction.RETRY_LATER
+    assert blocked.retry_at == failed.retry_not_before
+    assert blocked.login_authorized is False
+
+    admitted = lifecycle.begin_login(
+        now=failed.retry_not_before,
+        access_token_available=False,
+    )
+    assert admitted.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+
+
+def test_expired_renewal_backoff_can_extend_conservative_no_login_horizon(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
+    payload["transient_failures"] = 32
+    lifecycle.state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
+    started = lifecycle.begin_renewal(
+        now=due_at,
+        refresh_token_lineage_id=active.session_lineage_id,
+    )
+
+    failed_at = active.slot_hold_until - timedelta(seconds=1)
+    failed = lifecycle.complete_renewal_failure(
+        attempt_id=started.attempt_id,
+        now=failed_at,
+        failure=ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE,
+    )
+
+    assert failed.state is ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    assert failed.slot_hold_until > active.slot_hold_until
+    blocked = lifecycle.begin_login(
+        now=active.slot_hold_until,
+        access_token_available=False,
+    )
+    assert (
+        blocked.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    )
+    assert blocked.retry_at == failed.slot_hold_until
+
+
 def test_renewal_failure_after_short_expiry_preserves_provider_slot_hold(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)

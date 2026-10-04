@@ -783,6 +783,77 @@ def test_wrong_session_id_cannot_migrate_legacy_checkpoint() -> None:
         assert not journal.exists()
 
 
+def test_wrong_session_id_cannot_migrate_wave_m_v3_checkpoint() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        embedded = _checkpoint_payload(1)
+        embedded["schema_version"] = 3
+        embedded["settlement_evidence"][0]["quote_outcomes_sha256"] = (
+            continuous_session._settlement_quote_outcomes_sha256(
+                {"provider-a:event-0:winner:home": "win"}
+            )
+        )
+        path.write_text(
+            json.dumps(embedded, sort_keys=True),
+            encoding="utf-8",
+        )
+        before = path.read_bytes()
+        journal = root / "continuous_session.settlement-evidence"
+
+        try:
+            continuous_session._ContinuousSessionState(
+                path,
+                session_id="wrong-session-id",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "wrong session identity migrated Wave M durable state"
+            )
+
+        assert path.read_bytes() == before
+        assert not journal.exists()
+
+
+def test_empty_wave_m_v3_migration_rejects_orphan_journal_without_rewrite() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        embedded = _checkpoint_payload(0)
+        embedded["schema_version"] = 3
+        path.write_text(
+            json.dumps(embedded, sort_keys=True),
+            encoding="utf-8",
+        )
+        before = path.read_bytes()
+        journal = root / "continuous_session.settlement-evidence"
+        journal.mkdir()
+
+        try:
+            continuous_session._ContinuousSessionState(
+                path,
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "empty Wave M migration published over an orphan journal"
+            )
+
+        assert path.read_bytes() == before
+        assert json.loads(path.read_text(encoding="utf-8"))[
+            "schema_version"
+        ] == 3
+        assert journal.exists()
+
+
 def test_wave_m_schema_v3_migrates_to_v4_without_losing_outcome_fingerprint() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

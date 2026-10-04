@@ -1311,6 +1311,30 @@ class ProductProposalRiskScenarioPopulationTests(unittest.TestCase):
                 original
             )
 
+    def test_public_issue_closure_binder_mutation_is_rejected(self) -> None:
+        issue = (
+            scenario_population_authority
+            .issue_product_proposal_risk_scenario_population
+        )
+        closure = issue.__closure__
+        self.assertIsNotNone(closure)
+        self.assertEqual(len(closure), 1)
+        cell = closure[0]
+        original = cell.cell_contents
+
+        def forged_bind(_instance):
+            return None
+
+        try:
+            cell.cell_contents = forged_bind
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "dispatch changed",
+            ):
+                self._issue()
+        finally:
+            cell.cell_contents = original
+
     def test_text_kwdefault_mutation_is_rejected(self) -> None:
         helper = scenario_population_authority._text
         kwdefaults = helper.__kwdefaults__

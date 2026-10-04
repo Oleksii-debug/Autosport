@@ -1628,10 +1628,12 @@ class SQLiteMarketStore:
             }
         )
 
-    @staticmethod
     def _recover_replay_cutoff_authority(
+        self,
         authority: MonotonicWorkspaceAuthority,
         observed_state_sha256: str | None,
+        *,
+        cutoff_rows: tuple[tuple[str, str, int], ...],
     ) -> None:
         try:
             authority.recover(observed_state_sha256=observed_state_sha256)
@@ -1641,6 +1643,46 @@ class SQLiteMarketStore:
             if not history or history[-1].phase is not AuthorityPhase.PREPARE:
                 raise
             pending = history[-1]
+
+            # Recovery may only COMMIT the exact one-row cutoff transition that the
+            # product would have issued. Infer the previous durable row-set by
+            # removing each current row in turn and matching the PREPARE ancestry;
+            # then bind the newly added row to its exact frozen corpus digest.
+            candidates: list[tuple[str, str, int]] = []
+            for index, row in enumerate(cutoff_rows):
+                prior_rows = cutoff_rows[:index] + cutoff_rows[index + 1 :]
+                prior_state_sha256 = self._replay_cutoff_authority_state_sha256(
+                    prior_rows
+                )
+                if prior_state_sha256 == pending.previous_committed_state_sha256:
+                    candidates.append(row)
+            if (
+                len(candidates) != 1
+                or pending.intended_state_sha256 != observed_state_sha256
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff PREPARE is not one canonical row addition"
+                )
+
+            cutoff_id, canonical_as_of, max_generation = candidates[0]
+            tx_prefix = f"{cutoff_id[:32]}-"
+            tx_suffix = pending.tx_id[len(tx_prefix) :] if pending.tx_id.startswith(tx_prefix) else ""
+            corpus_sha256 = self._frozen_replay_corpus_sha256(max_generation)
+            expected_binding_sha256 = _replay_cutoff_binding_sha256(
+                cutoff_id=cutoff_id,
+                canonical_as_of=canonical_as_of,
+                max_append_generation=max_generation,
+                corpus_sha256=corpus_sha256,
+            )
+            if (
+                len(tx_suffix) != 32
+                or re.fullmatch(r"[0-9a-f]{32}", tx_suffix) is None
+                or pending.semantic_binding_sha256 != expected_binding_sha256
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff PREPARE semantic binding is invalid"
+                )
+
             authority.recover(
                 observed_state_sha256=observed_state_sha256,
                 tx_id=pending.tx_id,
@@ -2037,6 +2079,7 @@ class SQLiteMarketStore:
                 self._recover_replay_cutoff_authority(
                     authority,
                     observed_state_sha256,
+                    cutoff_rows=cutoff_rows,
                 )
 
                 current_row = next(
@@ -2072,6 +2115,7 @@ class SQLiteMarketStore:
                         self._recover_replay_cutoff_authority(
                             authority,
                             observed_state_sha256,
+                            cutoff_rows=cutoff_rows,
                         )
                         current_row = next(
                             (

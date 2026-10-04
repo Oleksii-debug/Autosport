@@ -785,13 +785,32 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             raise PaperExecutionIntegrityError(
                 "run has multiple exposure-scope events"
             )
-        if scopes and (
-            scopes[0]["event_key"] != f"{run_id}:exposure-scope"
-            or scopes[0]["sequence"] >= reservation_event["sequence"]
-        ):
-            raise PaperExecutionIntegrityError(
-                "durable exposure scope chronology is invalid"
-            )
+        if scopes:
+            scope_event = scopes[0]
+            scope_payload = scope_event["payload"]
+            scope_bindings = scope_payload["bindings"]
+            if (
+                scope_event["event_key"] != f"{run_id}:exposure-scope"
+                or scope_event["sequence"]
+                >= reservation_event["sequence"]
+            ):
+                raise PaperExecutionIntegrityError(
+                    "durable exposure scope chronology is invalid"
+                )
+            if (
+                scope_payload["plan_id"] != plan.plan_id
+                or scope_payload["plan_fingerprint"] != plan.fingerprint
+                or [
+                    binding["action_id"]
+                    for binding in scope_bindings
+                ]
+                != [
+                    action.action_id for action in plan.actions
+                ]
+            ):
+                raise PaperExecutionIntegrityError(
+                    "durable exposure scope conflicts with execution plan"
+                )
 
         attempt_events, attempts = self._attempts_in_event_order(events)
         if any(

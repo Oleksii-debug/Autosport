@@ -163,6 +163,58 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 restored.close()
 
+    def test_product_desktop_authority_graph_rejects_post_build_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event()
+            delta = _delta(event)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(resolved_event=event),
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                desktop = runtime.coordinator.desktop_consumer
+                replacements = {
+                    "collector": object(),
+                    "checkpoint": object(),
+                    "resolve_event": lambda _delta: event,
+                    "apply_event": lambda _delta, _event: None,
+                    "lookup_application_receipt": lambda _delta: None,
+                    "_acknowledgement_clock": lambda: clock.value,
+                    "_on_application_receipt": lambda *_args: None,
+                    "drain": lambda **_kwargs: (),
+                    "_product_authority_sealed": False,
+                }
+                for name, replacement in replacements.items():
+                    with self.subTest(authority=name):
+                        original = getattr(desktop, name)
+                        with self.assertRaisesRegex(
+                            ProductCompositionError,
+                            "product desktop authority field",
+                        ):
+                            setattr(desktop, name, replacement)
+                        self.assertIs(getattr(desktop, name), original)
+
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                self.assertEqual(
+                    desktop.drain(as_of=clock.value),
+                    (delta.delta_id,),
+                )
+                self.assertEqual(runtime.mirror.snapshot(), (event,))
+                receipt = DesktopDeltaCheckpointStore(
+                    root / "desktop_acks.json"
+                ).application_receipt(delta)
+                self.assertIsNotNone(receipt)
+                self.assertEqual(
+                    receipt.canonical_event_digest,
+                    delta.canonical_event_digest,
+                )
+            finally:
+                runtime.close()
     def test_runtime_ack_clock_allows_application_after_causal_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

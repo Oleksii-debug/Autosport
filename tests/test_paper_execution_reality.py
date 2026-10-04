@@ -793,6 +793,35 @@ class PaperExecutionRealityTests(unittest.TestCase):
                 )
             self.assertFalse(path.exists())
 
+    def test_reservation_evidence_must_bind_exact_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = plan(action("a1"))
+            foreign_action = action("foreign")
+            observation, _registry = registered_observation(
+                ledger,
+                foreign_action,
+                PaperAttemptOutcome.REJECTED,
+            )
+            event_count = len(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "does not bind exact action",
+            ):
+                ledger.reserve_run(
+                    run_id="paper-exec-v2-" + "2" * 64,
+                    trigger_id="trigger-evidence-binding",
+                    plan=current,
+                    config=config(),
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={
+                        "a1": observation.evidence_id
+                    },
+                )
+            self.assertEqual(len(ledger.events()), event_count)
+
     def test_observed_evidence_must_predate_reservation(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-execution.jsonl"

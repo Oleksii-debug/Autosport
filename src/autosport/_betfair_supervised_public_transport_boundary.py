@@ -152,6 +152,33 @@ _CONFIRMATION_GENERIC_MONOTONIC_AUTHORITY_METHOD_GRAPH = (
         _CONFIRMATION_GENERIC_MONOTONIC_AUTHORITY_TYPE
     )
 )
+
+# The durable authority reconstructs slotted projection/state objects and then reads
+# their fields to make expiry, identity and integrity decisions.  Pin both their
+# Python callable surfaces and their C member descriptors: replacing a slot
+# descriptor must not let hostile attribute dispatch reinterpret already-verified
+# journal bytes without changing the owning class identity.
+_CONFIRMATION_GENERIC_PROJECTION_TYPES = (
+    _CONFIRMATION_GENERIC_MODULE.SupervisedExecutionReview,
+    _CONFIRMATION_GENERIC_MODULE.OperatorConfirmationReceipt,
+    _CONFIRMATION_GENERIC_MODULE.SupervisedConfirmationBinding,
+    _CONFIRMATION_GENERIC_MODULE._Record,
+    _CONFIRMATION_GENERIC_MODULE._State,
+)
+_CONFIRMATION_GENERIC_PROJECTION_METHOD_GRAPHS = tuple(
+    (projection_type, _snapshot_class_callable_graph(projection_type))
+    for projection_type in _CONFIRMATION_GENERIC_PROJECTION_TYPES
+)
+_CONFIRMATION_GENERIC_SLOT_DESCRIPTOR_GRAPH = tuple(
+    (
+        projection_type,
+        slot_name,
+        getattr(projection_type, slot_name),
+    )
+    for projection_type in _CONFIRMATION_GENERIC_PROJECTION_TYPES
+    for slot_name in getattr(projection_type, "__slots__", ())
+    if type(slot_name) is str
+)
 _WORKSPACE_LOCK_METHOD_GRAPH = _snapshot_class_callable_graph(
     _WORKSPACE_LOCK_TYPE
 )
@@ -341,6 +368,26 @@ def _confirmation_graph_unchanged() -> bool:
             and getattr(value, "__code__", None) is code
             for name, value, code in (
                 _CONFIRMATION_GENERIC_MONOTONIC_AUTHORITY_METHOD_GRAPH
+            )
+        )
+        and all(
+            getattr(_CONFIRMATION_GENERIC_MODULE, projection_type.__name__, None)
+            is projection_type
+            for projection_type in _CONFIRMATION_GENERIC_PROJECTION_TYPES
+            if not projection_type.__name__.startswith("_")
+        )
+        and all(
+            getattr(projection_type, name, None) is value
+            and getattr(value, "__code__", None) is code
+            for projection_type, method_graph in (
+                _CONFIRMATION_GENERIC_PROJECTION_METHOD_GRAPHS
+            )
+            for name, value, code in method_graph
+        )
+        and all(
+            getattr(projection_type, slot_name, None) is descriptor
+            for projection_type, slot_name, descriptor in (
+                _CONFIRMATION_GENERIC_SLOT_DESCRIPTOR_GRAPH
             )
         )
         and _confirmation.hashlib is _CONFIRMATION_HASHLIB

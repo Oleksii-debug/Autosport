@@ -156,3 +156,42 @@ def test_final_send_rejects_moving_generic_confirmation_trust_roots(
 
     assert not boundary._confirmation_graph_unchanged()
 
+@pytest.mark.parametrize(
+    ("type_name", "member_name", "replacement_kind"),
+    (
+        ("SupervisedExecutionReview", "expires_at", "slot"),
+        ("OperatorConfirmationReceipt", "consumed_at", "slot"),
+        ("SupervisedConfirmationBinding", "review", "slot"),
+        ("_Record", "payload", "slot"),
+        ("_State", "reviews", "slot"),
+        ("SupervisedExecutionReview", "__init__", "callable"),
+        ("OperatorConfirmationReceipt", "__init__", "callable"),
+        ("SupervisedConfirmationBinding", "__init__", "callable"),
+        ("_Record", "__init__", "callable"),
+        ("_State", "__init__", "callable"),
+    ),
+)
+def test_generic_confirmation_projection_surface_rebinding_fails_closed(
+    monkeypatch,
+    type_name: str,
+    member_name: str,
+    replacement_kind: str,
+) -> None:
+    assert boundary._confirmation_graph_unchanged()
+    projection_type = getattr(confirmation._confirmation, type_name)
+
+    if replacement_kind == "slot":
+        monkeypatch.setattr(
+            projection_type,
+            member_name,
+            property(lambda self: None),
+        )
+    else:
+        monkeypatch.setattr(
+            projection_type,
+            member_name,
+            lambda self, *args, **kwargs: None,
+        )
+
+    assert not boundary._confirmation_graph_unchanged()
+

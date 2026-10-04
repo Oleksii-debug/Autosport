@@ -23,6 +23,7 @@ from .portfolio import (
 _MARKET_OUTCOME_AUTHORITY_TYPE = MarketSettlementOutcomeAuthority
 _ASSERT_MARKET_OUTCOME_AUTHORITY = assert_market_settlement_outcome_authoritative
 _OUTCOME_ASSERT_AVAILABLE = _MARKET_OUTCOME_AUTHORITY_TYPE.assert_available_as_of
+_PORTFOLIO_SCENARIO_PROFIT_SETTLEMENTS = PortfolioEngine.scenario_profit_settlements
 
 _MAX_SCENARIO_GROUPS = 256
 _MAX_SCENARIO_OUTCOMES_PER_GROUP = 1024
@@ -480,7 +481,7 @@ class ScenarioSearchEngine:
                     )
                 settlement_by_quote.update(state_settlement)
             profits.append(
-                PortfolioEngine.scenario_profit_settlements(
+                _PORTFOLIO_SCENARIO_PROFIT_SETTLEMENTS(
                     open_tickets,
                     settlement_by_quote,
                 )

@@ -701,6 +701,45 @@ class PaperExecutionRealityTests(unittest.TestCase):
             ):
                 PaperExecutionLedger(path).events()
 
+    def test_invalid_reservation_inputs_leave_no_durable_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = plan(action("a1"))
+            model = config()
+            run_id = "paper-exec-v2-" + "1" * 64
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "both observed and synthetically suspended",
+            ):
+                ledger.reserve_run(
+                    run_id=run_id,
+                    trigger_id="trigger-invalid-reservation",
+                    plan=current,
+                    config=model,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={"a1": "evidence-a1"},
+                    suspended_action_ids=frozenset({"a1"}),
+                )
+            self.assertFalse(path.exists())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "invalid execution evidence",
+            ):
+                ledger.reserve_run(
+                    run_id=run_id,
+                    trigger_id="trigger-invalid-reservation",
+                    plan=current,
+                    config=model,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={
+                        "outside-plan": "evidence-outside"
+                    },
+                )
+            self.assertFalse(path.exists())
+
     def test_writer_lock_fails_closed_instead_of_creating_parallel_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-execution.jsonl"

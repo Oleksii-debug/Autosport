@@ -402,6 +402,64 @@ def test_credential_rotation_cannot_bypass_transient_auth_backoff(
     assert recovered.snapshot.credential_revision == "rev-2"
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE,
+        ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION,
+    ],
+)
+def test_revocation_then_rotation_cannot_launder_transient_backoff(
+    tmp_path,
+    failure,
+):
+    original = _lifecycle(tmp_path, revision="rev-1")
+    admitted = original.begin_login(now=NOW, access_token_available=False)
+    degraded = original.complete_login_failure(
+        attempt_id=admitted.attempt_id,
+        now=NOW + timedelta(seconds=1),
+        failure=failure,
+    )
+    revoked = original.record_credential_revoked(
+        now=NOW + timedelta(seconds=2)
+    )
+
+    assert revoked.state is ProphetXSessionState.CREDENTIAL_REJECTED
+    assert revoked.retry_not_before == degraded.retry_not_before
+
+    rotated = _lifecycle(tmp_path, revision="rev-2")
+    blocked = rotated.begin_login(
+        now=NOW + timedelta(seconds=3),
+        access_token_available=False,
+    )
+    assert blocked.action is ProphetXLoginAdmissionAction.RETRY_LATER
+    assert blocked.retry_at == degraded.retry_not_before
+    assert blocked.login_authorized is False
+
+    recovered = rotated.begin_login(
+        now=degraded.retry_not_before,
+        access_token_available=False,
+    )
+    assert recovered.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+    assert recovered.snapshot.credential_revision == "rev-2"
+
+
+def test_credential_rejected_retained_retry_horizon_must_be_future():
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="retained retry horizon must be future",
+    ):
+        ProphetXSessionSnapshot(
+            state=ProphetXSessionState.CREDENTIAL_REJECTED,
+            generation=3,
+            credential_revision="rev-1",
+            integration_role="market-maker-primary",
+            last_transition_at=NOW,
+            retry_not_before=NOW,
+            last_failure_class=ProphetXLoginFailureClass.CREDENTIAL_REJECTED,
+        )
+
+
 def test_credential_rotation_cannot_erase_old_slot_horizon(tmp_path):
     old = _lifecycle(tmp_path, revision="rev-old")
     active = _active(old)

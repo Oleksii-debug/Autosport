@@ -226,14 +226,16 @@ class MarketMirror:
         *,
         boundary: datetime,
         max_age: timedelta,
+        _statuses=_DECISION_ELIGIBLE_STATUSES,
+        _utc=_utc_timestamp,
     ) -> bool:
         """Require provider freshness and local causal availability at one cutoff."""
 
-        if event.status not in cls._DECISION_ELIGIBLE_STATUSES:
+        if event.status not in _statuses:
             return False
-        source_time = cls._utc_timestamp(event.source_ts or event.observed_ts)
-        observed_time = cls._utc_timestamp(event.observed_ts)
-        ingest_time = cls._utc_timestamp(event.ingest_ts)
+        source_time = _utc(event.source_ts or event.observed_ts)
+        observed_time = _utc(event.observed_ts)
+        ingest_time = _utc(event.ingest_ts)
         if (
             source_time is None
             or observed_time is None
@@ -246,7 +248,15 @@ class MarketMirror:
         age = boundary - source_time
         return timedelta(0) <= age <= max_age
 
-    def apply(self, event: MarketEvent) -> MirrorApplyResult:
+    def apply(
+        self,
+        event: MarketEvent,
+        *,
+        _require_event=_require_market_event,
+        _key_fn=_key,
+        _snapshot_fn=_snapshot_event,
+        _same_payload_fn=_same_sequence_payload,
+    ) -> MirrorApplyResult:
         """Apply one event iff it advances source-local sequence state.
 
         A repeated identical sequence is idempotent. A lower sequence is stale and
@@ -254,9 +264,9 @@ class MarketMirror:
         and fails closed rather than silently replacing canonical evidence. Material
         updates are serialized with readers and advance one mirror-wide revision.
         """
-        event = _require_market_event(event)
+        event = _require_event(event)
 
-        key = self._key(event)
+        key = _key_fn(event)
         with self._lock:
             if self._publication_revision_guard is not None:
                 raise MarketMirrorRevisionChanged(
@@ -264,7 +274,7 @@ class MarketMirror:
                 )
             previous = self._latest.get(key)
             if previous is None:
-                self._latest[key] = self._snapshot_event(event)
+                self._latest[key] = _snapshot_fn(event)
                 self._revision += 1
                 return MirrorApplyResult(
                     MirrorUpdate.APPLIED,
@@ -284,7 +294,7 @@ class MarketMirror:
                 )
 
             if event.sequence == previous.sequence:
-                if self._same_sequence_payload(event, previous):
+                if _same_payload_fn(event, previous):
                     return MirrorApplyResult(
                         MirrorUpdate.DUPLICATE,
                         event.source_id,
@@ -296,7 +306,7 @@ class MarketMirror:
                     "conflicting MarketEvent payload reused an existing source-local sequence"
                 )
 
-            self._latest[key] = self._snapshot_event(event)
+            self._latest[key] = _snapshot_fn(event)
             self._revision += 1
             return MirrorApplyResult(
                 MirrorUpdate.APPLIED,
@@ -345,6 +355,8 @@ class MarketMirror:
         event_ids: str | Iterable[str] | None = None,
         market_ids: str | Iterable[str] | None = None,
         selection_ids: str | Iterable[str] | None = None,
+        _selector_fn=_selector,
+        _snapshot_fn=_snapshot_event,
     ) -> MirrorSnapshot:
         """Capture one coherent revision and optionally filter it for a consumer.
 
@@ -353,16 +365,16 @@ class MarketMirror:
         decision consumer detect whether two requested views came from the same mirror
         state while an updater is active.
         """
-        selected_sources = self._selector(source_ids, name="source_ids")
-        selected_sports = self._selector(sports, name="sports")
-        selected_events = self._selector(event_ids, name="event_ids")
-        selected_markets = self._selector(market_ids, name="market_ids")
-        selected_selections = self._selector(selection_ids, name="selection_ids")
+        selected_sources = _selector_fn(source_ids, name="source_ids")
+        selected_sports = _selector_fn(sports, name="sports")
+        selected_events = _selector_fn(event_ids, name="event_ids")
+        selected_markets = _selector_fn(market_ids, name="market_ids")
+        selected_selections = _selector_fn(selection_ids, name="selection_ids")
 
         with self._lock:
             revision = self._revision
             events = tuple(
-                self._snapshot_event(event)
+                _snapshot_fn(event)
                 for _, event in sorted(self._latest.items(), key=lambda item: item[0])
             )
 
@@ -390,6 +402,9 @@ class MarketMirror:
         event_ids: str | Iterable[str] | None = None,
         market_ids: str | Iterable[str] | None = None,
         selection_ids: str | Iterable[str] | None = None,
+        _boundary_fn=_decision_boundary,
+        _view_fn=view,
+        _visible_fn=_decision_visible_event.__func__,
     ) -> MirrorSnapshot:
         """Return one revision-bearing focused view safe for decision consumption.
 
@@ -398,8 +413,8 @@ class MarketMirror:
         fail closed while remaining available through ``view``/``snapshot`` for audit.
         ``source_ts`` is preferred over the local observation clock when available.
         """
-        boundary, age_limit = self._decision_boundary(as_of=as_of, max_age=max_age)
-        captured = self.view(
+        boundary, age_limit = _boundary_fn(as_of=as_of, max_age=max_age)
+        captured = _view_fn(self,
             source_ids=source_ids,
             sports=sports,
             event_ids=event_ids,
@@ -409,7 +424,7 @@ class MarketMirror:
         eligible = tuple(
             event
             for event in captured.events
-            if self._decision_visible_event(
+            if _visible_fn(type(self),
                 event,
                 boundary=boundary,
                 max_age=age_limit,
@@ -437,6 +452,9 @@ class MarketMirror:
         *,
         as_of: datetime,
         max_age: timedelta,
+        _boundary_fn=_decision_boundary,
+        _snapshot_fn=_snapshot_event,
+        _visible_fn=_decision_visible_event.__func__,
     ) -> MirrorSnapshot:
         """Read decision-visible events for an explicit source/quote-key set.
 
@@ -463,11 +481,11 @@ class MarketMirror:
                 raise ValueError("mirror key quote_key must be a non-empty trimmed string")
             normalized.add((source_id, quote_key))
 
-        boundary, age_limit = self._decision_boundary(as_of=as_of, max_age=max_age)
+        boundary, age_limit = _boundary_fn(as_of=as_of, max_age=max_age)
         with self._lock:
             revision = self._revision
             events = tuple(
-                self._snapshot_event(self._latest[key])
+                _snapshot_fn(self._latest[key])
                 for key in sorted(normalized)
                 if key in self._latest
             )
@@ -475,7 +493,7 @@ class MarketMirror:
         eligible = tuple(
             event
             for event in events
-            if self._decision_visible_event(
+            if _visible_fn(type(self),
                 event,
                 boundary=boundary,
                 max_age=age_limit,
@@ -538,6 +556,11 @@ class MarketMirror:
         selection_ids: str | Iterable[str] | None = None,
         _require_store=_require_market_store,
         _trusted_reader=_trusted_live_events,
+        _boundary_fn=_decision_boundary,
+        _utc_fn=_utc_timestamp,
+        _init_fn=__init__,
+        _apply_fn=apply,
+        _active_view_fn=active_view,
     ) -> MirrorSnapshot:
         """Reconstruct exactly the decision-visible mirror state at as_of.
 
@@ -563,14 +586,32 @@ class MarketMirror:
                 else "store must be a SQLiteMarketStore"
             ),
         )
+        if require_live_receipt_authority:
+            boundary, age_limit = _boundary_fn(as_of=as_of, max_age=max_age)
+            mirror = object.__new__(cls)
+            _init_fn(mirror)
+            history = _trusted_reader(canonical_store)
+            for event in history:
+                observed = _utc_fn(event.observed_ts)
+                ingested = _utc_fn(event.ingest_ts)
+                if observed is None or ingested is None:
+                    continue
+                if observed <= boundary and ingested <= boundary:
+                    _apply_fn(mirror, event)
+            return _active_view_fn(
+                mirror,
+                as_of=boundary,
+                max_age=age_limit,
+                source_ids=source_ids,
+                sports=sports,
+                event_ids=event_ids,
+                market_ids=market_ids,
+                selection_ids=selection_ids,
+            )
+
         boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
         mirror = cls()
-        history = (
-            _trusted_reader(canonical_store)
-            if require_live_receipt_authority
-            else canonical_store.events()
-        )
-        for event in history:
+        for event in canonical_store.events():
             observed = cls._utc_timestamp(event.observed_ts)
             ingested = cls._utc_timestamp(event.ingest_ts)
             if observed is None or ingested is None:
@@ -615,6 +656,8 @@ class MarketMirror:
         *,
         _require_store=_require_market_store,
         _trusted_current=_trusted_live_current_by_source,
+        _init_fn=__init__,
+        _apply_fn=apply,
     ) -> "MarketMirror":
         """Restore only rows with durable product-owned live receipt authority.
 
@@ -630,10 +673,11 @@ class MarketMirror:
             exact=True,
             error_message="live store must be an exact SQLiteMarketStore",
         )
-        mirror = cls()
+        mirror = object.__new__(cls)
+        _init_fn(mirror)
         current = _trusted_current(canonical_store)
         for key in sorted(current):
-            mirror.apply(current[key])
+            _apply_fn(mirror, current[key])
         return mirror
 
     def __len__(self) -> int:

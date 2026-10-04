@@ -1535,6 +1535,35 @@ class RunTransaction:
         ]
         if summary.get("real_money_execution") is not False:
             mismatches.append("real_money_execution")
+        replay_evidence_fields = (
+            "replay_input_event_payload_sequence_sha256",
+            "replay_consumed_event_payload_sequence_sha256",
+            "replay_applied_event_payload_sequence_sha256",
+            "replay_consumed_event_payload_multiset_sha256",
+        )
+        present_replay_evidence = tuple(
+            field_name
+            for field_name in replay_evidence_fields
+            if field_name in summary
+        )
+        if present_replay_evidence:
+            if len(present_replay_evidence) != len(replay_evidence_fields):
+                mismatches.append("replay_event_payload_evidence")
+            else:
+                for field_name in replay_evidence_fields:
+                    try:
+                        self._require_identity_hash(
+                            summary.get(field_name),
+                            field_name,
+                        )
+                    except RunTransactionError:
+                        mismatches.append(field_name)
+                event_count = summary.get("event_count")
+                if (
+                    type(event_count) is not int
+                    or event_count < 0
+                ):
+                    mismatches.append("event_count")
         if mismatches:
             raise RunTransactionError(
                 f"{label} transaction identity mismatch: " + ",".join(sorted(mismatches))

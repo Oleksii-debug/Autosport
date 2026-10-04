@@ -893,6 +893,15 @@ class PersistentLiveDecisionLoop:
         if self.decision_ledger.path.exists():
             with WorkspaceEconomicLock(self.workspace):
                 self.decision_ledger.verify_integrity()
+                if self._progress is None:
+                    live_run_id = f"live:{self.loop_id}"
+                    if any(
+                        record.replay_run_id == live_run_id
+                        for record in self.decision_ledger.verified_records()
+                    ):
+                        raise LiveDecisionProgressError(
+                            "durable live decision history exists but progress is missing"
+                        )
                 if (
                     self._progress is not None
                     and self._progress.phase == _PHASE_COMMITTED

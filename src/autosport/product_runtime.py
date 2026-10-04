@@ -2049,6 +2049,41 @@ def _build_product_runtime_type(
     )
     base_methods = {name: getattr(base_type, name) for name in dispatch_methods}
 
+    class ProductRuntimeClassIdentity:
+        __slots__ = ()
+
+        def __get__(self, _instance, owner=None):
+            return owner
+
+        def __set__(self, _instance, _value) -> None:
+            raise error_type("product runtime class identity is immutable")
+
+        def __delete__(self, _instance) -> None:
+            raise error_type("product runtime class identity is immutable")
+
+    class ProductRuntimeClassGuard:
+        __slots__ = ("descriptor", "name")
+
+        def __init__(self, name: str, descriptor: object) -> None:
+            self.name = name
+            self.descriptor = descriptor
+
+        def __get__(self, _instance, _owner=None):
+            return self.descriptor
+
+        def __set__(self, _instance, _value) -> None:
+            raise error_type(
+                f"product runtime class member {self.name!r} is immutable"
+            )
+
+        def __delete__(self, _instance) -> None:
+            raise error_type(
+                f"product runtime class member {self.name!r} is immutable"
+            )
+
+    class ProductRuntimeMeta(type(base_type)):
+        pass
+
     def require_snapshot(self) -> tuple[tuple[str, object], ...]:
         snapshot = snapshots.get(self)
         if snapshot is None:
@@ -2066,7 +2101,11 @@ def _build_product_runtime_type(
                 )
         return snapshot
 
-    class ProductAutonomousProductRuntime(base_type):
+    class ProductAutonomousProductRuntime(
+        base_type,
+        metaclass=ProductRuntimeMeta,
+    ):
+        __class__ = ProductRuntimeClassIdentity()
         __eq__ = object.__eq__
         __hash__ = object.__hash__
 
@@ -2100,6 +2139,14 @@ def _build_product_runtime_type(
                     f"product runtime authority field {name!r} is immutable"
                 )
             object.__setattr__(self, name, value)
+
+    for name in ("__getattribute__", "__setattr__", "__eq__", "__hash__"):
+        descriptor = ProductAutonomousProductRuntime.__dict__[name]
+        type.__setattr__(
+            ProductRuntimeMeta,
+            name,
+            ProductRuntimeClassGuard(name, descriptor),
+        )
 
     return ProductAutonomousProductRuntime
 

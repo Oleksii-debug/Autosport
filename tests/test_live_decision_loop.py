@@ -96,10 +96,15 @@ class _EmptyProvider:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.on_read = None
 
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         del max_items
         self.calls += 1
+        hook = self.on_read
+        if hook is not None:
+            self.on_read = None
+            hook()
         return ProviderBatch(source_id=self.source_id, quotes=())
 
 
@@ -353,20 +358,88 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 ("input-a", (("selection-a", 1, "open"),)),
             )
 
-            peer_store = SQLiteMarketStore(workspace / "market.db")
-            try:
-                MarketEventBus(peer_store).publish_many(
-                    (
-                        self._event(
-                            sequence=2,
-                            odds="2.10",
-                            observed=self.START + timedelta(seconds=2),
-                        ),
-                    )
-                )
-            finally:
-                peer_store.close()
+            live_store = loop._default_market_store
+            self.assertIsNotNone(live_store)
+            with patch.object(
+                live_store,
+                "current_by_source_with_append_generation",
+                wraps=live_store.current_by_source_with_append_generation,
+            ) as proven_current:
+                clock.value = self.START + timedelta(seconds=2)
+                idle = loop.run_cycle()
+                self.assertEqual(idle.status, LiveCycleStatus.NO_CHANGE)
+                self.assertEqual(proven_current.call_count, 0)
 
+                peer_store = SQLiteMarketStore(workspace / "market.db")
+                try:
+                    MarketEventBus(peer_store).publish_many(
+                        (
+                            self._event(
+                                sequence=2,
+                                odds="2.10",
+                                observed=self.START + timedelta(seconds=3),
+                            ),
+                        )
+                    )
+                finally:
+                    peer_store.close()
+
+                clock.value = self.START + timedelta(seconds=3)
+                second = loop.run_cycle()
+                self.assertEqual(proven_current.call_count, 1)
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(provider.calls, 3)
+            self.assertEqual(
+                factory.calls[-1],
+                ("input-a", (("selection-a", 2, "open"),)),
+            )
+            loop.close()
+
+    def test_default_observer_reconciles_peer_append_committed_during_provider_io(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            factory = _EmptyIntentFactory()
+            provider = _EmptyProvider()
+            strategy = self._strategy_version()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=self._scientific_registry(workspace, strategy),
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            def publish_from_peer() -> None:
+                peer_store = SQLiteMarketStore(workspace / "market.db")
+                try:
+                    MarketEventBus(peer_store).publish_many(
+                        (
+                            self._event(
+                                sequence=2,
+                                odds="2.10",
+                                observed=self.START + timedelta(seconds=2),
+                            ),
+                        )
+                    )
+                finally:
+                    peer_store.close()
+
+            provider.on_read = publish_from_peer
             clock.value = self.START + timedelta(seconds=2)
             second = loop.run_cycle()
 

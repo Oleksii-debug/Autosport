@@ -2340,6 +2340,8 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             foreign_recovery = threading.Event()
             writer_errors: list[BaseException] = []
             original_recover = MonotonicWorkspaceAuthority.recover
+            cutoff_authority = second._replay_cutoff_authority()
+            cutoff_history_before = cutoff_authority.read_history()
 
             def guarded_recover(authority, **kwargs):
                 tx_id = kwargs.get("tx_id")
@@ -2383,6 +2385,16 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     with self.assertRaises(WorkspaceEconomicLockBusyError):
                         self.replay(second)
                     self.assertFalse(foreign_recovery.is_set())
+                    self.assertEqual(
+                        second.connection.execute(
+                            "SELECT COUNT(*) FROM market_replay_cutoffs"
+                        ).fetchone(),
+                        (0,),
+                    )
+                    self.assertEqual(
+                        cutoff_authority.read_history(),
+                        cutoff_history_before,
+                    )
 
                     release_writer.set()
                     writer.join(timeout=5)
@@ -2479,6 +2491,8 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             # An older exact cutoff is already independently sealed. Its existence
             # must not let a distinct later cutoff bypass live append issuance.
             self.assertEqual(len(self.replay(second).events), 0)
+            cutoff_authority = second._replay_cutoff_authority()
+            cutoff_history_before = cutoff_authority.read_history()
 
             def guarded_recover(authority, **kwargs):
                 tx_id = kwargs.get("tx_id")
@@ -2525,6 +2539,16 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     with self.assertRaises(WorkspaceEconomicLockBusyError):
                         self.replay(second, as_of=later_cutoff)
                     self.assertFalse(foreign_recovery.is_set())
+                    self.assertEqual(
+                        second.connection.execute(
+                            "SELECT COUNT(*) FROM market_replay_cutoffs"
+                        ).fetchone(),
+                        (1,),
+                    )
+                    self.assertEqual(
+                        cutoff_authority.read_history(),
+                        cutoff_history_before,
+                    )
 
                     release_writer.set()
                     writer.join(timeout=5)

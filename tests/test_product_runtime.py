@@ -66,6 +66,13 @@ class _Source:
         return self.resolved_event
 
 
+class _AlternateResolverSource(_Source):
+    def resolve_event(self, delta):
+        event = super().resolve_event(delta)
+        if event.status != "open":
+            raise AssertionError("alternate resolver requires an open market")
+        return event
+
 class _CrashAfterPersistBus(MarketEventBus):
     """Simulate process loss after SQLite/subscriber delivery but before app progress."""
 
@@ -161,6 +168,7 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 self.assertEqual(restored_status.cycles_completed, 1)
                 self.assertEqual(restored.manifest.source_id, "provider-a")
                 self.assertEqual(restored.manifest.initial_bankroll, "100")
+                self.assertIsNotNone(restored.manifest.source_resolver_identity)
             finally:
                 restored.close()
 
@@ -212,6 +220,7 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             replacements = {
                 "PaperBook": forged("PaperBook"),
                 "_ProductRuntimeLease": forged("_ProductRuntimeLease"),
+                "_source_resolver_identity": forged("_source_resolver_identity"),
                 "_settlement_authority_identity": forged("_settlement_authority_identity"),
                 "_ManifestStore": forged("_ManifestStore"),
                 "ContinuousEventLifecycle": forged("ContinuousEventLifecycle"),
@@ -869,6 +878,55 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 finally:
                     runtime.close()
 
+    def test_restart_rejects_changed_resolver_with_same_source_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            original_identity = runtime.manifest.source_resolver_identity
+            runtime.close()
+
+            with self.assertRaisesRegex(
+                ProductCompositionError,
+                "source resolver identity conflicts with durable product composition",
+            ):
+                build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_AlternateResolverSource(),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+
+            self.assertIsNotNone(original_identity)
+
+    def test_legacy_manifest_without_source_resolver_identity_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "product_composition.json").write_text(
+                '{"schema":"autosport.autonomous_product_composition",'
+                '"schema_version":2,"source_id":"provider-a",'
+                '"initial_bankroll":"100","settlement_authority_identity":null}',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ProductCompositionError,
+                "source resolver identity conflicts with durable product composition",
+            ):
+                build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
     def test_restart_with_different_source_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -70,6 +70,8 @@ _IID_EXPECTED_SEQUENCE_CODE = getattr(_IID_EXPECTED_SEQUENCE, "__code__", None)
 _IID_EXPECTED_MULTISET = expected_replay_consumed_payload_multiset_sha256
 _IID_EXPECTED_MULTISET_CODE = getattr(_IID_EXPECTED_MULTISET, "__code__", None)
 _IID_REPLAY_ENGINE = ReplayEngine
+_IID_REPLAY_RUN = ReplayEngine.__dict__.get("run")
+_IID_REPLAY_RUN_CODE = getattr(_IID_REPLAY_RUN, "__code__", None)
 _IID_DATASET_TYPE = ReplayDataset
 _IID_MEMBERSHIP_TYPE = ResolvedFixedNRiskMembership
 _IID_PATH_TYPE = type(Path("."))
@@ -101,6 +103,9 @@ def _require_iid_session_dispatch() -> None:
         or getattr(_IID_EXPECTED_MULTISET, "__code__", None)
         is not _IID_EXPECTED_MULTISET_CODE
         or ReplayEngine is not _IID_REPLAY_ENGINE
+        or ReplayEngine.__dict__.get("run") is not _IID_REPLAY_RUN
+        or getattr(_IID_REPLAY_RUN, "__code__", None)
+        is not _IID_REPLAY_RUN_CODE
         or ReplayDataset is not _IID_DATASET_TYPE
         or ResolvedFixedNRiskMembership is not _IID_MEMBERSHIP_TYPE
         or load_dataset is not _IID_DATASET_LOADER

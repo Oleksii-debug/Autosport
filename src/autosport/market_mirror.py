@@ -7,7 +7,7 @@ from enum import Enum
 from threading import RLock
 
 from .domain import MarketEvent, _quote_identity
-from .market_state_identity import same_semantic_market_state
+from .market_state_identity import MarketStateIdentityError, same_semantic_market_state
 from .storage import SQLiteMarketStore, _timezone_aware_instant
 
 
@@ -224,7 +224,14 @@ class MarketMirror:
                     "conflicting MarketEvent payload reused an existing source-local sequence"
                 )
 
-            semantic_refresh = same_semantic_market_state(previous, event)
+            try:
+                semantic_refresh = same_semantic_market_state(previous, event)
+            except MarketStateIdentityError:
+                # A malformed/unsupported claimed semantic contract cannot mint
+                # duplicate suppression. Preserve the durable acquisition as an
+                # ordinary material transition so restart/live reconstruction
+                # remains available while downstream work is conservatively invalidated.
+                semantic_refresh = False
             self._latest[key] = self._snapshot_event(event)
             if decision_causal:
                 self._decision_causal_keys.add(key)

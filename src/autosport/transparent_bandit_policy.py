@@ -42,7 +42,9 @@ def _sha256(name: str, value: object) -> str:
 
 
 def _exact_decimal(name: str, value: object) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
+    if type(value) is not Decimal:
+        raise LearningEnvironmentError(f"{name} must be a finite exact Decimal")
+    if not value.is_finite():
         raise LearningEnvironmentError(f"{name} must be a finite exact Decimal")
     return value
 
@@ -97,7 +99,7 @@ class ActionEstimate:
 
     def __post_init__(self) -> None:
         _text("action_type", self.action_type)
-        if isinstance(self.observations, bool) or not isinstance(self.observations, int):
+        if type(self.observations) is not int:
             raise LearningEnvironmentError("observations must be an integer")
         if self.observations < 0:
             raise LearningEnvironmentError("observations must be non-negative")
@@ -163,16 +165,16 @@ class BanditPolicyState:
         _sha256("environment_id", self.environment_id)
         _text("protocol_id", self.protocol_id)
         _sha256("config_sha256", self.config_sha256)
-        if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
+        if type(self.seed) is not int or self.seed < 0:
             raise LearningEnvironmentError("seed must be a non-negative integer")
-        if isinstance(self.generation, bool) or not isinstance(self.generation, int):
+        if type(self.generation) is not int:
             raise LearningEnvironmentError("generation must be an integer")
         if self.generation < 0:
             raise LearningEnvironmentError("generation must be non-negative")
         if type(self.estimates) is not tuple or not self.estimates:
             raise LearningEnvironmentError("estimates must be a non-empty tuple")
-        if any(not isinstance(item, ActionEstimate) for item in self.estimates):
-            raise LearningEnvironmentError("estimates must contain ActionEstimate values")
+        if any(type(item) is not ActionEstimate for item in self.estimates):
+            raise LearningEnvironmentError("estimates must contain exact ActionEstimate values")
         action_types = tuple(item.action_type for item in self.estimates)
         if action_types != tuple(sorted(action_types)) or len(action_types) != len(set(action_types)):
             raise LearningEnvironmentError("policy action types must be sorted and unique")
@@ -210,7 +212,7 @@ class BanditPolicyState:
         seed: int,
         action_types: frozenset[str],
     ) -> "BanditPolicyState":
-        if not isinstance(action_types, frozenset) or not action_types:
+        if type(action_types) is not frozenset or not action_types:
             raise LearningEnvironmentError("action_types must be a non-empty frozenset")
         canonical = sorted(_text("action_type", value) for value in action_types)
         if len(canonical) != len(set(canonical)):
@@ -337,7 +339,7 @@ class BanditPolicyState:
 
     def choose(self, *, admissible_actions: frozenset[str]) -> str:
         """Choose only among owner-supplied actions; deterministic ties are lexical."""
-        if not isinstance(admissible_actions, frozenset) or not admissible_actions:
+        if type(admissible_actions) is not frozenset or not admissible_actions:
             raise LearningEnvironmentError("admissible_actions must be a non-empty frozenset")
         admitted = {_text("admissible action", value) for value in admissible_actions}
         estimates = {item.action_type: item for item in self.estimates}

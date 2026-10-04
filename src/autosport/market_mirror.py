@@ -550,6 +550,8 @@ class MarketMirror:
         """
         if type(require_live_receipt_authority) is not bool:
             raise TypeError("require_live_receipt_authority must be bool")
+        if require_live_receipt_authority and cls is not __class__:
+            raise TypeError("trusted live replay requires an exact MarketMirror")
         canonical_store = _require_market_store(
             store,
             exact=require_live_receipt_authority,
@@ -613,6 +615,8 @@ class MarketMirror:
         restart. The receipt side table is intentionally prospective: rows written
         before that authority existed stay absent from this live projection.
         """
+        if cls is not __class__:
+            raise TypeError("live store bootstrap requires an exact MarketMirror")
         canonical_store = _require_market_store(
             store,
             exact=True,

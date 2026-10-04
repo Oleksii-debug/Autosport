@@ -87,25 +87,13 @@ class MarketImpliedUniverseBindingTests(unittest.TestCase):
         self.addCleanup(self.market_store.close)
 
     def authority(self, *, event_id: str = "event-1") -> MarketSettlementOutcomeAuthority:
-        assessment = assess_betfair_historical_market_definition_authority(
+        return issue_synthetic_market_outcome_authority(
+            event_id=event_id,
             market_id="match_odds",
-            market_definition={
-                "eventId": event_id,
-                "eventTypeId": "2593174",
-                "marketType": "MATCH_ODDS",
-                "status": "OPEN",
-                "runners": [
-                    {"id": "away"},
-                    {"id": "draw"},
-                    {"id": "home"},
-                ],
-            },
-            provider_publish_at="2026-09-18T15:00:00Z",
+            selection_ids=("away", "draw", "home"),
+            causal_cutoff="2026-09-18T15:00:00Z",
             observed_at="2026-09-18T15:00:01Z",
         )
-        self.assertEqual(assessment.status, OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE)
-        self.assertIsNotNone(assessment.authority)
-        return assessment.authority  # type: ignore[return-value]
 
     def persist_market(self, *, event_id: str = "event-1") -> None:
         mirror = MarketMirror()

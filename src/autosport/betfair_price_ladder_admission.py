@@ -47,8 +47,40 @@ _CLASSIC_BANDS: tuple[tuple[Decimal, Decimal, Decimal], ...] = (
 )
 
 
+def _build_result_meta():
+    sealed: set[type] = set()
+    protected = frozenset({"admissible"})
+
+    class _ResultMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            if cls in sealed and name in protected:
+                raise TypeError(
+                    "Betfair price-ladder authority surface is sealed: "
+                    + name
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name: str) -> None:
+            if cls in sealed and name in protected:
+                raise TypeError(
+                    "Betfair price-ladder authority surface is sealed: "
+                    + name
+                )
+            super().__delattr__(name)
+
+        @classmethod
+        def seal(mcls, cls: type) -> None:
+            sealed.add(cls)
+
+    return _ResultMeta
+
+
+_ResultMeta = _build_result_meta()
+del _build_result_meta
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True)
-class BetfairPriceLadderAdmission:
+class BetfairPriceLadderAdmission(metaclass=_ResultMeta):
     state: BetfairPriceLadderAdmissionState
     evidence_digest: str
     reasons: tuple[str, ...]
@@ -474,5 +506,7 @@ def _install_price_ladder_admission_authority():
     _price_ladder_admissible_property,
 ) = _install_price_ladder_admission_authority()
 BetfairPriceLadderAdmission.admissible = _price_ladder_admissible_property
+_ResultMeta.seal(BetfairPriceLadderAdmission)
+del _ResultMeta
 del _price_ladder_admissible_property
 del _install_price_ladder_admission_authority

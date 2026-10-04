@@ -580,7 +580,15 @@ class PaperExecutionAdoptionRuntime:
             "action_ids",
             "observation_evidence_ids",
         }
-        if type(payload) is not dict or set(payload) != expected_keys:
+        # Product-owned live execution adds the verified DecisionLedger origin
+        # to this same reservation. Start-time recovery consumes only the execution
+        # identity/timestamp here; the composed execute/load authority re-resolves
+        # and validates decision_origin itself.
+        allowed_keys = (
+            expected_keys,
+            expected_keys | {"decision_origin"},
+        )
+        if type(payload) is not dict or set(payload) not in allowed_keys:
             raise PaperExecutionAdoptionError(
                 "durable PAPER execution reservation schema is invalid"
             )
@@ -809,6 +817,13 @@ class PaperExecutionAdoptionRuntime:
         if not callable(clock):
             raise TypeError("clock must be callable")
         with self._execution_lock:
+            # The product clock is injected code and may execute arbitrary Python.
+            # Snapshot the already-composed authorities before invoking it. In
+            # particular, DecisionLedger-origin composition wraps execute(), so
+            # bypassing that surface via _execute_unlocked would mint an origin-less
+            # live PAPER reservation.
+            resolve_execution_started_at = self.resolve_execution_started_at
+            execute = self.execute
             now = clock()
             if not isinstance(now, datetime):
                 raise TypeError("PAPER execution clock must return datetime")
@@ -817,12 +832,14 @@ class PaperExecutionAdoptionRuntime:
                     "PAPER execution clock must return a timezone-aware datetime"
                 )
             proposed_started_at = now.astimezone(timezone.utc).isoformat()
-            resolved_started_at = self.resolve_execution_started_at(
+            resolved_started_at = resolve_execution_started_at(
                 prepared=prepared,
                 trigger_id=trigger_id,
                 proposed_started_at=proposed_started_at,
             )
-            return self._execute_unlocked(
+            # _execution_lock is re-entrant. Re-enter through the canonical composed
+            # execute surface so decision-origin/recovery wrappers remain authoritative.
+            return execute(
                 prepared=prepared,
                 trigger_id=trigger_id,
                 started_at=resolved_started_at,

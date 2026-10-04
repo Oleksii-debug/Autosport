@@ -2751,6 +2751,19 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 if event["event_type"] == "RUN_RESERVED"
             ]
             self.assertEqual(len(reservations), 1)
+            origin = execution_ledger.reservation_decision_origin(
+                reservations[0]["run_id"]
+            )
+            self.assertIsNotNone(origin)
+            assert origin is not None
+            self.assertEqual(
+                origin.decision_id,
+                reservations[0]["payload"]["trigger_id"],
+            )
+            self.assertEqual(
+                reservations[0]["payload"]["decision_origin"],
+                origin.to_dict(),
+            )
             self.assertEqual(
                 reservations[0]["payload"]["started_at"],
                 (self.START + timedelta(seconds=6)).isoformat(),

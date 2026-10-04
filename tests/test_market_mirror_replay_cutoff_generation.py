@@ -1032,6 +1032,54 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_persist_and_apply_hot_duplicate_owns_caller_metadata_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            original = MarketEvent.from_dict(
+                {
+                    **self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T18:59:59+00:00",
+                    ).to_dict(),
+                    "metadata": {"witness": {"value": 1}},
+                }
+            )
+            retry = MarketEvent.from_dict(original.to_dict())
+            try:
+                self.assertTrue(store.append(original))
+                mirror = MarketMirror.from_store(store)
+                original_commit = store._commit_stable_database_path
+                mutated = False
+
+                def commit_then_mutate_caller():
+                    nonlocal mutated
+                    result = original_commit()
+                    if not mutated:
+                        retry.metadata["witness"]["value"] = 2
+                        mutated = True
+                    return result
+
+                with patch.object(
+                    store,
+                    "_commit_stable_database_path",
+                    new=commit_then_mutate_caller,
+                ):
+                    result = mirror.persist_and_apply(store, retry)
+
+                self.assertTrue(mutated)
+                self.assertEqual(result.status.value, "duplicate")
+                live = mirror.event_for_quote_key(
+                    original.source_id,
+                    original.quote_key,
+                )
+                self.assertIsNotNone(live)
+                assert live is not None
+                self.assertEqual(live.metadata["witness"]["value"], 1)
+                self.assertEqual(retry.metadata["witness"]["value"], 2)
+            finally:
+                store.close()
+
     def test_path_replacement_after_sqlite_append_commit_blocks_machine_commit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

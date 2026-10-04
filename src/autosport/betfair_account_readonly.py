@@ -266,6 +266,9 @@ class BetfairClearedOrderObservation:
     customer_strategy_ref: str | None
     evidence: BetfairEvidence
     event_id: str | None = None
+    bet_outcome: str | None = None
+    voided_date: str | None = None
+    handicap: Decimal | None = None
 
     def __post_init__(self) -> None:
         _required_text(self.bet_id, "bet_id")
@@ -282,6 +285,11 @@ class BetfairClearedOrderObservation:
         _optional_text(self.customer_order_ref, "customer_order_ref")
         _optional_text(self.customer_strategy_ref, "customer_strategy_ref")
         _optional_text(self.event_id, "event_id")
+        _optional_text(self.bet_outcome, "bet_outcome")
+        if self.voided_date is not None:
+            _iso_timestamp(self.voided_date, "voided_date")
+        if self.handicap is not None:
+            _decimal(self.handicap, "handicap")
 
 
 @dataclass(frozen=True, slots=True)
@@ -706,6 +714,17 @@ class BetfairReadOnlyClient:
         page_size: int = 1000,
         max_pages: int = 100,
     ) -> BetfairExecutionReadbackEnvelope:
+        # Freeze the exact helper dispatch and status coverage before the first
+        # provider-capable callback.  The product-origin wrapper has already
+        # established that these bound methods are canonical; retaining the
+        # bindings prevents an in-flight callback from installing a transient
+        # self-removing instance shadow that redirects a later scope read and
+        # disappears before the wrapper's post-capture dispatch check.
+        read_market_event = self.read_market_event
+        read_current_orders_page = self.read_current_orders_page
+        read_cleared_orders_page = self.read_cleared_orders_page
+        cleared_statuses = _EXECUTION_CLEARED_STATUSES
+
         action = _required_text(action_id, "action_id")
         order_ref = action
         if provider_order_ref is not None:
@@ -722,7 +741,7 @@ class BetfairReadOnlyClient:
         _positive_int(max_pages, "max_pages")
         market_event: BetfairMarketEventObservation | None
         try:
-            market_event = self.read_market_event(market)
+            market_event = read_market_event(market)
         except BetfairReadOnlyError as exc:
             if str(exc) != (
                 "exact market-to-event identity is unavailable from listMarketCatalogue"
@@ -737,7 +756,7 @@ class BetfairReadOnlyClient:
             pages: list[BetfairCurrentOrderPage] = []
             offset = 0
             for _ in range(max_pages):
-                page = self.read_current_orders_page(
+                page = read_current_orders_page(
                     from_record=offset,
                     record_count=page_size,
                     customer_order_refs=(order_ref,),
@@ -761,11 +780,11 @@ class BetfairReadOnlyClient:
             groups: list[
                 tuple[str, tuple[BetfairClearedOrderPage, ...]]
             ] = []
-            for status in _EXECUTION_CLEARED_STATUSES:
+            for status in cleared_statuses:
                 pages: list[BetfairClearedOrderPage] = []
                 offset = 0
                 for _ in range(max_pages):
-                    page = self.read_cleared_orders_page(
+                    page = read_cleared_orders_page(
                         from_record=offset,
                         record_count=page_size,
                         bet_status=status,
@@ -1150,6 +1169,9 @@ def _parse_cleared_order(
         _provider_optional_text(raw, "customerStrategyRef", "customer_strategy_ref"),
         evidence,
         _provider_optional_text(raw, "eventId", "event_id"),
+        _provider_optional_text(raw, "betOutcome", "bet_outcome"),
+        _provider_optional_text(raw, "voidedDate", "voided_date"),
+        _provider_optional_number(raw, "handicap", "handicap"),
     )
 
 
@@ -1181,6 +1203,23 @@ def _provider_text(value: Mapping[str, object], key: str, field: str) -> str:
 def _provider_optional_text(value: Mapping[str, object], key: str, field: str) -> str | None:
     raw = value.get(key)
     return None if raw is None else _required_text(raw, field)
+
+
+def _provider_optional_number(
+    value: Mapping[str, object], key: str, field: str
+) -> Decimal | None:
+    raw = value.get(key)
+    if raw is None:
+        return None
+    if isinstance(raw, Decimal):
+        result = raw
+    elif isinstance(raw, int) and not isinstance(raw, bool):
+        result = Decimal(raw)
+    else:
+        raise BetfairReadOnlyError(
+            f"{field} must be a JSON number decoded without binary float"
+        )
+    return _decimal(result, field)
 
 
 def _provider_int(value: Mapping[str, object], key: str, field: str) -> int:

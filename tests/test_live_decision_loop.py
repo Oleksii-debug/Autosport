@@ -1817,6 +1817,94 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertIsNone(loop._freshness_deadlines["input-a"])
             loop.close()
 
+    def test_clock_regression_after_committed_decision_fails_before_provider_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(sequence=1),), ()],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            self.assertEqual(observer.calls, 1)
+
+            clock.value = self.START
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "clock moved backwards",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(observer.calls, 1)
+            loop.close()
+
+    def test_clock_regression_floor_is_restored_from_durable_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            first_clock = _ManualClock(self.START + timedelta(seconds=1))
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=first_clock,
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+            first.close()
+
+            regressed_observer = _DurableObserver(workspace, [()])
+            resumed = self._loop(
+                workspace,
+                observer=regressed_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "clock moved backwards",
+            ):
+                resumed.run_cycle()
+            self.assertEqual(regressed_observer.calls, 0)
+            resumed.close()
+
+    def test_clock_regression_inside_one_cycle_fails_before_decision_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+
+            def regress_clock(_updates):
+                clock.value = self.START
+                return object()
+
+            loop = self._loop(
+                workspace,
+                observer=regress_clock,
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "clock moved backwards",
+            ):
+                loop.run_cycle()
+
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            loop.close()
+
     def test_pause_and_stop_are_durable_and_do_not_poll_provider(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

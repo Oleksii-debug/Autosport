@@ -424,3 +424,43 @@ def test_coordinated_canonical_execute_root_rebinding_cannot_call_trusted_privat
     )
     assert closure["canonical_execute_code"].cell_contents is original_code
 
+def test_public_executor_rejects_coordinated_canonical_execute_root_rebinding(
+    monkeypatch,
+) -> None:
+    assert boundary._canonical_internal_dispatch_unchanged()
+    original_execute = boundary._CANONICAL_EXECUTE
+    original_code = boundary._CANONICAL_EXECUTE_CODE
+
+    def forged_canonical_execute(*args, **kwargs):
+        return object()
+
+    monkeypatch.setattr(boundary, "_CANONICAL_EXECUTE", forged_canonical_execute)
+    monkeypatch.setattr(
+        boundary,
+        "_CANONICAL_EXECUTE_CODE",
+        forged_canonical_execute.__code__,
+    )
+
+    with pytest.raises(
+        boundary._impl.BetfairSupervisedExecutionError,
+        match="canonical Betfair execution caller authority changed",
+    ):
+        boundary._PUBLIC_EXECUTE(
+            None,
+            None,
+            None,
+            action_id="forged-action",
+            attempt_id="forged-attempt",
+            profile=None,
+            client=None,
+        )
+
+    closure = dict(
+        zip(
+            boundary._PUBLIC_EXECUTE.__code__.co_freevars,
+            boundary._PUBLIC_EXECUTE.__closure__ or (),
+        )
+    )
+    assert closure["canonical_execute"].cell_contents is original_execute
+    assert closure["canonical_execute_code"].cell_contents is original_code
+

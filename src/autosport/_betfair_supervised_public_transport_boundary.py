@@ -1011,56 +1011,80 @@ _impl._CANONICAL_BETFAIR_PLACE_ACTION = _TRUSTED_PRIVATE_PLACE_ACTION
 _impl._CANONICAL_BETFAIR_PLACE_ACTION_CODE = _TRUSTED_PRIVATE_PLACE_ACTION_CODE
 
 
-def _confirmed_execute_betfair_supervised_action(
-    ledger: _impl.RealExecutionLedger,
-    bound: _impl.BoundSupervisedExecutionPlan,
-    approval: _impl.SupervisedApproval,
-    *,
-    action_id: str,
-    attempt_id: str,
-    profile: _impl.BookmakerCapabilityProfile,
-    client: _impl.BetfairSupervisedPlaceOrdersClient,
-    clock=None,
-    confirmation_receipt_id: str | None = None,
-    confirmation_review_sha256: str | None = None,
+def _build_confirmed_execute_betfair_supervised_action(
+    canonical_execute,
+    canonical_execute_code,
 ):
-    """Carry one exact durable final-send receipt through canonical execution."""
-
-    try:
-        workspace = str(_CONFIRMATION_PATH(ledger.path).parent.resolve())
-    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise _impl.BetfairSupervisedExecutionError(
-            "Betfair execution ledger workspace is not canonical"
-        ) from exc
-    context = _ExecutionConfirmationContext(
-        ledger=ledger,
-        bound=bound,
-        approval=approval,
-        action_id=action_id,
-        attempt_id=attempt_id,
-        client=client,
-        workspace=workspace,
-        receipt_id=confirmation_receipt_id,
-        review_sha256=confirmation_review_sha256,
-    )
-    token = _CONFIRMATION_CONTEXT.set(context)
-    try:
-        return _CANONICAL_EXECUTE(
-            ledger,
-            bound,
-            approval,
+    def _confirmed_execute_betfair_supervised_action(
+        ledger: _impl.RealExecutionLedger,
+        bound: _impl.BoundSupervisedExecutionPlan,
+        approval: _impl.SupervisedApproval,
+        *,
+        action_id: str,
+        attempt_id: str,
+        profile: _impl.BookmakerCapabilityProfile,
+        client: _impl.BetfairSupervisedPlaceOrdersClient,
+        clock=None,
+        confirmation_receipt_id: str | None = None,
+        confirmation_review_sha256: str | None = None,
+    ):
+        """Carry one exact durable final-send receipt through canonical execution."""
+    
+        if (
+            _CANONICAL_EXECUTE is not canonical_execute
+            or _CANONICAL_EXECUTE_CODE is not canonical_execute_code
+            or getattr(canonical_execute, "__code__", None) is not canonical_execute_code
+        ):
+            raise _impl.BetfairSupervisedExecutionError(
+                "canonical Betfair execution caller authority changed"
+            )
+    
+        try:
+            workspace = str(_CONFIRMATION_PATH(ledger.path).parent.resolve())
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise _impl.BetfairSupervisedExecutionError(
+                "Betfair execution ledger workspace is not canonical"
+            ) from exc
+        context = _ExecutionConfirmationContext(
+            ledger=ledger,
+            bound=bound,
+            approval=approval,
             action_id=action_id,
             attempt_id=attempt_id,
-            profile=profile,
             client=client,
-            clock=clock,
+            workspace=workspace,
+            receipt_id=confirmation_receipt_id,
+            review_sha256=confirmation_review_sha256,
         )
-    finally:
-        _CONFIRMATION_CONTEXT.reset(token)
+        token = _CONFIRMATION_CONTEXT.set(context)
+        try:
+            return canonical_execute(
+                ledger,
+                bound,
+                approval,
+                action_id=action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                clock=clock,
+            )
+        finally:
+            _CONFIRMATION_CONTEXT.reset(token)
+    
 
+    return _confirmed_execute_betfair_supervised_action
 
-_PUBLIC_EXECUTE = _confirmed_execute_betfair_supervised_action
+_PUBLIC_EXECUTE = _build_confirmed_execute_betfair_supervised_action(
+    _CANONICAL_EXECUTE,
+    _CANONICAL_EXECUTE_CODE,
+)
+del _build_confirmed_execute_betfair_supervised_action
 _PUBLIC_EXECUTE_CODE = _PUBLIC_EXECUTE.__code__
+_PUBLIC_EXECUTE_FREEVARS = _PUBLIC_EXECUTE.__code__.co_freevars
+_PUBLIC_EXECUTE_CLOSURE = tuple(
+    cell.cell_contents
+    for cell in (_PUBLIC_EXECUTE.__closure__ or ())
+)
 _PUBLIC_EXECUTE.__name__ = _CANONICAL_EXECUTE.__name__
 _PUBLIC_EXECUTE.__qualname__ = _CANONICAL_EXECUTE.__qualname__
 _PUBLIC_EXECUTE.__module__ = _CANONICAL_EXECUTE.__module__
@@ -1110,6 +1134,16 @@ def _canonical_internal_dispatch_unchanged() -> bool:
         and "_PRIVATE_PLACE_ACTION" not in globals()
         and _impl.execute_betfair_supervised_action is _PUBLIC_EXECUTE
         and getattr(_PUBLIC_EXECUTE, "__code__", None) is _PUBLIC_EXECUTE_CODE
+        and _PUBLIC_EXECUTE.__code__.co_freevars == _PUBLIC_EXECUTE_FREEVARS
+        and _PUBLIC_EXECUTE.__closure__ is not None
+        and len(_PUBLIC_EXECUTE.__closure__) == len(_PUBLIC_EXECUTE_CLOSURE)
+        and all(
+            cell.cell_contents is expected
+            for cell, expected in zip(
+                _PUBLIC_EXECUTE.__closure__,
+                _PUBLIC_EXECUTE_CLOSURE,
+            )
+        )
         and getattr(_CANONICAL_EXECUTE, "__code__", None) is _CANONICAL_EXECUTE_CODE
         and _impl._PROVIDER_HTTP_POST is _PROVIDER_HTTP_POST
         and _impl._CANONICAL_PROVIDER_HTTP_POST is _PROVIDER_HTTP_POST

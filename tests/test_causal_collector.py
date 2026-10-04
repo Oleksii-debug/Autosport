@@ -379,6 +379,62 @@ class CollectorDeltaTests(unittest.TestCase):
             )
             self.assertEqual(second_consumer.drain(as_of="2026-01-01T00:00:11+00:00"), ())
 
+    def test_canonical_application_first_open_preserves_peer_completed_receipt(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            peer_path = root / "peer-application.json"
+            peer_market = SQLiteMarketStore(root / "peer-market.db")
+            try:
+                peer_application = CanonicalDesktopApplication(
+                    MarketEventBus(peer_market),
+                    SourceHealthStore(root / "peer-health.json"),
+                    peer_path,
+                    clock=lambda: "2026-01-01T00:00:05+00:00",
+                )
+                receipt = peer_application.apply(delta, event)
+                receipt.validate()
+            finally:
+                peer_market.close()
+
+            peer_state = json.loads(peer_path.read_text(encoding="utf-8"))
+            target_path = root / "canonical-application.json"
+
+            @contextmanager
+            def peer_publishes_before_lock_owner_reads(_workspace):
+                target_path.write_text(
+                    json.dumps(
+                        peer_state,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                yield
+
+            with patch(
+                "autosport.causal_collector_legacy.WorkspaceEconomicLock",
+                side_effect=peer_publishes_before_lock_owner_reads,
+            ):
+                reopened = CanonicalDesktopApplication(
+                    object(),
+                    object(),
+                    target_path,
+                    clock=lambda: "2026-01-01T00:00:06+00:00",
+                )
+
+            self.assertEqual(
+                reopened.completed_receipts_for_source("source-x"),
+                (receipt,),
+            )
+            self.assertEqual(
+                json.loads(target_path.read_text(encoding="utf-8")),
+                peer_state,
+            )
+
     def test_checkpoint_first_open_preserves_peer_state_created_at_lock_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "desktop.json"

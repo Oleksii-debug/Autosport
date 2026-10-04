@@ -30,8 +30,10 @@ from autosport.paper_settlement_learning import PaperSettlementLearningBridge
 from autosport.replay import ReplayEngine, market_event_payload_sha256
 from autosport.risk import PaperRiskPolicy
 from autosport.risk_of_ruin_evaluator import (
+    ProductRiskOfRuinEvaluator,
     RiskEvidenceClass,
     RiskOfRuinEvaluationRequest,
+    RiskOfRuinIssuanceError,
     RiskPathObservation,
     RiskTargetKind,
 )
@@ -729,6 +731,60 @@ def test_fixed_n_iid_qualification_verifier_rejects_object_new_forgery(
         )
 
 
+def test_fixed_n_iid_qualification_verifier_rejects_equality_forgery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        bridge,
+        _initial_capital_sha256,
+        _stake_policy_sha256,
+    ) = _qualified_fixed_n_fixture(tmp_path, monkeypatch)
+    canonical = resolve_product_fixed_n_iid_qualification(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+    forged = object.__new__(ProductFixedNIidQualificationAuthority)
+    for field_name in ProductFixedNIidQualificationAuthority.__dataclass_fields__:
+        object.__setattr__(forged, field_name, getattr(canonical, field_name))
+
+    class AlwaysEqual:
+        def __eq__(self, _other):
+            return True
+
+        def __ne__(self, _other):
+            return False
+
+    object.__setattr__(forged, "qualification_sha256", AlwaysEqual())
+
+    with pytest.raises(
+        ProductFixedNIidQualificationError,
+        match="qualification_sha256 must be exact text",
+    ):
+        verify_product_fixed_n_iid_qualification(
+            forged,
+            membership=membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridges=(bridge,),
+            authority_root=authority_root,
+        )
+
+
 def test_fixed_n_iid_qualification_verifier_rejects_resolver_rebinding(
     tmp_path,
     monkeypatch,
@@ -811,6 +867,25 @@ def test_product_fixed_n_risk_observations_match_evaluator_manifest(
     )
 
     assert type(cohort) is ProductFixedNRiskObservationSet
+    assert cohort.research_protocol_sha256 == membership.protocol_sha256
+    assert cohort.dataset_snapshot_id == membership.dataset_snapshot_id
+    assert cohort.dataset_manifest_sha256 == membership.dataset_manifest_sha256
+    assert cohort.risk_method == membership.risk_method
+    assert cohort.initial_capital_state_sha256 == initial_capital_sha256
+    assert cohort.sampling_manifest_sha256 == hashlib.sha256(
+        manifest.encode("utf-8")
+    ).hexdigest()
+    qualification = resolve_product_fixed_n_iid_qualification(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+    assert cohort.stake_policy_sha256 == qualification.stake_policy_sha256
     assert cohort.planned_member_ids == (RUN_ID,)
     assert len(cohort.observations) == 1
     observation = cohort.observations[0]
@@ -846,6 +921,65 @@ def test_product_fixed_n_risk_observations_match_evaluator_manifest(
         observations=cohort.observations,
     )
     assert request.observation_manifest_sha256 == cohort.observation_manifest_sha256
+    assert tuple(
+        item.source_evidence_sha256 for item in cohort.observations
+    ) == qualification.member_path_evidence_sha256
+
+
+def test_product_fixed_n_risk_observations_do_not_mint_positive_ruin_authority(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        bridge,
+        initial_capital_sha256,
+        _stake_policy_sha256,
+    ) = _qualified_fixed_n_fixture(tmp_path, monkeypatch)
+    cohort = resolve_product_fixed_n_risk_observations(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+    request = RiskOfRuinEvaluationRequest(
+        target_kind=RiskTargetKind.SINGLE,
+        bankroll_id="risk-path-bankroll",
+        currency="USD",
+        base_portfolio_sha256=initial_capital_sha256,
+        capital_state_sha256=initial_capital_sha256,
+        target_sha256="7" * 64,
+        evaluated_stakes=(Decimal("10"),),
+        research_protocol_sha256=membership.protocol_sha256,
+        reproducibility_bundle_sha256=cohort.source_evidence_sha256,
+        dataset_snapshot_id=membership.dataset_snapshot_id,
+        dataset_manifest_sha256=membership.dataset_manifest_sha256,
+        causal_cutoff="2026-09-03T10:00:31+00:00",
+        evaluated_at="2026-09-03T10:00:31+00:00",
+        confidence_level=Decimal("0.95"),
+        ruin_threshold=Decimal("0"),
+        planned_independent_units=1,
+        evidence_class=RiskEvidenceClass.PAPER,
+        observations=cohort.observations,
+    )
+    evaluator = ProductRiskOfRuinEvaluator(
+        workspace=tmp_path / "risk-of-ruin-evaluator",
+        authority_root=tmp_path / "risk-of-ruin-evaluator-authority",
+    )
+
+    with pytest.raises(
+        RiskOfRuinIssuanceError,
+        match="caller-constructed evaluation requests are assertion-only",
+    ):
+        evaluator.issue(request)
 
 
 def test_product_fixed_n_risk_observation_truth_cannot_be_caller_minted_or_subclassed() -> None:
@@ -897,6 +1031,123 @@ def test_product_fixed_n_risk_observation_verifier_rejects_object_new_forgery(
     with pytest.raises(
         ProductFixedNRiskObservationSetError,
         match="differs from canonical durable evidence",
+    ):
+        verify_product_fixed_n_risk_observations(
+            forged,
+            membership=membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridges=(bridge,),
+            authority_root=authority_root,
+        )
+
+
+def test_product_fixed_n_risk_observation_verifier_rejects_provenance_forgery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        bridge,
+        _initial_capital_sha256,
+        _stake_policy_sha256,
+    ) = _qualified_fixed_n_fixture(tmp_path, monkeypatch)
+    canonical = resolve_product_fixed_n_risk_observations(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+    forged = object.__new__(ProductFixedNRiskObservationSet)
+    for field_name in ProductFixedNRiskObservationSet.__dataclass_fields__:
+        object.__setattr__(forged, field_name, getattr(canonical, field_name))
+    object.__setattr__(forged, "dataset_manifest_sha256", "0" * 64)
+
+    with pytest.raises(
+        ProductFixedNRiskObservationSetError,
+        match="differs from canonical durable evidence",
+    ):
+        verify_product_fixed_n_risk_observations(
+            forged,
+            membership=membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridges=(bridge,),
+            authority_root=authority_root,
+        )
+
+
+def test_product_fixed_n_risk_observation_verifier_rejects_equality_forgery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        bridge,
+        _initial_capital_sha256,
+        _stake_policy_sha256,
+    ) = _qualified_fixed_n_fixture(tmp_path, monkeypatch)
+    canonical = resolve_product_fixed_n_risk_observations(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+    forged_observation = object.__new__(RiskPathObservation)
+    source = canonical.observations[0]
+    for field_name in RiskPathObservation.__dataclass_fields__:
+        object.__setattr__(
+            forged_observation,
+            field_name,
+            object.__getattribute__(source, field_name),
+        )
+
+    class AlwaysEqual:
+        def __eq__(self, _other):
+            return True
+
+        def __ne__(self, _other):
+            return False
+
+    object.__setattr__(
+        forged_observation,
+        "minimum_equity",
+        AlwaysEqual(),
+    )
+    forged = object.__new__(ProductFixedNRiskObservationSet)
+    for field_name in ProductFixedNRiskObservationSet.__dataclass_fields__:
+        object.__setattr__(
+            forged,
+            field_name,
+            object.__getattribute__(canonical, field_name),
+        )
+    object.__setattr__(forged, "observations", (forged_observation,))
+
+    with pytest.raises(
+        ProductFixedNRiskObservationSetError,
+        match="minimum_equity must be an exact finite Decimal",
     ):
         verify_product_fixed_n_risk_observations(
             forged,
@@ -1459,6 +1710,58 @@ def test_object_new_forgery_cannot_pass_canonical_evidence_verifier(
     with pytest.raises(
         ProductRunCapitalPathError,
         match="does not match canonical durable roots",
+    ):
+        verify_product_run_capital_path_evidence(
+            forged,
+            workspace=workspace,
+            run_id=RUN_ID,
+            member_index=0,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridge=bridge,
+            authority_root=authority_root,
+        )
+
+
+def test_nested_changed_ticket_equality_cannot_pass_canonical_evidence_verifier(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(tmp_path, monkeypatch)
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
+    canonical = resolve_product_run_capital_path_evidence(
+        workspace=workspace,
+        run_id=RUN_ID,
+        member_index=0,
+        membership=membership,
+        registry_path=registry_path,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridge=bridge,
+        authority_root=authority_root,
+    )
+    forged = object.__new__(ProductRunCapitalPathEvidence)
+    for field_name in ProductRunCapitalPathEvidence.__dataclass_fields__:
+        object.__setattr__(forged, field_name, getattr(canonical, field_name))
+
+    class AlwaysEqual:
+        def __eq__(self, _other):
+            return True
+
+        def __ne__(self, _other):
+            return False
+
+    object.__setattr__(forged, "changed_ticket_ids", (AlwaysEqual(),))
+
+    with pytest.raises(
+        ProductRunCapitalPathError,
+        match="changed_ticket_ids must be an exact text tuple",
     ):
         verify_product_run_capital_path_evidence(
             forged,

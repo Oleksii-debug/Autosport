@@ -819,8 +819,7 @@ def _prepare_market_definition_candidates(
         definition_bytes = _canonical_json_bytes(market_definition)
         definition_json = definition_bytes.decode("utf-8")
         definition_sha256 = sha256(definition_bytes).hexdigest()
-        payload = {
-            "schema": "autosport.betfair_authenticated_market_definition.v1",
+        fields = {
             "market_id": market_id,
             "provider_request_id": subscription.provider_request_id,
             "connection_id": subscription.connection_id,
@@ -833,10 +832,16 @@ def _prepare_market_definition_candidates(
             "market_definition_sha256": definition_sha256,
             "transport_frame_sha256": frame.payload_sha256,
         }
+        fingerprint_payload = {
+            "schema": "autosport.betfair_authenticated_market_definition.v1",
+            **fields,
+        }
         candidates.append(
             {
-                **payload,
-                "evidence_id": sha256(_canonical_json_bytes(payload)).hexdigest(),
+                **fields,
+                "evidence_id": sha256(
+                    _canonical_json_bytes(fingerprint_payload)
+                ).hexdigest(),
             }
         )
     return tuple(candidates)

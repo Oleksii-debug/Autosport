@@ -803,6 +803,7 @@ class PersistentLiveDecisionLoop:
         self.catalog_required_history = catalog_required_history
         self._default_market_store: SQLiteMarketStore | None = None
         self._default_health_store: SourceHealthStore | None = None
+        self._default_market_change_token: int | None = None
 
         store = SQLiteMarketStore(self.workspace / "market.db")
         try:
@@ -858,14 +859,17 @@ class PersistentLiveDecisionLoop:
                 assert store is not None
                 assert health_store is not None
 
-                # MarketEventBus delivery is process-local. A peer process may commit
-                # a newer positive append into the shared canonical SQLite store
-                # between our polls without touching this loop's in-memory mirror.
-                # Reconcile independently proven durable current state at every
-                # observation boundary before asking the provider for another batch.
-                # This keeps long-lived decision truth aligned with cross-process
-                # market authority without turning the mirror into persistence.
-                try:
+                def _reconcile_external_market_changes(*, force: bool = False) -> None:
+                    # MarketEventBus delivery is process-local. SQLite data_version is
+                    # only a cheap cross-connection invalidation hint; market values
+                    # still enter the mirror exclusively through the independently
+                    # proven current projection below.
+                    change_token = store.external_change_token()
+                    if (
+                        not force
+                        and self._default_market_change_token == change_token
+                    ):
+                        return
                     for (
                         persisted_event,
                         append_generation,
@@ -874,6 +878,10 @@ class PersistentLiveDecisionLoop:
                             persisted_event,
                             append_generation=append_generation,
                         )
+                    self._default_market_change_token = change_token
+
+                try:
+                    _reconcile_external_market_changes(force=opened_here)
                 except BaseException:
                     if opened_here:
                         store.close()
@@ -882,14 +890,28 @@ class PersistentLiveDecisionLoop:
                 if opened_here:
                     self._default_market_store = store
                     self._default_health_store = health_store
-                return poll_open_market_store_once(
-                    store,
-                    health_store,
-                    provider,
-                    mirror_updates=updates,
-                    max_items=self.bounds.observation_max_items,
-                    policy=self.ingestion_policy,
-                )
+
+                try:
+                    result = poll_open_market_store_once(
+                        store,
+                        health_store,
+                        provider,
+                        mirror_updates=updates,
+                        max_items=self.bounds.observation_max_items,
+                        policy=self.ingestion_policy,
+                    )
+                except ProviderUnavailableError:
+                    # A peer may have committed market truth while provider I/O was
+                    # failing. Reconcile it before the caller persists a ZERO
+                    # provider-gap decision against this observation boundary.
+                    _reconcile_external_market_changes()
+                    raise
+
+                # Catch peer commits that landed while provider I/O was in flight.
+                # Same-connection appends are already delivered synchronously by the
+                # local MarketEventBus and do not advance SQLite data_version here.
+                _reconcile_external_market_changes()
+                return result
 
             self._observe = _default_observer
         else:
@@ -965,6 +987,7 @@ class PersistentLiveDecisionLoop:
         store = self._default_market_store
         self._default_market_store = None
         self._default_health_store = None
+        self._default_market_change_token = None
         if store is not None:
             store.close()
 

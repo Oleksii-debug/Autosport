@@ -1647,6 +1647,27 @@ class PersistentLiveDecisionLoop:
             _canonical_text("required failed provider source_id", source_id)
             for source_id in required_failed_source_ids
         )
+        if require_failed and not normalized_required_failed:
+            if self.provider is not None:
+                try:
+                    normalized_required_failed = (
+                        _canonical_text(
+                            "provider.source_id",
+                            getattr(self.provider, "source_id", None),
+                        ),
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise LiveDecisionProgressError(
+                        "bound provider gap lost canonical provider source identity"
+                    ) from exc
+            else:
+                # A provider-less/custom observer cannot identify which source
+                # caused a generic failure. Recovery and restart must preserve the
+                # same conservative law as first publication: every source bound
+                # into that exact historical cut must replay as FAILED.
+                normalized_required_failed = tuple(
+                    sorted({boundary.source_id for boundary in boundaries})
+                )
         if (
             normalized_required_failed != tuple(sorted(normalized_required_failed))
             or len(set(normalized_required_failed)) != len(normalized_required_failed)

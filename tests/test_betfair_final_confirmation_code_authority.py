@@ -233,3 +233,40 @@ def test_execution_confirmation_context_constructor_rebinding_fails_closed(
     )
     assert not boundary._confirmation_graph_unchanged()
 
+@pytest.mark.parametrize(
+    ("type_name", "member_name", "replacement_kind"),
+    (
+        ("ExecutionAction", "expires_at", "slot"),
+        ("ExecutionPlan", "plan_id", "slot"),
+        ("ExecutionAttempt", "attempt_id", "slot"),
+        ("ExecutionAttemptReadView", "submitted_request_sha256", "slot"),
+        ("VerifiedExecutionPlanView", "attempts", "slot"),
+        ("ExecutionAction", "__init__", "callable"),
+        ("ExecutionAttemptReadView", "__init__", "callable"),
+        ("VerifiedExecutionPlanView", "__init__", "callable"),
+    ),
+)
+def test_final_send_ledger_projection_surface_rebinding_fails_closed(
+    monkeypatch,
+    type_name: str,
+    member_name: str,
+    replacement_kind: str,
+) -> None:
+    assert boundary._confirmation_graph_unchanged()
+    view_type = getattr(boundary._ledger_runtime, type_name)
+
+    if replacement_kind == "slot":
+        monkeypatch.setattr(
+            view_type,
+            member_name,
+            property(lambda self: None),
+        )
+    else:
+        monkeypatch.setattr(
+            view_type,
+            member_name,
+            lambda self, *args, **kwargs: None,
+        )
+
+    assert not boundary._confirmation_graph_unchanged()
+

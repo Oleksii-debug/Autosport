@@ -179,6 +179,32 @@ _CONFIRMATION_GENERIC_SLOT_DESCRIPTOR_GRAPH = tuple(
     for slot_name in getattr(projection_type, "__slots__", ())
     if type(slot_name) is str
 )
+
+# Final SUBMITTED/request proof is carried by typed ledger read projections.
+# Pin their generated constructors and slot descriptors as part of the same
+# irreversible-send graph so verified journal bytes cannot be reinterpreted by
+# class-level attribute dispatch after verified_execution_view() returns.
+_LEDGER_FINAL_VIEW_TYPES = (
+    _ledger_runtime.ExecutionAction,
+    _ledger_runtime.ExecutionPlan,
+    _ledger_runtime.ExecutionAttempt,
+    _ledger_runtime.ExecutionAttemptReadView,
+    _ledger_runtime.VerifiedExecutionPlanView,
+)
+_LEDGER_FINAL_VIEW_METHOD_GRAPHS = tuple(
+    (view_type, _snapshot_class_callable_graph(view_type))
+    for view_type in _LEDGER_FINAL_VIEW_TYPES
+)
+_LEDGER_FINAL_VIEW_SLOT_DESCRIPTOR_GRAPH = tuple(
+    (
+        view_type,
+        slot_name,
+        getattr(view_type, slot_name),
+    )
+    for view_type in _LEDGER_FINAL_VIEW_TYPES
+    for slot_name in getattr(view_type, "__slots__", ())
+    if type(slot_name) is str
+)
 _WORKSPACE_LOCK_METHOD_GRAPH = _snapshot_class_callable_graph(
     _WORKSPACE_LOCK_TYPE
 )
@@ -405,6 +431,22 @@ def _confirmation_graph_unchanged() -> bool:
                 _CONFIRMATION_GENERIC_SLOT_DESCRIPTOR_GRAPH
             )
         )
+        and all(
+            getattr(_ledger_runtime, view_type.__name__, None) is view_type
+            for view_type in _LEDGER_FINAL_VIEW_TYPES
+        )
+        and all(
+            getattr(view_type, name, None) is value
+            and getattr(value, "__code__", None) is code
+            for view_type, method_graph in _LEDGER_FINAL_VIEW_METHOD_GRAPHS
+            for name, value, code in method_graph
+        )
+        and all(
+            getattr(view_type, slot_name, None) is descriptor
+            for view_type, slot_name, descriptor in (
+                _LEDGER_FINAL_VIEW_SLOT_DESCRIPTOR_GRAPH
+            )
+        )
         and _confirmation.hashlib is _CONFIRMATION_HASHLIB
         and _CONFIRMATION_HASHLIB.sha256 is _CONFIRMATION_HASHLIB_SHA256
         and _confirmation.json is _CONFIRMATION_JSON
@@ -578,6 +620,10 @@ def _durable_submitted_at(
         context.ledger,
         context.bound.execution_plan.plan_id,
     )
+    if type(view) is not _ledger_runtime.VerifiedExecutionPlanView:
+        raise _impl.BetfairSupervisedExecutionError(
+            "durable execution view changed type before Betfair final send"
+        )
     if (
         view.plan_fingerprint != context.bound.execution_plan.fingerprint
         or view.plan is None
@@ -596,6 +642,14 @@ def _durable_submitted_at(
             "durable Betfair attempt is not uniquely submitted"
         )
     attempt = matches[0]
+    if (
+        type(attempt) is not _ledger_runtime.ExecutionAttemptReadView
+        or type(attempt.attempt) is not _ledger_runtime.ExecutionAttempt
+        or type(attempt.action) is not _ledger_runtime.ExecutionAction
+    ):
+        raise _impl.BetfairSupervisedExecutionError(
+            "durable Betfair attempt projection changed type"
+        )
     if (
         attempt.action.action_id != action.action_id
         or attempt.state is not _SUBMITTED_STATE

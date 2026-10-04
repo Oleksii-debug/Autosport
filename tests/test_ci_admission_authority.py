@@ -602,3 +602,32 @@ def test_main_has_no_implicit_argv_default_and_entrypoint_passes_sys_argv() -> N
     )
     assert "raise SystemExit(main(sys.argv[1:]))" in source
     assert "raise SystemExit(main())" not in source
+
+
+
+def test_main_rejects_inplace_cancel_kwdefault_rebase(monkeypatch) -> None:
+    defaults = controller_module.cancel_superseded.__kwdefaults__
+    assert defaults is not None
+    assert defaults["cancel_same_head"] is None
+
+    monkeypatch.setitem(defaults, "cancel_same_head", True)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+
+    assert controller_module.main(_main_cancel_args()) == 2
+
+
+def test_main_rejects_replaced_admission_kwdefault_mapping(monkeypatch) -> None:
+    defaults = controller_module.admit_current_head.__kwdefaults__
+    assert defaults is not None
+
+    replacement = dict(defaults)
+    monkeypatch.setattr(
+        controller_module.admit_current_head,
+        "__kwdefaults__",
+        replacement,
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+
+    assert controller_module.main(_main_admission_args()) == 2

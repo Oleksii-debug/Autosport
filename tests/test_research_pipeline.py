@@ -186,10 +186,21 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             envelope = json.loads(lines[0])
             self.assertEqual(envelope["record"]["action"], "OPEN_PAPER_RESEARCH_TICKET")
             self.assertFalse(envelope["record"]["payload"]["real_money_execution"])
+            portfolio_payload = envelope["record"]["payload"]["portfolio"]
             self.assertEqual(
-                envelope["record"]["payload"]["portfolio"]["ranking_risk_truth"],
+                portfolio_payload["ranking_risk_truth"],
                 "conservative-floor-change",
             )
+            self.assertFalse(portfolio_payload["worst_case_change_proven"])
+            self.assertTrue(portfolio_payload["scenario_worst_case_change_proven"])
+            self.assertFalse(portfolio_payload["best_case_change_proven"])
+            self.assertTrue(portfolio_payload["scenario_best_case_change_proven"])
+            self.assertFalse(portfolio_payload["base_outcome_space_exhaustive"])
+            self.assertFalse(portfolio_payload["base_outcome_space_exact"])
+            self.assertFalse(
+                portfolio_payload["with_candidate_outcome_space_exhaustive"]
+            )
+            self.assertFalse(portfolio_payload["with_candidate_outcome_space_exact"])
             self.assertEqual(decision.audit_sha256, envelope["sha256"])
 
     def test_stale_source_evidence_is_rejected_without_book_mutation(self):

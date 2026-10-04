@@ -4700,6 +4700,50 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_direct_state_rejects_settlement_field_descriptor_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-state-descriptor-rebind",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:state-descriptor-rebind",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="state-descriptor-rebind-evidence",
+                evidence_sha256="2" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            original_descriptor = SettlementResolution.__dict__["evidence_id"]
+            try:
+                state_path = root / "continuous_session.json"
+                before = state_path.read_text(encoding="utf-8")
+                SettlementResolution.evidence_id = property(
+                    lambda _self: "forged-descriptor-evidence"
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "settlement evidence authority descriptor changed",
+                ):
+                    coordinator._state.record_settlement_evidence(
+                        settlement_evidence=(resolution,),
+                    )
+                self.assertEqual(state_path.read_text(encoding="utf-8"), before)
+            finally:
+                SettlementResolution.evidence_id = original_descriptor
+                store.close()
+
     def test_direct_state_rejects_duplicate_settlement_before_publish(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -47,7 +47,11 @@ def _bind_canonical_settlement_engine(method):
     """Inject settlement constructor/scope authority through closure-owned seams."""
 
     canonical_engine_type = SettlementEngine
-    canonical_scope_resolver = _canonical_open_quote_keys_for_book
+    canonical_scope_impl = _canonical_open_quote_keys_for_book
+    canonical_lifecycle_type = ContinuousEventLifecycle
+    canonical_lifecycle_get = ContinuousEventLifecycle.get
+    canonical_lifecycle_read = ContinuousEventLifecycle._read
+    canonical_lifecycle_record_type = EventLifecycleRecord
     canonical_resolution_type = SettlementResolution
     canonical_datetime_type = datetime
     canonical_timezone_utc = timezone.utc
@@ -107,6 +111,33 @@ def _bind_canonical_settlement_engine(method):
             canonical_text(quote_key, "quote_outcomes quote_key")
             if type(outcome) is not str or outcome not in canonical_outcomes:
                 raise ValueError("quote_outcomes contains unsupported outcome")
+
+    def canonical_scope_resolver(
+        coordinator,
+        book: PaperBook,
+        event_identity: str,
+    ) -> set[str]:
+        lifecycle = coordinator.lifecycle
+        if type(lifecycle) is not canonical_lifecycle_type:
+            raise ContinuousSessionError(
+                "settlement lifecycle authority must be canonical"
+            )
+        if (
+            canonical_lifecycle_type.get is not canonical_lifecycle_get
+            or canonical_lifecycle_type._read is not canonical_lifecycle_read
+            or "get" in lifecycle.__dict__
+            or "_read" in lifecycle.__dict__
+        ):
+            raise ContinuousSessionError(
+                "settlement lifecycle lookup dispatch changed"
+            )
+        return canonical_scope_impl(
+            coordinator,
+            book,
+            event_identity,
+            _lifecycle_get=canonical_lifecycle_get,
+            _lifecycle_record_type=canonical_lifecycle_record_type,
+        )
 
     def guarded(self, *args, **kwargs):
         protected = {
@@ -858,6 +889,10 @@ def _bind_canonical_settlement_resolution_collection(method):
     """Seal externally-authoritative settlement evidence before durable staging."""
 
     resolution_type = SettlementResolution
+    lifecycle_type = ContinuousEventLifecycle
+    lifecycle_records = ContinuousEventLifecycle.records
+    lifecycle_read = ContinuousEventLifecycle._read
+    lifecycle_record_type = EventLifecycleRecord
     datetime_type = datetime
     timezone_utc = timezone.utc
     valid_hex = frozenset("0123456789abcdef")
@@ -911,12 +946,36 @@ def _bind_canonical_settlement_resolution_collection(method):
             if type(outcome) is not str or outcome not in valid_outcomes:
                 raise ValueError("quote_outcomes contains unsupported outcome")
 
+    def canonical_records(lifecycle) -> tuple[EventLifecycleRecord, ...]:
+        if type(lifecycle) is not lifecycle_type:
+            raise ContinuousSessionError(
+                "settlement lifecycle authority must be canonical"
+            )
+        if (
+            lifecycle_type.records is not lifecycle_records
+            or lifecycle_type._read is not lifecycle_read
+            or "records" in lifecycle.__dict__
+            or "_read" in lifecycle.__dict__
+        ):
+            raise ContinuousSessionError(
+                "settlement lifecycle record dispatch changed"
+            )
+        records = lifecycle_records(lifecycle)
+        if type(records) is not tuple or any(
+            type(record) is not lifecycle_record_type for record in records
+        ):
+            raise ContinuousSessionError(
+                "settlement lifecycle returned non-canonical records"
+            )
+        return records
+
     def guarded(self, *, as_of: str):
         return method(
             self,
             as_of=as_of,
             _settlement_resolution_type=resolution_type,
             _settlement_resolution_validate=validate_resolution,
+            _lifecycle_records=canonical_records,
         )
 
     guarded.__name__ = method.__name__
@@ -930,10 +989,17 @@ def _canonical_open_quote_keys_for_book(
     coordinator,
     book: PaperBook,
     event_identity: str,
+    *,
+    _lifecycle_get: Callable[[ContinuousEventLifecycle, str], EventLifecycleRecord | None],
+    _lifecycle_record_type: type[EventLifecycleRecord],
 ) -> set[str]:
     """Resolve the exact provider/sport/native-event scope allowed to mutate P&L."""
 
-    record = coordinator.lifecycle.get(event_identity)
+    record = _lifecycle_get(coordinator.lifecycle, event_identity)
+    if record is not None and type(record) is not _lifecycle_record_type:
+        raise ContinuousSessionError(
+            "settlement lifecycle lookup returned non-canonical record"
+        )
     if record is None:
         raise ContinuousSessionError(
             "settlement event identity is absent from durable lifecycle"
@@ -1273,11 +1339,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         as_of: str,
         _settlement_resolution_type: type[SettlementResolution],
         _settlement_resolution_validate: Callable[..., None],
+        _lifecycle_records: Callable[[ContinuousEventLifecycle], tuple[EventLifecycleRecord, ...]],
     ) -> tuple[SettlementResolution, ...]:
         if self._outcome_resolver is None:
             return ()
         resolutions: list[SettlementResolution] = []
-        for record in self.lifecycle.records():
+        for record in _lifecycle_records(self.lifecycle):
             # A continuous session is bound to exactly one collector source. A
             # shared lifecycle may contain other providers, but their settlement
             # records are outside this session's economic authority.

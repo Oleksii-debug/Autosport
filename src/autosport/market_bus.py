@@ -7,6 +7,22 @@ from .domain import MarketEvent
 from .storage import SQLiteMarketStore
 
 
+def _snapshot_live_event(
+    event: MarketEvent,
+    *,
+    _event_type: type[MarketEvent] = MarketEvent,
+    _to_dict=MarketEvent.to_dict,
+    _from_dict=MarketEvent.from_dict,
+) -> MarketEvent:
+    """Snapshot one live event through sealed canonical codec descriptors."""
+    if type(event) is not _event_type:
+        raise TypeError("live ingestion requires exact MarketEvent values")
+    snapshot = _from_dict(_to_dict(event))
+    if type(snapshot) is not _event_type:
+        raise TypeError("live ingestion snapshot lost canonical MarketEvent authority")
+    return snapshot
+
+
 class MarketEventDeliveryError(ExceptionGroup):
     """Subscriber failures raised only after persistence, with the exact durable outcome."""
 
@@ -64,7 +80,7 @@ class MarketEventBus:
         *,
         _store_type: type[SQLiteMarketStore] = SQLiteMarketStore,
         _live_append=SQLiteMarketStore._append_live_batch_accepted,
-        _deepcopy=deepcopy,
+        _snapshot=_snapshot_live_event,
     ) -> int:
         """Persist through the product-owned live-receipt authority seam.
 
@@ -78,9 +94,9 @@ class MarketEventBus:
             raise TypeError("live ingestion requires an exact SQLiteMarketStore")
         accepted = _live_append(
             self.store,
-            (_deepcopy(event) for event in events),
+            (_snapshot(event) for event in events),
         )
-        __class__._notify(self, accepted)
+        __class__._notify(self, accepted, _deepcopy=_snapshot)
         return len(accepted)
 
     def _notify(

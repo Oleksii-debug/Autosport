@@ -898,6 +898,9 @@ class CanonicalDesktopApplication:
         *,
         _market_event_type,
         _canonical_digest,
+        _market_store_type,
+        _market_events,
+        _dedupe_getter,
     ) -> DesktopApplicationReceipt:
         delta.validate()
         if type(event) is not _market_event_type:
@@ -963,6 +966,44 @@ class CanonicalDesktopApplication:
                     "canonical market event changed during desktop application"
                 )
             self.market_bus.publish(event)
+            if _canonical_digest(event) != digest:
+                raise DeltaConflictError(
+                    "canonical market event changed during market persistence"
+                )
+            market_store = getattr(self.market_bus, "store", None)
+            if type(market_store) is not _market_store_type:
+                raise ApplicationReceiptError(
+                    "canonical application cannot prove durable market storage"
+                )
+            try:
+                history = _market_events(market_store, delta.event_id)
+            except Exception as exc:
+                raise ApplicationReceiptError(
+                    "cannot verify durable market effect after publication"
+                ) from exc
+            matches = []
+            for stored_event in history:
+                if type(stored_event) is not _market_event_type:
+                    raise ApplicationReceiptError(
+                        "market persistence returned a non-canonical event type"
+                    )
+                try:
+                    stored_dedupe_key = _dedupe_getter(stored_event)
+                    stored_digest = _canonical_digest(stored_event)
+                except Exception as exc:
+                    raise ApplicationReceiptError(
+                        "cannot verify durable market identity after publication"
+                    ) from exc
+                if (
+                    stored_event.source_id == delta.source_id
+                    and stored_dedupe_key == delta.event_dedupe_key
+                    and stored_digest == digest
+                ):
+                    matches.append(stored_event)
+            if len(matches) != 1:
+                raise ApplicationReceiptError(
+                    "canonical application market effect is not durably provable"
+                )
             self._state.mark_market_applied(delta)
             progress = self._state.progress(delta)
             if progress is None:
@@ -1006,8 +1047,13 @@ class CanonicalDesktopApplication:
 def _bind_canonical_desktop_application_apply(implementation):
     """Seal the exact market-event type and digest authority for desktop application."""
 
+    from .storage import SQLiteMarketStore
+
     market_event_type = MarketEvent
     canonical_digest = canonical_event_digest
+    market_store_type = SQLiteMarketStore
+    market_events = SQLiteMarketStore.events
+    dedupe_getter = MarketEvent.dedupe_key.fget
 
     def apply(
         self: CanonicalDesktopApplication,
@@ -1020,6 +1066,9 @@ def _bind_canonical_desktop_application_apply(implementation):
             event,
             _market_event_type=market_event_type,
             _canonical_digest=canonical_digest,
+            _market_store_type=market_store_type,
+            _market_events=market_events,
+            _dedupe_getter=dedupe_getter,
         )
 
     return apply

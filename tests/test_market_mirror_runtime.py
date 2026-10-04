@@ -336,6 +336,45 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
                 first_store.close()
                 second_store.close()
 
+    def test_reconcile_rejects_rebound_store_path_before_mirror_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as first_directory, tempfile.TemporaryDirectory() as second_directory:
+            first_store = SQLiteMarketStore(Path(first_directory) / "market.db")
+            second_store = SQLiteMarketStore(Path(second_directory) / "market.db")
+            try:
+                first_event = self.event(selection="selection-a", sequence=1)
+                second_event = self.event(
+                    selection="selection-b",
+                    sequence=1,
+                    odds="3.00",
+                )
+                self.assertEqual(
+                    MarketEventBus(first_store)._publish_many_live_ingestion([first_event]),
+                    1,
+                )
+                self.assertEqual(
+                    MarketEventBus(second_store)._publish_many_live_ingestion([second_event]),
+                    1,
+                )
+                mirror = MarketMirror()
+                runtime = BoundedMirrorInvalidationBuffer(mirror)
+                runtime.reconcile_trusted_store(first_store)
+                runtime.drain()
+                before = mirror.snapshot()
+
+                second_store.path = first_store.path
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "path does not match the opened SQLite database",
+                ):
+                    runtime.reconcile_trusted_store(second_store)
+
+                self.assertEqual(mirror.snapshot(), before)
+                self.assertEqual(runtime.pending_count, 0)
+                self.assertFalse(runtime.full_refresh_required)
+            finally:
+                first_store.close()
+                second_store.close()
+
     def test_reconcile_trusted_store_requires_exact_store_and_hides_dependency_hooks(self) -> None:
         class StoreSubclass(SQLiteMarketStore):
             pass

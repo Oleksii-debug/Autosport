@@ -3235,6 +3235,9 @@ class PersistentLiveDecisionLoop:
                 "portfolio dependency graph"
             )
 
+        proven_market_events_by_intent: dict[
+            str, tuple[MarketEvent, ...]
+        ] = {}
         if progress.market_append_generation is not None:
             if committed_market_history is None:
                 raise DecisionLedgerIntegrityError(
@@ -3292,6 +3295,9 @@ class PersistentLiveDecisionLoop:
                             "proven market history"
                         )
                     matched_events.append(matching_events[0])
+                proven_market_events_by_intent[item["intent_id"]] = tuple(
+                    matched_events
+                )
 
                 risk_context = item["risk_context"]
                 provider_accounts_raw = risk_context["provider_accounts"]
@@ -3649,6 +3655,28 @@ class PersistentLiveDecisionLoop:
         ) in enumerate(positive_inputs):
             action_id = action_ids[position]
             binding_raw = bindings[position]
+            if len(opportunity.quotes) != 1:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision positive execution intent is "
+                    "not exactly single-leg"
+                )
+            proven_events = proven_market_events_by_intent.get(
+                intent_item["intent_id"],
+            )
+            if proven_events is not None:
+                if len(proven_events) != 1:
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision execution quote proof is ambiguous"
+                    )
+                try:
+                    runtime._require_back_compatible_exchange_side(
+                        proven_events[0].exchange_side
+                    )
+                except PaperExecutionAdoptionError as exc:
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision execution side lacks "
+                        "canonical PAPER authority"
+                    ) from exc
             if (
                 type(intent_item) is not dict
                 or type(binding_raw) is not dict

@@ -1804,6 +1804,93 @@ class SQLiteMarketStore:
                 semantic_binding_sha256=pending.semantic_binding_sha256,
             )
 
+    def _require_canonical_cutoff_authority_bindings(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+        append_authority: MonotonicWorkspaceAuthority,
+        cutoff_rows: tuple[tuple[str, str, int], ...],
+    ) -> None:
+        """Prove every committed cutoff is one canonical product row transition."""
+
+        history = authority.read_history()
+        commits = tuple(
+            record for record in history if record.phase is AuthorityPhase.COMMIT
+        )
+        if len(commits) != len(cutoff_rows):
+            raise MonotonicAuthorityRollbackError(
+                "causal replay cutoff authority commit count does not match durable rows"
+            )
+
+        remaining = list(cutoff_rows)
+        issued: list[tuple[str, str, int]] = []
+        previous_max_generation = 0
+        for record in commits:
+            candidates: list[tuple[str, str, int]] = []
+            for row in remaining:
+                cutoff_id, canonical_as_of, max_generation = row
+                tx_prefix = f"{cutoff_id[:32]}-"
+                tx_suffix = (
+                    record.tx_id[len(tx_prefix) :]
+                    if record.tx_id.startswith(tx_prefix)
+                    else ""
+                )
+                if (
+                    len(tx_suffix) != 32
+                    or re.fullmatch(r"[0-9a-f]{32}", tx_suffix) is None
+                ):
+                    continue
+                corpus_sha256 = self._frozen_replay_corpus_sha256(max_generation)
+                expected_binding_sha256 = _replay_cutoff_binding_sha256(
+                    cutoff_id=cutoff_id,
+                    canonical_as_of=canonical_as_of,
+                    max_append_generation=max_generation,
+                    corpus_sha256=corpus_sha256,
+                )
+                if record.semantic_binding_sha256 == expected_binding_sha256:
+                    candidates.append(row)
+
+            if len(candidates) != 1:
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff commit does not identify one canonical row"
+                )
+            row = candidates[0]
+            cutoff_id, _canonical_as_of, max_generation = row
+            if issued and max_generation < previous_max_generation:
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff commit regresses append generation"
+                )
+
+            self._require_committed_append_authority_through(
+                append_authority,
+                max_generation,
+            )
+            prior_rows = tuple(sorted(issued, key=lambda item: item[0]))
+            prior_state_sha256 = self._replay_cutoff_authority_state_sha256(
+                prior_rows
+            )
+            intended_rows = tuple(
+                sorted((*issued, row), key=lambda item: item[0])
+            )
+            intended_state_sha256 = self._replay_cutoff_authority_state_sha256(
+                intended_rows
+            )
+            if (
+                record.previous_committed_state_sha256 != prior_state_sha256
+                or record.intended_state_sha256 != intended_state_sha256
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff committed transition state is invalid"
+                )
+
+            issued.append(row)
+            remaining.remove(row)
+            previous_max_generation = max_generation
+
+        if remaining:
+            raise MonotonicAuthorityRollbackError(
+                "causal replay cutoff rows lack canonical committed transitions"
+            )
+
     @staticmethod
     def _require_independent_cutoff_issuance(
         authority: MonotonicWorkspaceAuthority,
@@ -2227,6 +2314,11 @@ class SQLiteMarketStore:
                     append_authority=append_authority,
                     cutoff_rows=cutoff_rows,
                 )
+                self._require_canonical_cutoff_authority_bindings(
+                    authority,
+                    append_authority,
+                    cutoff_rows,
+                )
 
                 current_row = next(
                     (
@@ -2263,6 +2355,11 @@ class SQLiteMarketStore:
                             observed_state_sha256,
                             append_authority=append_authority,
                             cutoff_rows=cutoff_rows,
+                        )
+                        self._require_canonical_cutoff_authority_bindings(
+                            authority,
+                            append_authority,
+                            cutoff_rows,
                         )
                         current_row = next(
                             (
@@ -2358,6 +2455,11 @@ class SQLiteMarketStore:
                         append_authority=append_authority,
                         cutoff_rows=cutoff_rows,
                     )
+                    self._require_canonical_cutoff_authority_bindings(
+                        authority,
+                        append_authority,
+                        cutoff_rows,
+                    )
 
                 # Re-read and independently prove the exact durable state after
                 # issuance/recovery, then consume rows from that same SQLite read
@@ -2377,6 +2479,11 @@ class SQLiteMarketStore:
                         observed_state_sha256,
                         append_authority=append_authority,
                         cutoff_rows=cutoff_rows,
+                    )
+                    self._require_canonical_cutoff_authority_bindings(
+                        authority,
+                        append_authority,
+                        cutoff_rows,
                     )
                     current_row = next(
                         (

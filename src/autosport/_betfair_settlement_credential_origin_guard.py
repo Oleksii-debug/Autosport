@@ -47,12 +47,147 @@ def _install_credential_origin_guard():
     ] = {}
     lock = Lock()
 
+    error_type = _ERROR
+    identity_error_type = _IDENTITY_ERROR
+    client_type = _CLIENT_TYPE
+    capture_type = _CAPTURE_TYPE
+    identity_type = _IDENTITY_TYPE
+    original_qualified_read = _ORIGINAL_QUALIFIED_READ
+    original_currency_for_capture = _ORIGINAL_CURRENCY_FOR_CAPTURE
+    resolve_identity = _RESOLVE_IDENTITY
+    require_identity = _REQUIRE_IDENTITY
+
+    def _metadata_snapshot(function):
+        code = getattr(function, "__code__", None)
+        defaults = getattr(function, "__defaults__", None)
+        kwdefaults = getattr(function, "__kwdefaults__", None)
+        if code is None:
+            raise RuntimeError(
+                "Betfair settlement credential-origin executable authority is unavailable"
+            )
+        kwitems = tuple(kwdefaults.items()) if kwdefaults is not None else ()
+        return code, defaults, kwdefaults, kwitems
+
+    (
+        resolve_identity_code,
+        resolve_identity_defaults,
+        resolve_identity_kwdefaults,
+        resolve_identity_kwitems,
+    ) = _metadata_snapshot(resolve_identity)
+    (
+        require_identity_code,
+        require_identity_defaults,
+        require_identity_kwdefaults,
+        require_identity_kwitems,
+    ) = _metadata_snapshot(require_identity)
+    (
+        qualified_read_code,
+        qualified_read_defaults,
+        qualified_read_kwdefaults,
+        qualified_read_kwitems,
+    ) = _metadata_snapshot(original_qualified_read)
+    (
+        currency_lookup_code,
+        currency_lookup_defaults,
+        currency_lookup_kwdefaults,
+        currency_lookup_kwitems,
+    ) = _metadata_snapshot(original_currency_for_capture)
+
+    def _metadata_current(
+        function,
+        *,
+        code,
+        defaults,
+        kwdefaults,
+        kwitems,
+    ) -> bool:
+        current_kwdefaults = getattr(function, "__kwdefaults__", None)
+        return (
+            getattr(function, "__code__", None) is code
+            and getattr(function, "__defaults__", None) is defaults
+            and current_kwdefaults is kwdefaults
+            and (
+                current_kwdefaults is None
+                or (
+                    len(current_kwdefaults) == len(kwitems)
+                    and all(
+                        key in current_kwdefaults
+                        and current_kwdefaults[key] is value
+                        for key, value in kwitems
+                    )
+                )
+            )
+        )
+
+    def _identity_verifier_current() -> bool:
+        return (
+            globals().get("_RESOLVE_IDENTITY") is resolve_identity
+            and globals().get("_REQUIRE_IDENTITY") is require_identity
+            and _metadata_current(
+                resolve_identity,
+                code=resolve_identity_code,
+                defaults=resolve_identity_defaults,
+                kwdefaults=resolve_identity_kwdefaults,
+                kwitems=resolve_identity_kwitems,
+            )
+            and _metadata_current(
+                require_identity,
+                code=require_identity_code,
+                defaults=require_identity_defaults,
+                kwdefaults=require_identity_kwdefaults,
+                kwitems=require_identity_kwitems,
+            )
+        )
+
+    def _qualified_read_current() -> bool:
+        return (
+            globals().get("_ORIGINAL_QUALIFIED_READ") is original_qualified_read
+            and _metadata_current(
+                original_qualified_read,
+                code=qualified_read_code,
+                defaults=qualified_read_defaults,
+                kwdefaults=qualified_read_kwdefaults,
+                kwitems=qualified_read_kwitems,
+            )
+        )
+
+    def _currency_lookup_current() -> bool:
+        return (
+            globals().get("_ORIGINAL_CURRENCY_FOR_CAPTURE")
+            is original_currency_for_capture
+            and _metadata_current(
+                original_currency_for_capture,
+                code=currency_lookup_code,
+                defaults=currency_lookup_defaults,
+                kwdefaults=currency_lookup_kwdefaults,
+                kwitems=currency_lookup_kwitems,
+            )
+        )
+
+    def _assert_identity_verifier_current() -> None:
+        if not _identity_verifier_current():
+            raise error_type(
+                "settlement currency authenticated identity verifier authority changed"
+            )
+
+    def _assert_qualified_read_current() -> None:
+        if not _qualified_read_current():
+            raise error_type("settlement currency qualified read authority changed")
+
+    def _assert_currency_lookup_current() -> None:
+        if not _currency_lookup_current():
+            raise error_type("settlement currency evidence lookup authority changed")
+
     def _require_k07(client, *, stage: str) -> _IDENTITY_TYPE:
+        _assert_identity_verifier_current()
         try:
-            identity = _RESOLVE_IDENTITY(client)
-            return _REQUIRE_IDENTITY(identity, client=client)
-        except _IDENTITY_ERROR as exc:
-            raise _ERROR(
+            identity = resolve_identity(client)
+            _assert_identity_verifier_current()
+            current = require_identity(identity, client=client)
+            _assert_identity_verifier_current()
+            return current
+        except identity_error_type as exc:
+            raise error_type(
                 f"settlement currency {stage} lacks K07 authenticated client/session authority"
             ) from exc
 
@@ -60,7 +195,7 @@ def _install_credential_origin_guard():
         try:
             state = vars(client)
         except TypeError as exc:
-            raise _ERROR("settlement currency client state is unavailable") from exc
+            raise error_type("settlement currency client state is unavailable") from exc
         venue_id = state.get("_venue_id")
         account_id = state.get("_account_id")
         if (
@@ -71,7 +206,7 @@ def _install_credential_origin_guard():
             or not account_id
             or account_id != account_id.strip()
         ):
-            raise _ERROR("settlement currency routing identity is unavailable")
+            raise error_type("settlement currency routing identity is unavailable")
         return venue_id, account_id
 
     def _forget_capture(capture_id: int):
@@ -89,29 +224,33 @@ def _install_credential_origin_guard():
         provider_order_ref: str | None = None,
         page_size: int = 200,
     ):
-        if type(client) is not _CLIENT_TYPE:
-            raise _ERROR(
+        if type(client) is not client_type:
+            raise error_type(
                 "settlement currency acquisition requires exact BetfairReadOnlyClient"
             )
 
         expected_venue, expected_account = _routing_snapshot(client)
         before = _require_k07(client, stage="acquisition")
-        capture = _ORIGINAL_QUALIFIED_READ(
+        _assert_qualified_read_current()
+        capture = original_qualified_read(
             client,
             action_id=action_id,
             market_id=market_id,
             provider_order_ref=provider_order_ref,
             page_size=page_size,
         )
-        if type(capture) is not _CAPTURE_TYPE:
-            raise _ERROR("settlement readback is not canonical Betfair execution capture")
+        _assert_qualified_read_current()
+        if type(capture) is not capture_type:
+            raise error_type("settlement readback is not canonical Betfair execution capture")
 
+        _assert_identity_verifier_current()
         try:
-            _REQUIRE_IDENTITY(before, client=client)
-        except _IDENTITY_ERROR as exc:
-            raise _ERROR(
+            require_identity(before, client=client)
+        except identity_error_type as exc:
+            raise error_type(
                 "settlement currency authenticated session changed during execution readback"
             ) from exc
+        _assert_identity_verifier_current()
 
         current_venue, current_account = _routing_snapshot(client)
         if (
@@ -120,7 +259,7 @@ def _install_credential_origin_guard():
             or capture.venue_id != expected_venue
             or capture.account_id != expected_account
         ):
-            raise _ERROR("settlement currency routing identity changed during readback")
+            raise error_type("settlement currency routing identity changed during readback")
 
         after = _require_k07(client, stage="post-readback verification")
         if (
@@ -128,13 +267,15 @@ def _install_credential_origin_guard():
             or before.venue_id != after.venue_id
             or before.currency_code != after.currency_code
         ):
-            raise _ERROR(
+            raise error_type(
                 "settlement currency/readback authenticated session context changed"
             )
 
-        legacy_currency = _ORIGINAL_CURRENCY_FOR_CAPTURE(capture)
+        _assert_currency_lookup_current()
+        legacy_currency = original_currency_for_capture(capture)
+        _assert_currency_lookup_current()
         if legacy_currency is None or legacy_currency != before.currency_code:
-            raise _ERROR(
+            raise error_type(
                 "settlement currency evidence does not match K07 authenticated context"
             )
 
@@ -154,7 +295,7 @@ def _install_credential_origin_guard():
         return capture
 
     def currency_for_capture(capture) -> str | None:
-        if type(capture) is not _CAPTURE_TYPE:
+        if type(capture) is not capture_type:
             return None
         with lock:
             record = issued.get(id(capture))
@@ -163,7 +304,7 @@ def _install_credential_origin_guard():
 
         client = record[1]()
         if client is None:
-            raise _ERROR(
+            raise error_type(
                 "settlement currency authenticated client expired before persistence"
             )
         identity = record[2]
@@ -171,12 +312,14 @@ def _install_credential_origin_guard():
         expected_currency = record[4]
         expected_venue = record[5]
         expected_account = record[6]
+        _assert_identity_verifier_current()
         try:
-            current = _REQUIRE_IDENTITY(identity, client=client)
-        except _IDENTITY_ERROR as exc:
-            raise _ERROR(
+            current = require_identity(identity, client=client)
+        except identity_error_type as exc:
+            raise error_type(
                 "settlement currency authenticated session changed before persistence"
             ) from exc
+        _assert_identity_verifier_current()
         current_venue, current_account = _routing_snapshot(client)
         if (
             current.session_context_id != expected_context
@@ -186,12 +329,14 @@ def _install_credential_origin_guard():
             or capture.venue_id != expected_venue
             or capture.account_id != expected_account
         ):
-            raise _ERROR(
+            raise error_type(
                 "settlement currency authenticated context changed before persistence"
             )
-        legacy_currency = _ORIGINAL_CURRENCY_FOR_CAPTURE(capture)
+        _assert_currency_lookup_current()
+        legacy_currency = original_currency_for_capture(capture)
+        _assert_currency_lookup_current()
         if legacy_currency != expected_currency:
-            raise _ERROR(
+            raise error_type(
                 "settlement currency evidence changed before persistence"
             )
         return expected_currency

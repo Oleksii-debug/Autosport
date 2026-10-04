@@ -562,6 +562,81 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertEqual(deliveries, [])
             self.assertFalse(checkpoint.has_ack(delta.delta_id))
 
+    def test_consumer_rejects_future_durable_receipt_before_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = self.make_delta(payload=payload)
+            collector.append(delta)
+            future_receipt = DesktopApplicationReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                receipt_id="receipt-d1",
+                applied_at="2026-01-01T00:00:07+00:00",
+            )
+            deliveries = []
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda _: event,
+                apply_event=lambda *_: self.fail(
+                    "apply_event must not run when durable receipt exists"
+                ),
+                lookup_application_receipt=lambda _: future_receipt,
+                on_application_receipt=lambda *_: deliveries.append(True),
+            )
+
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "desktop_available_at <= applied_at <= acknowledged_at",
+            ):
+                consumer.drain(as_of="2026-01-01T00:00:06+00:00")
+            self.assertEqual(deliveries, [])
+            self.assertFalse(checkpoint.has_ack(delta.delta_id))
+
+    def test_consumer_rejects_preavailability_fresh_receipt_before_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = self.make_delta(payload=payload)
+            collector.append(delta)
+            deliveries = []
+            applications = []
+
+            def apply_event(current, resolved):
+                self.assertEqual(resolved, event)
+                applications.append(current.delta_id)
+                return DesktopApplicationReceipt(
+                    delta_id=current.delta_id,
+                    canonical_event_digest=current.canonical_event_digest,
+                    receipt_id="receipt-d1",
+                    applied_at="2026-01-01T00:00:03+00:00",
+                )
+
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda _: event,
+                apply_event=apply_event,
+                lookup_application_receipt=lambda _: None,
+                on_application_receipt=lambda *_: deliveries.append(True),
+            )
+
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "desktop_available_at <= applied_at <= acknowledged_at",
+            ):
+                consumer.drain(as_of="2026-01-01T00:00:06+00:00")
+            self.assertEqual(applications, [delta.delta_id])
+            self.assertEqual(deliveries, [])
+            self.assertFalse(checkpoint.has_ack(delta.delta_id))
+
     def test_consumer_retries_post_receipt_delivery_before_ack(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

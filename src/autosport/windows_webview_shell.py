@@ -2296,6 +2296,63 @@ class AutosportWebBridge:
             self._trust_revoked = True
 
 
+_WEB_BRIDGE_PUBLIC_METHOD_NAMES = ("close", "dispatch", "get_state")
+_WEB_BRIDGE_PUBLIC_METHOD_WITNESSES = tuple(
+    (
+        name,
+        AutosportWebBridge.__dict__[name],
+        getattr(AutosportWebBridge.__dict__[name], "__code__", None),
+    )
+    for name in _WEB_BRIDGE_PUBLIC_METHOD_NAMES
+)
+
+
+def _require_canonical_web_bridge_surface(
+    api: object,
+    *,
+    _names=_WEB_BRIDGE_PUBLIC_METHOD_NAMES,
+    _witnesses=_WEB_BRIDGE_PUBLIC_METHOD_WITNESSES,
+) -> AutosportWebBridge:
+    """Reject any JS API object whose callable surface can exceed the product bridge."""
+
+    if (
+        type(api) is not AutosportWebBridge
+        or _WEB_BRIDGE_PUBLIC_METHOD_NAMES is not _names
+        or _WEB_BRIDGE_PUBLIC_METHOD_WITNESSES is not _witnesses
+    ):
+        raise WindowsWebViewUnavailable(
+            "Autosport refused a non-canonical WebView bridge surface"
+        )
+    try:
+        public_callables = tuple(
+            sorted(
+                name
+                for name in dir(api)
+                if not name.startswith("_") and callable(getattr(api, name))
+            )
+        )
+    except Exception as exc:
+        raise WindowsWebViewUnavailable(
+            "Autosport could not verify the WebView bridge surface"
+        ) from exc
+    if public_callables != tuple(sorted(_names)):
+        raise WindowsWebViewUnavailable(
+            "Autosport refused an expanded WebView bridge surface"
+        )
+    for name, expected, expected_code in _witnesses:
+        current = AutosportWebBridge.__dict__.get(name)
+        bound = getattr(api, name, None)
+        if (
+            current is not expected
+            or getattr(current, "__code__", None) is not expected_code
+            or getattr(bound, "__func__", None) is not expected
+        ):
+            raise WindowsWebViewUnavailable(
+                "Autosport refused a rebound WebView bridge method"
+            )
+    return api
+
+
 def launch_windows_shell(
     bridge: AutosportWebBridge | None = None,
     *,
@@ -2334,8 +2391,10 @@ def launch_windows_shell(
             f"Windows semantic shell asset is missing: {asset}"
         )
 
-    api = bridge or AutosportWebBridge()
-    canonical_bridge = isinstance(api, AutosportWebBridge)
+    api = _require_canonical_web_bridge_surface(
+        AutosportWebBridge() if bridge is None else bridge
+    )
+    canonical_bridge = True
     required_renderer = "edgechromium"
     renderer_observed = False
     trusted_document_observed = not canonical_bridge

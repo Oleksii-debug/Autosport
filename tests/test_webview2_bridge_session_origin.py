@@ -187,6 +187,69 @@ def test_same_window_same_url_before_load_recheck_is_idempotent() -> None:
     bridge._close_from_host()
 
 
+def test_launch_rejects_bridge_subclass_that_expands_js_api_surface(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class ExpandedBridge(AutosportWebBridge):
+        def arbitrary_workspace_call(self):
+            return "must-never-be-exposed"
+
+    fake = _FakeWebview()
+    controller = _Controller()
+    bridge = ExpandedBridge(controller)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    with pytest.raises(
+        WindowsWebViewUnavailable,
+        match="non-canonical WebView bridge surface",
+    ):
+        launch_windows_shell(bridge, storage_path=tmp_path / "webview")
+
+    assert fake.api is None
+    assert controller.events == []
+
+
+def test_launch_rejects_dynamic_public_callable_added_to_exact_bridge(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    fake = _FakeWebview()
+    controller = _Controller()
+    bridge = AutosportWebBridge(controller)
+    bridge.arbitrary_workspace_call = lambda: "must-never-be-exposed"  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    with pytest.raises(
+        WindowsWebViewUnavailable,
+        match="expanded WebView bridge surface",
+    ):
+        launch_windows_shell(bridge, storage_path=tmp_path / "webview")
+
+    assert fake.api is None
+    assert controller.events == []
+
+
+def test_launch_rejects_instance_shadow_of_allowlisted_bridge_method(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    fake = _FakeWebview()
+    controller = _Controller()
+    bridge = AutosportWebBridge(controller)
+    bridge.dispatch = lambda raw: {"status": "forged"}  # type: ignore[method-assign]
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    with pytest.raises(
+        WindowsWebViewUnavailable,
+        match="rebound WebView bridge method",
+    ):
+        launch_windows_shell(bridge, storage_path=tmp_path / "webview")
+
+    assert fake.api is None
+    assert controller.events == []
+
+
 def test_launch_binds_bridge_before_pywebview_api_use(monkeypatch) -> None:
     fake = _FakeWebview()
     controller = _Controller()

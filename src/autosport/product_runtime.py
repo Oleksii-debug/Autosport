@@ -616,6 +616,77 @@ def _desktop_applied_current_for_source(
     return tuple(latest[key] for key in sorted(latest))
 
 
+def _desktop_applied_event_for_receipt(
+    *,
+    source_id: str,
+    delta: CollectorDelta,
+    receipt: DesktopApplicationReceipt,
+    market_store: SQLiteMarketStore,
+    _delta_type: type[CollectorDelta] = CollectorDelta,
+    _event_type: type[MarketEvent] = MarketEvent,
+    _receipt_type: type[DesktopApplicationReceipt] = DesktopApplicationReceipt,
+    _validate_receipt=DesktopApplicationReceipt.validate,
+    _market_events=SQLiteMarketStore.events,
+    _canonical_digest=canonical_event_digest,
+    _dedupe_getter=MarketEvent.dedupe_key.fget,
+) -> MarketEvent:
+    """Resolve one completed desktop receipt to its exact canonical market event."""
+    if type(delta) is not _delta_type:
+        raise ProductCompositionError("desktop delivery delta type is not canonical")
+    if type(receipt) is not _receipt_type:
+        raise ProductCompositionError("desktop delivery receipt type is not canonical")
+    try:
+        _validate_receipt(receipt)
+    except Exception as exc:
+        raise ProductCompositionError(
+            "desktop delivery receipt is invalid"
+        ) from exc
+    if (
+        delta.source_id != source_id
+        or receipt.delta_id != delta.delta_id
+        or receipt.canonical_event_digest != delta.canonical_event_digest
+    ):
+        raise ProductCompositionError(
+            "desktop delivery receipt is not bound to this runtime delta"
+        )
+    if _dedupe_getter is None:
+        raise ProductCompositionError(
+            "canonical MarketEvent dedupe identity descriptor is unavailable"
+        )
+    try:
+        history = _market_events(market_store, delta.event_id)
+    except Exception as exc:
+        raise ProductCompositionError(
+            "cannot read canonical market history for desktop delivery"
+        ) from exc
+
+    matches: list[MarketEvent] = []
+    for event in history:
+        if type(event) is not _event_type:
+            raise ProductCompositionError(
+                "market history returned a non-canonical event type"
+            )
+        if event.source_id != source_id:
+            continue
+        try:
+            event_dedupe_key = _dedupe_getter(event)
+            event_digest = _canonical_digest(event)
+        except Exception as exc:
+            raise ProductCompositionError(
+                "cannot verify canonical market identity for desktop delivery"
+            ) from exc
+        if (
+            event_dedupe_key == delta.event_dedupe_key
+            and event_digest == receipt.canonical_event_digest
+        ):
+            matches.append(event)
+
+    if len(matches) != 1:
+        raise ProductCompositionError(
+            "desktop delivery receipt does not resolve to exactly one canonical market event"
+        )
+    return matches[0]
+
 @dataclass(slots=True)
 class AutonomousProductRuntime:
     """One supported headless composition of the integrated PAPER product authorities."""
@@ -1007,7 +1078,6 @@ def build_autonomous_product_runtime(
         ):
             invalidations.accept_persisted(event)
 
-        market_bus.subscribe(invalidations.accept_persisted)
         dependencies = FocusedMirrorDependencyIndex(mirror)
         collector_store = CollectorDeltaStore(root / "collector_deltas.json")
         collector = HeadlessCollectorService(
@@ -1019,12 +1089,29 @@ def build_autonomous_product_runtime(
             clock=resolved_clock,
             sleep=sleep,
         )
+
+        def deliver_completed_desktop_application(
+            delta: CollectorDelta,
+            receipt: DesktopApplicationReceipt,
+            *,
+            _resolve=_desktop_applied_event_for_receipt,
+            _accept=invalidations.accept_persisted,
+        ) -> None:
+            event = _resolve(
+                source_id=source_id,
+                delta=delta,
+                receipt=receipt,
+                market_store=market_store,
+            )
+            _accept(event)
+
         desktop = DesktopDeltaConsumer(
             collector_store,
             DesktopDeltaCheckpointStore(root / "desktop_acks.json"),
             resolve_event=source.resolve_event,
             apply_event=canonical_application.apply,
             lookup_application_receipt=canonical_application.lookup_receipt,
+            on_application_receipt=deliver_completed_desktop_application,
         )
         coordinator = ContinuousSessionCoordinator(
             workspace=root,

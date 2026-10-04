@@ -895,6 +895,9 @@ class DesktopDeltaConsumer:
     ``apply_event`` is the complete idempotent application boundary and must not return a
     receipt until both canonical market persistence and required source-health persistence
     are durable. ``lookup_application_receipt`` recovers only such complete receipts.
+    ``on_application_receipt`` runs only after that durable receipt exists and before the
+    desktop ACK. If it fails, the ACK remains absent and recovery replays the callback from
+    the durable receipt without reapplying the canonical event/health transaction.
     Separate post-receipt health mutation is rejected because it creates an unrecoverable
     crash boundary between event persistence and desktop acknowledgement.
     """
@@ -907,6 +910,9 @@ class DesktopDeltaConsumer:
         resolve_event: Callable[[CollectorDelta], Any],
         apply_event: Callable[[CollectorDelta, Any], DesktopApplicationReceipt],
         lookup_application_receipt: Callable[[CollectorDelta], DesktopApplicationReceipt | None],
+        on_application_receipt: Callable[
+            [CollectorDelta, DesktopApplicationReceipt], None
+        ] | None = None,
         apply_health: Callable[[CollectorDelta, Any], None] | None = None,
     ) -> None:
         self.collector = collector
@@ -914,6 +920,9 @@ class DesktopDeltaConsumer:
         self.resolve_event = resolve_event
         self.apply_event = apply_event
         self.lookup_application_receipt = lookup_application_receipt
+        if on_application_receipt is not None and not callable(on_application_receipt):
+            raise TypeError("on_application_receipt must be callable or None")
+        self._on_application_receipt = on_application_receipt
         if apply_health is not None:
             raise ApplicationReceiptError(
                 "apply_health must be included inside the durable apply_event boundary"
@@ -951,11 +960,30 @@ class DesktopDeltaConsumer:
 
                 durable_receipt = self.lookup_application_receipt(delta)
                 if durable_receipt is not None:
-                    durable_receipt.validate()
-                    if durable_receipt.canonical_event_digest != delta.canonical_event_digest:
+                    if not isinstance(durable_receipt, DesktopApplicationReceipt):
                         raise ApplicationReceiptError(
-                            f"durable application receipt digest conflicts with delta {delta.delta_id}"
+                            "durable application receipt must use the canonical receipt type"
                         )
+                    durable_receipt.validate()
+                    if (
+                        durable_receipt.delta_id != delta.delta_id
+                        or durable_receipt.canonical_event_digest
+                        != delta.canonical_event_digest
+                    ):
+                        raise ApplicationReceiptError(
+                            f"durable application receipt is not bound to delta {delta.delta_id}"
+                        )
+                    desktop_available = _instant(
+                        delta.desktop_available_at, "desktop_available_at"
+                    )
+                    applied = _instant(durable_receipt.applied_at, "applied_at")
+                    if not (desktop_available <= applied <= now):
+                        raise ApplicationReceiptError(
+                            "application timing must satisfy "
+                            "desktop_available_at <= applied_at <= acknowledged_at"
+                        )
+                    if self._on_application_receipt is not None:
+                        self._on_application_receipt(delta, durable_receipt)
                     self.checkpoint._ack_locked(
                         delta,
                         application_receipt=durable_receipt,
@@ -974,6 +1002,17 @@ class DesktopDeltaConsumer:
                 receipt.validate()
                 if receipt.delta_id != delta.delta_id or receipt.canonical_event_digest != digest:
                     raise ApplicationReceiptError("application receipt is not bound to this delta/digest")
+                desktop_available = _instant(
+                    delta.desktop_available_at, "desktop_available_at"
+                )
+                applied = _instant(receipt.applied_at, "applied_at")
+                if not (desktop_available <= applied <= now):
+                    raise ApplicationReceiptError(
+                        "application timing must satisfy "
+                        "desktop_available_at <= applied_at <= acknowledged_at"
+                    )
+                if self._on_application_receipt is not None:
+                    self._on_application_receipt(delta, receipt)
                 self.checkpoint._ack_locked(
                     delta,
                     application_receipt=receipt,

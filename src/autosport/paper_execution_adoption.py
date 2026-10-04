@@ -119,6 +119,14 @@ def _timestamp_text(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
+# Recovery-clock selection is itself financial execution authority: a forged older
+# reservation timestamp can make an actually expired quote look executable. Keep
+# the durable reader capability captured at module initialization so caller/runtime
+# mutation of the ledger instance's public `events` attribute cannot fabricate the
+# pre-existing RUN_RESERVED fact used to choose the execution clock.
+_PAPER_EXECUTION_LEDGER_EVENTS = PaperExecutionLedger.events
+
+
 class PaperExecutionAdoptionRuntime:
     """Bridge canonical PortfolioPlan decisions through #623 PAPER attempt truth.
 
@@ -537,7 +545,7 @@ class PaperExecutionAdoptionRuntime:
             )
 
         run_id = self.expected_run_id(prepared, trigger_id)
-        events = self.ledger.events(run_id)
+        events = _PAPER_EXECUTION_LEDGER_EVENTS(self.ledger, run_id)
         reservations = [
             event for event in events if event["event_type"] == "RUN_RESERVED"
         ]

@@ -603,6 +603,16 @@ _DISPATCH_ROOT = (
     _HASHLIB_SHA256,
     _UTC_NOW_ISO,
     _TERMINAL_POPULATION_TYPE,
+    _PROTOCOL_CONSTANTS,
+    _LOCK_METHOD_WITNESSES,
+    _AUTHORITY_METHOD_WITNESSES,
+    _CONSTRUCTOR_WITNESSES,
+    _LEDGER_INTERNAL_METHOD_WITNESSES,
+    _DECISION_RECORD_METHOD_WITNESSES,
+    _MEMBER_BINDING_TYPE,
+    _MEMBER_BINDING_POST_INIT,
+    _RESULT_TYPE,
+    _RESULT_AUTHORITY_PROPERTY_WITNESSES,
 )
 
 
@@ -626,6 +636,16 @@ def _require_dispatch(
         hashlib.sha256,
         utc_now_iso,
         ProductProposalTargetTerminalPopulation,
+        _PROTOCOL_CONSTANTS,
+        _LOCK_METHOD_WITNESSES,
+        _AUTHORITY_METHOD_WITNESSES,
+        _CONSTRUCTOR_WITNESSES,
+        _LEDGER_INTERNAL_METHOD_WITNESSES,
+        _DECISION_RECORD_METHOD_WITNESSES,
+        CounterfactualScenarioMemberBinding,
+        CounterfactualScenarioMemberBinding.__post_init__,
+        ProductProposalRiskScenarioPopulation,
+        _RESULT_AUTHORITY_PROPERTY_WITNESSES,
     )
     aliases = (
         _PRECOMMIT_TYPE,
@@ -644,6 +664,16 @@ def _require_dispatch(
         _HASHLIB_SHA256,
         _UTC_NOW_ISO,
         _TERMINAL_POPULATION_TYPE,
+        _PROTOCOL_CONSTANTS,
+        _LOCK_METHOD_WITNESSES,
+        _AUTHORITY_METHOD_WITNESSES,
+        _CONSTRUCTOR_WITNESSES,
+        _LEDGER_INTERNAL_METHOD_WITNESSES,
+        _DECISION_RECORD_METHOD_WITNESSES,
+        _MEMBER_BINDING_TYPE,
+        _MEMBER_BINDING_POST_INIT,
+        _RESULT_TYPE,
+        _RESULT_AUTHORITY_PROPERTY_WITNESSES,
     )
     live_protocol_constants = (
         _SCHEMA,
@@ -744,12 +774,28 @@ def _require_dispatch(
             "scenario population authority dispatch changed"
         )
 
-    for witness_set, owner in (
-        (_LOCK_METHOD_WITNESSES_EXPECTED, WorkspaceEconomicLock),
-        (_AUTHORITY_METHOD_WITNESSES_EXPECTED, MonotonicWorkspaceAuthority),
-        (_LEDGER_INTERNAL_METHOD_WITNESSES_EXPECTED, JsonlDecisionLedger),
+    for witness_set, expected_witness_set, owner in (
+        (
+            _LOCK_METHOD_WITNESSES,
+            _LOCK_METHOD_WITNESSES_EXPECTED,
+            WorkspaceEconomicLock,
+        ),
+        (
+            _AUTHORITY_METHOD_WITNESSES,
+            _AUTHORITY_METHOD_WITNESSES_EXPECTED,
+            MonotonicWorkspaceAuthority,
+        ),
+        (
+            _LEDGER_INTERNAL_METHOD_WITNESSES,
+            _LEDGER_INTERNAL_METHOD_WITNESSES_EXPECTED,
+            JsonlDecisionLedger,
+        ),
     ):
-        for name, expected_member, code in witness_set:
+        if witness_set is not expected_witness_set:
+            raise ProductProposalRiskScenarioPopulationError(
+                "scenario population authority dispatch changed"
+            )
+        for name, expected_member, code in expected_witness_set:
             current_member = owner.__dict__.get(name)
             current_function = getattr(current_member, "__func__", current_member)
             if (

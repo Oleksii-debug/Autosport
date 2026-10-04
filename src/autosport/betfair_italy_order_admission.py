@@ -223,6 +223,8 @@ def _build_italian_limit_evaluator():
     error_type = ItalianOrderAdmissionError
     decimal_type = Decimal
     fraction_type = Fraction
+    max_decimal_digits = _MAX_DECIMAL_DIGITS
+    max_abs_exponent = _MAX_ABS_EXPONENT
 
     selection_id_slot = instruction_type.__dict__["selection_id"]
     side_slot = instruction_type.__dict__["side"]
@@ -247,8 +249,8 @@ def _build_italian_limit_evaluator():
             )
         parts = value.as_tuple()
         if (
-            len(parts.digits) > _MAX_DECIMAL_DIGITS
-            or abs(parts.exponent) > _MAX_ABS_EXPONENT
+            len(parts.digits) > max_decimal_digits
+            or abs(parts.exponent) > max_abs_exponent
         ):
             raise error_type(f"{field} exceeds bounded Decimal shape")
         return value

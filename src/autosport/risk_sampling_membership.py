@@ -231,6 +231,112 @@ class ResolvedFixedNRiskMembership:
         return False
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedFixedNRiskEvaluationSpec:
+    """Structurally frozen statistical policy for a fixed-N risk experiment.
+
+    ScientificRegistry structure proves exact preregistration content and append
+    order but is not itself a non-backdateable product chronology authority.
+    Positive pre-outcome authority must be composed with the product membership
+    publication/randomization receipts before this specification can drive a
+    product-issued estimator.
+    """
+
+    research_protocol_id: str
+    protocol_sha256: str
+    design_sha256: str
+    dataset_snapshot_id: str
+    dataset_manifest_sha256: str
+    planned_run_ids: tuple[str, ...]
+    confidence_level: Decimal
+    ruin_threshold: Decimal
+    risk_target_scope: str
+    initial_capital_state_sha256: str
+    stake_policy_sha256: str
+    precommitted_at: str
+    outcome_reveal_after: str
+
+    @property
+    def planned_n(self) -> int:
+        return len(self.planned_run_ids)
+
+    @property
+    def product_preoutcome_chronology_proven(self) -> bool:
+        return False
+
+    @property
+    def iid_qualified(self) -> bool:
+        return False
+
+    @property
+    def grants_real_money_authority(self) -> bool:
+        return False
+
+
+def inspect_fixed_n_risk_evaluation_spec(
+    registry_path: str | Path,
+    *,
+    research_protocol_id: str,
+    dataset_snapshot_id: str,
+) -> ResolvedFixedNRiskEvaluationSpec:
+    """Resolve v2 statistical policy without upgrading it to product authority."""
+
+    membership = inspect_fixed_n_risk_membership_structure(
+        registry_path,
+        research_protocol_id=research_protocol_id,
+        dataset_snapshot_id=dataset_snapshot_id,
+    )
+    registry = ScientificRegistry(registry_path)
+    protocol = _entry(registry, "ResearchProtocol", membership.research_protocol_id)
+    binding = protocol.payload.get("binding")
+    if type(binding) is not dict:
+        raise RiskSamplingMembershipError(
+            "ResearchProtocol binding is missing or invalid"
+        )
+    design, design_sha256 = _parse_design(binding.get("evaluation_design"))
+    if design.get("kind") != _DESIGN_KIND_V2:
+        raise RiskSamplingMembershipError(
+            "product risk evaluation requires v2 fixed-N statistical preregistration"
+        )
+    if design_sha256 != membership.design_sha256:
+        raise RiskSamplingMembershipError(
+            "risk evaluation specification differs from fixed-N membership design"
+        )
+    confidence = Decimal(
+        _canonical_decimal_text(
+            design.get("confidence_level"),
+            "fixed-N confidence_level",
+        )
+    )
+    threshold = Decimal(
+        _canonical_decimal_text(
+            design.get("ruin_threshold"),
+            "fixed-N ruin_threshold",
+        )
+    )
+    return ResolvedFixedNRiskEvaluationSpec(
+        research_protocol_id=membership.research_protocol_id,
+        protocol_sha256=membership.protocol_sha256,
+        design_sha256=membership.design_sha256,
+        dataset_snapshot_id=membership.dataset_snapshot_id,
+        dataset_manifest_sha256=membership.dataset_manifest_sha256,
+        planned_run_ids=membership.planned_run_ids,
+        confidence_level=confidence,
+        ruin_threshold=threshold,
+        risk_target_scope=_RISK_TARGET_SCOPE,
+        initial_capital_state_sha256=_sha256(
+            design.get("initial_capital_state_sha256"),
+            "fixed-N initial_capital_state_sha256",
+        ),
+        stake_policy_sha256=_sha256(
+            design.get("stake_policy_sha256"),
+            "fixed-N stake_policy_sha256",
+        ),
+        precommitted_at=membership.precommitted_at,
+        outcome_reveal_after=membership.outcome_reveal_after,
+    )
+
+
 def inspect_fixed_n_risk_membership_structure(
     registry_path: str | Path,
     *,

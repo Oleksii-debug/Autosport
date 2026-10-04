@@ -278,3 +278,86 @@ def test_unbound_market_state_expectations_do_not_create_tautological_checks() -
     assert "INPLAY_MISMATCH" not in result.reasons
     assert "BET_DELAY_MISMATCH" not in result.reasons
 
+
+
+@pytest.mark.parametrize(
+    ("factory", "match"),
+    [
+        (
+            lambda: PriceSize(Decimal("Infinity"), Decimal("1")),
+            "finite exact Decimal",
+        ),
+        (
+            lambda: PriceSize(2.0, Decimal("1")),
+            "finite exact Decimal",
+        ),
+        (
+            lambda: replace(request(), requested_stake=True),
+            "finite exact Decimal",
+        ),
+        (
+            lambda: replace(request(), limit_price=Decimal("NaN")),
+            "finite exact Decimal",
+        ),
+        (
+            lambda: replace(request(), expected_market_version=True),
+            "non-negative integer",
+        ),
+        (
+            lambda: replace(request(), leg_count=True),
+            "positive integer",
+        ),
+        (
+            lambda: replace(request(), fill_or_kill=1),
+            "fill_or_kill must be bool",
+        ),
+        (
+            lambda: replace(request(), action_id=" action-1"),
+            "trimmed strings",
+        ),
+        (
+            lambda: replace(limits(), permitted=1),
+            "permitted must be bool",
+        ),
+        (
+            lambda: replace(limits(), min_stake=Decimal("-1")),
+            "min_stake must be positive",
+        ),
+        (
+            lambda: replace(
+                limits(),
+                min_stake=Decimal("10"),
+                max_stake=Decimal("2"),
+            ),
+            "min_stake cannot exceed max_stake",
+        ),
+        (
+            lambda: replace(snapshot(), market_version=True),
+            "non-negative integer",
+        ),
+        (
+            lambda: replace(snapshot(), virtualise=1),
+            "virtualise must be bool",
+        ),
+        (
+            lambda: replace(
+                snapshot(),
+                available_to_back=list(snapshot().available_to_back),
+            ),
+            "available_to_back must be a tuple",
+        ),
+        (
+            lambda: replace(
+                snapshot(),
+                available_to_back=(
+                    PriceSize(Decimal("2.10"), Decimal("5")),
+                    PriceSize(Decimal("2.10"), Decimal("4")),
+                ),
+            ),
+            "duplicate price levels",
+        ),
+    ],
+)
+def test_noncanonical_feasibility_ingress_is_rejected(factory, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        factory()

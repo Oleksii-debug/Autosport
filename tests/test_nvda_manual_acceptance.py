@@ -436,6 +436,72 @@ def test_resolution_verifier_rejects_issued_ledger_path_rebinding(tmp_path):
         )
 
 
+def test_resolution_verifier_rejects_fingerprint_authority_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript)
+    resolution = _resolve(ledger, transcript)
+    assert resolution is not None
+    issued_fingerprint = nvda_manual_module._resolution_fingerprint(resolution)
+    object.__setattr__(resolution, "human_tested", True)
+    hostile_called = False
+
+    def hostile_fingerprint(_resolution):
+        nonlocal hostile_called
+        hostile_called = True
+        return issued_fingerprint
+
+    monkeypatch.setattr(
+        nvda_manual_module,
+        "_resolution_fingerprint",
+        hostile_fingerprint,
+    )
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="resolution verifier authority changed",
+    ):
+        verify_manual_nvda_acceptance_resolution(
+            resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=RUNTIME_WITNESS_SHA,
+            expected_transcript_sha256=resolution.record.transcript_sha256,
+        )
+    assert hostile_called is False
+
+
+def test_resolution_issuance_rejects_structural_authority_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript)
+    hostile_called = False
+
+    def hostile_structural(*_args, **_kwargs):
+        nonlocal hostile_called
+        hostile_called = True
+        raise AssertionError("hostile structural authority executed")
+
+    monkeypatch.setattr(
+        nvda_manual_module,
+        "_structural_result",
+        hostile_structural,
+    )
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="resolution issuance authority changed",
+    ):
+        _resolve(ledger, transcript)
+    assert hostile_called is False
+
+
 def test_resolution_verifier_rejects_instance_events_override(tmp_path):
     transcript = _transcript()
     ledger = _ledger(tmp_path)

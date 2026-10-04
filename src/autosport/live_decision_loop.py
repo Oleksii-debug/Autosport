@@ -157,6 +157,7 @@ _INPUT_SPEC_KEYS_V1 = frozenset(
 _INPUT_SPEC_KEYS_V2 = frozenset(
     {"input_id", "source_ids", "sports", "event_ids", "market_ids", "selection_ids"}
 )
+_MARKET_FRONTIER_RETRY_LIMIT = 8
 
 
 def _canonical_text(name: str, value: object) -> str:
@@ -1019,7 +1020,7 @@ class PersistentLiveDecisionLoop:
         # interval, discard the candidate cutoff, reconcile the newly durable truth,
         # and sample again. Once stable, any later peer commit necessarily occurred
         # after the selected cutoff and belongs to a later cycle.
-        for _ in range(8):
+        for _ in range(_MARKET_FRONTIER_RETRY_LIMIT):
             expected_token = self._reconcile_default_market_changes(
                 store,
                 self.mirror_updates,

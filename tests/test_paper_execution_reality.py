@@ -795,6 +795,40 @@ class PaperExecutionRealityTests(unittest.TestCase):
                 )
             self.assertFalse(path.exists())
 
+            for invalid_started_at in (
+                "not-a-timestamp",
+                "2026-09-20T06:00:00",
+            ):
+                with self.subTest(
+                    invalid_started_at=invalid_started_at
+                ), self.assertRaisesRegex(
+                    PaperExecutionStateError,
+                    "reservation identity fields are invalid",
+                ):
+                    ledger.reserve_run(
+                        run_id=run_id,
+                        trigger_id="trigger-invalid-reservation",
+                        plan=current,
+                        config=model,
+                        started_at=invalid_started_at,
+                        observation_evidence_ids={},
+                    )
+                self.assertFalse(path.exists())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "reservation identity fields are invalid",
+            ):
+                ledger.reserve_run(
+                    run_id=run_id,
+                    trigger_id=" trigger-invalid-reservation ",
+                    plan=current,
+                    config=model,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={},
+                )
+            self.assertFalse(path.exists())
+
             with self.assertRaisesRegex(
                 PaperExecutionStateError,
                 "run_id does not match canonical",

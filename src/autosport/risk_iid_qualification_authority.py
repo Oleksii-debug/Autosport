@@ -385,41 +385,105 @@ def resolve_product_fixed_n_iid_qualification(
     return result
 
 
-def verify_product_fixed_n_iid_qualification(
-    candidate: ProductFixedNIidQualificationAuthority,
-    *,
-    membership: ResolvedFixedNRiskMembership,
-    registry_path: str | Path,
-    workspace: str | Path,
-    sampling_manifest_json: str,
-    sampling_frame_json: str,
-    horizon_json: str,
-    settlement_bridges: tuple[PaperSettlementLearningBridge, ...],
-    authority_root: str | Path | None = None,
-) -> ProductFixedNIidQualificationAuthority:
-    """Re-resolve every product root; the authority object is not a bearer token."""
+_QUALIFICATION_FIELDS = (
+    "experiment_id",
+    "planned_member_ids",
+    "member_execution_receipt_sha256",
+    "member_path_evidence_sha256",
+    "occurrence_root_sha256",
+    "sampling_manifest_sha256",
+    "initial_capital_state_sha256",
+    "stake_policy_sha256",
+    "qualification_sha256",
+)
 
-    _require_dispatch()
-    if type(candidate) is not _AUTHORITY_TYPE:
-        raise TypeError(
-            "candidate must be exact ProductFixedNIidQualificationAuthority"
+
+def _build_qualification_verifier(
+    resolver,
+    authority_type: type[ProductFixedNIidQualificationAuthority],
+):
+    """Freeze verifier dispatch and compare immutable fields without dataclass __eq__."""
+
+    module_globals = globals()
+    resolver_code = getattr(resolver, "__code__", None)
+    if resolver_code is None:
+        raise RuntimeError("fixed-N IID qualification resolver is unavailable")
+    fields = _QUALIFICATION_FIELDS
+
+    def verifier(
+        candidate: ProductFixedNIidQualificationAuthority,
+        *,
+        membership: ResolvedFixedNRiskMembership,
+        registry_path: str | Path,
+        workspace: str | Path,
+        sampling_manifest_json: str,
+        sampling_frame_json: str,
+        horizon_json: str,
+        settlement_bridges: tuple[PaperSettlementLearningBridge, ...],
+        authority_root: str | Path | None = None,
+    ) -> ProductFixedNIidQualificationAuthority:
+        def require_verifier_dispatch() -> None:
+            if (
+                module_globals.get("resolve_product_fixed_n_iid_qualification")
+                is not resolver
+                or getattr(resolver, "__code__", None) is not resolver_code
+                or module_globals.get("ProductFixedNIidQualificationAuthority")
+                is not authority_type
+            ):
+                raise ProductFixedNIidQualificationError(
+                    "fixed-N IID qualification verifier authority dispatch changed"
+                )
+
+        require_verifier_dispatch()
+        _require_dispatch()
+        if type(candidate) is not authority_type:
+            raise TypeError(
+                "candidate must be exact ProductFixedNIidQualificationAuthority"
+            )
+        canonical = resolver(
+            membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=sampling_manifest_json,
+            sampling_frame_json=sampling_frame_json,
+            horizon_json=horizon_json,
+            settlement_bridges=settlement_bridges,
+            authority_root=authority_root,
         )
-    canonical = resolve_product_fixed_n_iid_qualification(
-        membership,
-        registry_path=registry_path,
-        workspace=workspace,
-        sampling_manifest_json=sampling_manifest_json,
-        sampling_frame_json=sampling_frame_json,
-        horizon_json=horizon_json,
-        settlement_bridges=settlement_bridges,
-        authority_root=authority_root,
-    )
-    _require_dispatch()
-    if candidate != canonical:
-        raise ProductFixedNIidQualificationError(
-            "fixed-N IID qualification differs from canonical durable evidence"
-        )
-    return canonical
+        require_verifier_dispatch()
+        _require_dispatch()
+        if type(canonical) is not authority_type:
+            raise ProductFixedNIidQualificationError(
+                "fixed-N IID qualification resolver returned invalid authority type"
+            )
+        try:
+            differs = any(
+                object.__getattribute__(candidate, field_name)
+                != object.__getattribute__(canonical, field_name)
+                for field_name in fields
+            )
+        except AttributeError as exc:
+            raise ProductFixedNIidQualificationError(
+                "fixed-N IID qualification differs from canonical durable evidence"
+            ) from exc
+        if differs:
+            raise ProductFixedNIidQualificationError(
+                "fixed-N IID qualification differs from canonical durable evidence"
+            )
+        require_verifier_dispatch()
+        _require_dispatch()
+        return canonical
+
+    verifier.__name__ = "verify_product_fixed_n_iid_qualification"
+    verifier.__qualname__ = "verify_product_fixed_n_iid_qualification"
+    return verifier
+
+
+verify_product_fixed_n_iid_qualification = _build_qualification_verifier(
+    resolve_product_fixed_n_iid_qualification,
+    ProductFixedNIidQualificationAuthority,
+)
+del _build_qualification_verifier
 
 
 __all__ = [

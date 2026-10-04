@@ -9,7 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from .agents import AgentContext, AgentOrchestrator
-from .dataset import ReplayDataset
+from .dataset import ReplayDataset, load_dataset
 from .decision_ledger import JsonlDecisionLedger, VerifiedDecisionLedgerSnapshot
 from .domain import MarketEvent
 from .economic_goal import EconomicGoalContract
@@ -70,6 +70,9 @@ _IID_EXPECTED_SEQUENCE_CODE = getattr(_IID_EXPECTED_SEQUENCE, "__code__", None)
 _IID_EXPECTED_MULTISET = expected_replay_consumed_payload_multiset_sha256
 _IID_EXPECTED_MULTISET_CODE = getattr(_IID_EXPECTED_MULTISET, "__code__", None)
 _IID_REPLAY_ENGINE = ReplayEngine
+_IID_DATASET_TYPE = ReplayDataset
+_IID_DATASET_LOADER = load_dataset
+_IID_DATASET_LOADER_CODE = getattr(_IID_DATASET_LOADER, "__code__", None)
 _IID_EXECUTION_RECEIPT_TYPE = ProductIidRunExecutionReceipt
 
 
@@ -96,6 +99,10 @@ def _require_iid_session_dispatch() -> None:
         or getattr(_IID_EXPECTED_MULTISET, "__code__", None)
         is not _IID_EXPECTED_MULTISET_CODE
         or ReplayEngine is not _IID_REPLAY_ENGINE
+        or ReplayDataset is not _IID_DATASET_TYPE
+        or load_dataset is not _IID_DATASET_LOADER
+        or getattr(_IID_DATASET_LOADER, "__code__", None)
+        is not _IID_DATASET_LOADER_CODE
         or ProductIidRunExecutionReceipt is not _IID_EXECUTION_RECEIPT_TYPE
     ):
         raise ProductIidDrawPlanError(
@@ -371,7 +378,9 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
             # Recover the exact checksum-bound schema-v2 outcome chain and reject a
             # previously accepted restart/fork before PaperBook/ledger mutation.
             # The same binding is then persisted on the canonical RunRegistry item.
-            outcome_lineage = outcome_lineage_binding_from_dataset(dataset)
+            outcome_lineage = outcome_lineage_binding_from_dataset(
+                canonical_dataset
+            )
             if outcome_lineage is not None:
                 self.registry.assert_outcome_lineage_compatible(outcome_lineage)
             # Load and validate the exact causal market bytes, including schema-v3
@@ -418,6 +427,31 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
         """
 
         _require_iid_session_dispatch()
+        if type(dataset) is not _IID_DATASET_TYPE:
+            raise TypeError("dataset must be an exact ReplayDataset")
+        dataset_root = Path(dataset.root).expanduser().resolve(strict=True)
+        manifest_path = dataset_root / "manifest.json"
+        try:
+            manifest_before = manifest_path.read_bytes()
+            canonical_dataset = _IID_DATASET_LOADER(dataset_root)
+            manifest_after = manifest_path.read_bytes()
+        except (OSError, ValueError) as exc:
+            raise ProductIidDrawPlanError(
+                "IID runtime dataset cannot be canonically re-resolved"
+            ) from exc
+        _require_iid_session_dispatch()
+        if manifest_before != manifest_after:
+            raise ProductIidDrawPlanError(
+                "IID runtime dataset manifest changed during canonical re-resolution"
+            )
+        if (
+            hashlib.sha256(manifest_before).hexdigest()
+            != membership.dataset_manifest_sha256
+        ):
+            raise ProductIidDrawPlanError(
+                "IID runtime dataset manifest differs from the frozen DatasetSnapshot"
+            )
+
         with WorkspaceEconomicLock(self.workspace):
             plan = _IID_PLAN_RESOLVER(
                 membership,
@@ -438,8 +472,8 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
                 )
             draw = plan.member_draws[member_index]
 
-            corpus_events = dataset.load_market_events()
-            dataset._assert_sport_scope(corpus_events)
+            corpus_events = canonical_dataset.load_market_events()
+            canonical_dataset._assert_sport_scope(corpus_events)
             if self.research_plan is not None:
                 self.research_plan.preflight(corpus_events)
             _require_iid_session_dispatch()
@@ -448,7 +482,9 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
                 member_index=member_index,
                 market_events=corpus_events,
             )
-            verified_sports = dataset._assert_sport_scope(list(member_events))
+            verified_sports = canonical_dataset._assert_sport_scope(
+                list(member_events)
+            )
             if self.research_plan is not None:
                 self.research_plan.preflight(list(member_events))
 
@@ -526,7 +562,7 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
 
             _require_iid_session_dispatch()
             result = self._run_dataset_locked(
-                dataset,
+                canonical_dataset,
                 market_events=list(member_events),
                 verified_sports=verified_sports,
                 speed=speed,

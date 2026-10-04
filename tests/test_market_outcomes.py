@@ -390,6 +390,19 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
             (authority.authority_sha256,),
         )
 
+    def test_empty_portfolio_rejects_duplicate_provider_authority(self):
+        authority = self._authority()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "duplicate provider authority for canonical market identity",
+        ):
+            ScenarioSearchEngine().analyse_authoritative(
+                [],
+                [authority, authority],
+                decision_as_of=self.DECISION_AS_OF,
+            )
+
     def test_authoritative_scenario_search_covers_unticketed_real_third_outcome(self):
         authority = self._authority()
         book = PaperBook("100")

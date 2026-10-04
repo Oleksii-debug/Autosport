@@ -14,7 +14,8 @@ from autosport.betdaq_settlement_readback import (
 def _evidence() -> BetdaqEconomicEvidence:
     return BetdaqEconomicEvidence(
         method="GetOrderDetails",
-        request_identity_sha256="a" * 64,
+        # Canonical GetOrderDetails request identity for OrderId=123.
+        request_identity_sha256="0e48478b4b2cc067a15dea78acc1f4e549b94f51249935f8ad8e098c698ea824",
         source_payload_sha256="b" * 64,
         observed_at="2026-09-25T00:00:00Z",
         account_context_id="betdaq-auth-context:test",

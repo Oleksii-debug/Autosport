@@ -1725,18 +1725,44 @@ def _install_market_book_depth_authority():
         if not origin_at_read_start or not source_origin_authoritative(self):
             return observation
         observation_id = id(observation)
+        market_key = (observation.venue_id, observation.market_id)
+        definition = (
+            observation.ladder_type,
+            observation.line_range_min,
+            observation.line_range_max,
+            observation.line_range_interval,
+            observation.line_range_unit,
+        )
 
         def forget(current: object, *, key: int = observation_id) -> None:
-            existing = issued.get(key)
-            if existing is not None and existing[0] is current:
-                issued.pop(key, None)
+            with generation_lock:
+                existing = issued.get(key)
+                if existing is not None and existing[0] is current:
+                    issued.pop(key, None)
 
-        issued[observation_id] = (
-            ref(observation, forget),
-            fingerprint(observation),
-            ref(self),
-            acquisition_started_at,
-        )
+        # listMarketCatalogue does not expose a monotonic MarketDescription
+        # version. Preserve the stronger fact we do have: once this process has
+        # observed an incompatible definition for the same exact Betfair market,
+        # older definition evidence can never become current again. Re-observing
+        # the same definition keeps the generation; A->B->A increments twice and
+        # therefore cannot re-authorize the original A receipt.
+        with generation_lock:
+            previous = latest_definitions.get(market_key)
+            if previous is None:
+                generation = 0
+            elif previous[1] == definition:
+                generation = previous[0]
+            else:
+                generation = previous[0] + 1
+            latest_definitions[market_key] = (generation, definition)
+            issued[observation_id] = (
+                ref(observation, forget),
+                fingerprint(observation),
+                ref(self),
+                acquisition_started_at,
+                generation,
+                market_key,
+            )
         return observation
 
     def require_authoritative(
@@ -1795,7 +1821,15 @@ del _install_market_book_depth_authority
 # unchanged canonical adapter. This is the same trusted-process API provenance
 # boundary as MarketBook depth; it is not hostile-process isolation.
 def _install_market_price_ladder_authority():
-    issued: dict[int, tuple[object, str, object, datetime]] = {}
+    issued: dict[
+        int,
+        tuple[object, str, object, datetime, int, tuple[str, str]],
+    ] = {}
+    latest_definitions: dict[
+        tuple[str, str],
+        tuple[int, tuple[object, object, object, object, object]],
+    ] = {}
+    generation_lock = Lock()
     raw_read = BetfairReadOnlyClient.read_market_price_ladder
     fingerprint = _market_price_ladder_fingerprint
 
@@ -1893,23 +1927,32 @@ def _install_market_price_ladder_authority():
 
     def require_authoritative(
         observation: BetfairMarketPriceLadderObservation,
-    ) -> tuple[object, str, object, datetime]:
+    ) -> tuple[object, str, object, datetime, int, tuple[str, str]]:
         if type(observation) is not BetfairMarketPriceLadderObservation:
             raise BetfairReadOnlyError(
                 "price-ladder authority requires exact observation"
             )
-        current = issued.get(id(observation))
-        source = None if current is None else current[2]()
-        if (
-            current is None
-            or current[0]() is not observation
-            or current[1] != fingerprint(observation)
-            or not source_origin_authoritative(source)
-        ):
-            raise BetfairReadOnlyError(
-                "price-ladder observation lacks canonical direct Betfair provider IO origin"
+        with generation_lock:
+            current = issued.get(id(observation))
+            source = None if current is None else current[2]()
+            latest = (
+                None
+                if current is None
+                else latest_definitions.get(current[5])
             )
-        return current
+            if (
+                current is None
+                or current[0]() is not observation
+                or current[1] != fingerprint(observation)
+                or latest is None
+                or current[4] != latest[0]
+                or not source_origin_authoritative(source)
+            ):
+                raise BetfairReadOnlyError(
+                    "price-ladder observation lacks current canonical direct "
+                    "Betfair provider IO origin"
+                )
+            return current
 
     def assert_authoritative(
         observation: BetfairMarketPriceLadderObservation,

@@ -649,6 +649,58 @@ class PaperExecutionRealityTests(unittest.TestCase):
             ):
                 PaperExecutionLedger(path).events()
 
+    def test_rehashed_reservation_payload_extension_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            execute_paper_plan(
+                plan=plan(action("a1")),
+                trigger_id="trigger-reservation-schema",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            reservation = next(
+                item
+                for item in events
+                if item["event_type"] == "RUN_RESERVED"
+            )
+            reservation["payload"]["alternate_authority"] = "forged"
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reservation payload is invalid",
+            ):
+                PaperExecutionLedger(path).events()
+
+    def test_rehashed_completion_payload_extension_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            execute_paper_plan(
+                plan=plan(action("a1")),
+                trigger_id="trigger-completion-schema",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            completion = next(
+                item
+                for item in events
+                if item["event_type"] == "RUN_COMPLETED"
+            )
+            completion["payload"]["alternate_economics"] = "forged"
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "completion payload is invalid",
+            ):
+                PaperExecutionLedger(path).events()
+
     def test_writer_lock_fails_closed_instead_of_creating_parallel_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-execution.jsonl"

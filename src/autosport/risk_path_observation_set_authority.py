@@ -43,6 +43,12 @@ _PATH_TYPE = ProductRunCapitalPathEvidence
 _PATH_RESOLVER = resolve_product_run_capital_path_evidence
 _PATH_RESOLVER_CODE = getattr(_PATH_RESOLVER, "__code__", None)
 _OBSERVATION_TYPE = RiskPathObservation
+_OBSERVATION_INIT = RiskPathObservation.__init__
+_OBSERVATION_INIT_CODE = getattr(_OBSERVATION_INIT, "__code__", None)
+_OBSERVATION_POST_INIT = RiskPathObservation.__post_init__
+_OBSERVATION_POST_INIT_CODE = getattr(_OBSERVATION_POST_INIT, "__code__", None)
+_OBSERVATION_CANONICAL = RiskPathObservation.canonical_payload
+_OBSERVATION_CANONICAL_CODE = getattr(_OBSERVATION_CANONICAL, "__code__", None)
 _BRIDGE_TYPE = PaperSettlementLearningBridge
 
 
@@ -137,6 +143,15 @@ def _require_dispatch() -> None:
         or resolve_product_run_capital_path_evidence is not _PATH_RESOLVER
         or getattr(_PATH_RESOLVER, "__code__", None) is not _PATH_RESOLVER_CODE
         or RiskPathObservation is not _OBSERVATION_TYPE
+        or _OBSERVATION_TYPE.__init__ is not _OBSERVATION_INIT
+        or getattr(_OBSERVATION_INIT, "__code__", None)
+        is not _OBSERVATION_INIT_CODE
+        or _OBSERVATION_TYPE.__post_init__ is not _OBSERVATION_POST_INIT
+        or getattr(_OBSERVATION_POST_INIT, "__code__", None)
+        is not _OBSERVATION_POST_INIT_CODE
+        or _OBSERVATION_TYPE.canonical_payload is not _OBSERVATION_CANONICAL
+        or getattr(_OBSERVATION_CANONICAL, "__code__", None)
+        is not _OBSERVATION_CANONICAL_CODE
         or PaperSettlementLearningBridge is not _BRIDGE_TYPE
         or ProductFixedNRiskObservationSet is not _SET_TYPE
     ):
@@ -285,8 +300,11 @@ def resolve_product_fixed_n_risk_observations(
             "all frozen fixed-N members must produce risk observations"
         )
     canonical_observations = [
-        observation.canonical_payload()
-        for observation in observations
+        _OBSERVATION_CANONICAL(observation)
+        for observation in sorted(
+            observations,
+            key=lambda item: item.independent_unit_id,
+        )
     ]
     observation_manifest_sha256 = hashlib.sha256(
         _canonical_json({"observations": canonical_observations})
@@ -335,8 +353,14 @@ _OBSERVATION_SET_FIELDS = (
     "planned_member_ids",
     "qualification_sha256",
     "occurrence_root_sha256",
-    "observations",
     "observation_manifest_sha256",
+    "source_evidence_sha256",
+)
+_OBSERVATION_FIELDS = (
+    "independent_unit_id",
+    "dependence_group_id",
+    "minimum_equity",
+    "outcome_available_at",
     "source_evidence_sha256",
 )
 
@@ -403,7 +427,44 @@ def _build_observation_set_verifier(
                 != object.__getattribute__(canonical, field_name)
                 for field_name in fields
             )
-        except AttributeError as exc:
+            candidate_observations = object.__getattribute__(
+                candidate,
+                "observations",
+            )
+            canonical_observations = object.__getattribute__(
+                canonical,
+                "observations",
+            )
+            if (
+                type(candidate_observations) is not tuple
+                or type(canonical_observations) is not tuple
+                or len(candidate_observations) != len(canonical_observations)
+            ):
+                differs = True
+            else:
+                for candidate_observation, canonical_observation in zip(
+                    candidate_observations,
+                    canonical_observations,
+                    strict=True,
+                ):
+                    if (
+                        type(candidate_observation) is not _OBSERVATION_TYPE
+                        or type(canonical_observation) is not _OBSERVATION_TYPE
+                        or any(
+                            object.__getattribute__(
+                                candidate_observation,
+                                field_name,
+                            )
+                            != object.__getattribute__(
+                                canonical_observation,
+                                field_name,
+                            )
+                            for field_name in _OBSERVATION_FIELDS
+                        )
+                    ):
+                        differs = True
+                        break
+        except (AttributeError, TypeError) as exc:
             raise ProductFixedNRiskObservationSetError(
                 "risk observation cohort differs from canonical durable evidence"
             ) from exc

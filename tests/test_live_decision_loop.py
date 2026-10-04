@@ -3283,6 +3283,75 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed_observer.calls, 1)
             self.assertEqual(len(ledger.verified_records()), 2)
 
+    def test_append_pending_restart_ignores_malformed_later_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def crash_after_append() -> None:
+                raise RuntimeError("simulated process loss after ledger append")
+
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                post_append_hook=crash_after_append,
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+            pending = json.loads(first.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(pending["phase"], "append_pending")
+            self.assertEqual(pending["market_append_generation"], 1)
+            first.close()
+
+            path = workspace / "market.db"
+            corruptor = SQLiteMarketStore(path)
+            try:
+                corruptor.connection.execute(
+                    "INSERT INTO market_event_commit_order "
+                    "(dedupe_key, append_generation) VALUES (?, ?)",
+                    ("post-append-pending-orphan", 3),
+                )
+                corruptor.connection.commit()
+            finally:
+                corruptor.close()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            recovered = resumed.run_cycle()
+
+            self.assertEqual(
+                recovered.status,
+                LiveCycleStatus.DUPLICATE_DECISION,
+            )
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+            committed = json.loads(
+                resumed.progress_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(committed["phase"], "committed")
+            self.assertEqual(committed["market_append_generation"], 1)
+            resumed.close()
+
+            with self.assertRaises(ValueError):
+                SQLiteMarketStore(path)
+
     def test_post_execution_book_publish_restart_reuses_durable_plan_and_ticket(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

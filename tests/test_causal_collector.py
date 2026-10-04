@@ -2105,7 +2105,7 @@ class CollectorDeltaTests(unittest.TestCase):
                     total_rejected=expected_before.total_rejected + rejected,
                     consecutive_failures=0,
                     last_success_at=now,
-                    last_error= None,
+                    last_error=None,
                     last_cursor=cursor,
                     latest_source_ts=latest_source_ts,
                     quality_flags=tuple(sorted(quality_flags)),

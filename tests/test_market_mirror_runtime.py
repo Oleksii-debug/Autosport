@@ -521,7 +521,7 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
                 "has_more": False,
             },
             {
-                "changed_keys": (),
+                "changed_keys": (("provider-a", "quote-a"),),
                 "semantic_refresh_keys": (("provider-a", "quote-a"),),
                 "semantic_refresh_identities": (
                     (("provider-a", "quote-a"), 1),

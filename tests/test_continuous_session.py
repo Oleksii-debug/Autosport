@@ -4021,6 +4021,108 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 continuous_session_module.SettlementResolution = original
                 store.close()
 
+    def test_forged_completion_cannot_clear_valid_pending_settlement(self) -> None:
+        class _ForgedResolution(SettlementResolution):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-forged-completion",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:forged-completion",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="forged-completion-evidence",
+                evidence_sha256="a" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            forged = _ForgedResolution(
+                event_identity=resolution.event_identity,
+                settlement_ref=resolution.settlement_ref,
+                quote_outcomes=dict(resolution.quote_outcomes),
+                evidence_id=resolution.evidence_id,
+                evidence_sha256=resolution.evidence_sha256,
+                available_at=resolution.available_at,
+            )
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                before = coordinator.status()
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "settlement evidence must be canonical",
+                ):
+                    coordinator._state.complete_pending_settlement_commit(
+                        settlement_evidence=(forged,),
+                        retain_pending_evidence_ids=(),
+                    )
+                after = coordinator.status()
+                self.assertEqual(
+                    after.pending_settlement_evidence_ids,
+                    before.pending_settlement_evidence_ids,
+                )
+                self.assertEqual(after.settlement_evidence, before.settlement_evidence)
+            finally:
+                store.close()
+
+    def test_invalid_success_settlement_collection_cannot_advance_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-invalid-success-collection",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:invalid-success-collection",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="invalid-success-collection-evidence",
+                evidence_sha256="b" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                before = coordinator.status()
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "settlement_evidence must be a tuple",
+                ):
+                    coordinator._state.record_success(
+                        at=clock(),
+                        full_refresh=False,
+                        settlement_evidence=[resolution],
+                        retain_pending_evidence_ids=(),
+                    )
+                after = coordinator.status()
+                self.assertEqual(after.cycles_completed, before.cycles_completed)
+                self.assertEqual(after.last_success_at, before.last_success_at)
+                self.assertEqual(after.settlement_evidence, ())
+            finally:
+                store.close()
+
     def test_duplicate_durable_settlement_evidence_fails_closed_on_read(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

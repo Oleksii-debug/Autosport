@@ -163,6 +163,69 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             )
         return events
 
+    @staticmethod
+    def _reservation_payload(
+        *,
+        trigger_id: str,
+        plan: ExecutionPlan,
+        config: PaperExecutionModelConfig,
+        started_at: str,
+        observation_evidence_ids: Mapping[str, str],
+        suspended_action_ids: frozenset[str],
+    ) -> dict[str, Any]:
+        if type(suspended_action_ids) is not frozenset or any(
+            type(action_id) is not str or not action_id
+            for action_id in suspended_action_ids
+        ):
+            raise TypeError(
+                "suspended_action_ids must be a frozenset of non-empty strings"
+            )
+        plan_action_ids = {action.action_id for action in plan.actions}
+        if not suspended_action_ids.issubset(plan_action_ids):
+            raise PaperExecutionStateError(
+                "suspended_action_ids contain action outside execution plan"
+            )
+        payload: dict[str, Any] = {
+            "trigger_id": trigger_id,
+            "plan_id": plan.plan_id,
+            "plan_fingerprint": plan.fingerprint,
+            "model_fingerprint": config.fingerprint,
+            "started_at": started_at,
+            "action_ids": [action.action_id for action in plan.actions],
+            "observation_evidence_ids": dict(
+                sorted(observation_evidence_ids.items())
+            ),
+        }
+        if suspended_action_ids:
+            payload["suspended_action_ids"] = sorted(suspended_action_ids)
+        return payload
+
+    def reserve_run(
+        self,
+        *,
+        run_id: str,
+        trigger_id: str,
+        plan: ExecutionPlan,
+        config: PaperExecutionModelConfig,
+        started_at: str,
+        observation_evidence_ids: Mapping[str, str],
+        suspended_action_ids: frozenset[str] = frozenset(),
+    ) -> None:
+        payload = self._reservation_payload(
+            trigger_id=trigger_id,
+            plan=plan,
+            config=config,
+            started_at=started_at,
+            observation_evidence_ids=observation_evidence_ids,
+            suspended_action_ids=suspended_action_ids,
+        )
+        self._append_event(
+            event_type="RUN_RESERVED",
+            run_id=run_id,
+            key=f"{run_id}:reserve",
+            payload=payload,
+        )
+
     def _append_completion_unlocked(
         self,
         *,
@@ -302,6 +365,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         config: PaperExecutionModelConfig,
         started_at: str,
         observation_evidence_ids: Mapping[str, str],
+        suspended_action_ids: frozenset[str] = frozenset(),
     ) -> PaperExecutionRun | None:
         events = self.events(run_id)
         if not events:
@@ -309,15 +373,14 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         reserve = [event for event in events if event["event_type"] == "RUN_RESERVED"]
         if len(reserve) != 1:
             raise PaperExecutionIntegrityError("run needs exactly one reservation")
-        expected_reserve = {
-            "trigger_id": trigger_id,
-            "plan_id": plan.plan_id,
-            "plan_fingerprint": plan.fingerprint,
-            "model_fingerprint": config.fingerprint,
-            "started_at": started_at,
-            "action_ids": [action.action_id for action in plan.actions],
-            "observation_evidence_ids": dict(sorted(observation_evidence_ids.items())),
-        }
+        expected_reserve = self._reservation_payload(
+            trigger_id=trigger_id,
+            plan=plan,
+            config=config,
+            started_at=started_at,
+            observation_evidence_ids=observation_evidence_ids,
+            suspended_action_ids=suspended_action_ids,
+        )
         if reserve[0]["payload"] != expected_reserve:
             raise PaperExecutionStateError("run identity conflicts with durable reservation")
 
@@ -548,9 +611,20 @@ def execute_paper_plan(
     action_by_id = {action.action_id: action for action in plan.actions}
     if set(observations) - set(action_by_id):
         raise PaperExecutionStateError("observations contain action outside execution plan")
+    if type(suspended_action_ids) is not frozenset or any(
+        type(action_id) is not str or not action_id
+        for action_id in suspended_action_ids
+    ):
+        raise TypeError(
+            "suspended_action_ids must be a frozenset of non-empty strings"
+        )
     if set(suspended_action_ids) - set(action_by_id):
         raise PaperExecutionStateError(
             "suspended_action_ids contain action outside execution plan"
+        )
+    if set(observations) & set(suspended_action_ids):
+        raise PaperExecutionStateError(
+            "one execution action cannot be both observed and synthetically suspended"
         )
     if observations and not isinstance(
         evidence_registry,
@@ -578,6 +652,7 @@ def execute_paper_plan(
         config=config,
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspended_action_ids,
     )
     existing = ledger.load_run(
         run_id=run_id,
@@ -586,6 +661,7 @@ def execute_paper_plan(
         config=config,
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspended_action_ids,
     )
     assert existing is not None
     if existing.completed:
@@ -610,6 +686,7 @@ def execute_paper_plan(
             config=config,
             started_at=started_at,
             observation_evidence_ids=observation_evidence_ids,
+            suspended_action_ids=suspended_action_ids,
         )
         assert result is not None
         return result
@@ -697,6 +774,7 @@ def execute_paper_plan(
                 config=config,
                 started_at=started_at,
                 observation_evidence_ids=observation_evidence_ids,
+                suspended_action_ids=suspended_action_ids,
             )
             assert result is not None
             return result
@@ -714,6 +792,7 @@ def execute_paper_plan(
         config=config,
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspended_action_ids,
     )
     assert result is not None
     return result

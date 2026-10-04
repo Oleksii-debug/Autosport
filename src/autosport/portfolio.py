@@ -34,8 +34,21 @@ _PORTFOLIO_DECIMAL_CONTEXT = Context(
 )
 
 
-def _require_finite_decimal(value: object, label: str) -> Decimal:
-    if type(value) is not Decimal or not value.is_finite():
+def _canonical_decimal(
+    value: object,
+    *,
+    _decimal_type: type[Decimal] = Decimal,
+) -> Decimal:
+    return _decimal_type(value)
+
+
+def _require_finite_decimal(
+    value: object,
+    label: str,
+    *,
+    _decimal_type: type[Decimal] = Decimal,
+) -> Decimal:
+    if type(value) is not _decimal_type or not value.is_finite():
         raise ValueError(f"{label} must be a finite Decimal")
     return value
 
@@ -187,7 +200,7 @@ def _scenario_profit_in_context(
 ) -> Decimal:
     """Calculate one scenario while the canonical local context is active."""
 
-    total = Decimal("0")
+    total = _canonical_decimal("0")
     for ticket in tickets:
         if ticket.status is not TicketStatus.OPEN:
             continue
@@ -195,7 +208,7 @@ def _scenario_profit_in_context(
             ticket.stake,
             f"portfolio ticket {ticket.ticket_id} stake",
         )
-        combined_odds = Decimal("1")
+        combined_odds = _canonical_decimal("1")
         for leg in ticket.legs:
             odds = _require_finite_decimal(
                 leg.locked_odds,
@@ -307,7 +320,7 @@ class PortfolioEngine:
 
         try:
             with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
-                total = Decimal("0")
+                total = _canonical_decimal("0")
                 for ticket in ticket_snapshot:
                     if ticket.status is not TicketStatus.OPEN:
                         continue
@@ -333,7 +346,7 @@ class PortfolioEngine:
                     }
                     _status, payout, _balance = PaperBook._settlement_result(
                         ticket,
-                        Decimal("0"),
+                        _canonical_decimal("0"),
                         winners,
                         voids,
                     )
@@ -366,7 +379,7 @@ class PortfolioEngine:
         if not grouped.issubset(all_keys):
             raise ValueError("exclusive group contains quote not present in portfolio")
         if not open_tickets:
-            zero = Decimal("0")
+            zero = _canonical_decimal("0")
             return PortfolioReport("exact", 1, zero, zero, zero)
         ungrouped = sorted(all_keys - grouped)
         state_count = 2 ** len(ungrouped)
@@ -383,7 +396,7 @@ class PortfolioEngine:
                 else:
                     profits = list(self._sample_profits(open_tickets, groups, ungrouped))
                     mode = "conservative-approximate" if groups else "approximate"
-                mean_case = sum(profits, Decimal("0")) / Decimal(len(profits))
+                mean_case = sum(profits, _canonical_decimal("0")) / _canonical_decimal(len(profits))
                 if not mean_case.is_finite():
                     raise ValueError("portfolio mean scenario profit must be finite")
         except DecimalException as exc:

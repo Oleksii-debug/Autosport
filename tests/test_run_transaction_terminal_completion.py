@@ -17,6 +17,7 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
     def _prepare_canonical_commit(
         root: Path,
         sampling_draw_admission_receipt_sha256: str | None = None,
+        summary_overrides: dict[str, object] | None = None,
     ):
         registry = RunRegistry.initialize_pristine(root / "run_registry.json")
         book_path = root / "paper_book.json"
@@ -71,17 +72,18 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
             placed_at="2000-01-01T00:00:00+00:00",
         )
         tx.stage_outputs(staged_book, ledger.path)
-        summary = tx.precommit(
-            {
-                "schema_version": 2,
-                "run_id": run_id,
-                "experiment_key": experiment_key,
-                "market_sha256": market_sha256,
-                "sealed_results_sha256": results_sha256,
-                "strategy_id": strategy_id,
-                "real_money_execution": False,
-            }
-        )
+        summary_payload = {
+            "schema_version": 2,
+            "run_id": run_id,
+            "experiment_key": experiment_key,
+            "market_sha256": market_sha256,
+            "sealed_results_sha256": results_sha256,
+            "strategy_id": strategy_id,
+            "real_money_execution": False,
+        }
+        if summary_overrides:
+            summary_payload.update(summary_overrides)
+        summary = tx.precommit(summary_payload)
         summary_path = tx.commit()
         return tx, registry, experiment_key, summary, summary_path
 
@@ -140,6 +142,80 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
                 verified["sampling_draw_admission_receipt_sha256"],
                 admission,
             )
+
+    def test_replay_payload_evidence_survives_terminal_readback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            replay_evidence = {
+                "event_count": 3,
+                "replay_input_event_payload_sequence_sha256": "1" * 64,
+                "replay_consumed_event_payload_sequence_sha256": "2" * 64,
+                "replay_applied_event_payload_sequence_sha256": "3" * 64,
+                "replay_consumed_event_payload_multiset_sha256": "4" * 64,
+            }
+            tx, registry, key, summary, summary_path = self._prepare_canonical_commit(
+                root,
+                summary_overrides=replay_evidence,
+            )
+            registry.reconcile_completed_summary(
+                key,
+                summary_path,
+                root / "paper_book.json",
+            )
+            RunTransaction(root, tx.run_id).mark_registry_completed()
+            verified, _sha = registry.verified_completed_summary_for_run(tx.run_id)
+
+            for field_name, expected in replay_evidence.items():
+                self.assertEqual(summary[field_name], expected)
+                self.assertEqual(verified[field_name], expected)
+
+    def test_precommit_rejects_partial_replay_payload_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "replay_event_payload_evidence",
+            ):
+                self._prepare_canonical_commit(
+                    Path(tmp),
+                    summary_overrides={
+                        "event_count": 1,
+                        "replay_input_event_payload_sequence_sha256": "1" * 64,
+                    },
+                )
+
+    def test_precommit_rejects_noncanonical_replay_payload_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "replay_input_event_payload_sequence_sha256",
+            ):
+                self._prepare_canonical_commit(
+                    Path(tmp),
+                    summary_overrides={
+                        "event_count": 1,
+                        "replay_input_event_payload_sequence_sha256": "A" * 64,
+                        "replay_consumed_event_payload_sequence_sha256": "2" * 64,
+                        "replay_applied_event_payload_sequence_sha256": "3" * 64,
+                        "replay_consumed_event_payload_multiset_sha256": "4" * 64,
+                    },
+                )
+
+    def test_precommit_rejects_boolean_replay_event_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "event_count",
+            ):
+                self._prepare_canonical_commit(
+                    Path(tmp),
+                    summary_overrides={
+                        "event_count": True,
+                        "replay_input_event_payload_sequence_sha256": "1" * 64,
+                        "replay_consumed_event_payload_sequence_sha256": "2" * 64,
+                        "replay_applied_event_payload_sequence_sha256": "3" * 64,
+                        "replay_consumed_event_payload_multiset_sha256": "4" * 64,
+                    },
+                )
 
     def test_transaction_start_rejects_draw_admission_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:

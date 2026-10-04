@@ -912,44 +912,44 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertTrue(store.has_trusted_live_receipt(event))
             store.close()
 
-    def test_receipt_writer_cannot_launder_authority_for_unrelated_history(self) -> None:
+    def test_live_authority_uses_sealed_receipt_writer_descriptor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"
             store = SQLiteMarketStore(path)
-            live = self._direct_event(sequence=1)
-            foreign = self._direct_event(sequence=2, odds="2.20")
-            self.assertTrue(store.append(foreign))
-            self.assertFalse(store.has_trusted_live_receipt(foreign))
-            canonical_writer = store._insert_live_receipt_authority
-
-            def write_expected_and_foreign(event):
-                canonical_writer(event)
-                store.connection.execute(
-                    """INSERT INTO market_event_live_receipts
-                       (dedupe_key,ingest_ts,authority)
-                       VALUES (?,?,?)""",
-                    (
-                        foreign.dedupe_key,
-                        foreign.ingest_ts,
-                        "autosport.live_ingestion_receipt.v1",
-                    ),
-                )
+            event = self._direct_event(sequence=1)
 
             with patch.object(
-                store,
+                SQLiteMarketStore,
                 "_insert_live_receipt_authority",
-                side_effect=write_expected_and_foreign,
+                side_effect=AssertionError(
+                    "mutable receipt writer descriptor must not be consulted"
+                ),
             ):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "changed authority outside the canonical batch",
-                ):
-                    store._append_live_batch_accepted([live])
+                accepted = store._append_live_batch_accepted([event])
 
-            self.assertEqual(store.events(), [foreign])
-            self.assertFalse(store.has_trusted_live_receipt(foreign))
-            self.assertEqual(store.trusted_live_events(), [])
+            self.assertEqual(accepted, [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            self.assertEqual(store.trusted_live_events(), [event])
             self.assertFalse(store.connection.in_transaction)
+            store.close()
+
+    def test_live_authority_rejects_caller_canonical_append_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+
+            def forged_append(store_arg, events):
+                raise AssertionError("caller append override must never run")
+
+            with self.assertRaisesRegex(TypeError, "_canonical_append"):
+                store._append_live_batch_accepted(
+                    [event],
+                    _canonical_append=forged_append,
+                )
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
             store.close()
 
     def test_public_batch_preserves_outer_transaction_ownership(self) -> None:
@@ -1008,21 +1008,25 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(store.trusted_live_events(), [])
             store.close()
 
-    def test_silent_receipt_writer_noop_rolls_back_market_insert(self) -> None:
+    def test_receipt_persistence_denial_rolls_back_market_insert(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"
             store = SQLiteMarketStore(path)
 
-            with patch.object(
-                store,
-                "_insert_live_receipt_authority",
-                return_value=None,
-            ):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "did not persist canonical authority",
+            def deny_receipt_insert(action, table, column, database, trigger):
+                if (
+                    action == sqlite3.SQLITE_INSERT
+                    and table == "market_event_live_receipts"
                 ):
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            store.connection.set_authorizer(deny_receipt_insert)
+            try:
+                with self.assertRaises(sqlite3.DatabaseError):
                     self._ingest(store)
+            finally:
+                store.connection.set_authorizer(None)
 
             self.assertEqual(store.events(), [])
             self.assertEqual(store.current_by_source(), {})

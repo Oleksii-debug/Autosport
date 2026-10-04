@@ -1016,6 +1016,14 @@ def resolve_product_run_capital_path_evidence(
             "run stake-policy authority cannot be re-resolved"
         ) from exc
     _require_dispatch()
+    if executed_initial_capital_state_sha256 != structure.initial_capital_state_sha256:
+        raise ProductRunCapitalPathError(
+            "executed run initial-capital state differs from frozen IID design"
+        )
+    if executed_stake_policy_sha256 != structure.stake_policy_sha256:
+        raise ProductRunCapitalPathError(
+            "executed run stake policy differs from frozen IID design"
+        )
 
     effects_payload = {
         "schema": _EFFECTS_SCHEMA,

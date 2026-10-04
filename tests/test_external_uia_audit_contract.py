@@ -83,6 +83,12 @@ def test_external_uia_audit_requires_semantic_control_type_for_critical_controls
         "305": "ControlType.Button",
         "306": "ControlType.Edit",
         "307": "ControlType.List",
+        "product-source-select": "ControlType.ComboBox",
+        "product-source-save": "ControlType.Button",
+        "product-runtime-start": "ControlType.Button",
+        "product-runtime-stop": "ControlType.Button",
+        "product-runtime-status": "ControlType.Edit",
+        "emergency-stop-action": "ControlType.Button",
         "330": "ControlType.Button",
         "331": "ControlType.ComboBox",
         "332": "ControlType.Edit",
@@ -230,3 +236,64 @@ def test_windows_candidate_requires_duplicate_launch_evidence() -> None:
     assert "External UIA duplicate-launch dialog title mismatch" in step
     assert "extracted_external_uia_duplicate_launch_status" in step
 
+
+
+def test_external_uia_gate_covers_product_runtime_and_emergency_stop_controls() -> None:
+    audit = _audit()
+
+    expected = {
+        "product-source-select": (
+            "Джерело даних для тривалої симуляційної роботи",
+            "ControlType.ComboBox",
+        ),
+        "product-source-save": (
+            "Зберегти джерело даних",
+            "ControlType.Button",
+        ),
+        "product-runtime-start": (
+            "Запустити симуляційну роботу",
+            "ControlType.Button",
+        ),
+        "product-runtime-stop": (
+            "Зупинити симуляційну роботу",
+            "ControlType.Button",
+        ),
+        "product-runtime-status": (
+            "Стан тривалої симуляційної роботи",
+            "ControlType.Edit",
+        ),
+        "emergency-stop-action": (
+            "Активувати аварійний STOP",
+            "ControlType.Button",
+        ),
+    }
+
+    for automation_id, (name, control_type) in expected.items():
+        lines = [
+            line for line in audit.splitlines()
+            if f"automation_id = '{automation_id}'" in line
+        ]
+        assert len(lines) == 1
+        assert f"name = '{name}'" in lines[0]
+        assert f"expected_control_type = '{control_type}'" in lines[0]
+
+    emergency = next(
+        line for line in audit.splitlines()
+        if "automation_id = 'emergency-stop-action'" in line
+    )
+    assert "required_pattern = 'Action'" in emergency
+    assert "require_external_focus = $true" in emergency
+
+    runtime_status = next(
+        line for line in audit.splitlines()
+        if "automation_id = 'product-runtime-status'" in line
+    )
+    assert "required_pattern = 'Value'" in runtime_status
+    assert "require_value_read_only = $true" in runtime_status
+
+    for automation_id in ("product-runtime-start", "product-runtime-stop"):
+        line = next(
+            line for line in audit.splitlines()
+            if f"automation_id = '{automation_id}'" in line
+        )
+        assert "allow_disabled = $true" in line

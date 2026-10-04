@@ -782,6 +782,112 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             ContinuousSessionCoordinator.__setattr__ = object.__setattr__
         self.assertIs(ContinuousSessionCoordinator.__setattr__, original)
 
+    def test_tick_rejects_resolution_subclass_before_durable_evidence(self) -> None:
+        class DerivedSettlementResolution(SettlementResolution):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="result:subclass",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            authority = _OutcomeAuthority(
+                DerivedSettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="result:subclass",
+                    quote_outcomes={"event-1|winner|home": "win"},
+                    evidence_id="subclass-evidence",
+                    evidence_sha256="b" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "canonical SettlementResolution",
+                ):
+                    coordinator.tick()
+                self.assertEqual(coordinator.status().settlement_evidence, ())
+            finally:
+                store.close()
+
+    def test_tick_rejects_future_evidence_despite_validate_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="result:future-precommit",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            authority = _OutcomeAuthority(
+                SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="result:future-precommit",
+                    quote_outcomes={"event-1|winner|home": "win"},
+                    evidence_id="future-precommit-evidence",
+                    evidence_sha256="c" * 64,
+                    available_at="2026-09-19T21:21:00+00:00",
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                with patch.object(
+                    SettlementResolution,
+                    "validate",
+                    lambda *_args, **_kwargs: None,
+                ):
+                    with self.assertRaisesRegex(
+                        ContinuousSessionError,
+                        "failed canonical validation",
+                    ):
+                        coordinator.tick()
+                self.assertEqual(coordinator.status().settlement_evidence, ())
+            finally:
+                store.close()
+
+    def test_settlement_resolution_collection_dispatch_is_sealed(self) -> None:
+        original = ContinuousSessionCoordinator._settlement_resolutions
+        with self.assertRaisesRegex(
+            TypeError,
+            "canonical settlement consumer entry binding is immutable",
+        ):
+            ContinuousSessionCoordinator._settlement_resolutions = lambda *_args, **_kwargs: ()
+        self.assertIs(
+            ContinuousSessionCoordinator._settlement_resolutions,
+            original,
+        )
+
     def test_direct_settle_rejects_conflicting_duplicate_evidence_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -206,3 +206,7 @@ from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_id
 # Final provider/execution consumers must preserve Python LOAD_GLOBAL semantics too:
 # a late global shadow of a builtin/missing name must fail before economic dispatch.
 from . import _provider_execution_name_resolution_guard as _provider_execution_name_resolution_guard  # noqa: F401,E402
+
+# Structural readback cannot silently relabel provider I/O if the configured account
+# route changes while an exact execution capture is in flight.
+from . import _betfair_execution_readback_route_authority_guard as _betfair_execution_readback_route_authority_guard  # noqa: F401,E402

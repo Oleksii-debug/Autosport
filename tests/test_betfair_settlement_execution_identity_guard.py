@@ -241,3 +241,34 @@ def test_capture_class_authority_rebind_fails_before_ingest(
         match="execution identity dispatch changed",
     ):
         _guarded_ingest(action=_action(), capture=capture, ledger=ledger)
+
+
+@pytest.mark.parametrize(
+    ("owner", "method_name"),
+    [
+        (ExecutionAction, "to_dict"),
+        (BetfairExecutionReadbackEnvelope, "assert_authoritative"),
+        (BetfairExecutionReadbackEnvelope, "_authority_fingerprint"),
+        (RealExecutionLedger, "saga"),
+    ],
+)
+def test_authority_method_code_drift_fails_before_ingest(
+    tmp_path,
+    monkeypatch,
+    owner,
+    method_name,
+) -> None:
+    method = vars(owner)[method_name]
+    original_code = method.__code__
+    drifted_code = original_code.replace(
+        co_name=f"drifted_{owner.__name__}_{method_name}"
+    )
+    monkeypatch.setattr(method, "__code__", drifted_code)
+
+    capture = object.__new__(BetfairExecutionReadbackEnvelope)
+    ledger = RealExecutionLedger(tmp_path / "execution.jsonl")
+    with pytest.raises(
+        settlement.BetfairSettlementRevisionError,
+        match="execution identity dispatch changed",
+    ):
+        _guarded_ingest(action=_action(), capture=capture, ledger=ledger)

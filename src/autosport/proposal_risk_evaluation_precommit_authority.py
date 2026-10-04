@@ -39,6 +39,9 @@ _AGENT = "autosport.proposal-risk-evaluation-precommit-authority.v1"
 _ACTION_PREFIX = "proposal-risk-evaluation-precommit-v1:"
 _HEX = frozenset("0123456789abcdef")
 _MAX_DECIMAL_TEXT = 256
+_PROPOSAL_EVALUATION_SCOPE = (
+    "EXACT_PROPOSAL_TARGET_FIXED_STAKE_VECTOR_COUNTERFACTUAL_V1"
+)
 
 _TARGET_TYPE = ProductProposalRiskTarget
 _TARGET_RESOLVER = resolve_product_proposal_risk_target
@@ -166,6 +169,7 @@ class ProductProposalRiskEvaluationPrecommit:
     confidence_level: Decimal
     ruin_threshold: Decimal
     risk_target_scope: str
+    proposal_evaluation_scope: str
     initial_capital_state_sha256: str
     stake_policy_sha256: str
     scientific_precommit_sha256: str
@@ -198,10 +202,20 @@ class ProductProposalRiskEvaluationPrecommit:
         return _proven(self)
 
     @property
-    def proposal_target_preoutcome_chronology_proven(
+    def scientific_preoutcome_chronology_proven(
         self, _proven=_IDENTITY_PROVEN
     ) -> bool:
         return _proven(self)
+
+    @property
+    def proposal_target_bound_after_scientific_precommit(
+        self, _proven=_IDENTITY_PROVEN
+    ) -> bool:
+        return _proven(self)
+
+    @property
+    def scientific_precommit_proves_proposal_execution_scope(self) -> bool:
+        return False
 
     @property
     def proposal_target_counterfactual_execution_proven(self) -> bool:
@@ -248,6 +262,7 @@ _BINDING_FIELDS = (
     "confidence_level",
     "ruin_threshold",
     "risk_target_scope",
+    "proposal_evaluation_scope",
     "initial_capital_state_sha256",
     "stake_policy_sha256",
     "scientific_precommit_sha256",
@@ -557,16 +572,12 @@ def _material(
     precommitted_at = _instant(
         membership.precommitted_at, "membership_precommitted_at"
     )
-    outcome_reveal_after = _instant(
+    _instant(
         membership.outcome_reveal_after, "membership_outcome_reveal_after"
     )
     if target_time < precommitted_at:
         raise ProductProposalRiskEvaluationPrecommitError(
             "proposal target predates the product scientific membership precommit"
-        )
-    if target_time >= outcome_reveal_after:
-        raise ProductProposalRiskEvaluationPrecommitError(
-            "proposal target is not inside the pre-outcome evaluation window"
         )
     return {
         "schema": _SCHEMA,
@@ -632,6 +643,7 @@ def _material(
         ),
         "ruin_threshold": _decimal_text(science.ruin_threshold, "ruin_threshold"),
         "risk_target_scope": _text(science.risk_target_scope, "risk_target_scope"),
+        "proposal_evaluation_scope": _PROPOSAL_EVALUATION_SCOPE,
         "initial_capital_state_sha256": _sha(
             science.initial_capital_state_sha256, "initial_capital_state_sha256"
         ),
@@ -643,7 +655,9 @@ def _material(
         ),
         "proposal_target_identity_proven": True,
         "scientific_precommit_proven": True,
-        "proposal_target_preoutcome_chronology_proven": True,
+        "scientific_preoutcome_chronology_proven": True,
+        "proposal_target_bound_after_scientific_precommit": True,
+        "scientific_precommit_proves_proposal_execution_scope": False,
         "proposal_target_counterfactual_execution_proven": False,
         "risk_upper_bound_for_target": False,
         "grants_ticket_authority": False,
@@ -731,6 +745,7 @@ def _build(
         "confidence_level": science.confidence_level,
         "ruin_threshold": science.ruin_threshold,
         "risk_target_scope": science.risk_target_scope,
+        "proposal_evaluation_scope": _PROPOSAL_EVALUATION_SCOPE,
         "initial_capital_state_sha256": science.initial_capital_state_sha256,
         "stake_policy_sha256": science.stake_policy_sha256,
         "scientific_precommit_sha256": science.authority_sha256,

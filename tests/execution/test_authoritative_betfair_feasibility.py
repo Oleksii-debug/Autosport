@@ -444,8 +444,16 @@ def test_authoritative_price_ladder_witness_is_bound_but_not_sufficient() -> Non
     bound = _bound(datetime.now(timezone.utc))
 
     with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        without_ladder = assess_authoritative_betfair_execution_feasibility(
+            ledger,
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+        )
         result = assess_authoritative_betfair_execution_feasibility(
-            _reserved_ledger(tmp, bound),
+            ledger,
             bound,
             receipt,
             action_id=ACTION_ID,
@@ -453,8 +461,10 @@ def test_authoritative_price_ladder_witness_is_bound_but_not_sufficient() -> Non
             price_ladder_admission=ladder,
         )
 
+    assert "PRICE_LADDER_AUTHORITY_UNPROVEN" in without_ladder.reasons
     assert "PRICE_LADDER_AUTHORITY_UNPROVEN" not in result.reasons
     assert "PRICE_LADDER_EVIDENCE_AFTER_DECISION" not in result.reasons
+    assert without_ladder.evidence_digest != result.evidence_digest
     assert "LIMIT_AUTHORITY_REJECTED" in result.reasons
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
     assert result.sufficient is False

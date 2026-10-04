@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .domain import MarketType, utc_now_iso
+from .market_state_identity import PROPHETX_REST_MARKET_STATE_CONTRACT
 from .providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
 from .provider_sequence_authority import SQLiteProviderSequenceAuthority
 
@@ -500,6 +501,9 @@ class ProphetXRestMarketProvider:
                     "sequence_source_id": _SEQUENCE_SOURCE_ID,
                     "request_fingerprint_sha256": request_fingerprint_sha256,
                     "snapshot_fingerprint_sha256": snapshot_fingerprint_sha256,
+                    "semantic_state_contract": (
+                        PROPHETX_REST_MARKET_STATE_CONTRACT
+                    ),
                 },
             )
             for quote in all_quotes

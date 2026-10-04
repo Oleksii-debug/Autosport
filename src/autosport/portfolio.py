@@ -15,7 +15,7 @@ from decimal import (
     localcontext,
 )
 
-from .domain import PaperTicket, TicketStatus
+from .domain import PaperTicket, TicketLeg, TicketStatus
 from .paper import PaperBook
 
 
@@ -44,6 +44,85 @@ def _portfolio_arithmetic_error(exc: DecimalException) -> ValueError:
     return ValueError(
         "portfolio economics are not representable in the canonical Decimal context"
     )
+
+
+def _analysis_ticket_fingerprint(
+    ticket: PaperTicket,
+) -> tuple[
+    str,
+    Decimal,
+    tuple[TicketLeg, ...],
+    str,
+    TicketStatus,
+    tuple[str, ...],
+]:
+    """Return exactly the mutable ticket fields consumed by scenario analysis."""
+
+    return (
+        ticket.ticket_id,
+        ticket.stake,
+        ticket.legs,
+        ticket.placed_at,
+        ticket.status,
+        ticket.provider_source_ids,
+    )
+
+
+def _snapshot_open_tickets_for_analysis(
+    tickets: list[PaperTicket],
+) -> list[PaperTicket]:
+    """Detach one causally coherent cut of mutable ticket economics.
+
+    ``PaperTicket`` is intentionally mutable because settlement updates it in
+    place.  Merely copying tickets one-by-one is not enough: a settlement between
+    two copies could otherwise create a mixed OPEN-ticket set that never existed at
+    a single instant.  Capture the fields consumed by this engine, then revalidate
+    the source identities and those fields before publishing the detached cut.
+    """
+
+    source_tickets = tuple(tickets)
+    captured: list[tuple[object, ...]] = []
+    snapshots: list[PaperTicket] = []
+
+    for ticket in source_tickets:
+        fingerprint = _analysis_ticket_fingerprint(ticket)
+        captured.append(fingerprint)
+        (
+            ticket_id,
+            stake,
+            legs,
+            placed_at,
+            status,
+            provider_source_ids,
+        ) = fingerprint
+        if status is not TicketStatus.OPEN:
+            continue
+        snapshots.append(
+            PaperTicket(
+                ticket_id=ticket_id,
+                stake=stake,
+                legs=tuple(legs),
+                placed_at=placed_at,
+                status=TicketStatus.OPEN,
+                provider_source_ids=tuple(provider_source_ids),
+            )
+        )
+
+    current_tickets = tuple(tickets)
+    if (
+        len(current_tickets) != len(source_tickets)
+        or any(
+            current is not source
+            for current, source in zip(current_tickets, source_tickets)
+        )
+    ):
+        raise ValueError("portfolio ticket set changed during snapshot")
+
+    for ticket, fingerprint in zip(source_tickets, captured):
+        if _analysis_ticket_fingerprint(ticket) != fingerprint:
+            raise ValueError("portfolio ticket changed during snapshot")
+
+    return snapshots
 
 
 def _scenario_profit_in_context(
@@ -152,10 +231,12 @@ class PortfolioEngine:
                     "settlement_by_quote values must be win, loss, or void"
                 )
 
+        ticket_snapshot = _snapshot_open_tickets_for_analysis(tickets)
+
         try:
             with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
                 total = Decimal("0")
-                for ticket in tickets:
+                for ticket in ticket_snapshot:
                     if ticket.status is not TicketStatus.OPEN:
                         continue
                     stake = _require_finite_decimal(
@@ -207,7 +288,7 @@ class PortfolioEngine:
             seen.update(group)
         groups.sort(key=lambda group: tuple(sorted(group)))
 
-        open_tickets = [ticket for ticket in tickets if ticket.status is TicketStatus.OPEN]
+        open_tickets = _snapshot_open_tickets_for_analysis(tickets)
         all_keys = {leg.quote_key for ticket in open_tickets for leg in ticket.legs}
         grouped = set().union(*groups) if groups else set()
         if not grouped.issubset(all_keys):

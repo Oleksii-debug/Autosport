@@ -1980,7 +1980,9 @@ class PersistentLiveDecisionLoop:
                     )
                 ledger_offset = durable_progress.ledger_offset
             else:
-                last_record = self._verified_last_ledger_record()
+                last_record = self._verified_latest_ledger_record(
+                    replay_run_id=f"live:{self.loop_id}",
+                )
                 if (
                     last_record is not None
                     and last_record[1].decision_id == decision_id

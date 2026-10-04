@@ -117,14 +117,6 @@ class NvdaHumanAcceptanceStructuralResult:
         raise TypeError("NvdaHumanAcceptanceStructuralResult may not be subclassed")
 
 
-# Process-local structural authority.  A bounded strong-reference registry prevents
-# object-id reuse while an issuance is live.  Eviction is deliberately fail-closed:
-# a durable/restarted consumer must reopen the transcript and validate it again.
-_ISSUED_STRUCTURAL_RESULTS: OrderedDict[
-    int, tuple[NvdaHumanAcceptanceStructuralResult, str]
-] = OrderedDict()
-
-
 def _require_exact_dict(name: str, value: object) -> dict[str, Any]:
     if type(value) is not dict:
         raise NvdaHumanAcceptanceError(f"{name} must be an exact dict")
@@ -319,7 +311,7 @@ def _structural_result_fingerprint(
     return _canonical_sha256(payload)
 
 
-def verify_human_nvda_acceptance_structural_result(
+def _verify_human_nvda_acceptance_structural_result_payload(
     result: object,
     *,
     expected_artifact_sha256: str,
@@ -340,16 +332,7 @@ def verify_human_nvda_acceptance_structural_result(
         raise NvdaHumanAcceptanceError(
             "structural result must be the exact canonical result type"
         )
-    issued = _ISSUED_STRUCTURAL_RESULTS.get(id(result))
-    if issued is None or issued[0] is not result:
-        raise NvdaHumanAcceptanceError(
-            "structural result is not a live validator-issued authority"
-        )
-    fingerprint = _structural_result_fingerprint(result)
-    if fingerprint != issued[1]:
-        raise NvdaHumanAcceptanceError(
-            "structural result payload changed after validator issuance"
-        )
+    _structural_result_fingerprint(result)
     if result.artifact_sha256 != expected_artifact:
         raise NvdaHumanAcceptanceError(
             "structural result does not match the expected artifact"
@@ -464,7 +447,7 @@ def _validate_journey(journey: object, *, expected_id: str) -> None:
         _validate_step(step, journey_id=expected_id, index=index)
 
 
-def validate_human_nvda_acceptance_transcript(
+def _validate_human_nvda_acceptance_transcript_payload(
     transcript: object,
     *,
     expected_artifact_sha256: str,
@@ -565,11 +548,84 @@ def validate_human_nvda_acceptance_transcript(
     object.__setattr__(result, "real_money_execution", False)
     object.__setattr__(result, "whole_product_complete", False)
 
-    fingerprint = _structural_result_fingerprint(result)
-    while len(_ISSUED_STRUCTURAL_RESULTS) >= _MAX_LIVE_STRUCTURAL_RESULTS:
-        _ISSUED_STRUCTURAL_RESULTS.popitem(last=False)
-    _ISSUED_STRUCTURAL_RESULTS[id(result)] = (result, fingerprint)
+    _structural_result_fingerprint(result)
     return result
+
+
+def _install_structural_result_authority():
+    """Hide live issuance membership from mutable module-global state."""
+
+    registry: OrderedDict[
+        int, tuple[NvdaHumanAcceptanceStructuralResult, str]
+    ] = OrderedDict()
+    validate_payload = _validate_human_nvda_acceptance_transcript_payload
+    verify_payload = _verify_human_nvda_acceptance_structural_result_payload
+    fingerprint_for = _structural_result_fingerprint
+    result_type = NvdaHumanAcceptanceStructuralResult
+    max_live = _MAX_LIVE_STRUCTURAL_RESULTS
+
+    def validate_human_nvda_acceptance_transcript(
+        transcript: object,
+        *,
+        expected_artifact_sha256: str,
+        expected_source_sha: str,
+        expected_webview2_runtime_witness_sha256: str,
+    ) -> NvdaHumanAcceptanceStructuralResult:
+        result = validate_payload(
+            transcript,
+            expected_artifact_sha256=expected_artifact_sha256,
+            expected_source_sha=expected_source_sha,
+            expected_webview2_runtime_witness_sha256=(
+                expected_webview2_runtime_witness_sha256
+            ),
+        )
+        fingerprint = fingerprint_for(result)
+        while len(registry) >= max_live:
+            registry.popitem(last=False)
+        registry[id(result)] = (result, fingerprint)
+        return result
+
+    def verify_human_nvda_acceptance_structural_result(
+        result: object,
+        *,
+        expected_artifact_sha256: str,
+        expected_source_sha: str,
+        expected_webview2_runtime_witness_sha256: str,
+    ) -> NvdaHumanAcceptanceStructuralResult:
+        if type(result) is not result_type:
+            raise NvdaHumanAcceptanceError(
+                "structural result must be the exact canonical result type"
+            )
+        issued = registry.get(id(result))
+        if issued is None or issued[0] is not result:
+            raise NvdaHumanAcceptanceError(
+                "structural result is not a live validator-issued authority"
+            )
+        fingerprint = fingerprint_for(result)
+        if fingerprint != issued[1]:
+            raise NvdaHumanAcceptanceError(
+                "structural result payload changed after validator issuance"
+            )
+        return verify_payload(
+            result,
+            expected_artifact_sha256=expected_artifact_sha256,
+            expected_source_sha=expected_source_sha,
+            expected_webview2_runtime_witness_sha256=(
+                expected_webview2_runtime_witness_sha256
+            ),
+        )
+
+    return (
+        validate_human_nvda_acceptance_transcript,
+        verify_human_nvda_acceptance_structural_result,
+    )
+
+
+(
+    validate_human_nvda_acceptance_transcript,
+    verify_human_nvda_acceptance_structural_result,
+) = _install_structural_result_authority()
+del _install_structural_result_authority
 
 
 def build_manual_nvda_transcript_template(

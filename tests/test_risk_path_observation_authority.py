@@ -17,7 +17,7 @@ from autosport.decision_ledger import (
     EconomicDecisionAuthority,
     JsonlDecisionLedger,
 )
-from autosport.domain import TicketLeg
+from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_provenance import provenance_for
 from autosport.learning_environment import (
@@ -27,6 +27,7 @@ from autosport.learning_environment import (
 )
 from autosport.paper import PaperBook
 from autosport.paper_settlement_learning import PaperSettlementLearningBridge
+from autosport.replay import ReplayEngine, market_event_payload_sha256
 from autosport.risk import PaperRiskPolicy
 from autosport.risk_path_observation_authority import (
     ProductRunCapitalPathEvidence,
@@ -60,12 +61,28 @@ def _sha_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _sampling_market_event() -> MarketEvent:
+    return MarketEvent.from_dict(
+        {
+            "event_id": "risk-path-sampled-event",
+            "market_id": "winner",
+            "selection_id": "home",
+            "decimal_odds": "2.0",
+            "observed_ts": "2026-09-03T10:00:00+00:00",
+            "source_id": "risk-path-sampling-frame",
+            "sequence": 1,
+        }
+    )
+
+
 SAMPLING_FRAME_JSON = _canonical(
     {
         "schema": "AUTOSPORT_RISK_IID_SAMPLING_FRAME_V1",
         "units": [
             {
-                "payload_sha256": "8" * 64,
+                "payload_sha256": market_event_payload_sha256(
+                    _sampling_market_event()
+                ),
                 "unit_id": "sample-001",
             }
         ],
@@ -383,6 +400,10 @@ def _completed_run_with_settlement_bridge(
         book,
         canonical_ledger,
     )
+    replay_run = ReplayEngine((_sampling_market_event(),)).run(
+        lambda _event: None,
+        run_id=RUN_ID,
+    )
     tx.precommit(
         {
             "schema_version": 2,
@@ -392,7 +413,8 @@ def _completed_run_with_settlement_bridge(
             "sealed_results_sha256": "c" * 64,
             "strategy_id": "risk-path-strategy",
             "real_money_execution": False,
-        }
+        },
+        replay_execution_receipt=replay_run.execution_receipt,
     )
     summary_path = tx.commit()
     registry.complete(
@@ -447,9 +469,10 @@ def test_product_run_capital_path_re_resolves_completed_settlement(
     assert len(evidence.expected_draw_plan_sha256) == 64
     assert len(evidence.expected_draw_transcript_sha256) == 64
     assert len(evidence.run_admission_receipt_sha256) == 64
+    assert len(evidence.run_execution_receipt_sha256) == 64
     assert evidence.run_admission_bound is True
-    assert evidence.execution_consumption_proven is False
-    assert evidence.sampling_occurrence_ancestry_proven is False
+    assert evidence.execution_consumption_proven is True
+    assert evidence.sampling_occurrence_ancestry_proven is True
     assert evidence.iid_qualified is False
     assert evidence.grants_real_money_authority is False
 
@@ -823,23 +846,7 @@ def test_object_new_forgery_cannot_pass_canonical_evidence_verifier(
     )
 
     forged = object.__new__(ProductRunCapitalPathEvidence)
-    for field_name in (
-        "member_id",
-        "member_index",
-        "expected_stream_sha256",
-        "base_snapshot_sha256",
-        "final_snapshot_sha256",
-        "changed_ticket_ids",
-        "minimum_equity",
-        "outcome_available_at",
-        "expected_draw_plan_sha256",
-        "expected_draw_transcript_sha256",
-        "run_admission_receipt_sha256",
-        "settlement_effects_sha256",
-        "replay_source_evidence_sha256",
-        "source_evidence_sha256",
-        "complete",
-    ):
+    for field_name in ProductRunCapitalPathEvidence.__dataclass_fields__:
         object.__setattr__(forged, field_name, getattr(canonical, field_name))
     object.__setattr__(forged, "source_evidence_sha256", "0" * 64)
 

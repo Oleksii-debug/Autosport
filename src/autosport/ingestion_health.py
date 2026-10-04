@@ -706,12 +706,17 @@ class SourceHealthStore:
         quality_flags: tuple[str, ...],
     ) -> SourceHealthState:
         """Apply one success only if the durable state still equals expected_before."""
-        if not isinstance(expected_before, SourceHealthState):
-            raise TypeError("expected_before must be SourceHealthState")
+        # Compare-and-swap inputs are authority-bearing caller assertions.
+        # Subclasses can override validate/equality and must not participate in
+        # the durable-state CAS decision.
+        if type(expected_before) is not SourceHealthState:
+            raise TypeError("expected_before must be exact SourceHealthState")
         expected_before.validate()
         if ambiguous_after is not None:
-            if not isinstance(ambiguous_after, SourceHealthState):
-                raise TypeError("ambiguous_after must be SourceHealthState or null")
+            if type(ambiguous_after) is not SourceHealthState:
+                raise TypeError(
+                    "ambiguous_after must be exact SourceHealthState or null"
+                )
             ambiguous_after.validate()
             if ambiguous_after.source_id != expected_before.source_id:
                 raise ValueError("ambiguous_after source_id must match expected_before")

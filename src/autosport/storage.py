@@ -31,6 +31,28 @@ _LIVE_RECEIPT_COLUMNS_SQL = ",".join(_LIVE_RECEIPT_COLUMNS)
 _LIVE_RECEIPT_AUTHORITY = "autosport.live_ingestion_receipt.v1"
 
 
+def _decode_market_event(
+    raw: dict[str, object],
+    *,
+    _event_type: type[MarketEvent] = MarketEvent,
+    _from_dict=MarketEvent.from_dict,
+) -> MarketEvent:
+    """Decode through the import-time canonical MarketEvent codec descriptor."""
+    event = _from_dict(raw)
+    if type(event) is not _event_type:
+        raise TypeError("canonical market event decoder returned a non-canonical type")
+    return event
+
+
+def _encode_market_event(
+    event: MarketEvent,
+    *,
+    _to_dict=MarketEvent.to_dict,
+) -> dict[str, object]:
+    """Encode through the import-time canonical MarketEvent codec descriptor."""
+    return _to_dict(event)
+
+
 class _LiveReceiptBatch:
     """Immutable live value snapshot that can recognize its retry-hook generations."""
 
@@ -50,12 +72,9 @@ class _LiveReceiptBatch:
     def __iter__(
         self,
         *,
-        _market_event_type: type[MarketEvent] = MarketEvent,
+        _decode=_decode_market_event,
     ):
-        generation = tuple(
-            _market_event_type.from_dict(json.loads(payload))
-            for payload in self._payloads
-        )
+        generation = tuple(_decode(json.loads(payload)) for payload in self._payloads)
         self._issued_generations.append(generation)
         return iter(generation)
 
@@ -170,7 +189,7 @@ def _canonical_json(raw: object) -> str:
 
 
 def _canonical_payload(event: MarketEvent) -> str:
-    return _canonical_json(event.to_dict())
+    return _canonical_json(_encode_market_event(event))
 
 
 def _source_payload_from_raw(raw: object) -> str:
@@ -185,7 +204,7 @@ def _source_payload_from_raw(raw: object) -> str:
 
 
 def _source_payload(event: MarketEvent) -> str:
-    return _source_payload_from_raw(event.to_dict())
+    return _source_payload_from_raw(_encode_market_event(event))
 
 
 def _typed_equal(left: object, right: object) -> bool:
@@ -244,19 +263,20 @@ def _validate_persistable_sequence(value: object) -> int:
 def _validate_incoming_event(
     event: MarketEvent,
     *,
-    _market_event_type: type[MarketEvent] = MarketEvent,
+    _decode=_decode_market_event,
+    _encode=_encode_market_event,
 ) -> str:
     """Prove an event survives the exact durable JSON/SQLite representation without type drift."""
     _validate_persistable_sequence(event.sequence)
     _observed_instant(event.observed_ts)
     _timezone_aware_instant(event.ingest_ts, "ingest_ts")
     try:
-        raw = event.to_dict()
+        raw = _encode(event)
         payload = _canonical_json(raw)
         persisted_raw = _load_history_payload(payload)
         if not _typed_payload_equal(raw, persisted_raw):
             raise ValueError("market event JSON representation changes payload types")
-        round_tripped = _market_event_type.from_dict(persisted_raw).to_dict()
+        round_tripped = _encode(_decode(persisted_raw))
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("market event payload is not canonical") from exc
     if not _typed_payload_equal(persisted_raw, round_tripped):
@@ -267,7 +287,7 @@ def _validate_incoming_event(
 def _event_from_history_row(
     row: tuple[object, ...],
     *,
-    _market_event_type: type[MarketEvent] = MarketEvent,
+    _decode=_decode_market_event,
 ) -> MarketEvent:
     """Decode one persisted history row while proving redundant identity columns agree."""
     if len(row) != len(_HISTORY_COLUMNS):
@@ -293,7 +313,7 @@ def _event_from_history_row(
     if payload_json != canonical_raw:
         raise ValueError("stored market event payload is not canonical JSON text")
 
-    event = _market_event_type.from_dict(raw)
+    event = _decode(raw)
     if canonical_raw != _canonical_payload(event):
         raise ValueError("stored market event payload is not canonical")
 
@@ -318,14 +338,14 @@ def _event_from_history_row(
 def _event_from_current_payload(
     payload_json: object,
     *,
-    _market_event_type: type[MarketEvent] = MarketEvent,
+    _decode=_decode_market_event,
 ) -> MarketEvent:
     """Decode canonical projection payload independently of repairable redundant columns."""
     if not isinstance(payload_json, str):
         raise ValueError("current quote projection payload must be JSON text")
     raw = _load_history_payload(payload_json)
     try:
-        event = _market_event_type.from_dict(raw)
+        event = _decode(raw)
     except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("current quote projection payload is not canonical") from exc
     if _canonical_json(raw) != _canonical_payload(event):

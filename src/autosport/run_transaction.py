@@ -131,6 +131,23 @@ class RunTransaction:
                 sampling_draw_admission_receipt_sha256,
                 "sampling_draw_admission_receipt_sha256",
             )
+        try:
+            from .run_registry import RunRegistry
+
+            start_registry_item = RunRegistry(
+                tx.workspace / "run_registry.json"
+            ).get(experiment_key)
+        except Exception as exc:
+            raise RunTransactionError(
+                "transaction start cannot validate external registry identity"
+            ) from exc
+        registry_admission = start_registry_item.get(
+            "sampling_draw_admission_receipt_sha256"
+        )
+        if registry_admission != sampling_draw_admission_receipt_sha256:
+            raise RunTransactionError(
+                "transaction start sampling draw-admission binding mismatch"
+            )
         base_book_snapshot = tx._verified_canonical_paper_book_snapshot(
             tx.workspace / "paper_book.json",
             "base PaperBook",

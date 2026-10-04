@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.source_rights_manifest as subject
 from autosport.source_rights_manifest import (
     SourceRightsAuthorization,
     SourceRightsManifest,
@@ -200,6 +201,61 @@ def test_tampered_digest_type_fails_closed(tmp_path: Path) -> None:
         ExplodingStr(current.manifest_sha256),
     )
     with pytest.raises(SourceRightsManifestError):
+        authorize_source_use(
+            current,
+            source_identity=current.source_identity,
+            required_scope="historical.read",
+            at=NOW,
+        )
+
+
+
+def test_parsed_scope_cardinality_is_bounded_before_sorting(tmp_path: Path) -> None:
+    path = tmp_path / "rights.json"
+    raw = payload()
+    raw["authorized_scopes"] = [
+        f"scope.{index}" for index in range(subject._MAX_AUTHORIZED_SCOPES + 1)
+    ]
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(SourceRightsManifestError, match="maximum supported scope count"):
+        load_source_rights_manifest(path)
+
+
+def test_runtime_scope_cardinality_is_bounded_before_revalidation(tmp_path: Path) -> None:
+    current = manifest(tmp_path)
+    object.__setattr__(
+        current,
+        "authorized_scopes",
+        tuple(f"scope.{index}" for index in range(subject._MAX_AUTHORIZED_SCOPES + 1)),
+    )
+
+    with pytest.raises(SourceRightsManifestError, match="maximum supported scope count"):
+        authorize_source_use(
+            current,
+            source_identity=current.source_identity,
+            required_scope="historical.read",
+            at=NOW,
+        )
+
+
+def test_manifest_file_size_is_bounded_before_json_materialization(tmp_path: Path) -> None:
+    path = tmp_path / "rights.json"
+    path.write_bytes(b"{" + b"x" * subject._MAX_MANIFEST_BYTES)
+
+    with pytest.raises(SourceRightsManifestError, match="maximum supported size"):
+        load_source_rights_manifest(path)
+
+
+def test_runtime_manifest_bytes_are_bounded_before_hash_or_json(tmp_path: Path) -> None:
+    current = manifest(tmp_path)
+    object.__setattr__(
+        current,
+        "manifest_bytes",
+        b"x" * (subject._MAX_MANIFEST_BYTES + 1),
+    )
+
+    with pytest.raises(SourceRightsManifestError, match="maximum supported size"):
         authorize_source_use(
             current,
             source_identity=current.source_identity,

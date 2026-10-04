@@ -236,6 +236,7 @@ def _require_dispatch() -> None:
         is not _DERIVE_POLICY_ESTIMATE_MATERIAL
         or getattr(_DERIVE_POLICY_ESTIMATE_MATERIAL, "__code__", None)
         is not _DERIVE_POLICY_ESTIMATE_MATERIAL_CODE
+        or _ESTIMATE_FIELDS is not _ESTIMATE_FIELDS_CANONICAL
     ):
         raise ProductFixedNRiskPolicyEstimateError(
             "risk policy estimate authority dispatch changed"
@@ -490,7 +491,7 @@ def resolve_product_fixed_n_risk_policy_estimate(
     material = _DERIVE_POLICY_ESTIMATE_MATERIAL(precommit, observation_set)
     _require_dispatch()
     result = object.__new__(_ESTIMATE_TYPE)
-    for field_name in _ESTIMATE_FIELDS:
+    for field_name in _ESTIMATE_FIELDS_CANONICAL:
         object.__setattr__(result, field_name, material[field_name])
     _require_dispatch()
     return result
@@ -522,6 +523,7 @@ _ESTIMATE_FIELDS = (
     "upper_bound",
     "estimate_sha256",
 )
+_ESTIMATE_FIELDS_CANONICAL = _ESTIMATE_FIELDS
 
 
 def _build_verifier(resolver, estimate_type):
@@ -529,6 +531,7 @@ def _build_verifier(resolver, estimate_type):
     resolver_code = getattr(resolver, "__code__", None)
     if resolver_code is None:
         raise RuntimeError("risk policy estimate resolver is unavailable")
+    field_names = _ESTIMATE_FIELDS_CANONICAL
 
     def verifier(
         candidate: ProductFixedNRiskPolicyEstimate,
@@ -549,6 +552,8 @@ def _build_verifier(resolver, estimate_type):
                 or getattr(resolver, "__code__", None) is not resolver_code
                 or module_globals.get("ProductFixedNRiskPolicyEstimate")
                 is not estimate_type
+                or module_globals.get("_ESTIMATE_FIELDS") is not field_names
+                or module_globals.get("_ESTIMATE_FIELDS_CANONICAL") is not field_names
             ):
                 raise ProductFixedNRiskPolicyEstimateError(
                     "risk policy estimate verifier dispatch changed"
@@ -580,7 +585,7 @@ def _build_verifier(resolver, estimate_type):
                 is not type(object.__getattribute__(canonical, field_name))
                 or object.__getattribute__(candidate, field_name)
                 != object.__getattribute__(canonical, field_name)
-                for field_name in _ESTIMATE_FIELDS
+                for field_name in field_names
             )
         except AttributeError as exc:
             raise ProductFixedNRiskPolicyEstimateError(

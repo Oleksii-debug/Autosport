@@ -116,7 +116,9 @@ class ProductProposalTargetTerminalPopulation:
     candidate_vector_sha256: str
     candidate_sha256s: tuple[str, ...]
     market_authority_sha256s: tuple[str, ...]
+    market_authority_json: tuple[str, ...]
     market_group_sha256s: tuple[str, ...]
+    market_group_json: tuple[str, ...]
     candidate_market_authority_sha256s: tuple[tuple[str, ...], ...]
     terminal_market_count: int
     terminal_state_count: int
@@ -772,7 +774,13 @@ def _build(
         "market_authority_sha256s": tuple(
             material["market_authority_sha256s"]
         ),
+        "market_authority_json": tuple(
+            _canonical_json(item) for item in material["market_authorities"]
+        ),
         "market_group_sha256s": tuple(material["market_group_sha256s"]),
+        "market_group_json": tuple(
+            _canonical_json(item) for item in material["market_groups"]
+        ),
         "candidate_market_authority_sha256s": tuple(
             tuple(values)
             for values in material["candidate_market_authority_sha256s"]

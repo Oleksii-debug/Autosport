@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -178,6 +179,38 @@ class ProductProposalTargetTerminalPopulationTests(unittest.TestCase):
         self.assertEqual(
             issued.market_authority_sha256s,
             (authority.authority_sha256,),
+        )
+        self.assertIs(type(issued.market_authority_json), tuple)
+        self.assertIs(type(issued.market_group_json), tuple)
+        self.assertTrue(
+            all(type(value) is str for value in issued.market_authority_json)
+        )
+        self.assertTrue(
+            all(type(value) is str for value in issued.market_group_json)
+        )
+        authority_material = tuple(
+            json.loads(value) for value in issued.market_authority_json
+        )
+        group_material = tuple(
+            json.loads(value) for value in issued.market_group_json
+        )
+        self.assertEqual(
+            tuple(item["authority_sha256"] for item in authority_material),
+            issued.market_authority_sha256s,
+        )
+        self.assertEqual(
+            tuple(item["market_group_sha256"] for item in group_material),
+            issued.market_group_sha256s,
+        )
+        self.assertEqual(
+            tuple(item["terminal_state_count"] for item in group_material),
+            (authority.terminal_state_count,),
+        )
+        parsed = json.loads(issued.market_group_json[0])
+        parsed["terminal_state_count"] = 999999
+        self.assertNotEqual(
+            parsed["terminal_state_count"],
+            json.loads(issued.market_group_json[0])["terminal_state_count"],
         )
         self.assertEqual(issued.terminal_market_count, 1)
         self.assertEqual(issued.terminal_state_count, 27)

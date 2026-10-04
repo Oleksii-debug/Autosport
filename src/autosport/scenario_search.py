@@ -689,7 +689,12 @@ def _integer_probability_weights(
     )
     if any(weight < 0 for weight in weights) or sum(weights) <= 0:
         raise ValueError("weighted scenario probabilities are invalid")
-    return weights
+    common_factor = 0
+    for weight in weights:
+        common_factor = math.gcd(common_factor, weight)
+    if common_factor <= 0:
+        raise ValueError("weighted scenario probabilities have no positive mass")
+    return tuple(weight // common_factor for weight in weights)
 
 
 def _weighted_choice(

@@ -11,7 +11,7 @@ market admissibility, provider-write permission, or real-money authority.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, localcontext
+from decimal import Decimal
 from enum import Enum
 from fractions import Fraction
 from operator import attrgetter
@@ -193,99 +193,20 @@ class ItalianLimitBatchAdmission(metaclass=_ItalianLimitBatchAdmissionMeta):
 _ItalianLimitBatchAdmissionMeta.seal(ItalianLimitBatchAdmission)
 
 
-def evaluate_italian_limit_batch(
-    instructions: tuple[ItalianLimitInstruction, ...],
-) -> ItalianLimitBatchAdmission:
-    """Evaluate only the represented Betfair Italy standard-LIMIT rule slice.
-
-    A no-reason result is RULESET_SATISFIED_UNBOUND, not ADMISSIBLE. Positive
-    provider admission requires separate product-owned current-rule,
-    authenticated-jurisdiction, account-currency, market, risk/funds and other
-    execution authorities.
-    """
-
-    if type(instructions) is not tuple:
-        raise ItalianOrderAdmissionError(
-            "instructions must be an immutable exact tuple"
-        )
-    if any(type(item) is not ItalianLimitInstruction for item in instructions):
-        raise ItalianOrderAdmissionError(
-            "instructions must contain exact ItalianLimitInstruction values"
-        )
-
-    reasons: list[str] = []
-    if not instructions:
-        return ItalianLimitBatchAdmission(
-            ItalianLimitAdmissionState.REJECTED,
-            ("EMPTY_BATCH",),
-            (),
-        )
-    if len(instructions) > 50:
-        reasons.append("TOO_MANY_INSTRUCTIONS")
-
-    sides = {instruction.side for instruction in instructions}
-    if len(sides) > 1:
-        reasons.append("MIXED_BACK_LAY_BATCH")
-
-    returns: list[Decimal] = []
-    for index, instruction in enumerate(instructions):
-        prefix = f"I{index}:"
-        if instruction.bet_target_type is not None:
-            # .it does not support Betfair target sizing. Do not reinterpret
-            # target-mode numeric fields as standard backer's-stake economics.
-            reasons.append(prefix + "TARGET_MODE_UNAVAILABLE_IT")
-            continue
-
-        if instruction.side == "BACK":
-            if instruction.size < Decimal("2.00"):
-                reasons.append(prefix + "BACK_STAKE_BELOW_EUR_2")
-            if not _is_multiple(
-                instruction.size, Decimal("0.50")
-            ):
-                reasons.append(
-                    prefix + "BACK_STAKE_NOT_EUR_0_50_INCREMENT"
-                )
-        else:
-            if instruction.size < Decimal("0.50"):
-                reasons.append(
-                    prefix + "LAY_BACKER_STAKE_BELOW_EUR_0_50"
-                )
-
-        # Represented rule arithmetic only: for standard LIMIT both BACK and
-        # LAY returned amount at submitted price is backer's stake * price.
-        preselected_return = _exact_multiply(
-            instruction.size, instruction.price
-        )
-        returns.append(preselected_return)
-        if preselected_return > Decimal("10000.00"):
-            reasons.append(
-                prefix + "PRESELECTED_RETURN_EXCEEDS_EUR_10000"
-            )
-
-    state = (
-        ItalianLimitAdmissionState.REJECTED
-        if reasons
-        else ItalianLimitAdmissionState.RULESET_SATISFIED_UNBOUND
-    )
-    return ItalianLimitBatchAdmission(
-        state, tuple(reasons), tuple(returns)
-    )
-
-
 def _positive_decimal(value: object, field: str) -> Decimal:
+    decimal_type = Decimal
     if (
-        type(value) is not Decimal
+        type(value) is not decimal_type
         or not value.is_finite()
         or value <= 0
     ):
         raise ItalianOrderAdmissionError(
             f"{field} must be an exact positive finite Decimal"
         )
-    digits = value.as_tuple().digits
-    exponent = value.as_tuple().exponent
+    parts = value.as_tuple()
     if (
-        len(digits) > _MAX_DECIMAL_DIGITS
-        or abs(exponent) > _MAX_ABS_EXPONENT
+        len(parts.digits) > _MAX_DECIMAL_DIGITS
+        or abs(parts.exponent) > _MAX_ABS_EXPONENT
     ):
         raise ItalianOrderAdmissionError(
             f"{field} exceeds bounded Decimal shape"
@@ -293,24 +214,186 @@ def _positive_decimal(value: object, field: str) -> Decimal:
     return value
 
 
-def _is_multiple(value: Decimal, increment: Decimal) -> bool:
-    # Inputs are shape-bounded before this exact-rational conversion.
-    value_fraction = Fraction(value)
-    increment_fraction = Fraction(increment)
-    quotient = value_fraction / increment_fraction
-    return quotient.denominator == 1
+def _build_italian_limit_evaluator():
+    """Capture the diagnostic rule authority graph once at module load."""
 
+    instruction_type = ItalianLimitInstruction
+    result_type = ItalianLimitBatchAdmission
+    state_type = ItalianLimitAdmissionState
+    error_type = ItalianOrderAdmissionError
+    decimal_type = Decimal
+    fraction_type = Fraction
 
-def _exact_multiply(left: Decimal, right: Decimal) -> Decimal:
-    """Multiply bounded finite Decimals independently of ambient precision."""
+    selection_id_slot = instruction_type.__dict__["selection_id"]
+    side_slot = instruction_type.__dict__["side"]
+    size_slot = instruction_type.__dict__["size"]
+    price_slot = instruction_type.__dict__["price"]
+    target_slot = instruction_type.__dict__["bet_target_type"]
 
-    left_digits = max(1, len(left.as_tuple().digits))
-    right_digits = max(1, len(right.as_tuple().digits))
-    with localcontext() as context:
-        context.prec = left_digits + right_digits + 2
-        result = left * right
-    if not result.is_finite() or result <= 0:
-        raise ItalianOrderAdmissionError(
-            "preselected return is not a positive finite Decimal"
+    one = decimal_type("1")
+    back_min = decimal_type("2.00")
+    back_increment = decimal_type("0.50")
+    lay_min = decimal_type("0.50")
+    max_return = decimal_type("10000.00")
+
+    def validate_decimal(value: object, field: str) -> Decimal:
+        if (
+            type(value) is not decimal_type
+            or not value.is_finite()
+            or value <= 0
+        ):
+            raise error_type(
+                f"{field} must be an exact positive finite Decimal"
+            )
+        parts = value.as_tuple()
+        if (
+            len(parts.digits) > _MAX_DECIMAL_DIGITS
+            or abs(parts.exponent) > _MAX_ABS_EXPONENT
+        ):
+            raise error_type(f"{field} exceeds bounded Decimal shape")
+        return value
+
+    def snapshot_instruction(
+        instruction: ItalianLimitInstruction,
+    ) -> tuple[int, str, Decimal, Decimal, str | None]:
+        """Read one exact DTO once, then validate the immutable local snapshot."""
+
+        owner = type(instruction)
+        selection_id = selection_id_slot.__get__(instruction, owner)
+        side = side_slot.__get__(instruction, owner)
+        size = size_slot.__get__(instruction, owner)
+        price = price_slot.__get__(instruction, owner)
+        target = target_slot.__get__(instruction, owner)
+
+        if type(selection_id) is not int or selection_id <= 0:
+            raise error_type("selection_id must be a positive integer")
+        if type(side) is not str or side not in {"BACK", "LAY"}:
+            raise error_type("side must be exactly BACK or LAY")
+        size = validate_decimal(size, "size")
+        price = validate_decimal(price, "price")
+        if price <= one:
+            raise error_type("price must be greater than 1")
+        if target is not None and (
+            type(target) is not str
+            or target not in {"PAYOUT", "BACKERS_PROFIT"}
+        ):
+            raise error_type(
+                "bet_target_type must be PAYOUT, BACKERS_PROFIT, or None"
+            )
+        return selection_id, side, size, price, target
+
+    def is_multiple(value: Decimal, increment: Decimal) -> bool:
+        value_fraction = fraction_type(value)
+        increment_fraction = fraction_type(increment)
+        quotient = value_fraction / increment_fraction
+        return quotient.denominator == 1
+
+    def exact_multiply(left: Decimal, right: Decimal) -> Decimal:
+        """Multiply Decimal tuples exactly, independent of ambient context."""
+
+        left_parts = left.as_tuple()
+        right_parts = right.as_tuple()
+
+        left_coefficient = 0
+        for digit in left_parts.digits:
+            left_coefficient = (left_coefficient * 10) + digit
+        right_coefficient = 0
+        for digit in right_parts.digits:
+            right_coefficient = (right_coefficient * 10) + digit
+
+        product = left_coefficient * right_coefficient
+        product_digits = tuple(int(character) for character in str(product))
+        exponent = left_parts.exponent + right_parts.exponent
+        result = decimal_type((0, product_digits, exponent))
+        if not result.is_finite() or result <= 0:
+            raise error_type(
+                "preselected return is not a positive finite Decimal"
+            )
+        return result
+
+    def evaluate_italian_limit_batch(
+        instructions: tuple[ItalianLimitInstruction, ...],
+    ) -> ItalianLimitBatchAdmission:
+        """Evaluate only the represented Betfair Italy standard-LIMIT rule slice.
+
+        A no-reason result is RULESET_SATISFIED_UNBOUND, not ADMISSIBLE.
+        Positive provider admission requires separate product-owned current-rule,
+        authenticated-jurisdiction, account-currency, market, risk/funds and
+        other execution authorities.
+        """
+
+        if type(instructions) is not tuple:
+            raise error_type("instructions must be an immutable exact tuple")
+        if not instructions:
+            return result_type(
+                state_type.REJECTED,
+                ("EMPTY_BATCH",),
+                (),
+            )
+
+        # Bound work before inspecting caller-controlled members. The provider
+        # request shape is already invalid above 50, so scanning arbitrary
+        # over-limit payloads adds no diagnostic authority.
+        if len(instructions) > 50:
+            return result_type(
+                state_type.REJECTED,
+                ("TOO_MANY_INSTRUCTIONS",),
+                (),
+            )
+
+        if any(type(item) is not instruction_type for item in instructions):
+            raise error_type(
+                "instructions must contain exact ItalianLimitInstruction values"
+            )
+
+        snapshots = tuple(snapshot_instruction(item) for item in instructions)
+        reasons: list[str] = []
+
+        sides = {snapshot[1] for snapshot in snapshots}
+        if len(sides) > 1:
+            reasons.append("MIXED_BACK_LAY_BATCH")
+
+        returns: list[Decimal] = []
+        for index, snapshot in enumerate(snapshots):
+            _selection_id, side, size, price, target = snapshot
+            prefix = f"I{index}:"
+            if target is not None:
+                # .it does not support Betfair target sizing. Do not reinterpret
+                # target-mode numeric fields as standard backer's-stake economics.
+                reasons.append(prefix + "TARGET_MODE_UNAVAILABLE_IT")
+                continue
+
+            if side == "BACK":
+                if size < back_min:
+                    reasons.append(prefix + "BACK_STAKE_BELOW_EUR_2")
+                if not is_multiple(size, back_increment):
+                    reasons.append(
+                        prefix + "BACK_STAKE_NOT_EUR_0_50_INCREMENT"
+                    )
+            else:
+                if size < lay_min:
+                    reasons.append(
+                        prefix + "LAY_BACKER_STAKE_BELOW_EUR_0_50"
+                    )
+
+            # Represented rule arithmetic only: for standard LIMIT both BACK and
+            # LAY returned amount at submitted price is backer's stake * price.
+            preselected_return = exact_multiply(size, price)
+            returns.append(preselected_return)
+            if preselected_return > max_return:
+                reasons.append(
+                    prefix + "PRESELECTED_RETURN_EXCEEDS_EUR_10000"
+                )
+
+        state = (
+            state_type.REJECTED
+            if reasons
+            else state_type.RULESET_SATISFIED_UNBOUND
         )
-    return result
+        return result_type(state, tuple(reasons), tuple(returns))
+
+    return evaluate_italian_limit_batch
+
+
+evaluate_italian_limit_batch = _build_italian_limit_evaluator()
+del _build_italian_limit_evaluator

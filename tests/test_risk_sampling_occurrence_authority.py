@@ -13,6 +13,8 @@ from autosport.risk_sampling_occurrence_authority import (
     ProductIidDrawPlanError,
     ProductIidExpectedDrawPlan,
     ProductIidExpectedMemberDraw,
+    ProductIidRunAdmissionReceipt,
+    issue_product_iid_run_admission,
     resolve_product_iid_expected_draw_plan,
     verify_product_iid_expected_draw_plan,
 )
@@ -205,6 +207,28 @@ def _resolve(values):
         sampling_manifest_json=manifest,
         sampling_frame_json=frame_json,
         horizon_json=horizon_json,
+        authority_root=authority_root,
+    )
+
+
+def _issue_admission(values):
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    return issue_product_iid_run_admission(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        member_index=0,
         authority_root=authority_root,
     )
 
@@ -579,4 +603,109 @@ def test_draw_truth_types_cannot_be_subclassed() -> None:
 
     with pytest.raises(TypeError, match="must not be subclassed"):
         class ForgedDraw(ProductIidExpectedMemberDraw):
+            pass
+
+
+
+def test_run_admission_is_product_issued_before_run_start(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values = _product_precommit(tmp_path, monkeypatch)
+    receipt = _issue_admission(values)
+
+    assert receipt.member_id == RUN_ID
+    assert receipt.member_index == 0
+    assert len(receipt.expected_draw_plan_sha256) == 64
+    assert len(receipt.expected_draw_transcript_sha256) == 64
+    assert receipt.product_precommit_bound is True
+    assert receipt.run_admission_bound is False
+    assert receipt.execution_consumption_proven is False
+    assert receipt.occurrence_ancestry_proven is False
+    assert receipt.iid_qualified is False
+    assert receipt.grants_real_money_authority is False
+
+
+def test_run_registry_persists_exact_draw_admission_receipt(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values = _product_precommit(tmp_path, monkeypatch)
+    receipt = _issue_admission(values)
+    workspace = values[1]
+    registry = RunRegistry(workspace / "run_registry.json")
+
+    key = registry.begin(
+        "a" * 64,
+        "b" * 64,
+        "strategy",
+        RUN_ID,
+        sampling_draw_admission_receipt_sha256=receipt.receipt_sha256,
+    )
+
+    assert (
+        registry.get(key)["sampling_draw_admission_receipt_sha256"]
+        == receipt.receipt_sha256
+    )
+    recovered = _issue_admission(values)
+    assert recovered.receipt_sha256 == receipt.receipt_sha256
+    assert recovered.run_admission_bound is False
+
+
+def test_run_admission_cannot_be_backfilled_after_registry_begin(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values = _product_precommit(tmp_path, monkeypatch)
+    workspace = values[1]
+    registry = RunRegistry(workspace / "run_registry.json")
+    registry.begin("a" * 64, "b" * 64, "strategy", RUN_ID)
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="before RunRegistry.begin",
+    ):
+        _issue_admission(values)
+
+
+def test_tampered_run_admission_state_fails_closed(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values = _product_precommit(tmp_path, monkeypatch)
+    receipt = _issue_admission(values)
+    workspace = values[1]
+    paths = tuple(workspace.glob(".risk-iid-run-admission-*.json"))
+    assert len(paths) == 1
+    raw = json.loads(paths[0].read_text(encoding="utf-8"))
+    raw["expected_draw_transcript_sha256"] = "0" * 64
+    paths[0].write_text(json.dumps(raw) + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="differs from frozen expected draws",
+    ):
+        _issue_admission(values)
+    assert len(receipt.receipt_sha256) == 64
+
+
+def test_run_admission_truth_cannot_be_caller_constructed_or_subclassed() -> None:
+    with pytest.raises(TypeError, match="product-issued"):
+        ProductIidRunAdmissionReceipt(
+            experiment_id="forged",
+            member_id=RUN_ID,
+            member_index=0,
+            stream_sha256="1" * 64,
+            expected_draw_plan_sha256="2" * 64,
+            expected_draw_transcript_sha256="3" * 64,
+            sampling_manifest_sha256="4" * 64,
+            sampling_frame_sha256="5" * 64,
+            horizon_sha256="6" * 64,
+            state_sha256="7" * 64,
+            receipt_sha256="8" * 64,
+            run_admission_bound=True,
+        )
+
+    with pytest.raises(TypeError, match="must not be subclassed"):
+        class ForgedAdmission(ProductIidRunAdmissionReceipt):
             pass

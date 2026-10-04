@@ -1528,6 +1528,22 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 reopened.close()
 
+    def test_restart_during_live_append_issuance_does_not_recover_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            first = SQLiteMarketStore(path)
+            authority = first._market_append_authority()
+            try:
+                before = authority.read_history()
+                with first._market_append_issuance_lock(authority):
+                    with self.assertRaises(WorkspaceEconomicLockBusyError):
+                        SQLiteMarketStore(path)
+                after = authority.read_history()
+                self.assertEqual(after, before)
+                self.assertEqual(first.events(), [])
+            finally:
+                first.close()
+
     def test_parallel_store_append_lock_contention_has_no_partial_write(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

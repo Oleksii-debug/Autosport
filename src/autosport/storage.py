@@ -728,6 +728,64 @@ def _trusted_live_events_from_connection(
     return sorted(events, key=_order_key)
 
 
+def _trusted_live_current_from_connection(
+    connection: sqlite3.Connection,
+    *,
+    _authority: str = _LIVE_RECEIPT_AUTHORITY,
+    _decode_history=_event_from_history_row,
+    _quote_key=_market_event_quote_key,
+) -> dict[tuple[str, str], MarketEvent]:
+    """Read latest receipt-authoritative state without materializing trusted history."""
+
+    if connection.execute(
+        """SELECT 1
+           FROM market_event_live_receipts
+           WHERE authority<>?
+           LIMIT 1""",
+        (_authority,),
+    ).fetchone() is not None:
+        raise ValueError("live receipt authority kind is not canonical")
+
+    rows = connection.execute(
+        f"""SELECT {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)},
+                   r.ingest_ts,r.authority
+            FROM market_events AS m
+            INNER JOIN market_event_live_receipts AS r
+            ON r.dedupe_key=m.dedupe_key
+            WHERE r.authority=?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM market_events AS newer
+                  INNER JOIN market_event_live_receipts AS newer_receipt
+                  ON newer_receipt.dedupe_key=newer.dedupe_key
+                  WHERE newer_receipt.authority=?
+                    AND newer.source_id=m.source_id
+                    AND newer.quote_key=m.quote_key
+                    AND (
+                        newer.sequence>m.sequence
+                        OR (
+                            newer.sequence=m.sequence
+                            AND newer.dedupe_key>m.dedupe_key
+                        )
+                    )
+              )
+            ORDER BY m.source_id,m.quote_key""",
+        (_authority, _authority),
+    ).fetchall()
+
+    current: dict[tuple[str, str], MarketEvent] = {}
+    for row in rows:
+        event = _decode_history(row[: len(_HISTORY_COLUMNS)])
+        receipt_ingest_ts, authority = row[-2:]
+        if receipt_ingest_ts != event.ingest_ts or authority != _authority:
+            raise ValueError("live receipt authority conflicts with market history")
+        key = (event.source_id, _quote_key(event))
+        if key in current:
+            raise ValueError("trusted live current projection is ambiguous")
+        current[key] = event
+    return current
+
+
 def _has_trusted_live_receipt_from_connection(
     connection: sqlite3.Connection,
     event: MarketEvent,
@@ -1156,20 +1214,11 @@ class SQLiteMarketStore:
     def trusted_live_current_by_source(
         self,
         *,
-        _read=_trusted_live_events_from_connection,
-        _quote_key=_market_event_quote_key,
-        _projection_key=_projection_order_key,
+        _read=_trusted_live_current_from_connection,
     ) -> dict[tuple[str, str], MarketEvent]:
-        """Project latest source-local live state without retroactively trusting imports."""
+        """Project latest source-local live state without materializing trusted history."""
         with self._connection_lock:
-            events = _read(self.connection)
-        current: dict[tuple[str, str], MarketEvent] = {}
-        for event in events:
-            key = (event.source_id, _quote_key(event))
-            previous = current.get(key)
-            if previous is None or _projection_key(event) > _projection_key(previous):
-                current[key] = event
-        return current
+            return _read(self.connection)
 
     def current_by_source(self) -> dict[tuple[str, str], MarketEvent]:
         with self._connection_lock:

@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.transparent_bandit_policy as policy_module
 from autosport.learning_environment import (
     CausalLearningEnvironment,
     EnvironmentIdentity,
@@ -194,3 +195,72 @@ def test_update_evidence_rejects_rebound_reward_chain_with_rewritten_top_level_i
             reward_id=rebound_reward.reward_id,
         )
 
+
+
+def test_update_rejects_rebound_action_type_root_before_dispatch(monkeypatch):
+    policy, _action, reward, transition = _resolved_step()
+    hostile_calls: list[str] = []
+
+    class ForgedAction:
+        def __getattribute__(self, name):
+            hostile_calls.append(name)
+            raise AssertionError("forged Action dispatch executed")
+
+    forged = object.__new__(ForgedAction)
+    monkeypatch.setattr(policy_module, "Action", ForgedAction)
+
+    with pytest.raises(
+        LearningEnvironmentError,
+        match="causal witness type authority changed",
+    ):
+        policy.update(action=forged, reward=reward, transition=transition)
+
+    assert hostile_calls == []
+
+
+def test_update_evidence_rejects_rebound_action_type_root_before_dispatch(
+    monkeypatch,
+):
+    policy, action, reward, transition = _resolved_step()
+    _successor, evidence = policy.update(
+        action=action,
+        reward=reward,
+        transition=transition,
+    )
+    hostile_calls: list[str] = []
+
+    class ForgedAction:
+        def __getattribute__(self, name):
+            hostile_calls.append(name)
+            raise AssertionError("forged evidence Action dispatch executed")
+
+    forged = object.__new__(ForgedAction)
+    monkeypatch.setattr(policy_module, "Action", ForgedAction)
+
+    with pytest.raises(
+        LearningEnvironmentError,
+        match="causal witness type authority changed",
+    ):
+        replace(evidence, action=forged)
+
+    assert hostile_calls == []
+
+
+def test_update_evidence_cannot_mint_without_exact_causal_witnesses():
+    policy, action, reward, transition = _resolved_step()
+    _successor, evidence = policy.update(
+        action=action,
+        reward=reward,
+        transition=transition,
+    )
+
+    with pytest.raises(
+        LearningEnvironmentError,
+        match="causal witnesses are required",
+    ):
+        replace(
+            evidence,
+            action=None,
+            reward=None,
+            transition=None,
+        )

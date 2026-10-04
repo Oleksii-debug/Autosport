@@ -26,6 +26,11 @@ from .learning_environment import (
 POLICY_SCHEMA: Final = "autosport.transparent_bandit_policy"
 POLICY_SCHEMA_VERSION: Final = 1
 
+_CANONICAL_ACTION_TYPE = Action
+_CANONICAL_REWARD_EVIDENCE_TYPE = RewardEvidence
+_CANONICAL_TRANSITION_TYPE = Transition
+_CANONICAL_EVIDENCE_TRUTH_TYPE = EvidenceTruth
+
 
 def _text(name: str, value: object) -> str:
     if type(value) is not str or not value or value != value.strip() or "\x00" in value:
@@ -361,11 +366,20 @@ class BanditPolicyState:
         reward: RewardEvidence,
         transition: Transition,
     ) -> tuple["BanditPolicyState", "PolicyUpdateEvidence"]:
-        if type(action) is not Action:
+        if (
+            Action is not _CANONICAL_ACTION_TYPE
+            or RewardEvidence is not _CANONICAL_REWARD_EVIDENCE_TYPE
+            or Transition is not _CANONICAL_TRANSITION_TYPE
+            or EvidenceTruth is not _CANONICAL_EVIDENCE_TRUTH_TYPE
+        ):
+            raise LearningEnvironmentError(
+                "policy causal witness type authority changed"
+            )
+        if type(action) is not _CANONICAL_ACTION_TYPE:
             raise TypeError("action must be exact Action")
-        if type(reward) is not RewardEvidence:
+        if type(reward) is not _CANONICAL_REWARD_EVIDENCE_TYPE:
             raise TypeError("reward must be exact RewardEvidence")
-        if type(transition) is not Transition:
+        if type(transition) is not _CANONICAL_TRANSITION_TYPE:
             raise TypeError("transition must be exact Transition")
         if action.environment_id != self.environment_id:
             raise LearningEnvironmentError("action belongs to another policy environment")
@@ -445,6 +459,15 @@ class PolicyUpdateEvidence:
     transition: Transition | None = None
 
     def __post_init__(self) -> None:
+        if (
+            Action is not _CANONICAL_ACTION_TYPE
+            or RewardEvidence is not _CANONICAL_REWARD_EVIDENCE_TYPE
+            or Transition is not _CANONICAL_TRANSITION_TYPE
+            or EvidenceTruth is not _CANONICAL_EVIDENCE_TRUTH_TYPE
+        ):
+            raise LearningEnvironmentError(
+                "policy causal witness type authority changed"
+            )
         _sha256("environment_id", self.environment_id)
         _text("protocol_id", self.protocol_id)
         _sha256("config_sha256", self.config_sha256)
@@ -462,29 +485,30 @@ class PolicyUpdateEvidence:
             "reward_id",
         ):
             _sha256(name, getattr(self, name))
-        if not isinstance(self.reward_truth, EvidenceTruth):
-            raise LearningEnvironmentError("reward_truth must be EvidenceTruth")
-        if self.reward_truth is EvidenceTruth.SIMULATED:
+        if type(self.reward_truth) is not _CANONICAL_EVIDENCE_TRUTH_TYPE:
+            raise LearningEnvironmentError("reward_truth must be exact EvidenceTruth")
+        if self.reward_truth is _CANONICAL_EVIDENCE_TRUTH_TYPE.SIMULATED:
             _text("simulation_model_id", self.simulation_model_id)
         elif self.simulation_model_id is not None:
             raise LearningEnvironmentError("observed policy update cannot carry simulation_model_id")
 
         witnesses = (self.action, self.reward, self.transition)
-        if any(item is not None for item in witnesses):
-            if not all(item is not None for item in witnesses):
-                raise LearningEnvironmentError("policy update causal witnesses must be complete")
-            if type(self.action) is not Action:
-                raise LearningEnvironmentError(
-                    "policy update action witness must be exact Action"
-                )
-            if type(self.reward) is not RewardEvidence:
-                raise LearningEnvironmentError(
-                    "policy update reward witness must be exact RewardEvidence"
-                )
-            if type(self.transition) is not Transition:
-                raise LearningEnvironmentError(
-                    "policy update transition witness must be exact Transition"
-                )
+        if not all(item is not None for item in witnesses):
+            raise LearningEnvironmentError(
+                "policy update causal witnesses are required"
+            )
+        if type(self.action) is not _CANONICAL_ACTION_TYPE:
+            raise LearningEnvironmentError(
+                "policy update action witness must be exact Action"
+            )
+        if type(self.reward) is not _CANONICAL_REWARD_EVIDENCE_TYPE:
+            raise LearningEnvironmentError(
+                "policy update reward witness must be exact RewardEvidence"
+            )
+        if type(self.transition) is not _CANONICAL_TRANSITION_TYPE:
+            raise LearningEnvironmentError(
+                "policy update transition witness must be exact Transition"
+            )
             if self.action.environment_id != self.environment_id:
                 raise LearningEnvironmentError("policy update action witness environment mismatch")
             if self.reward.environment_id != self.environment_id:

@@ -77,6 +77,7 @@ class EventType(str, Enum):
     ATTEMPT_UNKNOWN = "ATTEMPT_UNKNOWN"
     PROVIDER_ORDER_REFERENCE_BOUND = "PROVIDER_ORDER_REFERENCE_BOUND"
     PROVIDER_EVIDENCE_BOUND = "PROVIDER_EVIDENCE_BOUND"
+    VERIFIED_PROVIDER_EFFECT_BOUND = "VERIFIED_PROVIDER_EFFECT_BOUND"
     EXTERNAL_ACKNOWLEDGEMENT = "EXTERNAL_ACKNOWLEDGEMENT"
     RECONCILED_FOUND = "RECONCILED_FOUND"
     RECONCILED_NOT_FOUND = "RECONCILED_NOT_FOUND"
@@ -511,6 +512,51 @@ class ProviderEvidenceBindingView:
 
 
 @dataclass(frozen=True, slots=True)
+class VerifiedProviderEffectBindingView:
+    """Durable provider-origin matched economics issued by the canonical verifier."""
+
+    evidence_id: str
+    observed_at: str
+    source_payload_sha256: str
+    external_receipt_id: str
+    status: AcknowledgementStatus
+    accepted_odds: Decimal
+    accepted_stake: Decimal
+    provider_order_ref: str | None = None
+
+    def __post_init__(self) -> None:
+        _sha256_text(self.evidence_id, "evidence_id")
+        _timestamp(self.observed_at, "observed_at")
+        _sha256_text(self.source_payload_sha256, "source_payload_sha256")
+        _text(self.external_receipt_id, "external_receipt_id")
+        if type(self.status) is not AcknowledgementStatus or self.status not in {
+            AcknowledgementStatus.ACCEPTED,
+            AcknowledgementStatus.PARTIAL,
+        }:
+            raise ValueError("verified provider effect status must be ACCEPTED/PARTIAL")
+        if type(self.accepted_odds) is not Decimal:
+            raise ValueError("accepted_odds must be exact Decimal")
+        if type(self.accepted_stake) is not Decimal:
+            raise ValueError("accepted_stake must be exact Decimal")
+        _decimal(self.accepted_odds, "accepted_odds")
+        _decimal(self.accepted_stake, "accepted_stake")
+        if self.provider_order_ref is not None:
+            _text(self.provider_order_ref, "provider_order_ref")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "evidence_id": self.evidence_id,
+            "observed_at": self.observed_at,
+            "source_payload_sha256": self.source_payload_sha256,
+            "external_receipt_id": self.external_receipt_id,
+            "status": self.status.value,
+            "accepted_odds": _decimal_text(self.accepted_odds),
+            "accepted_stake": _decimal_text(self.accepted_stake),
+            "provider_order_ref": self.provider_order_ref,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionAttemptReadView:
     """Typed immutable view of one attempt from one verified ledger snapshot."""
 
@@ -523,6 +569,7 @@ class ExecutionAttemptReadView:
     unknown_observed_at: str | None
     provider_order_ref: str | None
     provider_evidence: ProviderEvidenceBindingView | None
+    verified_provider_effect: VerifiedProviderEffectBindingView | None
     acknowledgement: ExternalAcknowledgement | None
     found_reconciliations: tuple[ExternalEffectReconciliation, ...]
     not_found_reconciliation: ReconciliationSnapshot | None
@@ -1178,6 +1225,17 @@ class RealExecutionLedger:
                     # acknowledgement. The current write path still requires an
                     # exact acknowledgement digest and cannot create this shape.
                     legacy_provider_evidence_seen = True
+            elif kind == EventType.VERIFIED_PROVIDER_EFFECT_BOUND.value:
+                if state not in {
+                    AttemptState.SUBMITTED,
+                    AttemptState.UNKNOWN,
+                    AttemptState.ACCEPTED,
+                    AttemptState.PARTIAL,
+                }:
+                    raise ExecutionLedgerIntegrityError(
+                        "verified provider effect requires submitted/UNKNOWN/accepted attempt"
+                    )
+                cls._verified_provider_effect_from_dict(event["payload"])
             elif kind == EventType.EXTERNAL_ACKNOWLEDGEMENT.value:
                 if state not in {
                     AttemptState.SUBMITTED,
@@ -1407,6 +1465,45 @@ class RealExecutionLedger:
         return acknowledgement
 
     @staticmethod
+    def _verified_provider_effect_from_dict(
+        value: object,
+    ) -> VerifiedProviderEffectBindingView:
+        expected_fields = {
+            "evidence_id",
+            "observed_at",
+            "source_payload_sha256",
+            "external_receipt_id",
+            "status",
+            "accepted_odds",
+            "accepted_stake",
+            "provider_order_ref",
+        }
+        if not isinstance(value, dict) or set(value) != expected_fields:
+            raise ExecutionLedgerIntegrityError(
+                "stored verified provider effect schema is invalid"
+            )
+        try:
+            effect = VerifiedProviderEffectBindingView(
+                evidence_id=value["evidence_id"],
+                observed_at=value["observed_at"],
+                source_payload_sha256=value["source_payload_sha256"],
+                external_receipt_id=value["external_receipt_id"],
+                status=AcknowledgementStatus(value["status"]),
+                accepted_odds=_decimal(value["accepted_odds"], "accepted_odds"),
+                accepted_stake=_decimal(value["accepted_stake"], "accepted_stake"),
+                provider_order_ref=value["provider_order_ref"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ExecutionLedgerIntegrityError(
+                "stored verified provider effect values are invalid"
+            ) from exc
+        if effect.to_dict() != value:
+            raise ExecutionLedgerIntegrityError(
+                "stored verified provider effect payload is not canonical"
+            )
+        return effect
+
+    @staticmethod
     def _found_reconciliation_from_dict(
         value: object,
     ) -> ExternalEffectReconciliation:
@@ -1632,7 +1729,11 @@ class RealExecutionLedger:
             unknown_time: datetime | None = None
             provider_evidence_time: datetime | None = None
             provider_order_reference_seen = False
+            provider_order_ref_value: str | None = None
             provider_evidence_seen = False
+            verified_provider_effect: VerifiedProviderEffectBindingView | None = None
+            verified_provider_effect_time: datetime | None = None
+            stored_acknowledgement: ExternalAcknowledgement | None = None
             legacy_provider_evidence_time: datetime | None = None
             provider_acknowledgements: dict[str, datetime] = {}
             found_reconciliations: dict[str, ExternalEffectReconciliation] = {}
@@ -1787,6 +1888,7 @@ class RealExecutionLedger:
                             followup["payload"]["provider_order_ref"],
                             "provider_order_ref",
                         )
+                        provider_order_ref_value = provider_order_ref
                         binding_sha256 = _sha256_text(
                             followup["payload"]["binding_sha256"],
                             "binding_sha256",
@@ -1898,11 +2000,69 @@ class RealExecutionLedger:
                             legacy_provider_evidence_time = evidence_time
                     elif (
                         followup["event_type"]
+                        == EventType.VERIFIED_PROVIDER_EFFECT_BOUND.value
+                    ):
+                        if verified_provider_effect is not None:
+                            raise ExecutionLedgerIntegrityError(
+                                "attempt has multiple verified provider effect facts"
+                            )
+                        effect = cls._verified_provider_effect_from_dict(
+                            followup["payload"]
+                        )
+                        effect_time = _timestamp(effect.observed_at, "observed_at")
+                        causal_boundaries = [reserved_time]
+                        if submitted_time is not None:
+                            causal_boundaries.append(submitted_time)
+                        if unknown_time is not None:
+                            causal_boundaries.append(unknown_time)
+                        if provider_evidence_time is not None:
+                            causal_boundaries.append(provider_evidence_time)
+                        if effect_time < max(causal_boundaries):
+                            raise ExecutionLedgerIntegrityError(
+                                "verified provider effect precedes attempt causal boundary"
+                            )
+                        if (
+                            provider_order_ref_value is not None
+                            and effect.provider_order_ref != provider_order_ref_value
+                        ):
+                            raise ExecutionLedgerIntegrityError(
+                                "verified provider effect mismatches durable provider order reference"
+                            )
+                        requested_stake = _decimal(
+                            action["requested_stake"], "requested_stake"
+                        )
+                        if effect.accepted_stake > requested_stake:
+                            raise ExecutionLedgerIntegrityError(
+                                "verified provider effect stake exceeds requested action stake"
+                            )
+                        if (
+                            effect.status is AcknowledgementStatus.ACCEPTED
+                            and effect.accepted_stake != requested_stake
+                        ):
+                            raise ExecutionLedgerIntegrityError(
+                                "verified ACCEPTED effect stake must equal requested action stake"
+                            )
+                        if (
+                            effect.status is AcknowledgementStatus.PARTIAL
+                            and not (
+                                Decimal("0")
+                                < effect.accepted_stake
+                                < requested_stake
+                            )
+                        ):
+                            raise ExecutionLedgerIntegrityError(
+                                "verified PARTIAL effect stake must be below requested action stake"
+                            )
+                        verified_provider_effect = effect
+                        verified_provider_effect_time = effect_time
+                    elif (
+                        followup["event_type"]
                         == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
                     ):
                         acknowledgement = cls._acknowledgement_from_dict(
                             followup["payload"]
                         )
+                        stored_acknowledgement = acknowledgement
                         if acknowledgement.attempt_id != attempt_id:
                             raise ExecutionLedgerIntegrityError(
                                 "stored acknowledgement attempt identity mismatch"
@@ -2039,6 +2199,33 @@ class RealExecutionLedger:
                     raise ExecutionLedgerIntegrityError(
                         "attempt chronology timestamp is invalid"
                     ) from exc
+            if (
+                verified_provider_effect is not None
+                and stored_acknowledgement is not None
+            ):
+                if (
+                    stored_acknowledgement.external_receipt_id
+                    != verified_provider_effect.external_receipt_id
+                    or stored_acknowledgement.status
+                    is not verified_provider_effect.status
+                    or stored_acknowledgement.acknowledged_at
+                    != verified_provider_effect.observed_at
+                    or stored_acknowledgement.accepted_odds
+                    != verified_provider_effect.accepted_odds
+                    or stored_acknowledgement.accepted_stake
+                    != verified_provider_effect.accepted_stake
+                ):
+                    raise ExecutionLedgerIntegrityError(
+                        "verified provider effect conflicts with durable acknowledgement"
+                    )
+                if (
+                    stored_acknowledgement.reconciliation_evidence_id is not None
+                    and stored_acknowledgement.reconciliation_evidence_id
+                    != verified_provider_effect.evidence_id
+                ):
+                    raise ExecutionLedgerIntegrityError(
+                        "verified provider effect conflicts with reconciliation identity"
+                    )
             cls._state(attempt_events)
 
         provider_reference_owners: dict[tuple[str, str, str], str] = {}
@@ -2531,6 +2718,186 @@ class RealExecutionLedger:
             acknowledgement_sha256=_digest(acknowledgement.to_dict()),
             require_submitted=True,
         )
+
+    def _bind_verified_provider_effect_evidence(
+        self,
+        *,
+        attempt_id: str,
+        evidence: object,
+    ) -> None:
+        """Persist provider-origin matched economics only after canonical verification."""
+
+        from .supervised_provider_evidence import (
+            ProviderEvidenceError,
+            VerifiedProviderEffectEvidence,
+            assert_verified_provider_evidence_authoritative,
+        )
+
+        if type(evidence) is not VerifiedProviderEffectEvidence:
+            raise TypeError(
+                "evidence must be exact VerifiedProviderEffectEvidence"
+            )
+        try:
+            assert_verified_provider_evidence_authoritative(evidence)
+        except ProviderEvidenceError as exc:
+            raise ExecutionStateError(
+                "verified provider effect evidence is not authoritative"
+            ) from exc
+
+        identity = (
+            evidence.bookmaker_id,
+            evidence.account_id,
+            evidence.action_id,
+            evidence.event_id,
+            evidence.market_id,
+            evidence.selection_id,
+        )
+        payload = VerifiedProviderEffectBindingView(
+            evidence_id=evidence.evidence_id,
+            observed_at=evidence.observed_at,
+            source_payload_sha256=evidence.source_payload_sha256,
+            external_receipt_id=evidence.external_receipt_id,
+            status=evidence.status,
+            accepted_odds=evidence.accepted_odds,
+            accepted_stake=evidence.accepted_stake,
+            provider_order_ref=evidence.provider_order_ref,
+        ).to_dict()
+        try:
+            assert_verified_provider_evidence_authoritative(evidence)
+        except ProviderEvidenceError as exc:
+            raise ExecutionStateError(
+                "verified provider effect evidence lost canonical authority"
+            ) from exc
+
+        def operation() -> None:
+            events = self._events()
+            attempt_events = self._attempt_events(events, attempt_id)
+            if not attempt_events:
+                raise ExecutionStateError(
+                    "verified provider effect requires reserved attempt"
+                )
+            first = attempt_events[0]
+            _, action = self._action_payload(
+                events, first["plan_id"], first["action_id"]
+            )
+            if identity != (
+                action["bookmaker_id"],
+                action["account_id"],
+                first["action_id"],
+                action["event_id"],
+                action["market_id"],
+                action["selection_id"],
+            ):
+                raise ExecutionIdentityConflict(
+                    "verified provider effect identity mismatches execution action"
+                )
+            existing = [
+                event
+                for event in attempt_events
+                if event["event_type"]
+                == EventType.VERIFIED_PROVIDER_EFFECT_BOUND.value
+            ]
+            if existing:
+                if len(existing) == 1 and existing[0]["payload"] == payload:
+                    return
+                raise ExecutionIdentityConflict(
+                    "attempt already has different verified provider effect"
+                )
+            state = self._state(attempt_events)
+            if state not in {
+                AttemptState.SUBMITTED,
+                AttemptState.UNKNOWN,
+                AttemptState.ACCEPTED,
+                AttemptState.PARTIAL,
+            }:
+                raise ExecutionStateError(
+                    "verified provider effect requires submitted/UNKNOWN/accepted attempt"
+                )
+
+            refs = [
+                event["payload"]["provider_order_ref"]
+                for event in attempt_events
+                if event["event_type"]
+                == EventType.PROVIDER_ORDER_REFERENCE_BOUND.value
+                and event["payload"].get("provider_id") == action["bookmaker_id"]
+            ]
+            if len(refs) > 1:
+                raise ExecutionLedgerIntegrityError(
+                    "attempt has multiple provider order reference bindings"
+                )
+            if refs and payload["provider_order_ref"] != refs[0]:
+                raise ExecutionIdentityConflict(
+                    "verified provider effect mismatches durable provider order reference"
+                )
+
+            requested_stake = _decimal(
+                action["requested_stake"], "requested_stake"
+            )
+            accepted_stake = _decimal(
+                payload["accepted_stake"], "accepted_stake"
+            )
+            status = AcknowledgementStatus(payload["status"])
+            if accepted_stake > requested_stake:
+                raise ExecutionStateError(
+                    "verified provider effect stake exceeds requested action stake"
+                )
+            if (
+                status is AcknowledgementStatus.ACCEPTED
+                and accepted_stake != requested_stake
+            ):
+                raise ExecutionStateError(
+                    "verified ACCEPTED effect stake must equal requested action stake"
+                )
+            if (
+                status is AcknowledgementStatus.PARTIAL
+                and not Decimal("0") < accepted_stake < requested_stake
+            ):
+                raise ExecutionStateError(
+                    "verified PARTIAL effect stake must be below requested action stake"
+                )
+
+            terminal_acks = [
+                self._acknowledgement_from_dict(event["payload"])
+                for event in attempt_events
+                if event["event_type"]
+                == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
+            ]
+            if terminal_acks:
+                if len(terminal_acks) != 1:
+                    raise ExecutionLedgerIntegrityError(
+                        "attempt has multiple external acknowledgement facts"
+                    )
+                acknowledgement = terminal_acks[0]
+                if (
+                    acknowledgement.external_receipt_id
+                    != payload["external_receipt_id"]
+                    or acknowledgement.status is not status
+                    or acknowledgement.acknowledged_at != payload["observed_at"]
+                    or acknowledgement.accepted_odds
+                    != _decimal(payload["accepted_odds"], "accepted_odds")
+                    or acknowledgement.accepted_stake != accepted_stake
+                ):
+                    raise ExecutionIdentityConflict(
+                        "verified provider effect conflicts with durable acknowledgement"
+                    )
+                if (
+                    acknowledgement.reconciliation_evidence_id is not None
+                    and acknowledgement.reconciliation_evidence_id
+                    != payload["evidence_id"]
+                ):
+                    raise ExecutionIdentityConflict(
+                        "verified provider effect conflicts with reconciliation identity"
+                    )
+
+            self._append(
+                EventType.VERIFIED_PROVIDER_EFFECT_BOUND,
+                first["plan_id"],
+                first["action_id"],
+                attempt_id,
+                payload,
+            )
+
+        self._mutate(operation)
 
     def provider_evidence_binding(
         self,
@@ -3344,6 +3711,12 @@ class RealExecutionLedger:
                 for event in attempt_events
                 if event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value
             ]
+            verified_provider_effect_events = [
+                event
+                for event in attempt_events
+                if event["event_type"]
+                == EventType.VERIFIED_PROVIDER_EFFECT_BOUND.value
+            ]
             acknowledgements = [
                 event
                 for event in attempt_events
@@ -3364,6 +3737,7 @@ class RealExecutionLedger:
                 ("UNKNOWN transition", unknown),
                 ("provider order reference", provider_refs),
                 ("provider evidence", provider_evidence_events),
+                ("verified provider effect", verified_provider_effect_events),
                 ("external acknowledgement", acknowledgements),
                 ("not-found reconciliation", not_found_events),
             ):
@@ -3401,6 +3775,13 @@ class RealExecutionLedger:
                         "acknowledgement_sha256"
                     ),
                 )
+            verified_provider_effect = (
+                self._verified_provider_effect_from_dict(
+                    verified_provider_effect_events[0]["payload"]
+                )
+                if verified_provider_effect_events
+                else None
+            )
             acknowledgement = (
                 self._acknowledgement_from_dict(
                     acknowledgements[0]["payload"]
@@ -3437,6 +3818,7 @@ class RealExecutionLedger:
                     unknown_observed_at=unknown_observed_at,
                     provider_order_ref=provider_order_ref,
                     provider_evidence=provider_evidence,
+                    verified_provider_effect=verified_provider_effect,
                     acknowledgement=acknowledgement,
                     found_reconciliations=found_reconciliations,
                     not_found_reconciliation=not_found_reconciliation,

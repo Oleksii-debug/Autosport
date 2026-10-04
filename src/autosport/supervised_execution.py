@@ -1051,6 +1051,14 @@ def reconcile_provider_readback(
         readback.accepted_odds,
     )
 
+    # Persist canonical provider-origin matched economics before the generic
+    # acknowledgement/reconciliation transition. This same-ledger fact survives
+    # restart and cannot be minted by the generic ProviderReadback surface.
+    ledger._bind_verified_provider_effect_evidence(
+        attempt_id=attempt_id,
+        evidence=readback,
+    )
+
     direct_binding = ledger.provider_evidence_binding(attempt_id)
     reconciliation_evidence_id = (
         None if direct_binding is not None else readback.evidence_id

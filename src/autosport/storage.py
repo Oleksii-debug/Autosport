@@ -601,8 +601,6 @@ class SQLiteMarketStore:
     def __init__(self, path: str | Path = "autosport.db") -> None:
         self.path = Path(path)
         self._connection_lock = RLock()
-        # Mutable state may block nested authority, but never grants receipt authority.
-        self._live_receipt_write_depth = 0
         self.connection = sqlite3.connect(self.path, check_same_thread=False)
         try:
             self.connection.execute("PRAGMA journal_mode=WAL")
@@ -841,26 +839,81 @@ class SQLiteMarketStore:
         self,
         events: Iterable[MarketEvent],
     ) -> list[MarketEvent]:
-        """Route one exact live-ingestion batch through the canonical write choke point.
+        """Persist one live-ingestion batch and its receipt witnesses atomically.
 
-        Materialize before arming authority so lazy iterable code runs while no live
-        capability exists. Receipt authority is carried by an internal wrapper rather
-        than caller-mutable store state. append_batch_accepted remains the canonical
-        retry/fault-injection choke point.
+        Lazy caller iterables are fully materialized before any transaction begins.
+        The public append_batch_accepted path remains the retry/fault-injection choke
+        point, but it is never receipt-authoritative by itself. Live authority is
+        derived only after this method proves, inside one transaction, which exact
+        canonical batch rows were newly inserted.
         """
         if type(self) is not SQLiteMarketStore:
             raise TypeError(
                 "live receipt authority requires an exact SQLiteMarketStore"
             )
-        materialized = tuple(events)
+        batch = _LiveReceiptBatch(tuple(events))
+        canonical_events = tuple(batch)
         with self._connection_lock:
-            if self._live_receipt_write_depth != 0:
-                raise RuntimeError("nested live receipt authority write is not allowed")
-            self._live_receipt_write_depth = 1
+            if self.connection.in_transaction:
+                raise RuntimeError(
+                    "live receipt authority requires transaction ownership"
+                )
+            self.connection.execute("BEGIN IMMEDIATE")
             try:
-                return self.append_batch_accepted(_LiveReceiptBatch(materialized))
-            finally:
-                self._live_receipt_write_depth = 0
+                preexisting: set[str] = set()
+                canonical_by_dedupe: dict[str, MarketEvent] = {}
+                for event in canonical_events:
+                    existing = canonical_by_dedupe.get(event.dedupe_key)
+                    if existing is None:
+                        canonical_by_dedupe[event.dedupe_key] = event
+                    elif _canonical_payload(existing) != _canonical_payload(event):
+                        raise ValueError(
+                            "conflicting duplicate live market event identity: "
+                            f"{event.dedupe_key}"
+                        )
+                    row = self.connection.execute(
+                        f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE dedupe_key=?",
+                        (event.dedupe_key,),
+                    ).fetchone()
+                    if row is not None:
+                        preexisting.add(event.dedupe_key)
+
+                accepted = self.append_batch_accepted(batch)
+
+                expected: list[MarketEvent] = []
+                for dedupe_key, canonical_event in canonical_by_dedupe.items():
+                    row = self.connection.execute(
+                        f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE dedupe_key=?",
+                        (dedupe_key,),
+                    ).fetchone()
+                    if dedupe_key in preexisting:
+                        continue
+                    if row is None:
+                        raise RuntimeError(
+                            "live append hook did not persist an expected market event"
+                        )
+                    stored = _event_from_history_row(row)
+                    if _canonical_payload(stored) != _canonical_payload(canonical_event):
+                        raise RuntimeError(
+                            "live append hook persisted a non-canonical market event"
+                        )
+                    expected.append(stored)
+
+                if tuple(_canonical_payload(event) for event in accepted) != tuple(
+                    _canonical_payload(event) for event in expected
+                ):
+                    raise RuntimeError(
+                        "live append hook returned events outside the canonical inserted set"
+                    )
+
+                for event in expected:
+                    self._insert_live_receipt_authority(event)
+            except Exception:
+                self.connection.rollback()
+                raise
+            else:
+                self.connection.commit()
+                return expected
 
     def append(self, event: MarketEvent) -> bool:
         with self._connection_lock:
@@ -868,19 +921,29 @@ class SQLiteMarketStore:
                 return self._insert_one(event)
 
     def append_batch_accepted(self, events: Iterable[MarketEvent]) -> list[MarketEvent]:
-        """Insert one normalized batch in one transaction and return newly accepted events."""
+        """Insert one normalized batch and return newly accepted events.
+
+        When called inside an existing transaction, transaction ownership stays with
+        the outer caller. This lets the live-ingestion path compose the canonical
+        append choke point with receipt witnesses without exposing receipt authority
+        through public mutable state or a caller-forgeable wrapper.
+        """
         accepted: list[MarketEvent] = []
         with self._connection_lock:
-            live_receipt_authority = (
-                type(events) is _LiveReceiptBatch
-                and self._live_receipt_write_depth == 1
-            )
-            with self.connection:
+            owns_transaction = not self.connection.in_transaction
+            if owns_transaction:
+                self.connection.execute("BEGIN IMMEDIATE")
+            try:
                 for event in events:
                     if self._insert_one(event):
-                        if live_receipt_authority:
-                            self._insert_live_receipt_authority(event)
                         accepted.append(event)
+            except Exception:
+                if owns_transaction:
+                    self.connection.rollback()
+                raise
+            else:
+                if owns_transaction:
+                    self.connection.commit()
         return accepted
 
     def append_many(self, events: Iterable[MarketEvent]) -> int:

@@ -78,7 +78,7 @@ def _market_event_dedupe_key(
 
 
 class _LiveReceiptBatch:
-    """Immutable value snapshot for the one authority-bearing storage path."""
+    """Immutable retry/fault-injection snapshot; durable authority never trusts it."""
 
     __slots__ = ("_payloads",)
 
@@ -1229,7 +1229,8 @@ class SQLiteMarketStore:
         _receipt_writer,
         _batch_type=_LiveReceiptBatch,
         _batch_init=_LiveReceiptBatch.__init__,
-        _batch_iter=_LiveReceiptBatch.__iter__,
+        _decode_batch_payload=_decode_market_event,
+        _loads_batch_payload=json.loads,
         _object_new=object.__new__,
         _dedupe_key=_market_event_dedupe_key,
         _quote_key=_market_event_quote_key,
@@ -1257,12 +1258,17 @@ class SQLiteMarketStore:
         materialized = tuple(events)
         if any(type(event) is not _market_event_type for event in materialized):
             raise TypeError("live receipt authority requires exact MarketEvent values")
-        # Python special-method lookup consults the class at runtime. Capture and
-        # call the canonical constructor/iterator descriptors explicitly so later
-        # descriptor rebinding cannot rewrite authority-bearing payload reconstruction.
+        # Snapshot canonical payloads before exposing the non-authoritative batch
+        # object. Durable reconstruction never reads that object's mutable payload slot.
+        canonical_payloads = tuple(
+            _canonical_payload_fn(event) for event in materialized
+        )
         batch = _object_new(_batch_type)
         _batch_init(batch, materialized, _payload=_canonical_payload_fn)
-        canonical_events = tuple(_batch_iter(batch))
+        canonical_events = tuple(
+            _decode_batch_payload(_loads_batch_payload(payload))
+            for payload in canonical_payloads
+        )
         with self._connection_lock:
             if self.connection.in_transaction:
                 raise RuntimeError(

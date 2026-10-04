@@ -642,6 +642,42 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 object.__setattr__(runtime, "coordinator", original)
                 runtime.close()
 
+    def test_runtime_internal_lifecycle_helpers_cannot_be_shadowed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_autonomous_product_runtime(
+                workspace=Path(directory),
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product runtime authority field '_coherent_status' is immutable",
+                ):
+                    runtime._coherent_status = lambda **_kwargs: None
+
+                runtime.__dict__["_coherent_status"] = lambda **_kwargs: None
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product runtime method '_coherent_status' changed after composition",
+                ):
+                    runtime.status()
+                runtime.__dict__.pop("_coherent_status")
+
+                runtime.__dict__["_require_runtime_authority"] = lambda: None
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product runtime method '_require_runtime_authority' changed after composition",
+                ):
+                    runtime.tick()
+                runtime.__dict__.pop("_require_runtime_authority")
+
+                self.assertEqual(runtime.status().source_id, "provider-a")
+            finally:
+                runtime.close()
+
     def test_runtime_closed_and_lease_authority_flags_are_not_caller_writable(
         self,
     ) -> None:

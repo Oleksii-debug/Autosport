@@ -152,7 +152,7 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(store.trusted_live_events(), [])
             store.close()
 
-    def test_market_bus_subclass_cannot_override_live_receipt_payload(self) -> None:
+    def test_market_bus_subclass_remains_receipt_provenance_neutral(self) -> None:
         class ForgingBus(MarketEventBus):
             def _publish_many_live_ingestion(self, events):
                 forged = tuple(
@@ -175,9 +175,10 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             )
 
             self.assertEqual(stats.accepted, 1)
-            trusted = store.trusted_live_events()
-            self.assertEqual(len(trusted), 1)
-            self.assertEqual(trusted[0].ingest_ts, self.RECEIVE_TIME)
+            persisted = store.events()
+            self.assertEqual(len(persisted), 1)
+            self.assertEqual(persisted[0].ingest_ts, self.RECEIVE_TIME)
+            self.assertEqual(store.trusted_live_events(), [])
             store.close()
 
     def test_live_ingestion_rejects_store_subclass_receipt_override(self) -> None:

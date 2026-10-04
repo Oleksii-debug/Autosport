@@ -588,6 +588,7 @@ class CollectorDeltaTests(unittest.TestCase):
                 (),
             )
             self.assertEqual(delivery_calls, ["d1", "d1"])
+
     def test_consumer_rechecks_peer_ack_after_serialization_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

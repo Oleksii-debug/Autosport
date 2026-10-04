@@ -56,6 +56,7 @@ def _canonical_precommit(
     root = Path(temp.name).resolve()
     workspace = root / "workspace"
     workspace.mkdir()
+    setattr(test, "_proposal_risk_workspace", workspace)
     authority_root = root / "machine-authority"
     env = patch.dict(
         os.environ,
@@ -122,6 +123,7 @@ def _canonical_precommit(
                 proposal_ts=decision_ts,
             )
         )
+    setattr(test, "_proposal_risk_contexts", tuple(contexts))
     target = issue_product_proposal_risk_target(
         workspace,
         signal_strengths=(Decimal("1"), Decimal("0.8")),
@@ -627,6 +629,333 @@ class ProductProposalRiskExecutionEvidenceTests(unittest.TestCase):
                 evaluated_at="2026-10-04T10:02:00+00:00",
             )
 
+
+
+
+import autosport.proposal_risk_scenario_population_authority as scenario_population_authority
+from autosport.monotonic_workspace_authority import (
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
+from autosport.proposal_risk_scenario_population_authority import (
+    CounterfactualScenarioMemberBinding,
+    ProductProposalRiskScenarioPopulation,
+    ProductProposalRiskScenarioPopulationError,
+    issue_product_proposal_risk_scenario_population,
+    resolve_product_proposal_risk_scenario_population,
+)
+
+
+class ProductProposalRiskScenarioPopulationTests(unittest.TestCase):
+
+    def setUp(self) -> None:
+        self.precommit = _canonical_precommit(self)
+        self.workspace = getattr(self, "_proposal_risk_workspace")
+
+    def _members(
+        self,
+        *,
+        scenario_a: str = "scenario-a",
+        scenario_b: str = "scenario-b",
+        mapping_a: str = "mapping-a",
+        mapping_b: str = "mapping-b",
+        cutoff_a: str = "2026-08-31T23:58:00+00:00",
+        cutoff_b: str = "2026-08-31T23:59:00+00:00",
+    ) -> tuple[CounterfactualScenarioMemberBinding, ...]:
+        return (
+            CounterfactualScenarioMemberBinding(
+                member_id=self.precommit.planned_member_ids[0],
+                scenario_id=scenario_a,
+                scenario_source_sha256=_sha("scenario-source-a"),
+                mapping_sha256=_sha(mapping_a),
+                settlement_semantics_sha256=_sha("settlement-semantics-v1"),
+                causal_cutoff=cutoff_a,
+            ),
+            CounterfactualScenarioMemberBinding(
+                member_id=self.precommit.planned_member_ids[1],
+                scenario_id=scenario_b,
+                scenario_source_sha256=_sha("scenario-source-b"),
+                mapping_sha256=_sha(mapping_b),
+                settlement_semantics_sha256=_sha("settlement-semantics-v1"),
+                causal_cutoff=cutoff_b,
+            ),
+        )
+
+    def test_exact_population_is_durable_but_non_authorizing(self) -> None:
+        issued = issue_product_proposal_risk_scenario_population(
+            self.workspace,
+            self.precommit,
+            self._members(),
+        )
+
+        self.assertTrue(issued.population_identity_proven)
+        self.assertTrue(issued.fixed_n_member_mapping_complete)
+        self.assertTrue(issued.causal_cutoff_compatible)
+        self.assertEqual(issued.planned_member_ids, self.precommit.planned_member_ids)
+        self.assertEqual(issued.member_scenario_ids, ("scenario-a", "scenario-b"))
+        self.assertEqual(issued.evaluated_stakes, self.precommit.evaluated_stakes)
+        self.assertGreater(issued.bound_at, self.precommit.target_decision_ts)
+        last_record = json.loads(
+            (self.workspace / "decisions.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+        )["record"]
+        self.assertEqual(last_record["recorded_at"], issued.bound_at)
+        self.assertFalse(issued.product_scenario_source_provenance_proven)
+        self.assertFalse(issued.terminal_mapping_proven)
+        self.assertFalse(issued.scenario_execution_proven)
+        self.assertFalse(issued.proposal_target_counterfactual_execution_proven)
+        self.assertFalse(issued.risk_upper_bound_for_target)
+        self.assertFalse(issued.grants_risk_approval_authority)
+        self.assertFalse(issued.grants_ticket_authority)
+        self.assertFalse(issued.grants_broker_execution_authority)
+        self.assertFalse(issued.grants_real_money_authority)
+        self.assertFalse(issued.grants_state_mutation_authority)
+
+        resolved = resolve_product_proposal_risk_scenario_population(
+            self.workspace,
+            self.precommit,
+        )
+        self.assertEqual(resolved.population_sha256, issued.population_sha256)
+        self.assertEqual(resolved.decision_id, issued.decision_id)
+        self.assertEqual(resolved.member_mapping_sha256s, issued.member_mapping_sha256s)
+
+    def test_direct_or_forged_result_cannot_mint_authority(self) -> None:
+        with self.assertRaises(TypeError):
+            ProductProposalRiskScenarioPopulation()
+
+        forged = object.__new__(ProductProposalRiskScenarioPopulation)
+        self.assertFalse(forged.population_identity_proven)
+        self.assertFalse(forged.fixed_n_member_mapping_complete)
+        self.assertFalse(forged.causal_cutoff_compatible)
+        self.assertFalse(forged.product_scenario_source_provenance_proven)
+        self.assertFalse(forged.terminal_mapping_proven)
+        self.assertFalse(forged.scenario_execution_proven)
+        self.assertFalse(forged.proposal_target_counterfactual_execution_proven)
+        self.assertFalse(forged.risk_upper_bound_for_target)
+        self.assertFalse(forged.grants_risk_approval_authority)
+        self.assertFalse(forged.grants_ticket_authority)
+        self.assertFalse(forged.grants_broker_execution_authority)
+        self.assertFalse(forged.grants_real_money_authority)
+        self.assertFalse(forged.grants_state_mutation_authority)
+
+    def test_exact_reissue_is_idempotent(self) -> None:
+        first = issue_product_proposal_risk_scenario_population(
+            self.workspace,
+            self.precommit,
+            self._members(),
+        )
+        second = issue_product_proposal_risk_scenario_population(
+            self.workspace,
+            self.precommit,
+            self._members(),
+        )
+        self.assertEqual(second.population_sha256, first.population_sha256)
+        self.assertEqual(second.decision_id, first.decision_id)
+
+    def test_post_hoc_population_substitution_is_rejected(self) -> None:
+        issue_product_proposal_risk_scenario_population(
+            self.workspace,
+            self.precommit,
+            self._members(),
+        )
+        with self.assertRaisesRegex(
+            ProductProposalRiskScenarioPopulationError,
+            "different scenario population",
+        ):
+            issue_product_proposal_risk_scenario_population(
+                self.workspace,
+                self.precommit,
+                self._members(
+                    scenario_a="replacement-scenario-a",
+                    mapping_a="replacement-mapping-a",
+                ),
+            )
+
+    def test_fixed_n_order_and_cardinality_are_exact(self) -> None:
+        members = self._members()
+        for bad in ((members[0],), (members[1], members[0])):
+            with self.subTest(member_ids=tuple(item.member_id for item in bad)):
+                with self.assertRaises(ProductProposalRiskScenarioPopulationError):
+                    issue_product_proposal_risk_scenario_population(
+                        self.workspace,
+                        self.precommit,
+                        bad,
+                    )
+
+    def test_member_cutoff_cannot_cross_scientific_cutoff(self) -> None:
+        with self.assertRaisesRegex(
+            ProductProposalRiskScenarioPopulationError,
+            "causal cutoff exceeds",
+        ):
+            issue_product_proposal_risk_scenario_population(
+                self.workspace,
+                self.precommit,
+                self._members(cutoff_a="2026-09-01T00:00:01+00:00"),
+            )
+
+    def test_caller_cannot_backdate_population_timestamp(self) -> None:
+        with self.assertRaises(TypeError):
+            issue_product_proposal_risk_scenario_population(
+                self.workspace,
+                self.precommit,
+                self._members(),
+                bound_at="2026-09-18T13:19:59+00:00",
+            )
+
+    def test_iid_with_replacement_scenario_multiplicity_is_preserved(self) -> None:
+        members = self._members(
+            scenario_a="same-scenario",
+            scenario_b="same-scenario",
+            mapping_a="same-mapping",
+            mapping_b="same-mapping",
+        )
+        issued = issue_product_proposal_risk_scenario_population(
+            self.workspace,
+            self.precommit,
+            members,
+        )
+        self.assertEqual(
+            issued.member_scenario_ids,
+            ("same-scenario", "same-scenario"),
+        )
+        self.assertEqual(
+            issued.member_mapping_sha256s,
+            (_sha("same-mapping"), _sha("same-mapping")),
+        )
+
+    def test_superseded_target_invalidates_population(self) -> None:
+        issued = issue_product_proposal_risk_scenario_population(
+            self.workspace,
+            self.precommit,
+            self._members(),
+        )
+        self.assertTrue(issued.population_identity_proven)
+
+        issue_product_proposal_risk_target(
+            self.workspace,
+            signal_strengths=(Decimal("0.9"), Decimal("0.7")),
+            contexts=getattr(self, "_proposal_risk_contexts"),
+        )
+
+        with self.assertRaisesRegex(
+            ProductProposalRiskScenarioPopulationError,
+            "no longer the current target",
+        ):
+            resolve_product_proposal_risk_scenario_population(
+                self.workspace,
+                self.precommit,
+            )
+        with self.assertRaisesRegex(
+            ProductProposalRiskScenarioPopulationError,
+            "no longer the current target",
+        ):
+            issue_product_proposal_risk_scenario_population(
+                self.workspace,
+                self.precommit,
+                self._members(),
+            )
+
+    def test_independent_authority_detects_ledger_rollback(self) -> None:
+        issue_product_proposal_risk_scenario_population(
+            self.workspace,
+            self.precommit,
+            self._members(),
+        )
+        ledger_path = self.workspace / "decisions.jsonl"
+        original = ledger_path.read_bytes()
+        try:
+            lines = original.splitlines(keepends=True)
+            self.assertGreaterEqual(len(lines), 2)
+            ledger_path.write_bytes(b"".join(lines[:-1]))
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "ledger record is missing|missing from the canonical Decision Ledger",
+            ):
+                resolve_product_proposal_risk_scenario_population(
+                    self.workspace,
+                    self.precommit,
+                )
+        finally:
+            ledger_path.write_bytes(original)
+
+    def test_missing_parent_precommit_or_target_ledger_root_blocks_issue(self) -> None:
+        ledger_path = self.workspace / "decisions.jsonl"
+        original = ledger_path.read_bytes()
+        targets = (
+            (
+                self.precommit.decision_id,
+                "evaluation precommit is missing",
+            ),
+            (
+                "target-v1:" + self.precommit.target_sha256,
+                "risk target is missing",
+            ),
+        )
+        for decision_id, message in targets:
+            with self.subTest(decision_id=decision_id):
+                rows = []
+                for raw in original.splitlines():
+                    envelope = json.loads(raw.decode("utf-8"))
+                    if envelope["record"]["decision_id"] != decision_id:
+                        rows.append(raw)
+                self.assertLess(len(rows), len(original.splitlines()))
+                try:
+                    ledger_path.write_bytes(b"\n".join(rows) + b"\n")
+                    with self.assertRaisesRegex(
+                        ProductProposalRiskScenarioPopulationError,
+                        message,
+                    ):
+                        issue_product_proposal_risk_scenario_population(
+                            self.workspace,
+                            self.precommit,
+                            self._members(),
+                        )
+                finally:
+                    ledger_path.write_bytes(original)
+
+    def test_commit_crash_prefix_recovers_without_population_switch(self) -> None:
+        original_commit = MonotonicWorkspaceAuthority.commit
+        with patch.object(
+            MonotonicWorkspaceAuthority,
+            "commit",
+            side_effect=MonotonicWorkspaceAuthorityError("injected commit crash"),
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "COMMIT failed",
+            ):
+                issue_product_proposal_risk_scenario_population(
+                    self.workspace,
+                    self.precommit,
+                    self._members(),
+                )
+
+        resolved = resolve_product_proposal_risk_scenario_population(
+            self.workspace,
+            self.precommit,
+        )
+        self.assertTrue(resolved.population_identity_proven)
+        self.assertEqual(resolved.member_scenario_ids, ("scenario-a", "scenario-b"))
+        self.assertIs(
+            MonotonicWorkspaceAuthority.commit,
+            original_commit,
+        )
+
+
+    def test_module_authority_alias_rebind_is_rejected_before_write(self) -> None:
+        original = scenario_population_authority._LEDGER_APPEND
+        try:
+            scenario_population_authority._LEDGER_APPEND = lambda *args, **kwargs: None
+            with self.assertRaisesRegex(
+                ProductProposalRiskScenarioPopulationError,
+                "authority dispatch changed",
+            ):
+                issue_product_proposal_risk_scenario_population(
+                    self.workspace,
+                    self.precommit,
+                    self._members(),
+                )
+        finally:
+            scenario_population_authority._LEDGER_APPEND = original
 
 if __name__ == "__main__":
     unittest.main()

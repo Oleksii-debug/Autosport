@@ -642,8 +642,9 @@ def _fraction_to_exact_decimal(value: Fraction) -> Decimal:
         coefficient *= 5 ** (scale - fives)
     if coefficient == 0:
         return Decimal("0")
-    digits = tuple(int(item) for item in str(abs(coefficient)))
-    return Decimal((int(coefficient < 0), digits, -scale))
+    coefficient_decimal = Decimal(coefficient)
+    parts = coefficient_decimal.as_tuple()
+    return Decimal((parts.sign, parts.digits, parts.exponent - scale))
 
 
 def _fraction_to_sampled_decimal(value: Fraction) -> Decimal:

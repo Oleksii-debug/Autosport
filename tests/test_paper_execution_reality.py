@@ -27,6 +27,40 @@ STARTED_AT = "2026-09-20T03:00:00.100000+00:00"
 EXPIRES_AT = "2026-09-20T03:01:00+00:00"
 
 
+def rewrite_rehashed_events(
+    ledger: PaperExecutionLedger,
+    events: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    rewritten: list[dict[str, object]] = []
+    previous_sha256 = None
+    for sequence, item in enumerate(events):
+        event = ledger._event(
+            event_type=item["event_type"],
+            run_id=item["run_id"],
+            key=item["event_key"],
+            payload=item["payload"],
+            sequence=sequence,
+            previous_sha256=previous_sha256,
+        )
+        rewritten.append(event)
+        previous_sha256 = event["event_sha256"]
+    ledger.path.write_text(
+        "".join(
+            json.dumps(
+                item,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+            for item in rewritten
+        ),
+        encoding="utf-8",
+    )
+    ledger._write_anchor_unlocked(rewritten)
+    return rewritten
+
+
 def action(
     action_id: str,
     *,
@@ -440,6 +474,78 @@ class PaperExecutionRealityTests(unittest.TestCase):
                 "unsupported event_type",
             ):
                 PaperExecutionLedger(path).events()
+
+    def test_rehashed_synthetic_attempt_semantics_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = plan(action("a1"))
+            model = config()
+            execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-rehashed-attempt",
+                config=model,
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            attempt = next(
+                item
+                for item in events
+                if item["event_type"] == "ATTEMPT_RECORDED"
+            )
+            attempt["payload"]["reason"] = "forged but fully rehashed"
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "synthetic attempt is not reproducible",
+            ):
+                execute_paper_plan(
+                    plan=current,
+                    trigger_id="trigger-rehashed-attempt",
+                    config=model,
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                )
+
+    def test_rehashed_attempt_event_reordering_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = plan(action("a1"), action("a2"))
+            model = config()
+            execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-reordered-attempts",
+                config=model,
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            indexes = [
+                index
+                for index, item in enumerate(events)
+                if item["event_type"] == "ATTEMPT_RECORDED"
+            ]
+            self.assertEqual(len(indexes), 2)
+            events[indexes[0]], events[indexes[1]] = (
+                events[indexes[1]],
+                events[indexes[0]],
+            )
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "canonical sequence order",
+            ):
+                execute_paper_plan(
+                    plan=current,
+                    trigger_id="trigger-reordered-attempts",
+                    config=model,
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                )
 
     def test_writer_lock_fails_closed_instead_of_creating_parallel_history(self):
         with tempfile.TemporaryDirectory() as tmp:

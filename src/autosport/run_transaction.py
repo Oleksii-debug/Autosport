@@ -131,16 +131,24 @@ class RunTransaction:
                 sampling_draw_admission_receipt_sha256,
                 "sampling_draw_admission_receipt_sha256",
             )
+        start_registry_item = None
+        registry_path = tx.workspace / "run_registry.json"
+        if sampling_draw_admission_receipt_sha256 is not None or registry_path.exists():
             try:
                 from .run_registry import RunRegistry
 
-                start_registry_item = RunRegistry(
-                    tx.workspace / "run_registry.json"
-                ).get(experiment_key)
+                start_registry_item = RunRegistry(registry_path).get(experiment_key)
+            except KeyError:
+                if sampling_draw_admission_receipt_sha256 is not None:
+                    raise RunTransactionError(
+                        "transaction start cannot validate external registry identity"
+                    )
             except Exception as exc:
-                raise RunTransactionError(
-                    "transaction start cannot validate external registry identity"
-                ) from exc
+                if sampling_draw_admission_receipt_sha256 is not None:
+                    raise RunTransactionError(
+                        "transaction start cannot validate external registry identity"
+                    ) from exc
+        if start_registry_item is not None:
             registry_admission = start_registry_item.get(
                 "sampling_draw_admission_receipt_sha256"
             )

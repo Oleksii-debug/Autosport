@@ -56,6 +56,21 @@ _LOCK_TYPE = WorkspaceEconomicLock
 _AUTHORITY_TYPE = MonotonicWorkspaceAuthority
 _MARKET_EVENT_TYPE = MarketEvent
 _TICKET_LEG_TYPE = TicketLeg
+_DECISION_RECORD_TYPE = DecisionRecord
+_JSON_DUMPS = json.dumps
+_HASHLIB_SHA256 = hashlib.sha256
+_MARKET_EVENT_METHOD_WITNESSES = tuple(
+    (
+        name,
+        MarketEvent.__dict__[name],
+        getattr(
+            getattr(MarketEvent.__dict__[name], "__func__", MarketEvent.__dict__[name]),
+            "__code__",
+            None,
+        ),
+    )
+    for name in ("to_dict", "from_dict")
+)
 
 _DERIVE_VECTOR_DESCRIPTOR = PaperRiskPolicy.__dict__["derive_goal_stake_vector"]
 _DERIVE_VECTOR = _DERIVE_VECTOR_DESCRIPTOR
@@ -129,6 +144,7 @@ _LEDGER_INTERNAL_METHOD_WITNESSES = tuple(
         "_append_validated",
         "_verify_bytes",
         "verified_snapshot",
+        "verify_integrity",
     )
 )
 _DECISION_RECORD_METHOD_WITNESSES = tuple(
@@ -152,6 +168,7 @@ _AUTHORITY_METHOD_WITNESSES = tuple(
     )
     for name in ("prepare", "commit", "recover", "read_history")
 )
+_AUTHORITY_METHOD_WITNESSES_EXPECTED = _AUTHORITY_METHOD_WITNESSES
 
 
 class ProductProposalRiskTargetError(RuntimeError):
@@ -361,6 +378,9 @@ def _require_dispatch() -> None:
         (_AUTHORITY_TYPE is MonotonicWorkspaceAuthority, "MonotonicWorkspaceAuthority type"),
         (_MARKET_EVENT_TYPE is MarketEvent, "MarketEvent type"),
         (_TICKET_LEG_TYPE is TicketLeg, "TicketLeg type"),
+        (_DECISION_RECORD_TYPE is DecisionRecord, "DecisionRecord type"),
+        (_JSON_DUMPS is json.dumps, "canonical JSON serializer"),
+        (_HASHLIB_SHA256 is hashlib.sha256, "target SHA-256 implementation"),
         (_REPLACE is replace, "dataclasses.replace helper"),
         (_PROVENANCE_FOR is provenance_for, "economic-goal provenance helper"),
         (_ENSURE_DURABLE_FILE is ensure_durable_file, "durable-file helper"),
@@ -563,7 +583,13 @@ def _require_dispatch() -> None:
         raise ProductProposalRiskTargetError(
             "proposal-risk target dispatch authority changed: durable-file helper"
         )
-    for name, expected, code in _AUTHORITY_METHOD_WITNESSES:
+    if (
+        _AUTHORITY_METHOD_WITNESSES is not _AUTHORITY_METHOD_WITNESSES_EXPECTED
+    ):
+        raise ProductProposalRiskTargetError(
+            "proposal-risk target monotonic authority witness root changed"
+        )
+    for name, expected, code in _AUTHORITY_METHOD_WITNESSES_EXPECTED:
         current = MonotonicWorkspaceAuthority.__dict__.get(name)
         if (
             current is not expected
@@ -572,13 +598,30 @@ def _require_dispatch() -> None:
             raise ProductProposalRiskTargetError(
                 f"proposal-risk target dispatch authority changed: monotonic authority {name}"
             )
+    for name, expected, code in _MARKET_EVENT_METHOD_WITNESSES:
+        current = MarketEvent.__dict__.get(name)
+        current_function = getattr(current, "__func__", current)
+        if (
+            current is not expected
+            or getattr(current_function, "__code__", None) is not code
+        ):
+            raise ProductProposalRiskTargetError(
+                f"proposal-risk target dispatch authority changed: MarketEvent {name}"
+            )
 
     helper_witnesses = globals().get("_PROPOSAL_TARGET_HELPER_WITNESSES")
+    expected_helper_witnesses = globals().get(
+        "_PROPOSAL_TARGET_HELPER_WITNESSES_EXPECTED"
+    )
+    if helper_witnesses is not expected_helper_witnesses:
+        raise ProductProposalRiskTargetError(
+            "proposal-risk target internal helper witness root changed"
+        )
     if type(helper_witnesses) is not tuple:
         raise ProductProposalRiskTargetError(
             "proposal-risk target internal helper witness set is unavailable"
         )
-    for name, expected, code in helper_witnesses:
+    for name, expected, code in expected_helper_witnesses:
         current = globals().get(name)
         if (
             current is not expected
@@ -587,6 +630,9 @@ def _require_dispatch() -> None:
             raise ProductProposalRiskTargetError(
                 f"proposal-risk target internal helper authority changed: {name}"
             )
+
+
+_REQUIRE_DISPATCH_ORIGINAL = _require_dispatch
 
 
 def _context_payload(context: ProposedTicketRiskContext) -> dict[str, object]:
@@ -1382,7 +1428,11 @@ def issue_product_proposal_risk_target(
     simultaneously valid alternatives.
     """
 
-    _require_dispatch()
+    if _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL:
+        raise ProductProposalRiskTargetError(
+            "proposal-risk target dispatch guard root changed"
+        )
+    _REQUIRE_DISPATCH_ORIGINAL()
     workspace = _workspace_path(workspace)
     if type(signal_strengths) is not tuple or not signal_strengths:
         raise ProductProposalRiskTargetError(
@@ -1393,7 +1443,7 @@ def issue_product_proposal_risk_target(
     )
 
     with _LOCK_TYPE(workspace):
-        _require_dispatch()
+        _REQUIRE_DISPATCH_ORIGINAL()
         goal, policy, book, ledger = _current_product_state(workspace)
         validated_contexts = _validate_context_vector(contexts, goal)
         if len(signals) != len(validated_contexts):
@@ -1602,11 +1652,15 @@ def resolve_product_proposal_risk_target(
     economic mutation makes the proposal stale.
     """
 
-    _require_dispatch()
+    if _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL:
+        raise ProductProposalRiskTargetError(
+            "proposal-risk target dispatch guard root changed"
+        )
+    _REQUIRE_DISPATCH_ORIGINAL()
     workspace = _workspace_path(workspace)
     target_sha256 = _sha(target_sha256, "target_sha256")
     with _LOCK_TYPE(workspace):
-        _require_dispatch()
+        _REQUIRE_DISPATCH_ORIGINAL()
         goal, policy, book, ledger = _current_product_state(workspace)
         workspace_authority = _authority_for_workspace(workspace)
         workspace_instance_id = workspace_authority.workspace_instance_id
@@ -1668,3 +1722,5 @@ _PROPOSAL_TARGET_HELPER_WITNESSES = tuple(
         "_decimal_text",
     )
 )
+
+_PROPOSAL_TARGET_HELPER_WITNESSES_EXPECTED = _PROPOSAL_TARGET_HELPER_WITNESSES

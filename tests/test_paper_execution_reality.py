@@ -870,6 +870,27 @@ class PaperExecutionRealityTests(unittest.TestCase):
                 target.record_attempt(attempt)
             self.assertFalse(target_path.exists())
 
+            target._append_event(
+                event_type="ATTEMPT_RECORDED",
+                run_id=attempt.run_id,
+                key=f"{attempt.run_id}:attempt:{attempt.sequence}",
+                payload=attempt.to_dict(),
+            )
+            event_count = len(target.events())
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "cannot be retroactively appended",
+            ):
+                target.reserve_run(
+                    run_id=result.run_id,
+                    trigger_id="trigger-attempt-source",
+                    plan=current,
+                    config=config(),
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={},
+                )
+            self.assertEqual(len(target.events()), event_count)
+
     def test_exact_attempt_retry_is_idempotent_after_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PaperExecutionLedger(

@@ -37,6 +37,22 @@ class ProductProposalRiskExecutionEvidenceDispatchGuardTests(unittest.TestCase):
         finally:
             evidence_authority._mint = original
 
+    def test_protocol_root_rebinding_is_rejected_before_input_dispatch(self) -> None:
+        original = evidence_authority._BOUND_METHOD
+        try:
+            evidence_authority._BOUND_METHOD = "CALLER_SELECTED_BOUND_METHOD"
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "protocol root _BOUND_METHOD changed",
+            ):
+                evidence_authority.derive_product_proposal_risk_execution_evidence(
+                    None,
+                    (),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            evidence_authority._BOUND_METHOD = original
+
     def test_authority_type_rebinding_is_rejected_before_input_dispatch(self) -> None:
         original = evidence_authority.ProductProposalRiskExecutionEvidence
         try:

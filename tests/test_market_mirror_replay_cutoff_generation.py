@@ -3230,6 +3230,77 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_append_batch_materializes_generator_before_issuance_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            state = {"consumed": False, "lock_entered": False}
+
+            def generated_events():
+                yield self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                state["consumed"] = True
+
+            class GuardLock:
+                def __enter__(self):
+                    self.assert_consumed = state["consumed"]
+                    if not self.assert_consumed:
+                        raise AssertionError("append iterable executed under issuance lock")
+                    state["lock_entered"] = True
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            try:
+                with patch.object(
+                    SQLiteMarketStore,
+                    "_market_append_issuance_lock",
+                    new=staticmethod(lambda _authority: GuardLock()),
+                ):
+                    accepted = store.append_batch_accepted(generated_events())
+
+                self.assertEqual(len(accepted), 1)
+                self.assertTrue(state["consumed"])
+                self.assertTrue(state["lock_entered"])
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
+
+    def test_append_batch_generator_failure_occurs_before_durable_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            authority = store._market_append_authority()
+            before = authority.read_history()
+
+            def broken_events():
+                yield self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                raise RuntimeError("generator failed before batch admission")
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "generator failed before batch admission",
+                ):
+                    store.append_batch_accepted(broken_events())
+
+                self.assertEqual(authority.read_history(), before)
+                self.assertEqual(store.events(), [])
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_event_commit_order"
+                    ).fetchone(),
+                    (0,),
+                )
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

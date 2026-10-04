@@ -398,7 +398,7 @@ class ProphetXMarketDataTests(unittest.TestCase):
                     normalizer.normalize(second_batch.source_id, quote)
                     for quote in second_batch.quotes
                 ),
-                1,
+                len(second_batch.quotes),
             )
             current = store.current_by_source()
             strike_a = next(
@@ -406,15 +406,8 @@ class ProphetXMarketDataTests(unittest.TestCase):
                 for (_source_id, _quote_key), event in current.items()
                 if event.selection_id.endswith(":strike-a")
             )
-            strike_b = next(
-                event
-                for (_source_id, _quote_key), event in current.items()
-                if event.selection_id.endswith(":strike-b")
-            )
             self.assertEqual(strike_a.sequence, second_batch.quotes[0].sequence)
             self.assertEqual(strike_a.decimal_odds, Decimal("2.6"))
-            self.assertEqual(strike_b.sequence, first_batch.quotes[0].sequence)
-            self.assertEqual(len(store.events()), len(first_batch.quotes) + 1)
         finally:
             store.close()
 

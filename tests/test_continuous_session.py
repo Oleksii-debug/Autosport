@@ -1738,6 +1738,286 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_prepared_recovery_matching_lifecycle_cannot_mint_unstaged_truth(self) -> None:
+        class Handoff:
+            def __init__(self) -> None:
+                self.resolutions = ()
+
+            def prepared_settlement_resolutions(self, *, paper_book_path):
+                del paper_book_path
+                return self.resolutions
+
+            def reconcile_after_settlement(self, **_kwargs):
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="result:prepared-mint",
+            )
+            handoff = Handoff()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-prepared-mint",
+                        position=1,
+                        events=(event,),
+                    )
+                ),
+                clock,
+                settlement_learning_handoff=handoff,
+            )
+            try:
+                coordinator.tick()
+                handoff.resolutions = (
+                    SettlementResolution(
+                        event_identity=event.identity,
+                        settlement_ref="result:prepared-mint",
+                        quote_outcomes={"event-1|winner|home": "win"},
+                        evidence_id="prepared-mint-evidence",
+                        evidence_sha256="6" * 64,
+                        available_at="2026-09-19T21:19:30+00:00",
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "was not durably staged before P&L",
+                ):
+                    coordinator._recovered_settlement_resolutions(as_of=clock())
+            finally:
+                store.close()
+
+    def test_prepared_recovery_matching_lifecycle_rejects_cleared_history(self) -> None:
+        class Handoff:
+            def __init__(self) -> None:
+                self.resolutions = ()
+
+            def prepared_settlement_resolutions(self, *, paper_book_path):
+                del paper_book_path
+                return self.resolutions
+
+            def reconcile_after_settlement(self, **_kwargs):
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="result:prepared-cleared",
+            )
+            handoff = Handoff()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-prepared-cleared",
+                        position=1,
+                        events=(event,),
+                    )
+                ),
+                clock,
+                settlement_learning_handoff=handoff,
+            )
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="result:prepared-cleared",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="prepared-cleared-evidence",
+                evidence_sha256="7" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                coordinator.tick()
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                coordinator._state.complete_pending_settlement_commit(
+                    settlement_evidence=(resolution,),
+                    retain_pending_evidence_ids=(),
+                )
+                handoff.resolutions = (resolution,)
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "no longer pending for recovery",
+                ):
+                    coordinator._recovered_settlement_resolutions(as_of=clock())
+            finally:
+                store.close()
+
+    def test_prepared_recovery_rejects_durable_lifecycle_reference_drift(self) -> None:
+        class Handoff:
+            def __init__(self) -> None:
+                self.resolutions = ()
+
+            def prepared_settlement_resolutions(self, *, paper_book_path):
+                del paper_book_path
+                return self.resolutions
+
+            def reconcile_after_settlement(self, **_kwargs):
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="result:prepared-canonical-ref",
+            )
+            handoff = Handoff()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-prepared-ref-drift",
+                        position=1,
+                        events=(event,),
+                    )
+                ),
+                clock,
+                settlement_learning_handoff=handoff,
+            )
+            try:
+                coordinator.tick()
+                handoff.resolutions = (
+                    SettlementResolution(
+                        event_identity=event.identity,
+                        settlement_ref="result:prepared-forged-ref",
+                        quote_outcomes={"event-1|winner|home": "win"},
+                        evidence_id="prepared-ref-drift-evidence",
+                        evidence_sha256="8" * 64,
+                        available_at="2026-09-19T21:19:30+00:00",
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "prepared settlement recovery conflicts with durable lifecycle",
+                ):
+                    coordinator._recovered_settlement_resolutions(as_of=clock())
+            finally:
+                store.close()
+
+    def test_prepared_recovery_rejects_cutoff_before_lifecycle_discovery(self) -> None:
+        class Handoff:
+            def __init__(self) -> None:
+                self.resolutions = ()
+
+            def prepared_settlement_resolutions(self, *, paper_book_path):
+                del paper_book_path
+                return self.resolutions
+
+            def reconcile_after_settlement(self, **_kwargs):
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="result:prepared-cutoff",
+            )
+            handoff = Handoff()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-prepared-cutoff",
+                        position=1,
+                        events=(event,),
+                    )
+                ),
+                clock,
+                settlement_learning_handoff=handoff,
+            )
+            try:
+                coordinator.tick()
+                handoff.resolutions = (
+                    SettlementResolution(
+                        event_identity=event.identity,
+                        settlement_ref="result:prepared-cutoff",
+                        quote_outcomes={"event-1|winner|home": "win"},
+                        evidence_id="prepared-cutoff-evidence",
+                        evidence_sha256="9" * 64,
+                        available_at="2026-09-19T21:19:00+00:00",
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "prepared settlement lifecycle was discovered after the evidence cutoff",
+                ):
+                    coordinator._recovered_settlement_resolutions(
+                        as_of="2026-09-19T21:19:30+00:00",
+                    )
+            finally:
+                store.close()
+
+    def test_prepared_recovery_rejects_duplicate_evidence_identity(self) -> None:
+        class Handoff:
+            def __init__(self) -> None:
+                self.resolutions = ()
+
+            def prepared_settlement_resolutions(self, *, paper_book_path):
+                del paper_book_path
+                return self.resolutions
+
+            def reconcile_after_settlement(self, **_kwargs):
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="result:prepared-duplicate",
+            )
+            handoff = Handoff()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-prepared-duplicate",
+                        position=1,
+                        events=(event,),
+                    )
+                ),
+                clock,
+                settlement_learning_handoff=handoff,
+            )
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="result:prepared-duplicate",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="prepared-duplicate-evidence",
+                evidence_sha256="a" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                coordinator.tick()
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                handoff.resolutions = (resolution, resolution)
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "prepared settlement recovery repeats evidence identity",
+                ):
+                    coordinator._recovered_settlement_resolutions(as_of=clock())
+            finally:
+                store.close()
+
     def test_recovered_settlement_requires_exact_tuple_contract(self) -> None:
         class Handoff:
             def prepared_settlement_resolutions(self, *, paper_book_path):

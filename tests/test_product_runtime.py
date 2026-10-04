@@ -483,6 +483,60 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 _LearningHandoff.reconcile_after_settlement = original
 
+    def test_product_source_and_learning_proxy_class_dispatch_is_immutable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_autonomous_product_runtime(
+                workspace=Path(directory),
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+                settlement_learning_handoff=_LearningHandoff(),
+            )
+            source_proxy = runtime.collector.source
+            learning_proxy = runtime.coordinator.settlement_learning_handoff
+            try:
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "collector source proxy class member 'fetch_deltas' is immutable",
+                ):
+                    type.__setattr__(
+                        type(source_proxy),
+                        "fetch_deltas",
+                        lambda *_args, **_kwargs: (),
+                    )
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "collector source proxy class member 'source_id' is immutable",
+                ):
+                    type.__setattr__(
+                        type(source_proxy),
+                        "source_id",
+                        "forged-source",
+                    )
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "settlement learning proxy class member 'reconcile_after_settlement' is immutable",
+                ):
+                    type.__setattr__(
+                        type(learning_proxy),
+                        "reconcile_after_settlement",
+                        lambda *_args, **_kwargs: (),
+                    )
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "settlement learning proxy class identity is immutable",
+                ):
+                    object.__setattr__(
+                        learning_proxy,
+                        "__class__",
+                        type("ForgedLearningProxy", (), {}),
+                    )
+            finally:
+                runtime.close()
+
     def test_product_collector_rejects_post_build_source_reassignment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_autonomous_product_runtime(

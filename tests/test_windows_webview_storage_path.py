@@ -11,6 +11,8 @@ from autosport.paths import default_webview_storage_path
 from autosport.windows_webview_shell import (
     _PYWEBVIEW_RELEASE_SETTINGS,
     _WEBVIEW2_ENVIRONMENT_OVERRIDES,
+    AutosportWebBridge,
+    AutosportWebController,
     WindowsWebViewUnavailable,
     _probe_webview_storage_writable,
     launch_windows_shell,
@@ -31,7 +33,26 @@ class _Window:
         self.events = SimpleNamespace(
             initialized=_EventHook(),
             before_load=_EventHook(),
+            closing=_EventHook(),
         )
+        self.original_url: str | None = None
+        self.real_url = "http://127.0.0.1:43000/index.html"
+        self.current_url = self.real_url
+        self.native = SimpleNamespace(
+            webview=SimpleNamespace(
+                CoreWebView2=SimpleNamespace(
+                    Environment=SimpleNamespace(
+                        BrowserVersionString="154.0.2847.51",
+                    )
+                )
+            )
+        )
+
+    def get_current_url(self) -> str:
+        return self.current_url
+
+    def destroy(self) -> None:
+        pass
 
 
 class _Bridge:
@@ -52,13 +73,19 @@ def _fake_webview(
     def create_window(*args, **kwargs):
         calls["create_window"] = (args, kwargs)
         calls["window"] = window
+        window.original_url = args[1]
         return window
 
     def start(**kwargs):
         calls["start"] = dict(kwargs)
-        callback = window.events.initialized.callback
-        assert callback is not None
-        callback(kwargs["gui"])
+        initialized = window.events.initialized.callback
+        assert initialized is not None
+        if initialized(kwargs["gui"]) is False:
+            raise RuntimeError("renderer witness rejected")
+        before_load = window.events.before_load.callback
+        assert before_load is not None
+        if before_load() is False:
+            raise RuntimeError("trusted document witness rejected")
 
     release_settings = {name: None for name in _PYWEBVIEW_RELEASE_SETTINGS}
     if settings:
@@ -68,6 +95,13 @@ def _fake_webview(
         start=start,
         settings=release_settings,
     )
+
+
+def _canonical_bridge(
+    tmp_path: Path,
+) -> tuple[AutosportWebBridge, AutosportWebController]:
+    controller = AutosportWebController(tmp_path / "workspace")
+    return AutosportWebBridge(controller), controller
 
 
 def _clear_webview2_environment_overrides(

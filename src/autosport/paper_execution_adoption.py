@@ -600,13 +600,74 @@ class PaperExecutionAdoptionRuntime:
             )
 
         run_id = self.expected_run_id(prepared, trigger_id)
+        run_events = self.ledger.events(run_id)
+        if not run_events:
+            raise PaperExecutionAdoptionError(
+                "PaperBook changed before any durable #623 run evidence"
+            )
+        reservations = tuple(
+            event
+            for event in run_events
+            if event.get("event_type") == "RUN_RESERVED"
+        )
+        if len(reservations) != 1:
+            raise PaperExecutionAdoptionError(
+                "PaperBook recovery requires exactly one durable #623 reservation"
+            )
+        reservation = reservations[0].get("payload")
+        if type(reservation) is not dict:
+            raise PaperExecutionAdoptionError(
+                "PaperBook recovery reservation is malformed"
+            )
+        observation_evidence_ids = reservation.get(
+            "observation_evidence_ids"
+        )
+        suspended_raw = reservation.get("suspended_action_ids", [])
+        action_ids = {
+            action.action_id for action in prepared.execution_plan.actions
+        }
+        if (
+            type(observation_evidence_ids) is not dict
+            or any(
+                type(action_id) is not str
+                or not action_id
+                or type(evidence_id) is not str
+                or not evidence_id
+                or action_id not in action_ids
+                for action_id, evidence_id in observation_evidence_ids.items()
+            )
+            or type(suspended_raw) is not list
+            or any(
+                type(action_id) is not str
+                or not action_id
+                or action_id not in action_ids
+                for action_id in suspended_raw
+            )
+            or suspended_raw != sorted(suspended_raw)
+            or len(suspended_raw) != len(set(suspended_raw))
+        ):
+            raise PaperExecutionAdoptionError(
+                "PaperBook recovery execution inputs are malformed"
+            )
+        suspended_action_ids = frozenset(suspended_raw)
+        if set(observation_evidence_ids) & suspended_action_ids:
+            raise PaperExecutionAdoptionError(
+                "PaperBook recovery execution inputs conflict"
+            )
+        evidence_registry = (
+            None
+            if not observation_evidence_ids
+            else PaperExecutionEvidenceRegistry(self.ledger)
+        )
         run = self.ledger.load_run(
             run_id=run_id,
             trigger_id=trigger_id,
             plan=prepared.execution_plan,
             config=self.config,
             started_at=started_at,
-            observation_evidence_ids={},
+            observation_evidence_ids=observation_evidence_ids,
+            suspended_action_ids=suspended_action_ids,
+            evidence_registry=evidence_registry,
         )
         if run is None:
             raise PaperExecutionAdoptionError(

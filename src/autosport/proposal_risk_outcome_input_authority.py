@@ -209,6 +209,37 @@ class ProductProposalRiskOutcomeInputMapping:
         return False
 
 
+_RESULT_TYPE = ProductProposalRiskOutcomeInputMapping
+_RESULT_TYPE_EXPECTED = _RESULT_TYPE
+_RESULT_AUTHORITY_PROPERTY_NAMES = (
+    "mapping_identity_proven",
+    "exact_target_market_coverage_proven",
+    "decision_time_market_inputs_rebuilt",
+    "provider_outcome_origin_independently_proven",
+    "joint_probability_model_proven",
+    "proposal_target_counterfactual_execution_proven",
+    "risk_upper_bound_for_target",
+    "proposal_target_risk_qualified",
+    "grants_risk_approval_authority",
+    "grants_ticket_authority",
+    "grants_broker_execution_authority",
+    "grants_real_money_authority",
+    "grants_state_mutation_authority",
+)
+_RESULT_AUTHORITY_PROPERTY_WITNESSES = tuple(
+    (
+        name,
+        _RESULT_TYPE.__dict__[name],
+        _RESULT_TYPE.__dict__[name].fget,
+        getattr(_RESULT_TYPE.__dict__[name].fget, "__code__", None),
+    )
+    for name in _RESULT_AUTHORITY_PROPERTY_NAMES
+)
+_RESULT_AUTHORITY_PROPERTY_WITNESSES_EXPECTED = (
+    _RESULT_AUTHORITY_PROPERTY_WITNESSES
+)
+
+
 _RESULT_FIELDS = (
     "workspace_instance_id",
     "decision_id",
@@ -316,7 +347,24 @@ def _workspace_path(value: object) -> Path:
 
 def _require_dispatch() -> None:
     if (
-        ProductProposalRiskTarget is not _TARGET_TYPE
+        ProductProposalRiskOutcomeInputMapping is not _RESULT_TYPE_EXPECTED
+        or _RESULT_TYPE is not _RESULT_TYPE_EXPECTED
+        or _RESULT_AUTHORITY_PROPERTY_WITNESSES
+        is not _RESULT_AUTHORITY_PROPERTY_WITNESSES_EXPECTED
+        or any(
+            ProductProposalRiskOutcomeInputMapping.__dict__.get(name)
+            is not descriptor
+            or getattr(
+                ProductProposalRiskOutcomeInputMapping.__dict__.get(name),
+                "fget",
+                None,
+            )
+            is not getter
+            or getattr(getter, "__code__", None) is not code
+            for name, descriptor, getter, code
+            in _RESULT_AUTHORITY_PROPERTY_WITNESSES_EXPECTED
+        )
+        or ProductProposalRiskTarget is not _TARGET_TYPE
         or resolve_product_proposal_risk_target is not _TARGET_RESOLVER
         or getattr(_TARGET_RESOLVER, "__code__", None) is not _TARGET_RESOLVER_CODE
         or build_market_implied_baseline_evidence is not _BASELINE_BUILD

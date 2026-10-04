@@ -1620,6 +1620,68 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
                     market_inputs=(market_input,),
                 )
 
+    def test_outcome_input_mapping_result_class_rebinding_fails_closed(self) -> None:
+        with patch.object(
+            outcome_input_authority,
+            "ProductProposalRiskOutcomeInputMapping",
+            object,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskOutcomeInputMappingError,
+                "dispatch authority changed",
+            ):
+                outcome_input_authority._require_dispatch()
+
+    def test_outcome_input_mapping_authority_property_rebinding_fails_closed(
+        self,
+    ) -> None:
+        forged = property(lambda _self: True)
+        with patch.object(
+            ProductProposalRiskOutcomeInputMapping,
+            "risk_upper_bound_for_target",
+            forged,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskOutcomeInputMappingError,
+                "dispatch authority changed",
+            ):
+                outcome_input_authority._require_dispatch()
+
+    def test_outcome_input_mapping_false_authority_getter_code_mutation_fails_closed(
+        self,
+    ) -> None:
+        false_authority_names = (
+            "provider_outcome_origin_independently_proven",
+            "joint_probability_model_proven",
+            "proposal_target_counterfactual_execution_proven",
+            "risk_upper_bound_for_target",
+            "proposal_target_risk_qualified",
+            "grants_risk_approval_authority",
+            "grants_ticket_authority",
+            "grants_broker_execution_authority",
+            "grants_real_money_authority",
+            "grants_state_mutation_authority",
+        )
+
+        def forged(_self: object) -> bool:
+            return True
+
+        for name in false_authority_names:
+            descriptor = ProductProposalRiskOutcomeInputMapping.__dict__[name]
+            getter = descriptor.fget
+            self.assertIsNotNone(getter)
+            original_code = getter.__code__
+            try:
+                getter.__code__ = forged.__code__
+                with self.assertRaisesRegex(
+                    ProductProposalRiskOutcomeInputMappingError,
+                    "dispatch authority changed",
+                    msg=name,
+                ):
+                    outcome_input_authority._require_dispatch()
+            finally:
+                getter.__code__ = original_code
+
 
 if __name__ == "__main__":
     unittest.main()

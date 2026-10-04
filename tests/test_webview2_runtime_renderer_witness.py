@@ -26,8 +26,31 @@ class _InitializedEvent:
 
 
 class _FakeWindow:
-    def __init__(self) -> None:
-        self.events = SimpleNamespace(initialized=_InitializedEvent())
+    def __init__(self, browser_version: object = "154.0.2847.51") -> None:
+        self.events = SimpleNamespace(
+            initialized=_InitializedEvent(),
+            before_load=_InitializedEvent(),
+            closing=_InitializedEvent(),
+        )
+        self.original_url: str | None = None
+        self.real_url = "http://127.0.0.1:41000/index.html"
+        self.current_url = self.real_url
+        self.native = SimpleNamespace(
+            webview=SimpleNamespace(
+                CoreWebView2=SimpleNamespace(
+                    Environment=SimpleNamespace(
+                        BrowserVersionString=browser_version,
+                    )
+                )
+            )
+        )
+        self.destroyed = False
+
+    def get_current_url(self) -> str:
+        return self.current_url
+
+    def destroy(self) -> None:
+        self.destroyed = True
 
 
 class _FakeWebview:
@@ -49,6 +72,7 @@ class _FakeWebview:
 
     def create_window(self, *args, **kwargs):
         self.create_calls += 1
+        self.window.original_url = args[1]
         return self.window
 
     def start(self, *, gui: str, **kwargs) -> None:
@@ -61,14 +85,17 @@ class _FakeWebview:
                 raise RuntimeError(
                     "window creation cancelled by initialized renderer witness"
                 )
+        for handler in tuple(self.window.events.before_load.handlers):
+            accepted = handler()
+            if accepted is False:
+                raise RuntimeError(
+                    "window creation cancelled by trusted document witness"
+                )
 
 
-class _Bridge:
-    def __init__(self) -> None:
-        self.closed = False
-
-    def close(self) -> None:
-        self.closed = True
+def _canonical_bridge(tmp_path: Path) -> tuple[AutosportWebBridge, AutosportWebController]:
+    controller = AutosportWebController(tmp_path / "workspace")
+    return AutosportWebBridge(controller), controller
 
 
 def _install_fake_webview(

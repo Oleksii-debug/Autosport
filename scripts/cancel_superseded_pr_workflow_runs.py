@@ -495,6 +495,8 @@ class GitHubApi:
         _pulls_per_page: int = _PULLS_PER_PAGE,
         _encode_query=urlencode,
         _encode_query_code=urlencode.__code__,
+        _encode_query_defaults=urlencode.__defaults__,
+        _encode_query_kwdefaults=urlencode.__kwdefaults__,
         _sha_validator=_require_sha,
         _sha_validator_code=_require_sha.__code__,
         _positive_int=_require_positive_int,
@@ -526,6 +528,10 @@ class GitHubApi:
                 and bound_func is request_func
                 and getattr(request_func, "__code__", None) is request_code
                 and getattr(_encode_query, "__code__", None) is _encode_query_code
+                and getattr(_encode_query, "__defaults__", None)
+                is _encode_query_defaults
+                and getattr(_encode_query, "__kwdefaults__", None)
+                is _encode_query_kwdefaults
                 and getattr(_sha_validator, "__code__", None) is _sha_validator_code
                 and getattr(_positive_int, "__code__", None) is _positive_int_code
             )
@@ -536,6 +542,10 @@ class GitHubApi:
             or _pulls_per_page > 100
             or not callable(_encode_query)
             or getattr(_encode_query, "__code__", None) is not _encode_query_code
+            or getattr(_encode_query, "__defaults__", None)
+            is not _encode_query_defaults
+            or getattr(_encode_query, "__kwdefaults__", None)
+            is not _encode_query_kwdefaults
             or not request_dispatch_current()
         ):
             raise CancellationError("commit association authority is unavailable")

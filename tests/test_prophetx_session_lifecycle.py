@@ -1163,6 +1163,58 @@ def test_credential_rejection_evidence_cannot_be_reclassified_as_wait(
         )
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE,
+        ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION,
+        ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED,
+    ],
+)
+def test_login_failure_evidence_cannot_be_laundered_into_wait_state(failure):
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="login failure evidence is incompatible with durable state",
+    ):
+        ProphetXSessionSnapshot(
+            state=ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+            generation=8,
+            credential_revision="rev-1",
+            integration_role="market-maker-primary",
+            last_transition_at=NOW,
+            slot_hold_until=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
+            last_failure_class=failure,
+        )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ProphetXRenewalFailureClass.RETRYABLE,
+        ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE,
+        ProphetXRenewalFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+    ],
+)
+def test_renewal_failure_evidence_cannot_be_laundered_into_active_state(
+    failure,
+):
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="renewal failure evidence is incompatible with durable state",
+    ):
+        ProphetXSessionSnapshot(
+            state=ProphetXSessionState.ACTIVE,
+            generation=9,
+            credential_revision="rev-1",
+            integration_role="market-maker-primary",
+            last_transition_at=NOW,
+            session_lineage_id=sha256(b"session").hexdigest(),
+            access_expires_at=NOW + timedelta(minutes=10),
+            slot_hold_until=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
+            last_renewal_failure_class=failure,
+        )
+
+
 def test_credential_rejected_state_rejects_nonfuture_provider_slot_hold():
     with pytest.raises(
         ProphetXSessionLifecycleError,

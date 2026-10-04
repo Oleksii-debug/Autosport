@@ -325,6 +325,60 @@ class ProphetXSessionSnapshot:
                 "credential-rejected state"
             )
 
+        if self.last_failure_class is not None:
+            allowed_login_failure_states = {
+                ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE: {
+                    ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
+                },
+                ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION: {
+                    ProphetXSessionState.PROVIDER_UNAVAILABLE,
+                },
+                ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED: {
+                    ProphetXSessionState.SESSION_POOL_EXHAUSTED,
+                },
+                ProphetXLoginFailureClass.CREDENTIAL_REJECTED: {
+                    ProphetXSessionState.CREDENTIAL_REJECTED,
+                },
+                ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT: {
+                    ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+                },
+            }
+            if self.state not in allowed_login_failure_states[self.last_failure_class]:
+                raise ProphetXSessionLifecycleError(
+                    "login failure evidence is incompatible with durable state"
+                )
+
+        if self.last_renewal_failure_class is not None:
+            allowed_renewal_failure_states = {
+                ProphetXRenewalFailureClass.RETRYABLE: {
+                    ProphetXSessionState.RENEWAL_DUE,
+                    ProphetXSessionState.RENEWING,
+                    ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+                    ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
+                },
+                ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE: {
+                    ProphetXSessionState.RENEWAL_DUE,
+                    ProphetXSessionState.RENEWING,
+                    ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+                    ProphetXSessionState.PROVIDER_UNAVAILABLE,
+                },
+                ProphetXRenewalFailureClass.CREDENTIAL_REJECTED: {
+                    ProphetXSessionState.CREDENTIAL_REJECTED,
+                },
+                ProphetXRenewalFailureClass.AMBIGUOUS_PROVIDER_RESULT: {
+                    ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+                },
+            }
+            if (
+                self.state
+                not in allowed_renewal_failure_states[
+                    self.last_renewal_failure_class
+                ]
+            ):
+                raise ProphetXSessionLifecycleError(
+                    "renewal failure evidence is incompatible with durable state"
+                )
+
         if self.state in {
             ProphetXSessionState.LOGIN_IN_FLIGHT,
             ProphetXSessionState.RENEWING,

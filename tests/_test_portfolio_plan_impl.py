@@ -1,3 +1,4 @@
+import copy
 import json
 import tempfile
 import unittest
@@ -1323,6 +1324,21 @@ class PortfolioPlanTests(unittest.TestCase):
             (authority.authority_sha256,),
         )
 
+        copied_authority = copy.copy(authority)
+        with self.assertRaisesRegex(
+            ValueError,
+            "not issued by the canonical provider verifier",
+        ):
+            build_portfolio_plan(
+                book,
+                intents,
+                self._policy(goal),
+                self.DECISION_TS,
+                dependency_graph=graph,
+                terminal_state_evidence=witness,
+                market_outcome_authorities=(copied_authority,),
+            )
+
         payload = plan.to_dict()
         with self.assertRaisesRegex(
             ValueError,
@@ -1336,6 +1352,15 @@ class PortfolioPlanTests(unittest.TestCase):
             ),
             plan,
         )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "serialized portfolio plan is invalid",
+        ):
+            PortfolioPlan.from_dict(
+                payload,
+                verified_outcome_authorities=(copy.copy(authority),),
+            )
 
         tampered = json.loads(json.dumps(payload))
         terminal = tampered["terminal_economics"]

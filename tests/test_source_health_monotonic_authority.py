@@ -11,7 +11,7 @@ from autosport.continuous_observation import (
     ContinuousObservationConfig,
     run_continuous_observation,
 )
-from autosport.ingestion_health import SourceHealthStore
+from autosport.ingestion_health import SourceHealthState, SourceHealthStore
 from autosport.monotonic_workspace_authority import (
     AuthorityPhase,
     MonotonicAuthorityRecoveryRequiredError,
@@ -59,6 +59,85 @@ def _record_provider_failure(store: SourceHealthStore) -> None:
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def test_success_cas_rejects_subclass_equality_forgery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path, monkeypatch, "cas-subclass")
+    _record_success(store)
+    current = store.get("provider-a")
+
+    class ForgedExpected(SourceHealthState):
+        def validate(self) -> None:
+            return None
+
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            return False
+
+    forged = ForgedExpected(source_id="provider-a")
+    assert current == forged
+
+    with pytest.raises(
+        TypeError,
+        match="expected_before must be exact SourceHealthState",
+    ):
+        store.record_success_if_current(
+            forged,
+            now=T2,
+            received=1,
+            accepted=1,
+            rejected=0,
+            cursor="cursor-2",
+            latest_source_ts=T2,
+            quality_flags=(),
+        )
+
+    assert store.get("provider-a") == current
+
+
+def test_success_cas_rejects_subclassed_ambiguous_after(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path, monkeypatch, "cas-ambiguous-subclass")
+    _record_success(store)
+    current = store.get("provider-a")
+
+    class ForgedAmbiguous(SourceHealthState):
+        def validate(self) -> None:
+            return None
+
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            return False
+
+    forged = ForgedAmbiguous(source_id="provider-a")
+    assert current == forged
+
+    with pytest.raises(
+        TypeError,
+        match="ambiguous_after must be exact SourceHealthState or null",
+    ):
+        store.record_success_if_current(
+            current,
+            ambiguous_after=forged,
+            now=T2,
+            received=1,
+            accepted=1,
+            rejected=0,
+            cursor="cursor-2",
+            latest_source_ts=T2,
+            quality_flags=(),
+        )
+
+    assert store.get("provider-a") == current
 
 
 def test_source_health_authority_key_matches_windows_filename_identity() -> None:

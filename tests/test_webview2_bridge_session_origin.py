@@ -417,6 +417,27 @@ def test_bridge_rejects_controller_registry_global_rebind(tmp_path) -> None:
     bridge._close_from_host()
 
 
+def test_bridge_rejects_trust_lock_rebind(tmp_path) -> None:
+    controller = AutosportWebController(tmp_path / "workspace")
+    bridge = AutosportWebBridge(controller)
+    window = _Window()
+    bridge._bind_trusted_window(window)
+    original_lock = bridge._trust_lock
+
+    bridge.__dict__["_trust_lock"] = threading.RLock()
+    try:
+        with pytest.raises(
+            WindowsWebBridgeTrustError,
+            match="trust-lock authority changed",
+        ):
+            bridge.get_state()
+    finally:
+        bridge.__dict__["_trust_lock"] = original_lock
+
+    assert bridge._trust_revoked is True
+    bridge._close_from_host()
+
+
 def test_bridge_rejects_controller_registry_record_downgrade(tmp_path) -> None:
     controller = AutosportWebController(tmp_path / "workspace")
     bridge = AutosportWebBridge(controller)
@@ -430,7 +451,7 @@ def test_bridge_rejects_controller_registry_record_downgrade(tmp_path) -> None:
         "request_id": raw.get("request_id", "forged"),
         "status": "forged",
     }
-    registry[bridge] = (controller, None, (), None)
+    registry[bridge] = (controller, None, (), None, bridge._trust_lock)
     try:
         with pytest.raises(
             WindowsWebBridgeTrustError,

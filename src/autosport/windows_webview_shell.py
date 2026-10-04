@@ -2318,6 +2318,7 @@ class AutosportWebBridge:
                 "The WebView bridge controller does not expose its required operations"
             )
 
+        trust_lock = threading.RLock()
         controller_record = (
             resolved_controller,
             controller_type,
@@ -2325,11 +2326,12 @@ class AutosportWebBridge:
             getattr(resolved_controller, "workspace", None)
             if controller_type is not None
             else None,
+            trust_lock,
         )
         object.__setattr__(self, "_controller", resolved_controller)
         object.__setattr__(self, "_controller_witness", resolved_controller)
         object.__setattr__(self, "_controller_record_witness", controller_record)
-        self._trust_lock = threading.RLock()
+        object.__setattr__(self, "_trust_lock", trust_lock)
         self._trusted_window: object | None = None
         self._trusted_url: str | None = None
         self._trust_revoked = False
@@ -2342,6 +2344,7 @@ class AutosportWebBridge:
             "_controller",
             "_controller_witness",
             "_controller_record_witness",
+            "_trust_lock",
         } and hasattr(
             self, "_controller_witness"
         ):
@@ -2363,6 +2366,7 @@ class AutosportWebBridge:
         object | None,
         tuple[tuple[str, object], ...],
         object,
+        object,
     ]:
         """Return and revalidate the construction-time controller authority record."""
 
@@ -2382,7 +2386,7 @@ class AutosportWebBridge:
             record = _registry.get(self)
         if (
             not isinstance(record, tuple)
-            or len(record) != 4
+            or len(record) != 5
             or not isinstance(record[2], tuple)
         ):
             self._trust_revoked = True
@@ -2394,7 +2398,18 @@ class AutosportWebBridge:
             raise WindowsWebBridgeTrustError(
                 "The WebView bridge construction-time controller authority record changed"
             )
-        controller, controller_type, operations, workspace_witness = record
+        (
+            controller,
+            controller_type,
+            operations,
+            workspace_witness,
+            trust_lock_witness,
+        ) = record
+        if self._trust_lock is not trust_lock_witness:
+            self._trust_revoked = True
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge trust-lock authority changed"
+            )
         if self._controller is not controller or self._controller_witness is not controller:
             self._trust_revoked = True
             raise WindowsWebBridgeTrustError(
@@ -2462,12 +2477,22 @@ class AutosportWebBridge:
                         "The WebView bridge refused a rebound canonical controller method"
                     )
 
-        return controller, controller_type, operations, workspace_witness
+        return (
+            controller,
+            controller_type,
+            operations,
+            workspace_witness,
+            trust_lock_witness,
+        )
 
     def _registered_controller_locked(self) -> object:
-        controller, _controller_type, _operations, _workspace_witness = (
-            self._registered_controller_record_locked()
-        )
+        (
+            controller,
+            _controller_type,
+            _operations,
+            _workspace_witness,
+            _trust_lock_witness,
+        ) = self._registered_controller_record_locked()
         return controller
 
     def _assert_canonical_controller_surface_locked(
@@ -2486,9 +2511,13 @@ class AutosportWebBridge:
     def _controller_operation_locked(self, controller: object, name: str):
         """Capture one construction-time operation before releasing the trust lock."""
 
-        registered, controller_type, operations, _workspace_witness = (
-            self._registered_controller_record_locked()
-        )
+        (
+            registered,
+            controller_type,
+            operations,
+            _workspace_witness,
+            _trust_lock_witness,
+        ) = self._registered_controller_record_locked()
         if registered is not controller:
             self._trust_revoked = True
             raise WindowsWebBridgeTrustError(
@@ -2790,9 +2819,13 @@ def _require_canonical_web_bridge_controller(
 
     with api._trust_lock:
         try:
-            _controller, controller_type, _operations, _workspace_witness = (
-                api._registered_controller_record_locked()
-            )
+            (
+                _controller,
+                controller_type,
+                _operations,
+                _workspace_witness,
+                _trust_lock_witness,
+            ) = api._registered_controller_record_locked()
         except WindowsWebBridgeTrustError as exc:
             raise WindowsWebViewUnavailable(
                 "Autosport could not verify the canonical WebView controller authority"

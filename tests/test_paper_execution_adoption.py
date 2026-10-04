@@ -428,6 +428,91 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(len(ledger.events()), event_count)
             self.assertEqual(book.tickets, {})
 
+    def test_observed_attempt_restart_recovers_inputs_without_caller_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            book_path = Path(tmp) / "paper-book.json"
+            current_action = action("a1", odds="2.50", stake="10.00")
+            current_prepared = prepared(runtime, current_action)
+            registered = evidence(
+                current_action,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.25",
+                stake="10.00",
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            shadow = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-observed-crash-window",
+                started_at=STARTED_AT,
+                materialize_exposure=False,
+                observations={"a1": registered.as_observation()},
+                evidence_registry=registry,
+            )
+            self.assertEqual(book.tickets, {})
+
+            reloaded_book = PaperBook.load(book_path)
+            restarted = PaperExecutionAdoptionRuntime(
+                book=reloaded_book,
+                ledger=ledger,
+                config=runtime.config,
+                max_quote_age=runtime.max_quote_age,
+                paper_book_path=book_path,
+            )
+            restarted_prepared = prepared(restarted, current_action)
+            resumed = restarted.execute(
+                prepared=restarted_prepared,
+                trigger_id="trigger-observed-crash-window",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(resumed.run, shadow.run)
+            self.assertEqual(len(reloaded_book.tickets), 1)
+            ticket = next(iter(reloaded_book.tickets.values()))
+            self.assertEqual(ticket.stake, Decimal("10.00"))
+            self.assertEqual(
+                ticket.legs[0].locked_odds,
+                Decimal("2.25"),
+            )
+
+    def test_suspended_attempt_restart_recovers_durable_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            book_path = Path(tmp) / "paper-book.json"
+            current_action = action("a1")
+            current_prepared = prepared(runtime, current_action)
+            shadow = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-suspended-crash-window",
+                started_at=STARTED_AT,
+                materialize_exposure=False,
+                suspended_action_ids=frozenset({"a1"}),
+            )
+            self.assertTrue(shadow.run.attempts[0].suspended)
+            self.assertEqual(book.tickets, {})
+
+            reloaded_book = PaperBook.load(book_path)
+            restarted = PaperExecutionAdoptionRuntime(
+                book=reloaded_book,
+                ledger=ledger,
+                config=runtime.config,
+                max_quote_age=runtime.max_quote_age,
+                paper_book_path=book_path,
+            )
+            restarted_prepared = prepared(restarted, current_action)
+            resumed = restarted.execute(
+                prepared=restarted_prepared,
+                trigger_id="trigger-suspended-crash-window",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(resumed.run, shadow.run)
+            self.assertTrue(resumed.run.attempts[0].suspended)
+            self.assertEqual(reloaded_book.tickets, {})
+
     def test_attempt_before_ticket_restart_materializes_same_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

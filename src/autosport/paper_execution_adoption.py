@@ -605,6 +605,99 @@ class PaperExecutionAdoptionRuntime:
             payload=self._exposure_scope_payload(prepared),
         )
 
+    def _require_durable_exposure_scope(
+        self,
+        *,
+        prepared: PreparedPaperExecution,
+        run_id: str,
+    ) -> None:
+        expected_payload = self._exposure_scope_payload(prepared)
+        scope_events = [
+            event
+            for event in self.ledger.events(run_id)
+            if event["event_type"] == self._EXPOSURE_SCOPE_EVENT_TYPE
+        ]
+        if (
+            len(scope_events) != 1
+            or scope_events[0]["payload"] != expected_payload
+        ):
+            raise PaperExecutionAdoptionError(
+                "durable exposure scope does not match prepared execution"
+            )
+
+    def _recover_reserved_execution_inputs(
+        self,
+        *,
+        prepared: PreparedPaperExecution,
+        run_id: str,
+    ) -> tuple[
+        dict[str, ObservedPaperExecution],
+        PaperExecutionEvidenceRegistry | None,
+        frozenset[str],
+    ] | None:
+        run_events = self.ledger.events(run_id)
+        reservations = [
+            event
+            for event in run_events
+            if event["event_type"] == "RUN_RESERVED"
+        ]
+        if not reservations:
+            return None
+        if len(reservations) != 1:
+            raise PaperExecutionAdoptionError(
+                "recovery requires exactly one durable #623 reservation"
+            )
+        reservation = reservations[0]["payload"]
+        observation_evidence_ids = reservation.get(
+            "observation_evidence_ids"
+        )
+        suspended_raw = reservation.get("suspended_action_ids", [])
+        action_ids = {
+            action.action_id for action in prepared.execution_plan.actions
+        }
+        if (
+            type(observation_evidence_ids) is not dict
+            or any(
+                type(action_id) is not str
+                or not action_id
+                or type(evidence_id) is not str
+                or not evidence_id
+                or action_id not in action_ids
+                for action_id, evidence_id
+                in observation_evidence_ids.items()
+            )
+            or type(suspended_raw) is not list
+            or any(
+                type(action_id) is not str
+                or not action_id
+                or action_id not in action_ids
+                for action_id in suspended_raw
+            )
+            or suspended_raw != sorted(suspended_raw)
+            or len(suspended_raw) != len(set(suspended_raw))
+        ):
+            raise PaperExecutionAdoptionError(
+                "durable execution reservation inputs are malformed"
+            )
+        suspended_action_ids = frozenset(suspended_raw)
+        if set(observation_evidence_ids) & suspended_action_ids:
+            raise PaperExecutionAdoptionError(
+                "durable execution reservation inputs conflict"
+            )
+        if not observation_evidence_ids:
+            return {}, None, suspended_action_ids
+
+        registry = PaperExecutionEvidenceRegistry(self.ledger)
+        observations: dict[str, ObservedPaperExecution] = {}
+        for action_id, evidence_id in observation_evidence_ids.items():
+            record = registry.resolve(evidence_id)
+            if record.action_id != action_id:
+                raise PaperExecutionAdoptionError(
+                    "durable execution evidence action identity is invalid"
+                )
+            observations[action_id] = record.as_observation()
+        return observations, registry, suspended_action_ids
+
     @staticmethod
     def _require_attempt_action_identity(attempt, action: ExecutionAction) -> None:
         if attempt.side != action.side:
@@ -652,65 +745,25 @@ class PaperExecutionAdoptionRuntime:
             )
 
         run_id = self.expected_run_id(prepared, trigger_id)
-        run_events = self.ledger.events(run_id)
-        if not run_events:
+        self._require_durable_exposure_scope(
+            prepared=prepared,
+            run_id=run_id,
+        )
+        recovered_inputs = self._recover_reserved_execution_inputs(
+            prepared=prepared,
+            run_id=run_id,
+        )
+        if recovered_inputs is None:
             raise PaperExecutionAdoptionError(
                 "PaperBook changed before any durable #623 run evidence"
             )
-        reservations = tuple(
-            event
-            for event in run_events
-            if event.get("event_type") == "RUN_RESERVED"
+        observations, evidence_registry, suspended_action_ids = (
+            recovered_inputs
         )
-        if len(reservations) != 1:
-            raise PaperExecutionAdoptionError(
-                "PaperBook recovery requires exactly one durable #623 reservation"
-            )
-        reservation = reservations[0].get("payload")
-        if type(reservation) is not dict:
-            raise PaperExecutionAdoptionError(
-                "PaperBook recovery reservation is malformed"
-            )
-        observation_evidence_ids = reservation.get(
-            "observation_evidence_ids"
-        )
-        suspended_raw = reservation.get("suspended_action_ids", [])
-        action_ids = {
-            action.action_id for action in prepared.execution_plan.actions
+        observation_evidence_ids = {
+            action_id: observation.evidence_id
+            for action_id, observation in observations.items()
         }
-        if (
-            type(observation_evidence_ids) is not dict
-            or any(
-                type(action_id) is not str
-                or not action_id
-                or type(evidence_id) is not str
-                or not evidence_id
-                or action_id not in action_ids
-                for action_id, evidence_id in observation_evidence_ids.items()
-            )
-            or type(suspended_raw) is not list
-            or any(
-                type(action_id) is not str
-                or not action_id
-                or action_id not in action_ids
-                for action_id in suspended_raw
-            )
-            or suspended_raw != sorted(suspended_raw)
-            or len(suspended_raw) != len(set(suspended_raw))
-        ):
-            raise PaperExecutionAdoptionError(
-                "PaperBook recovery execution inputs are malformed"
-            )
-        suspended_action_ids = frozenset(suspended_raw)
-        if set(observation_evidence_ids) & suspended_action_ids:
-            raise PaperExecutionAdoptionError(
-                "PaperBook recovery execution inputs conflict"
-            )
-        evidence_registry = (
-            None
-            if not observation_evidence_ids
-            else PaperExecutionEvidenceRegistry(self.ledger)
-        )
         run = self.ledger.load_run(
             run_id=run_id,
             trigger_id=trigger_id,
@@ -824,6 +877,21 @@ class PaperExecutionAdoptionRuntime:
         if type(materialize_exposure) is not bool:
             raise TypeError("materialize_exposure must be bool")
         expected_run_id = self.expected_run_id(prepared, trigger_id)
+        if (
+            observations is None
+            and evidence_registry is None
+            and not suspended_action_ids
+        ):
+            recovered_inputs = self._recover_reserved_execution_inputs(
+                prepared=prepared,
+                run_id=expected_run_id,
+            )
+            if recovered_inputs is not None:
+                (
+                    observations,
+                    evidence_registry,
+                    suspended_action_ids,
+                ) = recovered_inputs
         self._publish_exposure_scope(
             prepared=prepared,
             run_id=expected_run_id,

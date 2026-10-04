@@ -816,7 +816,7 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
 
         def forged_helper(member):
             del member
-            return (hostile_quote_key.__code__,)
+            return (original_code,)
 
         self.assertEqual(original_code.co_freevars, ())
         self.assertEqual(hostile_quote_key.__code__.co_freevars, ())

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import json
 import urllib.request as urllib_request
 
@@ -229,6 +229,50 @@ def test_finest_uses_one_cent_grid_not_classic_bands():
     off_grid = _assess(receipt, Decimal("2.001"))
     assert off_grid.state is BetfairPriceLadderAdmissionState.PRICE_LADDER_INVALID
     assert off_grid.admissible is False
+
+
+@pytest.mark.parametrize(
+    ("ladder_type", "price", "expected_state"),
+    [
+        (
+            "CLASSIC",
+            "1000.00",
+            BetfairPriceLadderAdmissionState.PRICE_LADDER_ADMISSIBLE,
+        ),
+        (
+            "CLASSIC",
+            "999.99",
+            BetfairPriceLadderAdmissionState.PRICE_LADDER_INVALID,
+        ),
+        (
+            "FINEST",
+            "999.99",
+            BetfairPriceLadderAdmissionState.PRICE_LADDER_ADMISSIBLE,
+        ),
+        (
+            "FINEST",
+            "999.991",
+            BetfairPriceLadderAdmissionState.PRICE_LADDER_INVALID,
+        ),
+    ],
+)
+def test_tick_admission_is_independent_of_mutable_decimal_context(
+    ladder_type,
+    price,
+    expected_state,
+):
+    receipt, client = _canonical_receipt(PriceLadderTransport(ladder_type))
+
+    with localcontext() as context:
+        context.prec = 1
+        result = _assess(receipt, Decimal(price))
+
+    assert result.state is expected_state
+    assert result.admissible is (
+        expected_state
+        is BetfairPriceLadderAdmissionState.PRICE_LADDER_ADMISSIBLE
+    )
+    assert client is not None
 
 
 def test_line_range_is_explicitly_unsupported_even_with_complete_metadata():

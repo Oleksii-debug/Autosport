@@ -165,6 +165,22 @@ def _assess(receipt, price: Decimal):
     )
 
 
+def test_admissible_authority_property_rebinding_is_rejected():
+    with pytest.raises(
+        TypeError,
+        match="Betfair price-ladder authority surface is sealed: admissible",
+    ):
+        subject.BetfairPriceLadderAdmission.admissible = property(
+            lambda _result: True
+        )
+
+    with pytest.raises(
+        TypeError,
+        match="Betfair price-ladder authority surface is sealed: admissible",
+    ):
+        del subject.BetfairPriceLadderAdmission.admissible
+
+
 def test_market_description_request_is_exact_and_decimal_metadata_is_preserved():
     transport = PriceLadderTransport(
         "LINE_RANGE",

@@ -1024,6 +1024,55 @@ def test_repeated_active_run_scan_resets_snapshot_local_recovery_authority(
     assert api._conflicted_unbound_run_ids == set()
 
 
+def test_failed_active_run_scan_discards_partial_snapshot_authority(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+
+    def fake_request(
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ) -> object:
+        assert method == "GET"
+        assert not allowed_http_errors
+        if "status=queued" in path:
+            return {
+                "total_count": 1,
+                "workflow_runs": [
+                    {
+                        "id": 7020,
+                        "head_sha": STALE_HEAD,
+                        "name": "CI",
+                        "status": "queued",
+                        "pull_requests": [],
+                        "head_branch": "feature/stale",
+                        "head_repository": {"full_name": "owner/repo"},
+                    }
+                ],
+            }
+        if "status=in_progress" in path:
+            raise CancellationError("synthetic second-status failure")
+        return {"total_count": 0, "workflow_runs": []}
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    with pytest.raises(CancellationError, match="synthetic second-status failure"):
+        api.active_runs()
+
+    assert api._recovered_runs == {}
+    assert api._zero_association_recovered_runs == {}
+    assert api._unbound_active_runs == {}
+    assert api._explicit_active_run_ids == set()
+    assert api._conflicted_unbound_run_ids == set()
+
+
 def test_orphan_recovery_active_cancel_conflict_clears_temporary_authority() -> None:
     class OrphanConflictApi:
         def __init__(self) -> None:

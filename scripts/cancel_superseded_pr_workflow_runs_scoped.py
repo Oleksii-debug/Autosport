@@ -1242,20 +1242,30 @@ class WorkflowScopedGitHubApi(GitHubApi):
             # Snapshot-local identity state must never leak across repeated scans on one API
             # object. A later invocation may observe a different stable queue and must derive
             # orphan authority only from that invocation's complete observation set.
-            if not reader_graph_current(self):
-                raise error_type("active workflow reader authority changed")
-            self._recovered_runs.clear()
-            self._zero_association_recovered_runs.clear()
-            self._unbound_active_runs.clear()
-            self._explicit_active_run_ids.clear()
-            self._conflicted_unbound_run_ids.clear()
+            def reset_snapshot_authority() -> None:
+                self._recovered_runs.clear()
+                self._zero_association_recovered_runs.clear()
+                self._unbound_active_runs.clear()
+                self._explicit_active_run_ids.clear()
+                self._conflicted_unbound_run_ids.clear()
+
+            # Clear any prior generation before consulting mutable reader state. If this
+            # generation fails after observing only some statuses, discard every partial
+            # authority record before propagating the failure.
+            reset_snapshot_authority()
             runs: list[WorkflowRun] = []
-            for status in active_statuses:
+            try:
                 if not reader_graph_current(self):
                     raise error_type("active workflow reader authority changed")
-                runs.extend(status_reader(self, status))
-                if not reader_graph_current(self):
-                    raise error_type("active workflow reader authority changed")
+                for status in active_statuses:
+                    if not reader_graph_current(self):
+                        raise error_type("active workflow reader authority changed")
+                    runs.extend(status_reader(self, status))
+                    if not reader_graph_current(self):
+                        raise error_type("active workflow reader authority changed")
+            except Exception:
+                reset_snapshot_authority()
+                raise
             return tuple(runs)
 
         return active_runs

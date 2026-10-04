@@ -1120,10 +1120,24 @@ class SQLiteMarketStore:
         self,
         event: MarketEvent,
         *,
+        _event_type: type[MarketEvent] = MarketEvent,
+        _capability_type: type[_LiveReceiptBatch] = _LiveReceiptBatch,
+        _canonical_payload_fn=_canonical_payload,
         _dedupe_key=_market_event_dedupe_key,
         _quote_key=_market_event_quote_key,
         _authority: str = _LIVE_RECEIPT_AUTHORITY,
     ) -> None:
+        if type(self) is not __class__:
+            raise TypeError("live receipt authority requires an exact SQLiteMarketStore")
+        if type(event) is not _event_type:
+            raise TypeError("live receipt authority requires an exact MarketEvent")
+        capability = self._active_live_receipt_batch
+        if type(capability) is not _capability_type:
+            raise RuntimeError("live receipt authority requires an active live batch capability")
+        payload = _canonical_payload_fn(event)
+        if payload not in capability._payloads:
+            raise RuntimeError("live receipt authority event is outside the active live batch")
+
         dedupe_key = _dedupe_key(event)
         quote_key = _quote_key(event)
         cursor = self.connection.execute(
@@ -1341,6 +1355,7 @@ def _seal_live_receipt_authority_call_surfaces() -> None:
     """Hide canonical dependency bindings from callers of receipt-authority APIs."""
 
     live_append_impl = SQLiteMarketStore._append_live_batch_accepted
+    receipt_insert_impl = SQLiteMarketStore._insert_live_receipt_authority
     rebuild_trusted_current_impl = SQLiteMarketStore._rebuild_trusted_live_current_quotes
     append_impl = SQLiteMarketStore.append_batch_accepted
     has_receipt_impl = SQLiteMarketStore.has_trusted_live_receipt
@@ -1352,6 +1367,12 @@ def _seal_live_receipt_authority_call_surfaces() -> None:
         events: Iterable[MarketEvent],
     ) -> list[MarketEvent]:
         return live_append_impl(self, events)
+
+    def _insert_live_receipt_authority(
+        self: SQLiteMarketStore,
+        event: MarketEvent,
+    ) -> None:
+        return receipt_insert_impl(self, event)
 
     def _rebuild_trusted_live_current_quotes(
         self: SQLiteMarketStore,
@@ -1379,6 +1400,7 @@ def _seal_live_receipt_authority_call_surfaces() -> None:
         return trusted_current_impl(self)
 
     SQLiteMarketStore._append_live_batch_accepted = _append_live_batch_accepted
+    SQLiteMarketStore._insert_live_receipt_authority = _insert_live_receipt_authority
     SQLiteMarketStore._rebuild_trusted_live_current_quotes = _rebuild_trusted_live_current_quotes
     SQLiteMarketStore.append_batch_accepted = append_batch_accepted
     SQLiteMarketStore.has_trusted_live_receipt = has_trusted_live_receipt

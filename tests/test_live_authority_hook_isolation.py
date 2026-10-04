@@ -87,6 +87,30 @@ class LiveAuthorityHookIsolationTests(unittest.TestCase):
             )
             store.close()
 
+    def test_receipt_writer_requires_active_live_capability_and_rejects_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self._event()
+            try:
+                self.assertTrue(store.append(event))
+                self.assertFalse(store.has_trusted_live_receipt(event))
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "active live batch capability",
+                ):
+                    store._insert_live_receipt_authority(event)
+                with self.assertRaises(TypeError):
+                    store._insert_live_receipt_authority(
+                        event,
+                        _authority="forged-authority",
+                    )
+
+                self.assertFalse(store.has_trusted_live_receipt(event))
+                self.assertEqual(store.trusted_live_current_by_source(), {})
+            finally:
+                store.close()
+
     def test_live_bus_seam_rejects_dependency_override_but_canonical_path_works(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

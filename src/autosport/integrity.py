@@ -40,10 +40,9 @@ _SCIENTIFIC_REGISTRY_ENTRY_KEYS = frozenset(
 
 
 def _resolved_key(path: Path) -> str:
-    try:
-        return str(path.resolve(strict=False))
-    except OSError:
-        return str(path.absolute())
+    """Return the stable lexical identity used by the persistent sidecar lock."""
+
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
 
 
 def _thread_lock_for(path: Path) -> threading.RLock:

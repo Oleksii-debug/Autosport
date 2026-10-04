@@ -486,7 +486,10 @@ class _ManifestStore:
             if (
                 len(source_identity) != 64
                 or source_identity != source_identity.lower()
-                or any(character not in "0123456789abcdef" for character in source_identity)
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in source_identity
+                )
             ):
                 raise ProductCompositionError(
                     "source_resolver_identity must be lowercase SHA-256 hex"

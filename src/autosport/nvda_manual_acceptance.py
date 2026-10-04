@@ -343,39 +343,59 @@ def _require_protocol(value: object) -> str:
     return protocol
 
 
-def _structural_result(
-    transcript: object,
-    *,
-    expected_artifact_sha256: str,
-    expected_source_sha: str,
-    expected_webview2_runtime_witness_sha256: str,
-):
-    artifact = _require_sha256(
-        "expected_artifact_sha256", expected_artifact_sha256
-    )
-    source = _require_git_commit_sha("expected_source_sha", expected_source_sha)
-    runtime_witness = _require_sha256(
-        "expected_webview2_runtime_witness_sha256",
-        expected_webview2_runtime_witness_sha256,
-    )
-    try:
-        result = validate_human_nvda_acceptance_transcript(
-            transcript,
-            expected_artifact_sha256=artifact,
-            expected_source_sha=source,
-            expected_webview2_runtime_witness_sha256=runtime_witness,
-        )
-        return verify_human_nvda_acceptance_structural_result(
-            result,
-            expected_artifact_sha256=artifact,
-            expected_source_sha=source,
-            expected_webview2_runtime_witness_sha256=runtime_witness,
-        )
-    except NvdaHumanAcceptanceError as exc:
-        raise NvdaManualAcceptanceStateError(
-            "physical NVDA transcript did not pass canonical structural validation"
-        ) from exc
+def _install_structural_result_authority():
+    validate = validate_human_nvda_acceptance_transcript
+    verify = verify_human_nvda_acceptance_structural_result
+    validate_code = validate.__code__
+    verify_code = verify.__code__
 
+    def structural_result(
+        transcript: object,
+        *,
+        expected_artifact_sha256: str,
+        expected_source_sha: str,
+        expected_webview2_runtime_witness_sha256: str,
+    ):
+        if (
+            validate_human_nvda_acceptance_transcript is not validate
+            or verify_human_nvda_acceptance_structural_result is not verify
+            or getattr(validate, "__code__", None) is not validate_code
+            or getattr(verify, "__code__", None) is not verify_code
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "physical NVDA structural validator authority changed"
+            )
+        artifact = _require_sha256(
+            "expected_artifact_sha256", expected_artifact_sha256
+        )
+        source = _require_git_commit_sha("expected_source_sha", expected_source_sha)
+        runtime_witness = _require_sha256(
+            "expected_webview2_runtime_witness_sha256",
+            expected_webview2_runtime_witness_sha256,
+        )
+        try:
+            result = validate(
+                transcript,
+                expected_artifact_sha256=artifact,
+                expected_source_sha=source,
+                expected_webview2_runtime_witness_sha256=runtime_witness,
+            )
+            return verify(
+                result,
+                expected_artifact_sha256=artifact,
+                expected_source_sha=source,
+                expected_webview2_runtime_witness_sha256=runtime_witness,
+            )
+        except NvdaHumanAcceptanceError as exc:
+            raise NvdaManualAcceptanceStateError(
+                "physical NVDA transcript did not pass canonical structural validation"
+            ) from exc
+
+    return structural_result
+
+
+_structural_result = _install_structural_result_authority()
+del _install_structural_result_authority
 
 def _decision_payload(
     *,

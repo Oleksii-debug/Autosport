@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.market_bus as market_bus_module
 import autosport.storage as storage_module
 from autosport.domain import MarketEvent
 from autosport.ingestion import IngestionEngine
@@ -242,6 +243,83 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(len(persisted), 1)
             self.assertEqual(persisted[0].ingest_ts, self.RECEIVE_TIME)
             self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
+    def test_live_bus_authority_survives_module_class_rebind(self) -> None:
+        class PoisonBus(MarketEventBus):
+            pass
+
+        class PoisonStore(SQLiteMarketStore):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            bus = MarketEventBus(store)
+            event = self._direct_event(sequence=1)
+
+            with (
+                patch.object(market_bus_module, "MarketEventBus", PoisonBus),
+                patch.object(market_bus_module, "SQLiteMarketStore", PoisonStore),
+            ):
+                accepted = MarketEventBus._publish_many_live_ingestion(bus, [event])
+
+            self.assertEqual(accepted, 1)
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_live_bus_uses_sealed_store_append_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            bus = MarketEventBus(store)
+            event = self._direct_event(sequence=1)
+
+            with patch.object(
+                SQLiteMarketStore,
+                "_append_live_batch_accepted",
+                side_effect=AssertionError("mutable class descriptor must not be consulted"),
+            ):
+                accepted = MarketEventBus._publish_many_live_ingestion(bus, [event])
+
+            self.assertEqual(accepted, 1)
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_live_bus_ignores_instance_notify_shadow(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            bus = MarketEventBus(store)
+            delivered = []
+            bus.subscribe(delivered.append)
+            bus._notify = lambda events: (_ for _ in ()).throw(
+                AssertionError("instance notify shadow must not control live delivery")
+            )
+            event = self._direct_event(sequence=1)
+
+            accepted = MarketEventBus._publish_many_live_ingestion(bus, [event])
+
+            self.assertEqual(accepted, 1)
+            self.assertEqual(delivered, [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_live_bus_deepcopy_authority_survives_module_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            bus = MarketEventBus(store)
+            delivered = []
+            bus.subscribe(delivered.append)
+            event = self._direct_event(sequence=1)
+
+            with patch.object(
+                market_bus_module,
+                "deepcopy",
+                side_effect=AssertionError("mutable deepcopy global must not be consulted"),
+            ):
+                accepted = MarketEventBus._publish_many_live_ingestion(bus, [event])
+
+            self.assertEqual(accepted, 1)
+            self.assertEqual(delivered, [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
             store.close()
 
     def test_private_live_receipt_seam_rejects_store_subclass(self) -> None:

@@ -4462,6 +4462,8 @@ def test_budget_exception_global_rebind_cannot_redirect_generic_main_failure(
     monkeypatch,
     capsys,
 ) -> None:
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(
         scoped_controller,
         "RequestBudgetExhausted",

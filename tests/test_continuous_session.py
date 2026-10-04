@@ -1766,6 +1766,106 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_cleared_historical_settlement_cannot_be_completed_again(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-complete-cleared",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:complete-cleared",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="complete-cleared-evidence",
+                evidence_sha256="1" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                coordinator._state.complete_pending_settlement_commit(
+                    settlement_evidence=(resolution,),
+                    retain_pending_evidence_ids=(),
+                )
+                before = coordinator.status()
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "settlement completion references evidence that is not pending",
+                ):
+                    coordinator._state.complete_pending_settlement_commit(
+                        settlement_evidence=(resolution,),
+                        retain_pending_evidence_ids=(),
+                    )
+                after = coordinator.status()
+                self.assertEqual(after.pending_settlement_evidence_ids, ())
+                self.assertEqual(after.settlement_evidence, before.settlement_evidence)
+            finally:
+                store.close()
+
+    def test_success_cannot_process_cleared_historical_settlement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-success-cleared",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:success-cleared",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="success-cleared-evidence",
+                evidence_sha256="2" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                coordinator._state.complete_pending_settlement_commit(
+                    settlement_evidence=(resolution,),
+                    retain_pending_evidence_ids=(),
+                )
+                before = coordinator.status()
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "successful settlement references evidence that is not pending",
+                ):
+                    coordinator._state.record_success(
+                        at=clock(),
+                        full_refresh=False,
+                        settlement_evidence=(resolution,),
+                        retain_pending_evidence_ids=(),
+                    )
+                after = coordinator.status()
+                self.assertEqual(after.cycles_completed, before.cycles_completed)
+                self.assertEqual(after.last_success_at, before.last_success_at)
+                self.assertEqual(after.pending_settlement_evidence_ids, ())
+                self.assertEqual(after.settlement_evidence, before.settlement_evidence)
+            finally:
+                store.close()
+
     def test_recovered_settlement_state_rejects_duplicate_evidence_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

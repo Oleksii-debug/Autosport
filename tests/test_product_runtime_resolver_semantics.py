@@ -304,6 +304,40 @@ def test_live_settlement_resolution_is_routed_through_product_authority_proxy(
         runtime.close()
 
 
+def test_settlement_outcome_proxy_class_dispatch_is_immutable(
+    tmp_path,
+) -> None:
+    source = _ProductSource()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=source,
+        clock=lambda: NOW,
+        outcome_authority=source,
+    )
+    proxy = runtime.coordinator.outcome_authority
+    try:
+        with pytest.raises(
+            ProductCompositionError,
+            match="settlement outcome proxy class member 'resolve' is immutable",
+        ):
+            type.__setattr__(
+                type(proxy),
+                "resolve",
+                lambda *_args, **_kwargs: None,
+            )
+        with pytest.raises(
+            ProductCompositionError,
+            match="settlement outcome proxy class identity is immutable",
+        ):
+            object.__setattr__(
+                proxy,
+                "__class__",
+                type("ForgedOutcomeProxy", (), {}),
+            )
+    finally:
+        runtime.close()
+
+
 def test_live_settlement_resolution_rejects_post_build_configuration_mutation(
     tmp_path,
 ) -> None:

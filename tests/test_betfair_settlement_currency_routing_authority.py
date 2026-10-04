@@ -280,8 +280,10 @@ def test_currency_lookup_alias_rebind_is_rejected_before_rebound_execution(
     assert calls == []
 
 
-def test_k07_verifier_closure_drift_is_rejected_before_permissive_execution() -> None:
-    client, _provider = _client(pytest.MonkeyPatch())
+def test_k07_verifier_closure_drift_is_rejected_before_permissive_execution(
+    monkeypatch,
+) -> None:
+    client, _provider = _client(monkeypatch)
     capture = _qualified_capture(client)
     assert origin_guard._currency_for_capture(capture) == "USD"
 

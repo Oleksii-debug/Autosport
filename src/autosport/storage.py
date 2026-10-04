@@ -2259,6 +2259,13 @@ class SQLiteMarketStore:
                     tx_id=tx_id,
                     semantic_binding_sha256=binding_sha256,
                 )
+                # The pathname can still be replaced after the pre-recovery identity
+                # check while the independent machine COMMIT is being persisted.
+                # Re-check before reporting append success so a detached SQLite inode
+                # can never flow into the live mirror as a successful durable update.
+                # If this fails, the machine COMMIT remains recoverable once the
+                # canonical pathname is restored.
+                self._require_database_path_identity()
                 return accepted
 
     def append_many(self, events: Iterable[MarketEvent]) -> int:

@@ -32,9 +32,9 @@ _LIVE_RECEIPT_AUTHORITY = "autosport.live_ingestion_receipt.v1"
 
 
 class _LiveReceiptBatch:
-    """Immutable value snapshot for the one authority-bearing storage path."""
+    """Immutable live value snapshot that can recognize its retry-hook generations."""
 
-    __slots__ = ("_payloads",)
+    __slots__ = ("_payloads", "_issued_generations")
 
     def __init__(self, events: tuple[MarketEvent, ...]) -> None:
         object.__setattr__(
@@ -42,15 +42,33 @@ class _LiveReceiptBatch:
             "_payloads",
             tuple(_canonical_payload(event) for event in events),
         )
+        object.__setattr__(self, "_issued_generations", [])
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("live receipt batch is immutable")
 
     def __iter__(self):
-        return (
+        generation = tuple(
             MarketEvent.from_dict(json.loads(payload))
             for payload in self._payloads
         )
+        self._issued_generations.append(generation)
+        return iter(generation)
+
+    def authorizes(self, events: Iterable[MarketEvent]) -> bool:
+        if events is self:
+            return True
+        if type(events) is not tuple:
+            return False
+        for generation in self._issued_generations:
+            if len(events) != len(generation):
+                continue
+            if not all(candidate is issued for candidate, issued in zip(events, generation)):
+                continue
+            if tuple(_canonical_payload(event) for event in events) != self._payloads:
+                raise ValueError("live receipt retry batch was mutated after issuance")
+            return True
+        return False
 
 
 _LEGACY_CURRENT_COLUMNS = ("quote_key", "observed_ts", "sequence", "payload_json")
@@ -601,8 +619,8 @@ class SQLiteMarketStore:
     def __init__(self, path: str | Path = "autosport.db") -> None:
         self.path = Path(path)
         self._connection_lock = RLock()
-        # Mutable state may block nested authority, but never grants receipt authority.
-        self._live_receipt_write_depth = 0
+        # Only an internally issued exact capability can grant live receipt authority.
+        self._active_live_receipt_batch: _LiveReceiptBatch | None = None
         self.connection = sqlite3.connect(self.path, check_same_thread=False)
         try:
             self.connection.execute("PRAGMA journal_mode=WAL")
@@ -853,14 +871,15 @@ class SQLiteMarketStore:
                 "live receipt authority requires an exact SQLiteMarketStore"
             )
         materialized = tuple(events)
+        capability = _LiveReceiptBatch(materialized)
         with self._connection_lock:
-            if self._live_receipt_write_depth != 0:
+            if self._active_live_receipt_batch is not None:
                 raise RuntimeError("nested live receipt authority write is not allowed")
-            self._live_receipt_write_depth = 1
+            self._active_live_receipt_batch = capability
             try:
-                return self.append_batch_accepted(_LiveReceiptBatch(materialized))
+                return self.append_batch_accepted(capability)
             finally:
-                self._live_receipt_write_depth = 0
+                self._active_live_receipt_batch = None
 
     def append(self, event: MarketEvent) -> bool:
         with self._connection_lock:
@@ -871,9 +890,10 @@ class SQLiteMarketStore:
         """Insert one normalized batch in one transaction and return newly accepted events."""
         accepted: list[MarketEvent] = []
         with self._connection_lock:
+            capability = self._active_live_receipt_batch
             live_receipt_authority = (
-                type(events) is _LiveReceiptBatch
-                and self._live_receipt_write_depth == 1
+                type(capability) is _LiveReceiptBatch
+                and capability.authorizes(events)
             )
             with self.connection:
                 for event in events:

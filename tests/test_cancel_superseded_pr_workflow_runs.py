@@ -697,3 +697,150 @@ def test_base_active_run_page_bound_and_parser_are_frozen(monkeypatch) -> None:
         "/actions/runs?event=pull_request&status=queued&per_page=100&page=2",
     ]
 
+def test_selector_ignores_rebound_coordinate_validators(monkeypatch) -> None:
+    monkeypatch.setattr(
+        controller_module,
+        "_require_positive_int",
+        lambda _value, *, field: 999,
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "_require_sha",
+        lambda _value, *, field: HEAD_A,
+    )
+
+    assert select_superseded_runs(
+        (
+            _run(10, HEAD_A),
+            _run(11, HEAD_B),
+        ),
+        pr_number=2008,
+        live_head_sha=HEAD_B,
+        workflow_name="CI",
+        current_run_id=11,
+    ) == (10,)
+
+
+def test_cancel_rejects_preentry_qualification_snapshot_rebind(monkeypatch) -> None:
+    forged_calls: list[int] = []
+
+    def forged_snapshot(api, pr_number: int, **_kwargs) -> tuple[str, bool]:
+        del api
+        forged_calls.append(pr_number)
+        return HEAD_B, True
+
+    monkeypatch.setattr(
+        controller_module,
+        "_qualification_snapshot",
+        forged_snapshot,
+    )
+    api = FakeApi([HEAD_B], (_run(10, HEAD_A),))
+
+    with pytest.raises(
+        CancellationError,
+        match="superseded-run cancellation authority changed",
+    ):
+        cancel_superseded(
+            api=api,
+            pr_number=2008,
+            event_head_sha=HEAD_B,
+            workflow_name="CI",
+            current_run_id=11,
+        )
+
+    assert forged_calls == []
+    assert api.active_calls == 0
+    assert api.cancelled == []
+
+
+def test_cancel_rejects_preentry_selector_rebind(monkeypatch) -> None:
+    forged_calls: list[str] = []
+
+    def forged_selector(*_args, **_kwargs) -> tuple[int, ...]:
+        forged_calls.append("selector")
+        return (999,)
+
+    monkeypatch.setattr(
+        controller_module,
+        "select_superseded_runs",
+        forged_selector,
+    )
+    api = FakeApi([HEAD_B], (_run(10, HEAD_A),))
+
+    with pytest.raises(
+        CancellationError,
+        match="superseded-run cancellation authority changed",
+    ):
+        cancel_superseded(
+            api=api,
+            pr_number=2008,
+            event_head_sha=HEAD_B,
+            workflow_name="CI",
+            current_run_id=11,
+        )
+
+    assert forged_calls == []
+    assert api.active_calls == 0
+    assert api.cancelled == []
+
+
+def test_cancel_rejects_nested_snapshot_kwdefault_rebase(monkeypatch) -> None:
+    defaults = controller_module._qualification_snapshot.__kwdefaults__
+    assert defaults is not None
+
+    def forged_reader(_qualification: object) -> tuple[str, bool]:
+        return HEAD_B, True
+
+    monkeypatch.setitem(
+        defaults,
+        "_qualification_state_reader",
+        forged_reader,
+    )
+    api = FakeApi([HEAD_B], (_run(10, HEAD_A),))
+
+    with pytest.raises(
+        CancellationError,
+        match="superseded-run cancellation authority changed",
+    ):
+        cancel_superseded(
+            api=api,
+            pr_number=2008,
+            event_head_sha=HEAD_B,
+            workflow_name="CI",
+            current_run_id=11,
+        )
+
+    assert api.active_calls == 0
+    assert api.cancelled == []
+
+
+def test_cancel_rejects_inflight_active_runs_shadow(monkeypatch) -> None:
+    forged_calls: list[str] = []
+
+    def forged_active_runs() -> tuple[WorkflowRun, ...]:
+        forged_calls.append("active")
+        return (_run(999, HEAD_A),)
+
+    class ShadowingApi(FakeApi):
+        def live_pr_head(self, pr_number: int) -> str:
+            head = super().live_pr_head(pr_number)
+            monkeypatch.setattr(self, "active_runs", forged_active_runs)
+            return head
+
+    api = ShadowingApi([HEAD_B], (_run(10, HEAD_A),))
+
+    with pytest.raises(
+        CancellationError,
+        match="superseded-run cancellation authority changed",
+    ):
+        cancel_superseded(
+            api=api,
+            pr_number=2008,
+            event_head_sha=HEAD_B,
+            workflow_name="CI",
+            current_run_id=11,
+        )
+
+    assert forged_calls == []
+    assert api.cancelled == []
+

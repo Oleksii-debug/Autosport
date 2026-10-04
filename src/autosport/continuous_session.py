@@ -976,6 +976,7 @@ class _ContinuousSessionState:
             raise ContinuousSessionError("settlement_evidence must be a list")
         values: list[dict[str, str | None]] = []
         seen_ids: set[str] = set()
+        seen_event_refs: set[tuple[str, str]] = set()
         legacy_fields = {
             "event_identity",
             "settlement_ref",
@@ -1014,6 +1015,12 @@ class _ContinuousSessionState:
                     "settlement_evidence contains duplicate evidence_id"
                 )
             seen_ids.add(evidence_id)
+            event_ref = (event_identity, settlement_ref)
+            if event_ref in seen_event_refs:
+                raise ContinuousSessionError(
+                    "settlement_evidence contains duplicate event/reference authority"
+                )
+            seen_event_refs.add(event_ref)
             evidence_sha256 = _sha256(
                 item["evidence_sha256"],
                 "settlement_evidence evidence_sha256",
@@ -1283,6 +1290,7 @@ class _ContinuousSessionState:
         previous = base_tip
         expected_sequence = base_count + 1
         seen_keys: set[str] = set()
+        seen_event_refs: set[tuple[str, str]] = set()
         for item in records:
             record = self._validate_evidence_record(item)
             if record["sequence"] != expected_sequence:
@@ -1299,6 +1307,12 @@ class _ContinuousSessionState:
                     "settlement evidence pending contains duplicate key"
                 )
             seen_keys.add(key)
+            event_ref = (record["event_identity"], record["settlement_ref"])
+            if event_ref in seen_event_refs:
+                raise ContinuousSessionError(
+                    "settlement evidence pending contains duplicate event/reference authority"
+                )
+            seen_event_refs.add(event_ref)
             previous = record["record_sha256"]
             expected_sequence += 1
         return raw
@@ -1529,6 +1543,7 @@ class _ContinuousSessionState:
         )
         previous = self._EMPTY_EVIDENCE_TIP
         evidence_ids: set[str] = set()
+        event_refs: set[tuple[str, str]] = set()
         for expected_sequence, record in enumerate(records, start=1):
             if record["sequence"] != expected_sequence:
                 raise ContinuousSessionError(
@@ -1544,6 +1559,12 @@ class _ContinuousSessionState:
                     "settlement evidence journal repeats evidence_id"
                 )
             evidence_ids.add(evidence_id)
+            event_ref = (record["event_identity"], record["settlement_ref"])
+            if event_ref in event_refs:
+                raise ContinuousSessionError(
+                    "settlement evidence journal repeats event/reference authority"
+                )
+            event_refs.add(event_ref)
             previous = record["record_sha256"]
         tip = records[-1]
         if (
@@ -1618,6 +1639,7 @@ class _ContinuousSessionState:
         )
         previous = self._EMPTY_EVIDENCE_TIP
         evidence_ids: set[str] = set()
+        event_refs: set[tuple[str, str]] = set()
         for expected_sequence, record in enumerate(records, start=1):
             if record["sequence"] != expected_sequence:
                 raise ContinuousSessionError(
@@ -1633,6 +1655,12 @@ class _ContinuousSessionState:
                     "settlement evidence recovery repeats evidence_id"
                 )
             evidence_ids.add(evidence_id)
+            event_ref = (record["event_identity"], record["settlement_ref"])
+            if event_ref in event_refs:
+                raise ContinuousSessionError(
+                    "settlement evidence recovery repeats event/reference authority"
+                )
+            event_refs.add(event_ref)
 
             if expected_sequence > base_count:
                 pending_offset = expected_sequence - base_count - 1
@@ -1641,6 +1669,21 @@ class _ContinuousSessionState:
                         "settlement evidence recovery tail conflicts with pending transaction"
                     )
             previous = record["record_sha256"]
+
+        already_written_pending = max(0, len(records) - base_count)
+        for record in pending_records[already_written_pending:]:
+            evidence_id = record["evidence_id"]
+            if evidence_id in evidence_ids:
+                raise ContinuousSessionError(
+                    "settlement evidence recovery pending tail repeats evidence_id"
+                )
+            evidence_ids.add(evidence_id)
+            event_ref = (record["event_identity"], record["settlement_ref"])
+            if event_ref in event_refs:
+                raise ContinuousSessionError(
+                    "settlement evidence recovery pending tail repeats event/reference authority"
+                )
+            event_refs.add(event_ref)
 
         if base_count == 0:
             if records:
@@ -1950,11 +1993,16 @@ class _ContinuousSessionState:
             return
         with durable_path_lock(self.path):
             raw = self._current_state_locked()
-            known = {
-                item["evidence_id"]: item
-                for item in self._load_evidence_history(raw)
+            history = self._load_evidence_history(raw)
+            known = {item["evidence_id"]: item for item in history}
+            known_event_refs = {
+                (item["event_identity"], item["settlement_ref"]): item
+                for item in history
             }
-            pending_ids: dict[str, dict[str, str]] = {}
+            pending_ids: dict[str, dict[str, str | None]] = {}
+            pending_event_refs: dict[
+                tuple[str, str], dict[str, str | None]
+            ] = {}
             for evidence in settlement_evidence:
                 normalized = self._normalized_settlement_evidence(evidence)
                 prior = pending_ids.get(evidence.evidence_id)
@@ -1963,6 +2011,18 @@ class _ContinuousSessionState:
                         "settlement evidence id conflicts within current batch"
                     )
                 pending_ids[evidence.evidence_id] = normalized
+                event_ref = (evidence.event_identity, evidence.settlement_ref)
+                prior_event_ref = pending_event_refs.get(event_ref)
+                if prior_event_ref is not None and prior_event_ref != normalized:
+                    raise ContinuousSessionError(
+                        "settlement event/reference conflicts within current batch"
+                    )
+                pending_event_refs[event_ref] = normalized
+                existing_event_ref = known_event_refs.get(event_ref)
+                if existing_event_ref is not None and existing_event_ref != normalized:
+                    raise ContinuousSessionError(
+                        "settlement event/reference conflicts with durable evidence"
+                    )
                 existing = known.get(evidence.evidence_id)
                 if existing is not None:
                     if existing["quote_outcomes_sha256"] is None:
@@ -2050,7 +2110,14 @@ class _ContinuousSessionState:
             raw = self._current_state_locked()
             history = self._load_evidence_history(raw)
             known = {item["evidence_id"]: item for item in history}
-            incoming: dict[str, dict[str, str]] = {}
+            known_event_refs = {
+                (item["event_identity"], item["settlement_ref"]): item
+                for item in history
+            }
+            incoming: dict[str, dict[str, str | None]] = {}
+            incoming_event_refs: dict[
+                tuple[str, str], dict[str, str | None]
+            ] = {}
             for evidence in settlement_evidence:
                 normalized = self._normalized_settlement_evidence(evidence)
                 prior = incoming.get(evidence.evidence_id)
@@ -2059,6 +2126,18 @@ class _ContinuousSessionState:
                         "settlement evidence id conflicts within current batch"
                     )
                 incoming[evidence.evidence_id] = normalized
+                event_ref = (evidence.event_identity, evidence.settlement_ref)
+                prior_event_ref = incoming_event_refs.get(event_ref)
+                if prior_event_ref is not None and prior_event_ref != normalized:
+                    raise ContinuousSessionError(
+                        "settlement event/reference conflicts within current batch"
+                    )
+                incoming_event_refs[event_ref] = normalized
+                existing_event_ref = known_event_refs.get(event_ref)
+                if existing_event_ref is not None and existing_event_ref != normalized:
+                    raise ContinuousSessionError(
+                        "settlement event/reference conflicts with durable evidence"
+                    )
                 existing = known.get(evidence.evidence_id)
                 if existing is not None:
                     if existing["quote_outcomes_sha256"] is None:

@@ -241,6 +241,173 @@ class SettlementReceiptIdentityTests(unittest.TestCase):
             ):
                 _state(path)
 
+    def test_same_batch_event_reference_cannot_alias_receipt_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = _state(Path(directory) / "continuous_session.json")
+            alias = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="provider-result:1",
+                quote_outcomes={"receipt-quote-1": "win"},
+                evidence_id="receipt-alias",
+                evidence_sha256="b" * 64,
+                available_at=_AT,
+            )
+            with self.assertRaisesRegex(
+                ContinuousSessionError,
+                "event/reference conflicts within current batch",
+            ):
+                state.validate_settlement_evidence(
+                    settlement_evidence=(_resolution(), alias)
+                )
+
+    def test_restart_event_reference_cannot_alias_receipt_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "continuous_session.json"
+            state = _state(path)
+            state.record_success(
+                at=_AT,
+                full_refresh=False,
+                settlement_evidence=(_resolution(),),
+            )
+            alias = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="provider-result:1",
+                quote_outcomes={"receipt-quote-1": "win"},
+                evidence_id="receipt-alias",
+                evidence_sha256="b" * 64,
+                available_at=_AT,
+            )
+            with self.assertRaisesRegex(
+                ContinuousSessionError,
+                "event/reference conflicts with durable evidence",
+            ):
+                _state(path).record_success(
+                    at=_AT,
+                    full_refresh=False,
+                    settlement_evidence=(alias,),
+                )
+
+    def test_pending_recovery_rejects_event_reference_alias_before_tail_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "continuous_session.json"
+            state = _state(path)
+            state.record_success(
+                at=_AT,
+                full_refresh=False,
+                settlement_evidence=(_resolution(),),
+            )
+            checkpoint = json.loads(path.read_text(encoding="utf-8"))
+            alias_resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="provider-result:1",
+                quote_outcomes={"receipt-quote-1": "win"},
+                evidence_id="receipt-pending-alias",
+                evidence_sha256="b" * 64,
+                available_at=_AT,
+            )
+            alias_item = state._normalized_settlement_evidence(alias_resolution)
+            alias_record = state._build_evidence_record(
+                alias_item,
+                sequence=2,
+                previous_record_sha256=checkpoint[
+                    "settlement_evidence_tip_sha256"
+                ],
+            )
+            checkpoint["settlement_evidence_pending"] = {
+                "base_count": 1,
+                "base_tip_sha256": checkpoint[
+                    "settlement_evidence_tip_sha256"
+                ],
+                "success_at": _AT,
+                "full_refresh": False,
+                "records": [alias_record],
+            }
+            path.write_text(
+                json.dumps(checkpoint, sort_keys=True),
+                encoding="utf-8",
+            )
+            journal = path.with_name(f"{path.stem}.settlement-evidence")
+            before = {
+                item.name: item.read_bytes()
+                for item in journal.iterdir()
+                if item.suffix == ".json"
+            }
+
+            with self.assertRaisesRegex(
+                ContinuousSessionError,
+                "pending tail repeats event/reference authority",
+            ):
+                _state(path)
+
+            after = {
+                item.name: item.read_bytes()
+                for item in journal.iterdir()
+                if item.suffix == ".json"
+            }
+            self.assertEqual(after, before)
+            self.assertIsNotNone(
+                json.loads(path.read_text(encoding="utf-8"))[
+                    "settlement_evidence_pending"
+                ]
+            )
+
+    def test_embedded_wave_m_event_reference_alias_fails_before_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "continuous_session.json"
+            fingerprint = _ContinuousSessionState._quote_outcomes_sha256(
+                _resolution()
+            )
+            first = {
+                "event_identity": "provider-a:event-1",
+                "settlement_ref": "provider-result:1",
+                "evidence_id": "receipt-1",
+                "evidence_sha256": "a" * 64,
+                "available_at": _AT,
+                "quote_outcomes_sha256": fingerprint,
+            }
+            second = dict(first)
+            second["evidence_id"] = "receipt-wave-alias"
+            second["evidence_sha256"] = "b" * 64
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema": "autosport.continuous_session",
+                        "schema_version": 3,
+                        "session_id": "session-1",
+                        "source_id": "provider-a",
+                        "state": "RUNNING",
+                        "started_at": _AT,
+                        "cycles_completed": 2,
+                        "last_success_at": _AT,
+                        "last_error_code": None,
+                        "last_full_refresh_at": None,
+                        "settlement_evidence": [first, second],
+                        "source_gap_state": None,
+                        "source_sync_state": None,
+                        "source_state_delta_id": None,
+                        "source_unresolved_gap_delta_ids": [],
+                        "source_projection_stream_epoch": None,
+                        "source_state_projection_backlog": False,
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ContinuousSessionError,
+                "duplicate event/reference authority",
+            ):
+                _state(path)
+
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8"))["schema_version"],
+                3,
+            )
+            self.assertFalse(
+                path.with_name(f"{path.stem}.settlement-evidence").exists()
+            )
+
     def test_push_is_not_a_canonical_receipt_outcome(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported outcome"):
             _resolution(outcome="push").validate(as_of=_AT)

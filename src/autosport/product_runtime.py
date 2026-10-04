@@ -525,17 +525,26 @@ class ProductCompositionManifest:
     initial_bankroll: str
     settlement_authority_identity: str | None = None
     source_resolver_identity: str | None = None
+    settlement_learning_handoff_identity: str | None = None
 
 
 class _ManifestStore:
     _SCHEMA = "autosport.autonomous_product_composition"
-    _VERSION = 3
+    _VERSION = 4
     _V1_FIELDS = {"schema", "schema_version", "source_id", "initial_bankroll"}
     _V2_FIELDS = {
         "schema",
         "schema_version",
         "source_id",
         "initial_bankroll",
+        "settlement_authority_identity",
+    }
+    _V3_FIELDS = {
+        "schema",
+        "schema_version",
+        "source_id",
+        "initial_bankroll",
+        "source_resolver_identity",
         "settlement_authority_identity",
     }
     _FIELDS = {
@@ -545,6 +554,7 @@ class _ManifestStore:
         "initial_bankroll",
         "source_resolver_identity",
         "settlement_authority_identity",
+        "settlement_learning_handoff_identity",
     }
 
     def __init__(self, path: Path) -> None:
@@ -571,6 +581,7 @@ class _ManifestStore:
                 **raw,
                 "source_resolver_identity": None,
                 "settlement_authority_identity": None,
+                "settlement_learning_handoff_identity": None,
             }
         if version == 2 and set(raw) == self._V2_FIELDS:
             self._text(raw.get("source_id"), "source_id")
@@ -578,6 +589,14 @@ class _ManifestStore:
             return {
                 **raw,
                 "source_resolver_identity": None,
+                "settlement_learning_handoff_identity": None,
+            }
+        if version == 3 and set(raw) == self._V3_FIELDS:
+            self._text(raw.get("source_id"), "source_id")
+            self._text(raw.get("initial_bankroll"), "initial_bankroll")
+            return {
+                **raw,
+                "settlement_learning_handoff_identity": None,
             }
         if version != self._VERSION or set(raw) != self._FIELDS:
             raise ProductCompositionError("product composition manifest schema mismatch")
@@ -614,6 +633,20 @@ class _ManifestStore:
                 raise ProductCompositionError(
                     "settlement_authority_identity must be lowercase SHA-256 hex"
                 )
+        learning_identity = raw.get("settlement_learning_handoff_identity")
+        if learning_identity is not None:
+            identity = self._text(
+                learning_identity,
+                "settlement_learning_handoff_identity",
+            )
+            if (
+                len(identity) != 64
+                or identity != identity.lower()
+                or any(character not in "0123456789abcdef" for character in identity)
+            ):
+                raise ProductCompositionError(
+                    "settlement_learning_handoff_identity must be lowercase SHA-256 hex"
+                )
         return raw
 
     def load_or_create(
@@ -623,6 +656,7 @@ class _ManifestStore:
         initial_bankroll: str,
         source_resolver_identity: str,
         settlement_authority_identity: str | None,
+        settlement_learning_handoff_identity: str | None,
     ) -> ProductCompositionManifest:
         source_id = self._text(source_id, "source_id")
         initial_bankroll = self._text(initial_bankroll, "initial_bankroll")
@@ -646,6 +680,11 @@ class _ManifestStore:
                 settlement_authority_identity,
                 "settlement_authority_identity",
             )
+        if settlement_learning_handoff_identity is not None:
+            settlement_learning_handoff_identity = self._text(
+                settlement_learning_handoff_identity,
+                "settlement_learning_handoff_identity",
+            )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             atomic_write_json(
@@ -657,6 +696,7 @@ class _ManifestStore:
                     "initial_bankroll": initial_bankroll,
                     "source_resolver_identity": source_resolver_identity,
                     "settlement_authority_identity": settlement_authority_identity,
+                    "settlement_learning_handoff_identity": settlement_learning_handoff_identity,
                 },
             )
         raw = self._read_raw()
@@ -676,11 +716,19 @@ class _ManifestStore:
             raise ProductCompositionError(
                 "settlement authority identity conflicts with durable product composition"
             )
+        if (
+            raw["settlement_learning_handoff_identity"]
+            != settlement_learning_handoff_identity
+        ):
+            raise ProductCompositionError(
+                "settlement learning handoff identity conflicts with durable product composition"
+            )
         return ProductCompositionManifest(
             source_id=source_id,
             initial_bankroll=initial_bankroll,
             source_resolver_identity=source_resolver_identity,
             settlement_authority_identity=settlement_authority_identity,
+            settlement_learning_handoff_identity=settlement_learning_handoff_identity,
         )
 
 

@@ -2830,18 +2830,25 @@ class CollectorDeltaTests(unittest.TestCase):
             delta = self.make_delta(payload=payload)
             collector.append(delta)
             market_store = SQLiteMarketStore(market_path)
+
+            class CrashAfterHealthStore(SourceHealthStore):
+                crashed = False
+
+                def record_success_if_current(self, *args, **kwargs):
+                    result = super().record_success_if_current(*args, **kwargs)
+                    if not self.crashed:
+                        self.crashed = True
+                        raise RuntimeError(
+                            "crash-after-canonical-health-before-progress-marker"
+                        )
+                    return result
+
             application = CanonicalDesktopApplication(
                 MarketEventBus(market_store),
-                SourceHealthStore(health_path),
+                CrashAfterHealthStore(health_path),
                 application_path,
                 clock=lambda: "2026-01-01T00:00:04+00:00",
             )
-            original_mark_health = application._state.mark_health_applied
-
-            def crash_before_health_progress_marker(current):
-                raise RuntimeError("crash-after-canonical-health-before-progress-marker")
-
-            application._state.mark_health_applied = crash_before_health_progress_marker
             first = DesktopDeltaConsumer(
                 collector,
                 DesktopDeltaCheckpointStore(desktop_path),
@@ -2849,9 +2856,11 @@ class CollectorDeltaTests(unittest.TestCase):
                 apply_event=application.apply,
                 lookup_application_receipt=application.lookup_receipt,
             )
-            with self.assertRaises(RuntimeError):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "crash-after-canonical-health-before-progress-marker",
+            ):
                 first.drain(as_of="2026-01-01T00:00:05+00:00")
-            application._state.mark_health_applied = original_mark_health
             self.assertFalse(DesktopDeltaCheckpointStore(desktop_path).has_ack("d1"))
             self.assertEqual(SourceHealthStore(health_path).get("source-x").poll_count, 1)
             self.assertEqual(len(market_store.events("e1")), 1)

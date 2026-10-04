@@ -557,6 +557,52 @@ def test_forged_future_ladder_dto_cannot_choose_late_evidence_reason() -> None:
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
 
 
+def test_price_ladder_before_durable_action_quote_cannot_satisfy_gate() -> None:
+    transport = MarketBookAndPriceLadderTransport()
+    original_opener = urllib_request._opener
+    try:
+        urllib_request._opener = _CanonicalUrlOpenerHarness(transport)
+        canonical_source = _canonical_client()
+        ladder_observation = canonical_source.read_market_price_ladder(
+            "1.234"
+        )
+        ladder = assess_betfair_price_ladder_admission(
+            ladder_observation,
+            Decimal("2.00"),
+            max_evidence_age=timedelta(seconds=5),
+        )
+        # Put the durable quote just after the ladder observation, then acquire
+        # MarketBook depth after that quote. This isolates the ladder's causal
+        # backdating from the parent's existing MarketBook quote fence.
+        time.sleep(0.005)
+        bound = _bound(
+            ladder.decision_at
+            + timedelta(seconds=1, milliseconds=1)
+        )
+        receipt = canonical_source.read_market_book_depth("1.234", 42)
+    finally:
+        urllib_request._opener = original_opener
+
+    assert ladder.admissible is True
+    with tempfile.TemporaryDirectory() as tmp:
+        result = assess_authoritative_betfair_execution_feasibility(
+            _reserved_ledger(tmp, bound),
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+            price_ladder_admission=ladder,
+        )
+
+    assert (
+        "PRICE_LADDER_EVIDENCE_PREDATES_ACTION_QUOTE"
+        in result.reasons
+    )
+    assert "PRICE_LADDER_AUTHORITY_UNPROVEN" not in result.reasons
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+    assert result.sufficient is False
+
+
 def test_price_ladder_observed_after_plan_reservation_cannot_backdate_gate() -> None:
     transport = MarketBookAndPriceLadderTransport()
     receipt, canonical_source = _synthetic_authoritative_receipt(transport)

@@ -526,7 +526,7 @@ def test_final_send_fails_closed_if_confirmation_authority_graph_changes(
             )
 
         assert transport.calls == []
-        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
+        assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
         assert _audit_receipt(authority, review, receipt).receipt.consumed_at is None
 
 

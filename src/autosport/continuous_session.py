@@ -1057,19 +1057,28 @@ class _ContinuousSessionState:
             (item["event_identity"], item["settlement_ref"]): item
             for item in pending.values()
         }
+        seen_input_ids: set[str] = set()
         for evidence in settlement_evidence:
+            # Validate the exact canonical resolution before any caller-controlled
+            # attribute is consumed by the durable state authority.
+            outcomes_digest = _settlement_outcomes_digest(evidence)
+            evidence_id = evidence.evidence_id
+            if evidence_id in seen_input_ids:
+                raise ContinuousSessionError(
+                    "settlement evidence repeats evidence_id"
+                )
+            seen_input_ids.add(evidence_id)
             normalized = {
                 "event_identity": evidence.event_identity,
                 "settlement_ref": evidence.settlement_ref,
-                "evidence_id": evidence.evidence_id,
+                "evidence_id": evidence_id,
                 "evidence_sha256": evidence.evidence_sha256,
                 "available_at": _settlement_instant(
                     evidence.available_at,
                     "available_at",
                 ).isoformat(),
             }
-            outcomes_digest = _settlement_outcomes_digest(evidence)
-            existing = known.get(evidence.evidence_id)
+            existing = known.get(evidence_id)
             if existing is not None and existing != normalized:
                 raise ContinuousSessionError(
                     "settlement evidence id conflicts with durable evidence"
@@ -1080,7 +1089,7 @@ class _ContinuousSessionState:
                 raise ContinuousSessionError(
                     "settlement event/reference conflicts with durable evidence"
                 )
-            previous_digest = outcome_digests.get(evidence.evidence_id)
+            previous_digest = outcome_digests.get(evidence_id)
             if existing is not None and previous_digest is None:
                 raise ContinuousSessionError(
                     "legacy settlement evidence lacks durable outcome interpretation"
@@ -1093,7 +1102,7 @@ class _ContinuousSessionState:
                 **normalized,
                 "quote_outcomes": dict(sorted(evidence.quote_outcomes.items())),
             }
-            existing_pending = pending.get(evidence.evidence_id)
+            existing_pending = pending.get(evidence_id)
             if existing_pending is not None and existing_pending != pending_payload:
                 raise ContinuousSessionError(
                     "pending settlement evidence id conflicts with durable resolution"
@@ -1106,15 +1115,15 @@ class _ContinuousSessionState:
                 raise ContinuousSessionError(
                     "pending settlement event/reference conflicts with durable resolution"
                 )
-            known[evidence.evidence_id] = normalized
+            known[evidence_id] = normalized
             known_pairs[pair] = normalized
-            outcome_digests[evidence.evidence_id] = outcomes_digest
+            outcome_digests[evidence_id] = outcomes_digest
             # A cleared historical receipt is durable audit truth, not unfinished
             # economic work. Re-observing the same provider result must not mint a
             # new pending commit. Only newly admitted evidence or evidence already
             # retained as pending may remain on the recovery path.
             if existing is None or existing_pending is not None:
-                pending[evidence.evidence_id] = pending_payload
+                pending[evidence_id] = pending_payload
                 pending_pairs[pair] = pending_payload
         return (
             list(sorted(known.values(), key=lambda item: item["evidence_id"])),
@@ -1223,15 +1232,6 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "retain_pending_evidence_ids contains duplicate identity"
             )
-        processed = {
-            resolution.evidence_id
-            for resolution in settlement_evidence
-        }
-        if not retained.issubset(processed):
-            raise ContinuousSessionError(
-                "retained pending settlement identity was not processed"
-            )
-
         def mutate(raw: dict[str, Any]) -> None:
             pending_before = {
                 item["evidence_id"]
@@ -1241,6 +1241,16 @@ class _ContinuousSessionState:
                 raw,
                 settlement_evidence,
             )
+            # The merge above is the closure-bound canonicality boundary. Consume
+            # identity only after it has accepted every exact resolution.
+            processed = {
+                resolution.evidence_id
+                for resolution in settlement_evidence
+            }
+            if not retained.issubset(processed):
+                raise ContinuousSessionError(
+                    "retained pending settlement identity was not processed"
+                )
             if not processed.issubset(pending_before):
                 raise ContinuousSessionError(
                     "settlement completion references evidence that is not pending"
@@ -1326,15 +1336,6 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "retain_pending_evidence_ids contains duplicate identity"
             )
-        processed = {
-            resolution.evidence_id
-            for resolution in settlement_evidence
-        }
-        if not retained.issubset(processed):
-            raise ContinuousSessionError(
-                "retained pending settlement identity was not processed"
-            )
-
         def mutate(raw: dict[str, Any]) -> None:
             pending_before = {
                 item["evidence_id"]
@@ -1344,6 +1345,16 @@ class _ContinuousSessionState:
                 raw,
                 settlement_evidence,
             )
+            # The merge above is the closure-bound canonicality boundary. Consume
+            # identity only after it has accepted every exact resolution.
+            processed = {
+                resolution.evidence_id
+                for resolution in settlement_evidence
+            }
+            if not retained.issubset(processed):
+                raise ContinuousSessionError(
+                    "retained pending settlement identity was not processed"
+                )
             if not processed.issubset(pending_before):
                 raise ContinuousSessionError(
                     "successful settlement references evidence that is not pending"

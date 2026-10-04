@@ -3316,6 +3316,10 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     ],
                     [first_resolution.evidence_id],
                 )
+                self.assertEqual(
+                    coordinator.status().pending_settlement_evidence_ids,
+                    (first_resolution.evidence_id,),
+                )
 
                 authority.resolutions = {
                     event_two.identity: second_resolution,
@@ -3334,6 +3338,10 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 self.assertEqual(
                     second_state["pending_settlement_resolutions"],
                     [],
+                )
+                self.assertEqual(
+                    coordinator.status().pending_settlement_evidence_ids,
+                    (),
                 )
                 self.assertEqual(second_state["cycles_completed"], 2)
             finally:
@@ -3526,6 +3534,10 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     (root / "continuous_session.json").read_text(encoding="utf-8")
                 )
                 self.assertEqual(raw["pending_settlement_resolutions"], [])
+                self.assertEqual(
+                    restarted.status().pending_settlement_evidence_ids,
+                    (),
+                )
                 self.assertEqual(raw["cycles_completed"], 0)
                 self.assertEqual(
                     raw["last_error_code"],

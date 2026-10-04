@@ -872,13 +872,15 @@ class GitHubApi:
             ):
                 raise CancellationError("invalid workflow-runs response")
             page_runs = payload["workflow_runs"]
+            total_count = payload["total_count"]
             if len(page_runs) > _runs_per_page:
                 raise CancellationError("invalid workflow-runs page size")
+            if total_count < len(page_runs):
+                raise CancellationError("invalid workflow-runs total_count")
             for item in page_runs:
                 run = _run_parser(item)
                 runs.append(run)
                 seen_run_ids.add(run.run_id)
-            total_count = payload["total_count"]
             # Queue shrinkage can make a later page short even though an earlier
             # total_count was larger. Treat that as a safe terminal moving snapshot:
             # missed runs only defer cleanup, while forged extra rows fail closed above.

@@ -68,7 +68,12 @@
   }
 
   function focusOperatorTarget(target) {
-    if (!(target instanceof HTMLElement)) return false;
+    const statusFallback = errorNode.hidden ? statusNode : errorNode;
+    if (!(target instanceof HTMLElement)) {
+      statusFallback.tabIndex = -1;
+      statusFallback.focus();
+      return document.activeElement === statusFallback;
+    }
     const unavailable = (
       target.hidden
       || target.closest("[hidden]") !== null
@@ -98,7 +103,6 @@
     // If the section heading cannot accept focus for any host/browser reason,
     // retain one deterministic accessible fallback rather than silently keeping
     // focus on the unavailable control.
-    const statusFallback = errorNode.hidden ? statusNode : errorNode;
     statusFallback.tabIndex = -1;
     statusFallback.focus();
     return document.activeElement === statusFallback;

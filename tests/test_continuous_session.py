@@ -244,6 +244,76 @@ def _build_coordinator(
 
 
 class ContinuousSessionCoordinatorTests(unittest.TestCase):
+
+    def test_tick_clock_rollback_fails_before_collector_and_outcome_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:clock",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="provider-result:clock",
+                quote_outcomes={
+                    "provider-a:event-1:winner:home": "win",
+                },
+                evidence_id="clock-preflight-receipt",
+                evidence_sha256="9" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            authority = _OutcomeAuthority(resolution)
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                clock.value = "2026-09-19T21:21:00+00:00"
+                coordinator.tick()
+                source_calls = source.catalog_calls
+                outcome_calls = authority.calls
+                checkpoint = root / "continuous_session.json"
+                checkpoint_before = checkpoint.read_bytes()
+                journal = root / "continuous_session.settlement-evidence"
+                journal_before = {
+                    item.name: item.read_bytes()
+                    for item in journal.iterdir()
+                    if item.suffix == ".json"
+                }
+
+                clock.value = "2026-09-19T21:20:30+00:00"
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "rewinds durable success time",
+                ):
+                    coordinator.tick()
+
+                self.assertEqual(source.catalog_calls, source_calls)
+                self.assertEqual(authority.calls, outcome_calls)
+                self.assertEqual(checkpoint.read_bytes(), checkpoint_before)
+                self.assertEqual(
+                    {
+                        item.name: item.read_bytes()
+                        for item in journal.iterdir()
+                        if item.suffix == ".json"
+                    },
+                    journal_before,
+                )
+            finally:
+                store.close()
+
     def test_tick_registers_new_event_and_persists_checkpoint_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

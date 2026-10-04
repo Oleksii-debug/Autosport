@@ -2250,6 +2250,21 @@ class _ContinuousSessionState:
 
         self._update_state(mutate)
 
+    def validate_cycle_time(self, *, at: str) -> None:
+        cycle_at = _instant(at, "at")
+        raw = self._read_current_state()
+        if cycle_at < _instant(raw["started_at"], "started_at"):
+            raise ContinuousSessionError(
+                "cycle timestamp predates continuous session start"
+            )
+        if raw["last_success_at"] is not None and cycle_at < _instant(
+            raw["last_success_at"],
+            "last_success_at",
+        ):
+            raise ContinuousSessionError(
+                "cycle timestamp rewinds durable success time"
+            )
+
     def record_success(
         self,
         *,
@@ -2912,6 +2927,9 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
         now = self.clock()
         _instant(now, "now")
+        # Clock chronology is a pre-effect authority. Reject rollback before
+        # collector delivery, settlement, learning, or PAPER economics can run.
+        self._state.validate_cycle_time(at=now)
         try:
             cycle = self.collector.run_cycle()
             source_snapshot = self._refresh_source_state_projection()

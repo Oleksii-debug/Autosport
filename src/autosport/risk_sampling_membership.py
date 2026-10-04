@@ -101,6 +101,21 @@ def _canonical_decimal_text(value: object, name: str) -> str:
     if not parsed.is_finite():
         raise RiskSamplingMembershipError(f"{name} must be finite")
     if parsed.is_zero():
+        canonical_length = 1
+    else:
+        decimal_tuple = parsed.as_tuple()
+        exponent = int(decimal_tuple.exponent)
+        digits = len(decimal_tuple.digits)
+        sign = 1 if decimal_tuple.sign else 0
+        if exponent >= 0:
+            canonical_length = sign + digits + exponent
+        elif digits + exponent > 0:
+            canonical_length = sign + digits + 1
+        else:
+            canonical_length = sign + 2 - exponent
+    if canonical_length > 128:
+        raise RiskSamplingMembershipError(f"{name} exceeds supported canonical size")
+    if parsed.is_zero():
         canonical = "0"
     else:
         canonical = format(parsed, "f")
@@ -168,14 +183,19 @@ def _parse_design(text: object) -> tuple[dict[str, Any], str]:
             raise RiskSamplingMembershipError(
                 "fixed-N risk target scope must be FROZEN_STAKE_POLICY"
             )
-        _sha256(
-            payload.get("initial_capital_state_sha256"),
-            "fixed-N initial_capital_state_sha256",
-        )
-        _sha256(
-            payload.get("stake_policy_sha256"),
-            "fixed-N stake_policy_sha256",
-        )
+        for field_name in (
+            "initial_capital_state_sha256",
+            "stake_policy_sha256",
+        ):
+            raw_sha = _canonical_text(
+                payload.get(field_name),
+                f"fixed-N {field_name}",
+            )
+            if raw_sha != raw_sha.lower():
+                raise RiskSamplingMembershipError(
+                    f"fixed-N {field_name} must use lowercase SHA-256 hex"
+                )
+            _sha256(raw_sha, f"fixed-N {field_name}")
     return payload, hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 

@@ -383,9 +383,33 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 "suspended_action_ids must be a frozenset of non-empty strings"
             )
         plan_action_ids = {action.action_id for action in plan.actions}
+        if len(plan_action_ids) != len(plan.actions):
+            raise PaperExecutionStateError(
+                "execution plan action identities must be unique"
+            )
+        if not isinstance(observation_evidence_ids, Mapping):
+            raise TypeError(
+                "observation_evidence_ids must be a mapping"
+            )
+        observation_ids = dict(observation_evidence_ids)
+        if any(
+            type(action_id) is not str
+            or not action_id
+            or action_id not in plan_action_ids
+            or type(evidence_id) is not str
+            or not evidence_id
+            for action_id, evidence_id in observation_ids.items()
+        ):
+            raise PaperExecutionStateError(
+                "observation_evidence_ids contain invalid execution evidence"
+            )
         if not suspended_action_ids.issubset(plan_action_ids):
             raise PaperExecutionStateError(
                 "suspended_action_ids contain action outside execution plan"
+            )
+        if set(observation_ids) & suspended_action_ids:
+            raise PaperExecutionStateError(
+                "one execution action cannot be both observed and synthetically suspended"
             )
         payload: dict[str, Any] = {
             "trigger_id": trigger_id,
@@ -395,7 +419,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             "started_at": started_at,
             "action_ids": [action.action_id for action in plan.actions],
             "observation_evidence_ids": dict(
-                sorted(observation_evidence_ids.items())
+                sorted(observation_ids.items())
             ),
         }
         if suspended_action_ids:

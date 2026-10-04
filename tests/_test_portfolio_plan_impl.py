@@ -1137,6 +1137,7 @@ class PortfolioPlanTests(unittest.TestCase):
             total_states=len(outcomes),
             worst_terminal_profit=Decimal("1"),
             best_terminal_profit=Decimal("2"),
+            evaluated_stakes=(Decimal("50.00"), Decimal("50.00")),
             worst_proven=True,
             best_proven=True,
         )
@@ -1332,6 +1333,21 @@ class PortfolioPlanTests(unittest.TestCase):
             replace(
                 plan,
                 terminal_economics=copy.copy(plan.terminal_economics),
+            )
+
+        changed_stakes = tuple(
+            stake + Decimal("0.01") if stake > 0 else stake
+            for stake in plan.stakes
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "terminal economics must bind the exact portfolio stake vector",
+        ):
+            replace(
+                plan,
+                stakes=changed_stakes,
+                dependency_evidence=None,
+                robust_proposal=None,
             )
 
         copied_authority = copy.copy(authority)

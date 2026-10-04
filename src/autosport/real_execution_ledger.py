@@ -1367,6 +1367,17 @@ class RealExecutionLedger:
                     "Betfair pre-provider no-effect authority values are invalid"
                 ) from exc
 
+            expected_source = (
+                "autosport.betfair_pre_provider_no_external_effect:v2:"
+                f"{payload['write_adapter_id']}:"
+                f"v{payload['write_adapter_version']}:"
+                f"{payload['pre_authority_snapshot_sha256']}"
+            )
+            if payload["source"] != expected_source:
+                raise ExecutionLedgerIntegrityError(
+                    "Betfair pre-provider no-effect authority source binding is invalid"
+                )
+
             prior_attempt_events = [
                 prior
                 for prior in events[:event_index]
@@ -2513,6 +2524,15 @@ class RealExecutionLedger:
             source=source,
         )
         reconciliation_payload = reconciliation.to_dict()
+        expected_source = (
+            "autosport.betfair_pre_provider_no_external_effect:v2:"
+            f"{write_adapter_id}:v{write_adapter_version}:"
+            f"{expected_snapshot_sha256}"
+        )
+        if source != expected_source:
+            raise ExecutionIdentityConflict(
+                "pre-provider no-effect authority source binding mismatch"
+            )
         authority_payload = {
             "evidence_id": evidence_id,
             "authorized_at": observed_at,

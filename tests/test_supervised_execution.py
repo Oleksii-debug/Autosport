@@ -2303,7 +2303,6 @@ def test_pre_provider_no_effect_authority_survives_restart_and_reconstruction(
     tmp_path,
 ) -> None:
     from autosport.betfair_pre_provider_recovery import (
-        begin_betfair_pre_provider_retry_attempt,
         recover_betfair_pre_provider_attempt,
     )
 
@@ -2339,7 +2338,6 @@ def test_pre_provider_no_effect_authority_survives_restart_and_reconstruction(
 def test_pre_provider_no_effect_authority_is_single_use(tmp_path) -> None:
     from autosport.betfair_pre_provider_recovery import (
         BetfairPreProviderRecoveryError,
-        begin_betfair_pre_provider_retry_attempt,
         recover_betfair_pre_provider_attempt,
     )
 

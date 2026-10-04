@@ -301,6 +301,36 @@ def test_duplicate_generation_does_not_change_resolution_identity() -> None:
     assert len(duplicate.candidate_generation_sha256s) == 1
 
 
+def test_resolver_rejects_tuple_constructor_bypass_with_stale_digests() -> None:
+    item = observation()
+    forged_payload = list(item)
+    forged_payload[3] = Decimal("999")
+    forged = tuple.__new__(
+        BetfairProviderConstraintObservation,
+        tuple(forged_payload),
+    )
+
+    with pytest.raises(
+        BetfairProviderConstraintError,
+        match="canonical reconstruction",
+    ):
+        resolve(forged)
+
+
+def test_resolver_rejects_truncated_tuple_constructor_bypass() -> None:
+    item = observation()
+    forged = tuple.__new__(
+        BetfairProviderConstraintObservation,
+        tuple(item[:17]),
+    )
+
+    with pytest.raises(
+        BetfairProviderConstraintError,
+        match="tuple shape",
+    ):
+        resolve(forged)
+
+
 def test_observation_batch_is_bounded() -> None:
     item = observation()
 

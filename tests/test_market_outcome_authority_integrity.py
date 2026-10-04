@@ -931,5 +931,69 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
         authority.assert_issued_integrity()
 
 
+    def test_digest_mask_rejects_module_root_registry_rebinding(self) -> None:
+        authority = self._authority()
+        issued_digest = authority.authority_sha256
+        object.__setattr__(
+            authority,
+            "selection_ids",
+            ("away", "forged", "home"),
+        )
+        original_roots = (
+            market_outcomes_module._CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS
+        )
+        original_digest = market_outcomes_module._CANONICAL_SHA256_PAYLOAD
+        hostile_calls: list[object] = []
+
+        def forged_digest(payload):
+            hostile_calls.append(payload)
+            return issued_digest
+
+        market_outcomes_module._CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS = ()
+        market_outcomes_module._CANONICAL_SHA256_PAYLOAD = forged_digest
+        try:
+            with self.assertRaisesRegex(ValueError, "module root was replaced"):
+                authority.assert_issued_integrity()
+        finally:
+            market_outcomes_module._CANONICAL_SHA256_PAYLOAD = original_digest
+            market_outcomes_module._CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS = (
+                original_roots
+            )
+
+        self.assertEqual(hostile_calls, [])
+        with self.assertRaisesRegex(ValueError, "mutated after verified issuance"):
+            authority.assert_issued_integrity()
+
+    def test_identity_guard_ignores_surface_registry_rebinding(self) -> None:
+        authority = self._authority()
+        original_surface = (
+            market_outcomes_module._CANONICAL_MARKET_OUTCOME_IDENTITY_CLASS_SURFACE
+        )
+        original_quote_key = MarketOutcomeIdentity.quote_key
+        hostile_calls: list[str] = []
+
+        def hostile_quote_key(identity, selection_id):
+            del identity, selection_id
+            hostile_calls.append("quote_key")
+            return "forged:quote:key"
+
+        market_outcomes_module._CANONICAL_MARKET_OUTCOME_IDENTITY_CLASS_SURFACE = ()
+        MarketOutcomeIdentity.quote_key = hostile_quote_key
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "canonical market outcome identity class dispatch was replaced",
+            ):
+                authority.assert_issued_integrity()
+        finally:
+            MarketOutcomeIdentity.quote_key = original_quote_key
+            market_outcomes_module._CANONICAL_MARKET_OUTCOME_IDENTITY_CLASS_SURFACE = (
+                original_surface
+            )
+
+        self.assertEqual(hostile_calls, [])
+        authority.assert_issued_integrity()
+
+
 if __name__ == "__main__":
     unittest.main()

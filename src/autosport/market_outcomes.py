@@ -945,10 +945,19 @@ _CANONICAL_MARKET_OUTCOME_AUTHORITY_CLASS_SURFACE = tuple(
 )
 
 
-def _assert_canonical_market_outcome_authority_dispatch() -> None:
+def _assert_canonical_market_outcome_authority_dispatch(
+    _module_roots=_CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS,
+    _identity_surface=_CANONICAL_MARKET_OUTCOME_IDENTITY_CLASS_SURFACE,
+    _authority_surface=_CANONICAL_MARKET_OUTCOME_AUTHORITY_CLASS_SURFACE,
+    _terminal_guard=_CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD,
+    _terminal_guard_code=_CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD_CODE,
+    _identity_type=_CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE,
+    _authority_type=_CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE,
+    _missing_slot=_MISSING_AUTHORITY_CLASS_SLOT,
+) -> None:
     """Fail closed if authority-bearing class dispatch or trusted roots changed."""
 
-    for name, expected in _CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS:
+    for name, expected in _module_roots:
         if globals().get(name) is not expected:
             raise ValueError(
                 "canonical market outcome authority module root was replaced"
@@ -969,22 +978,20 @@ def _assert_canonical_market_outcome_authority_dispatch() -> None:
             )
     if (
         getattr(
-            _CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD,
+            _terminal_guard,
             "__code__",
             None,
         )
-        is not _CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD_CODE
+        is not _terminal_guard_code
     ):
         raise ValueError(
             "canonical market terminal state class dispatch was replaced"
         )
-    _CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD()
+    _terminal_guard()
 
-    identity_class_dict = vars(_CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE)
-    for name, expected, expected_code in (
-        _CANONICAL_MARKET_OUTCOME_IDENTITY_CLASS_SURFACE
-    ):
-        current = identity_class_dict.get(name, _MISSING_AUTHORITY_CLASS_SLOT)
+    identity_class_dict = vars(_identity_type)
+    for name, expected, expected_code in _identity_surface:
+        current = identity_class_dict.get(name, _missing_slot)
         if current is not expected:
             raise ValueError(
                 "canonical market outcome identity class dispatch was replaced"
@@ -1003,11 +1010,9 @@ def _assert_canonical_market_outcome_authority_dispatch() -> None:
                 "canonical market outcome identity class dispatch was replaced"
             )
 
-    class_dict = vars(_CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE)
-    for name, expected, expected_code in (
-        _CANONICAL_MARKET_OUTCOME_AUTHORITY_CLASS_SURFACE
-    ):
-        current = class_dict.get(name, _MISSING_AUTHORITY_CLASS_SLOT)
+    class_dict = vars(_authority_type)
+    for name, expected, expected_code in _authority_surface:
+        current = class_dict.get(name, _missing_slot)
         if current is not expected:
             raise ValueError(
                 "canonical market outcome authority class dispatch was replaced"

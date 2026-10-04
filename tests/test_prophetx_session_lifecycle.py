@@ -13,6 +13,7 @@ from autosport.prophetx_session_lifecycle import (
     ProphetXSessionLifecycle,
     ProphetXSessionLifecycleError,
     ProphetXSessionScope,
+    ProphetXSessionSnapshot,
     ProphetXSessionState,
 )
 from autosport.workspace_lock import (
@@ -1404,6 +1405,94 @@ def test_state_file_size_is_bounded_before_json_parse(tmp_path):
         ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
     ],
 )
+@pytest.mark.parametrize(
+    "state,expected_failure,wrong_failure",
+    [
+        (
+            ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
+            ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE,
+            ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION,
+        ),
+        (
+            ProphetXSessionState.PROVIDER_UNAVAILABLE,
+            ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION,
+            ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE,
+        ),
+        (
+            ProphetXSessionState.SESSION_POOL_EXHAUSTED,
+            ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED,
+            ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+        ),
+    ],
+)
+def test_login_failure_state_rejects_contradictory_failure_class(
+    state,
+    expected_failure,
+    wrong_failure,
+):
+    kwargs = {
+        "state": state,
+        "generation": 1,
+        "credential_revision": "rev-1",
+        "integration_role": "market-maker-primary",
+        "last_transition_at": NOW,
+        "last_failure_class": wrong_failure,
+    }
+    if state is ProphetXSessionState.SESSION_POOL_EXHAUSTED:
+        kwargs["slot_hold_until"] = NOW + CONSERVATIVE_SESSION_SLOT_HOLD
+    else:
+        kwargs["retry_not_before"] = NOW + timedelta(seconds=5)
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="login failure class does not match durable state",
+    ):
+        ProphetXSessionSnapshot(**kwargs)
+
+    kwargs["last_failure_class"] = expected_failure
+    snapshot = ProphetXSessionSnapshot(**kwargs)
+    assert snapshot.last_failure_class is expected_failure
+
+
+@pytest.mark.parametrize(
+    "state,failure",
+    [
+        (
+            ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
+            ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE,
+        ),
+        (
+            ProphetXSessionState.PROVIDER_UNAVAILABLE,
+            ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION,
+        ),
+        (
+            ProphetXSessionState.SESSION_POOL_EXHAUSTED,
+            ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED,
+        ),
+    ],
+)
+def test_login_failure_state_rejects_renewal_failure_evidence(state, failure):
+    kwargs = {
+        "state": state,
+        "generation": 1,
+        "credential_revision": "rev-1",
+        "integration_role": "market-maker-primary",
+        "last_transition_at": NOW,
+        "last_failure_class": failure,
+        "last_renewal_failure_class": ProphetXRenewalFailureClass.RETRYABLE,
+    }
+    if state is ProphetXSessionState.SESSION_POOL_EXHAUSTED:
+        kwargs["slot_hold_until"] = NOW + CONSERVATIVE_SESSION_SLOT_HOLD
+    else:
+        kwargs["retry_not_before"] = NOW + timedelta(seconds=5)
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="login failure state cannot carry renewal failure evidence",
+    ):
+        ProphetXSessionSnapshot(**kwargs)
+
+
 def test_provider_slot_wait_rejects_nonfuture_hold(tmp_path, state):
     lifecycle = _lifecycle(tmp_path)
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)

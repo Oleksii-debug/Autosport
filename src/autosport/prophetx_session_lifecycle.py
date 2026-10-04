@@ -254,6 +254,27 @@ class ProphetXSessionSnapshot:
                 "last_renewal_failure_class must be an exact ProphetXRenewalFailureClass"
             )
 
+        login_failure_for_state = {
+            ProphetXSessionState.AUTH_RETRYABLE_FAILURE: (
+                ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE
+            ),
+            ProphetXSessionState.PROVIDER_UNAVAILABLE: (
+                ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION
+            ),
+            ProphetXSessionState.SESSION_POOL_EXHAUSTED: (
+                ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED
+            ),
+        }.get(self.state)
+        if login_failure_for_state is not None:
+            if self.last_failure_class is not login_failure_for_state:
+                raise ProphetXSessionLifecycleError(
+                    "login failure class does not match durable state"
+                )
+            if self.last_renewal_failure_class is not None:
+                raise ProphetXSessionLifecycleError(
+                    "login failure state cannot carry renewal failure evidence"
+                )
+
         if self.state in {
             ProphetXSessionState.LOGIN_IN_FLIGHT,
             ProphetXSessionState.RENEWING,

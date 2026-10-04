@@ -322,5 +322,54 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
             PortfolioEngine.scenario_profit([ticket], {leg.quote_key})
 
 
+    def test_decimal_global_rebind_cannot_replace_portfolio_money_root(self) -> None:
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("rebound Decimal is_finite executed")
+
+        leg = TicketLeg("event-hostile-root", "winner", "alice", Decimal("2"))
+        hostile_ticket = portfolio_module.PaperTicket(
+            ticket_id="synthetic-rebound-decimal",
+            stake=HostileDecimal("10"),
+            legs=(leg,),
+            placed_at="2026-09-21T08:00:00+00:00",
+        )
+        with patch.object(portfolio_module, "Decimal", HostileDecimal):
+            with self.assertRaisesRegex(
+                ValueError,
+                "stake must be a finite Decimal",
+            ):
+                PortfolioEngine.scenario_profit(
+                    [hostile_ticket],
+                    {leg.quote_key},
+                )
+
+        _book, ticket, exact_leg = self._open_ticket()
+
+        class PoisonDecimal:
+            def __new__(cls, *args, **kwargs):
+                raise AssertionError("rebound Decimal constructor executed")
+
+        with patch.object(portfolio_module, "Decimal", PoisonDecimal):
+            self.assertEqual(
+                PortfolioEngine.scenario_profit(
+                    [ticket],
+                    {exact_leg.quote_key},
+                ),
+                Decimal("10"),
+            )
+            self.assertEqual(
+                PortfolioEngine.scenario_profit_settlements(
+                    [ticket],
+                    {exact_leg.quote_key: "win"},
+                ),
+                Decimal("10"),
+            )
+            report = PortfolioEngine().analyse([ticket])
+            self.assertEqual(report.worst_case, Decimal("-10"))
+            self.assertEqual(report.best_case, Decimal("10"))
+            self.assertEqual(report.mean_case, Decimal("0"))
+
+
 if __name__ == "__main__":
     unittest.main()

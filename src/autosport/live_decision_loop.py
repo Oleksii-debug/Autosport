@@ -46,6 +46,7 @@ from .paper_execution_reality import (
     PaperLegAttempt,
     RecoveryDecision,
     _derive_run_economics,
+    _synthetic_attempt,
 )
 from .portfolio_plan import (
     OpportunityEvidence,
@@ -3296,7 +3297,19 @@ class PersistentLiveDecisionLoop:
         reservation_event = reservations[0]
         scope_event = scopes[0]
         reservation = reservation_event.get("payload")
-        if type(reservation) is not dict:
+        expected_reservation_keys = {
+            "trigger_id",
+            "plan_id",
+            "plan_fingerprint",
+            "model_fingerprint",
+            "started_at",
+            "action_ids",
+            "observation_evidence_ids",
+        }
+        if (
+            type(reservation) is not dict
+            or set(reservation) != expected_reservation_keys
+        ):
             raise DecisionLedgerIntegrityError(
                 "committed live decision #623 reservation is invalid"
             )
@@ -3318,6 +3331,7 @@ class PersistentLiveDecisionLoop:
             or reservation.get("plan_fingerprint") != plan_fingerprint
             or reservation.get("model_fingerprint") != model_fingerprint
             or reservation.get("started_at") != progress.decision_ts
+            or reservation.get("observation_evidence_ids") != {}
             or type(action_ids) is not list
             or len(action_ids) != positive_count
             or len(action_ids) != len(set(action_ids))
@@ -3343,14 +3357,15 @@ class PersistentLiveDecisionLoop:
         )
         try:
             attempts = tuple(
-                sorted(
-                    (
-                        PaperLegAttempt.from_dict(event.get("payload"))
-                        for event in attempt_events
-                    ),
-                    key=lambda item: item.sequence,
-                )
+                PaperLegAttempt.from_dict(event.get("payload"))
+                for event in attempt_events
             )
+            if tuple(
+                attempt.sequence for attempt in attempts
+            ) != tuple(range(len(attempts))):
+                raise PaperExecutionIntegrityError(
+                    "durable attempt events are not in canonical sequence order"
+                )
             derived = _derive_run_economics(
                 tuple(action_ids),
                 attempts,
@@ -3642,6 +3657,51 @@ class PersistentLiveDecisionLoop:
                 "committed live decision execution plan conflicts with "
                 "canonical plan/evidence"
             )
+
+        expected_run_id = "paper-exec-v2-" + _canonical_json_sha256(
+            {
+                "plan_fingerprint": reconstructed_plan.fingerprint,
+                "trigger_id": progress.decision_id,
+                "model_fingerprint": runtime.config.fingerprint,
+            }
+        )
+        if run_id != expected_run_id:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 run identity is invalid"
+            )
+        if (
+            scope_event.get("event_key") != f"{run_id}:exposure-scope"
+            or reservation_event.get("event_key") != f"{run_id}:reserve"
+            or completion.get("event_key") != f"{run_id}:complete"
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 event identity is invalid"
+            )
+        for event, attempt in zip(
+            attempt_events,
+            attempts,
+            strict=True,
+        ):
+            if event.get("event_key") != (
+                f"{run_id}:attempt:{attempt.sequence}"
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision #623 attempt event identity is invalid"
+                )
+            expected_attempt = _synthetic_attempt(
+                run_id=run_id,
+                plan=reconstructed_plan,
+                action=reconstructed_plan.actions[attempt.sequence],
+                sequence=attempt.sequence,
+                config=runtime.config,
+                started_at=progress.decision_ts,
+                suspended=False,
+            )
+            if attempt != expected_attempt:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision #623 attempt conflicts with "
+                    "canonical synthetic execution"
+                )
 
         action_by_id = {
             action.action_id: action for action in actions

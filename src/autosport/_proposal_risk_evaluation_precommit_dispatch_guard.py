@@ -321,6 +321,12 @@ def _install_execution_evidence_guard() -> None:
                 "proposal risk execution evidence public derivation was rebound"
             )
         require_surface()
+        if type(rows) is tuple:
+            for index, row in enumerate(rows):
+                if type(row) is not row_type:
+                    raise error_type(
+                        f"rows[{index}] must be exact CounterfactualMemberExecutionEvidence"
+                    )
         result = canonical_derive(
             precommit,
             rows,

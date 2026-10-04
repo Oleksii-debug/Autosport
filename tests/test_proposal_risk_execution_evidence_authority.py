@@ -1424,8 +1424,8 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
         self.authorities = getattr(self, "_proposal_terminal_authorities")
         self.assertFalse(
             self.terminal_population.terminal_space_exact,
-            "the fixture intentionally has two independently exact markets; "
-            "their Cartesian joint support is not proven exact",
+            "the fixture intentionally uses conservative provider terminal "
+            "supersets and has no proven Cartesian joint support",
         )
 
     def _binding(
@@ -1441,8 +1441,8 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
 
     def _bindings(self):
         return (
-            self._binding(("winner:other-a", "winner:selection-b")),
-            self._binding(("winner:selection-a", "winner:other-b")),
+            self._binding(("canonical:win,loss", "canonical:loss,win")),
+            self._binding(("canonical:loss,win", "canonical:win,loss")),
         )
 
     def _issue(
@@ -1480,7 +1480,7 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
             ),
         )
 
-    def test_exact_precommitted_terminal_vectors_prove_only_terminal_mapping(self) -> None:
+    def test_precommitted_provider_terminal_vectors_prove_only_mapping(self) -> None:
         bindings = self._bindings()
         parent = self._issue(bindings)
         result = self._resolve(bindings)
@@ -1490,7 +1490,8 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
         self.assertTrue(result.mapping_identity_proven)
         self.assertTrue(result.provider_terminal_population_proven)
         self.assertTrue(result.fixed_n_member_mapping_complete)
-        self.assertTrue(result.per_market_terminal_states_exact)
+        self.assertFalse(result.per_market_terminal_space_exact)
+        self.assertFalse(result.per_market_terminal_states_exact)
         self.assertTrue(result.terminal_mapping_proven)
         self.assertFalse(result.joint_terminal_space_exact)
         self.assertFalse(result.product_scenario_source_provenance_proven)
@@ -1511,10 +1512,30 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
         self.assertEqual(len(result.resolution_sha256), 64)
         self.assertEqual(self._resolve(bindings), result)
 
+    def test_conservative_all_void_state_maps_without_support_authority(self) -> None:
+        void_member = self._binding(
+            ("canonical:void,void", "canonical:void,void")
+        )
+        bindings = (void_member, void_member)
+        self._issue(bindings)
+        result = self._resolve(bindings)
+
+        self.assertTrue(result.mapping_identity_proven)
+        self.assertTrue(result.terminal_mapping_proven)
+        self.assertFalse(result.per_market_terminal_space_exact)
+        self.assertFalse(result.per_market_terminal_states_exact)
+        self.assertFalse(result.joint_terminal_space_exact)
+        self.assertFalse(result.joint_scenario_support_proven)
+        self.assertFalse(result.risk_upper_bound_for_target)
+        self.assertEqual(
+            result.member_state_vector_sha256s,
+            (void_member.state_vector_sha256, void_member.state_vector_sha256),
+        )
+
     def test_scenario_commitments_are_fixed_size_and_deterministic(self) -> None:
-        first = self._binding(("winner:other-a", "winner:selection-b"))
-        again = self._binding(("winner:other-a", "winner:selection-b"))
-        changed = self._binding(("winner:selection-a", "winner:selection-b"))
+        first = self._binding(("canonical:win,loss", "canonical:loss,win"))
+        again = self._binding(("canonical:win,loss", "canonical:loss,win"))
+        changed = self._binding(("canonical:loss,win", "canonical:loss,win"))
 
         self.assertEqual(first, again)
         self.assertNotEqual(first.scenario_id, changed.scenario_id)
@@ -1572,7 +1593,7 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
                 precommit=self.precommit,
                 authorities=self.authorities,
                 member_market_state_ids=(
-                    ("winner:selection-a", "winner:selection-b"),
+                    ("canonical:loss,win", "canonical:loss,win"),
                     bindings[1].market_state_ids,
                 ),
             )
@@ -1589,7 +1610,7 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
                 precommit=self.precommit,
                 authorities=self.authorities,
                 member_market_state_ids=(
-                    ("winner:missing", "winner:selection-b"),
+                    ("canonical:missing", "canonical:loss,win"),
                     bindings[1].market_state_ids,
                 ),
             )
@@ -1626,7 +1647,7 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
             )
 
     def test_iid_multiplicity_can_map_but_does_not_prove_draw_law(self) -> None:
-        repeated = self._binding(("winner:other-a", "winner:other-b"))
+        repeated = self._binding(("canonical:win,loss", "canonical:win,loss"))
         bindings = (repeated, repeated)
         self._issue(bindings)
         result = self._resolve(bindings)
@@ -1662,7 +1683,7 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
                 ProductProposalRiskTerminalStateMappingError,
                 "dispatch root changed",
             ):
-                self._binding(("winner:other-a", "winner:selection-b"))
+                self._binding(("canonical:win,loss", "canonical:loss,win"))
         finally:
             terminal_mapping_authority.hashlib.sha256 = original
 
@@ -1683,7 +1704,7 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
                 ProductProposalRiskTerminalStateMappingError,
                 "result authority surface changed",
             ):
-                self._binding(("winner:other-a", "winner:selection-b"))
+                self._binding(("canonical:win,loss", "canonical:loss,win"))
         finally:
             proof.__code__ = original_code
 
@@ -1703,7 +1724,7 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
                 ProductProposalRiskTerminalStateMappingError,
                 "result authority surface changed",
             ):
-                self._binding(("winner:other-a", "winner:selection-b"))
+                self._binding(("canonical:win,loss", "canonical:loss,win"))
         finally:
             getter.__code__ = original_code
 
@@ -1833,7 +1854,7 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
                 ProductProposalRiskTerminalStateMappingError,
                 "dispatch root changed",
             ):
-                self._binding(("winner:other-a", "winner:selection-b"))
+                self._binding(("canonical:win,loss", "canonical:loss,win"))
         finally:
             terminal_mapping_authority._MAPPING_SCHEMA = original
 
@@ -1850,7 +1871,7 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
                 ProductProposalRiskTerminalStateMappingError,
                 "dispatch root changed",
             ):
-                self._binding(("winner:other-a", "winner:selection-b"))
+                self._binding(("canonical:win,loss", "canonical:loss,win"))
         finally:
             method.__code__ = original_code
 

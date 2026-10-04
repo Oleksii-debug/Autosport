@@ -929,6 +929,76 @@ def test_receipt_after_plan_reservation_cannot_be_decision_evidence() -> None:
     assert result.sufficient is False
 
 
+def test_decision_evidence_identity_is_restart_stable() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "real.jsonl"
+        ledger = RealExecutionLedger(path)
+        ledger.reserve_plan(bound.execution_plan)
+        first = assess_authoritative_betfair_execution_feasibility(
+            ledger,
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+        )
+        restarted = RealExecutionLedger(path)
+        second = assess_authoritative_betfair_execution_feasibility(
+            restarted,
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+        )
+
+    assert first.decision_at == second.decision_at
+    assert first.evidence_digest == second.evidence_digest
+    assert first.liquidity_overlap_key == second.liquidity_overlap_key
+
+
+def test_distinct_plan_reservation_events_change_decision_evidence_identity() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        first_ledger = RealExecutionLedger(Path(tmp) / "first.jsonl")
+        second_ledger = RealExecutionLedger(Path(tmp) / "second.jsonl")
+        first_ledger.reserve_plan(bound.execution_plan)
+        second_ledger.reserve_plan(bound.execution_plan)
+
+        first_view = first_ledger.verified_execution_view(
+            bound.execution_plan.plan_id
+        )
+        second_view = second_ledger.verified_execution_view(
+            bound.execution_plan.plan_id
+        )
+        first = assess_authoritative_betfair_execution_feasibility(
+            first_ledger,
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+        )
+        second = assess_authoritative_betfair_execution_feasibility(
+            second_ledger,
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+        )
+
+    assert first_view.plan_reserved_event_id != second_view.plan_reserved_event_id
+    assert first.evidence_digest != second.evidence_digest
+    assert first.state is FeasibilityState.UNKNOWN_UNPROVEN
+    assert second.state is FeasibilityState.UNKNOWN_UNPROVEN
+
+
 def test_caller_cannot_supply_backdated_authoritative_decision_time() -> None:
     receipt, canonical_source = _synthetic_authoritative_receipt(
         MarketBookTransport()

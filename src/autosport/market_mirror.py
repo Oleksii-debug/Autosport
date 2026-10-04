@@ -46,6 +46,11 @@ class MarketMirror:
 
     def __init__(self) -> None:
         self._latest: dict[tuple[str, str], MarketEvent] = {}
+        # Keys may exist only as sealed generation-zero migration baseline. Those
+        # values remain audit-visible and preserve provider sequence ordering, but
+        # they cannot authorize economic decisions until a positive product-issued
+        # append becomes the current event for that key.
+        self._decision_causal_keys: set[tuple[str, str]] = set()
         self._revision = 0
         self._lock = RLock()
 
@@ -145,22 +150,26 @@ class MarketMirror:
         age = boundary - source_time
         return timedelta(0) <= age <= max_age
 
-    def apply(self, event: MarketEvent) -> MirrorApplyResult:
-        """Apply one event iff it advances source-local sequence state.
-
-        A repeated identical sequence is idempotent. A lower sequence is stale and
-        ignored. Reusing an existing sequence for different content is a conflict
-        and fails closed rather than silently replacing canonical evidence. Material
-        updates are serialized with readers and advance one mirror-wide revision.
-        """
+    def _apply_with_causal_authority(
+        self,
+        event: MarketEvent,
+        *,
+        decision_causal: bool,
+    ) -> MirrorApplyResult:
         if not isinstance(event, MarketEvent):
             raise TypeError("event must be a MarketEvent")
+        if type(decision_causal) is not bool:
+            raise TypeError("decision_causal must be a bool")
 
         key = self._key(event)
         with self._lock:
             previous = self._latest.get(key)
             if previous is None:
                 self._latest[key] = self._snapshot_event(event)
+                if decision_causal:
+                    self._decision_causal_keys.add(key)
+                else:
+                    self._decision_causal_keys.discard(key)
                 self._revision += 1
                 return MirrorApplyResult(
                     MirrorUpdate.APPLIED,
@@ -193,6 +202,10 @@ class MarketMirror:
                 )
 
             self._latest[key] = self._snapshot_event(event)
+            if decision_causal:
+                self._decision_causal_keys.add(key)
+            else:
+                self._decision_causal_keys.discard(key)
             self._revision += 1
             return MirrorApplyResult(
                 MirrorUpdate.APPLIED,
@@ -201,6 +214,20 @@ class MarketMirror:
                 previous.sequence,
                 event.sequence,
             )
+
+    def apply(self, event: MarketEvent) -> MirrorApplyResult:
+        """Apply one live/product-issued event iff it advances source-local state.
+
+        Public apply calls are decision-causal by construction: production subscribers
+        receive only events accepted by SQLiteMarketStore as positive durable appends.
+        Generation-zero migration state is loaded through the private provenance-aware
+        restoration path instead.
+        """
+
+        return self._apply_with_causal_authority(
+            event,
+            decision_causal=True,
+        )
 
     def persist_and_apply(
         self,
@@ -264,6 +291,7 @@ class MarketMirror:
         event_ids: str | Iterable[str] | None = None,
         market_ids: str | Iterable[str] | None = None,
         selection_ids: str | Iterable[str] | None = None,
+        _causal_only: bool = False,
     ) -> MirrorSnapshot:
         """Capture one coherent revision and optionally filter it for a consumer.
 
@@ -277,12 +305,15 @@ class MarketMirror:
         selected_events = self._selector(event_ids, name="event_ids")
         selected_markets = self._selector(market_ids, name="market_ids")
         selected_selections = self._selector(selection_ids, name="selection_ids")
+        if type(_causal_only) is not bool:
+            raise TypeError("_causal_only must be a bool")
 
         with self._lock:
             revision = self._revision
             events = tuple(
                 self._snapshot_event(event)
-                for _, event in sorted(self._latest.items(), key=lambda item: item[0])
+                for key, event in sorted(self._latest.items(), key=lambda item: item[0])
+                if not _causal_only or key in self._decision_causal_keys
             )
 
         filtered = tuple(
@@ -324,6 +355,7 @@ class MarketMirror:
             event_ids=event_ids,
             market_ids=market_ids,
             selection_ids=selection_ids,
+            _causal_only=True,
         )
         eligible = tuple(
             event
@@ -388,7 +420,7 @@ class MarketMirror:
             events = tuple(
                 self._snapshot_event(self._latest[key])
                 for key in sorted(normalized)
-                if key in self._latest
+                if key in self._latest and key in self._decision_causal_keys
             )
 
         eligible = tuple(
@@ -506,17 +538,21 @@ class MarketMirror:
 
     @classmethod
     def from_store(cls, store: SQLiteMarketStore) -> "MarketMirror":
-        """Restore latest source-specific mirror state from authoritative history.
+        """Restore audit/order state without laundering legacy baseline into decisions.
 
-        The canonical store remains the only writer/owner of durable market history.
-        Replaying ``store.events()`` reconstructs source-local sequence protection after
-        restart without letting this mirror mutate the store's shared current projection.
+        Every durable event remains in the mirror so restart preserves provider-local
+        sequence fences and raw audit views. Only positive append generations are marked
+        decision-causal; generation-zero migration rows stay visible through view() and
+        snapshot() but are excluded from active decision views.
         """
         if not isinstance(store, SQLiteMarketStore):
             raise TypeError("store must be a SQLiteMarketStore")
         mirror = cls()
-        for event in store.events():
-            mirror.apply(event)
+        for event, append_generation in store.events_with_append_generation():
+            mirror._apply_with_causal_authority(
+                event,
+                decision_causal=append_generation > 0,
+            )
         return mirror
 
     def __len__(self) -> int:

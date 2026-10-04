@@ -278,6 +278,62 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 recovery_time.isoformat(),
             )
 
+    def test_execute_with_clock_ignores_rebound_durable_loader_for_start_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            trigger_id = "trigger-rebound-durable-loader"
+            run_id = runtime.expected_run_id(current_prepared, trigger_id)
+            real_load = ledger._load_unlocked
+            forged_calls = [0]
+
+            fake_reservation = {
+                "event_type": "RUN_RESERVED",
+                "run_id": run_id,
+                "payload": {
+                    "trigger_id": trigger_id,
+                    "plan_id": current_prepared.execution_plan.plan_id,
+                    "plan_fingerprint": current_prepared.execution_plan.fingerprint,
+                    "model_fingerprint": runtime.config.fingerprint,
+                    "started_at": STARTED_AT,
+                    "action_ids": [
+                        item.action_id
+                        for item in current_prepared.execution_plan.actions
+                    ],
+                    "observation_evidence_ids": {},
+                },
+            }
+
+            def forged_load():
+                forged_calls[0] += 1
+                if forged_calls[0] == 1:
+                    return [fake_reservation]
+                return real_load()
+
+            ledger._load_unlocked = forged_load
+            actual_execution_time = datetime.fromisoformat(
+                "2026-09-20T06:01:00+00:00"
+            )
+
+            result = runtime.execute_with_clock(
+                prepared=current_prepared,
+                trigger_id=trigger_id,
+                clock=lambda: actual_execution_time,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(forged_calls[0], 0)
+            self.assertEqual(
+                result.run.started_at,
+                actual_execution_time.isoformat(),
+            )
+            self.assertEqual(
+                result.run.attempts[0].outcome,
+                PaperAttemptOutcome.REJECTED,
+            )
+            self.assertIn("expired", result.run.attempts[0].reason)
+            self.assertEqual(book.tickets, {})
+
     def test_execute_with_clock_ignores_rebound_ledger_reader_for_start_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

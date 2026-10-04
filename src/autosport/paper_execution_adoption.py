@@ -124,7 +124,7 @@ def _timestamp_text(value: datetime) -> str:
 # the durable reader capability captured at module initialization so caller/runtime
 # mutation of the ledger instance's public `events` attribute cannot fabricate the
 # pre-existing RUN_RESERVED fact used to choose the execution clock.
-_PAPER_EXECUTION_LEDGER_EVENTS = PaperExecutionLedger.events
+_PAPER_EXECUTION_LEDGER_LOAD_UNL = PaperExecutionLedger._load_unlocked
 
 
 class PaperExecutionAdoptionRuntime:
@@ -545,7 +545,12 @@ class PaperExecutionAdoptionRuntime:
             )
 
         run_id = self.expected_run_id(prepared, trigger_id)
-        events = _PAPER_EXECUTION_LEDGER_EVENTS(self.ledger, run_id)
+        with self.ledger._lock:
+            events = tuple(
+                event
+                for event in _PAPER_EXECUTION_LEDGER_LOAD_UNL(self.ledger)
+                if event["run_id"] == run_id
+            )
         reservations = [
             event for event in events if event["event_type"] == "RUN_RESERVED"
         ]

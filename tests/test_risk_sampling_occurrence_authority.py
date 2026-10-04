@@ -280,6 +280,92 @@ def test_expected_draw_plan_is_deterministic_for_same_frozen_roots(
     assert first.plan_sha256 == second.plan_sha256
 
 
+def test_draw_plan_verifier_reresolves_exact_nested_evidence(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values = _product_precommit(tmp_path, monkeypatch)
+    canonical = _resolve(values)
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+
+    verified = verify_product_iid_expected_draw_plan(
+        canonical,
+        membership=membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        authority_root=authority_root,
+    )
+
+    assert type(verified) is ProductIidExpectedDrawPlan
+    assert verified.plan_sha256 == canonical.plan_sha256
+    assert verified.frame_units == canonical.frame_units
+    assert verified.member_draws == canonical.member_draws
+
+
+def test_draw_plan_verifier_rejects_forgery_even_with_mutated_equality(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values = _product_precommit(tmp_path, monkeypatch)
+    canonical = _resolve(values)
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    forged = object.__new__(ProductIidExpectedDrawPlan)
+    for field_name in (
+        "experiment_id",
+        "sampling_manifest_sha256",
+        "sampling_frame_sha256",
+        "horizon_sha256",
+        "frame_units",
+        "member_draws",
+        "plan_sha256",
+    ):
+        object.__setattr__(
+            forged,
+            field_name,
+            object.__getattribute__(canonical, field_name),
+        )
+    object.__setattr__(forged, "plan_sha256", "0" * 64)
+    monkeypatch.setattr(
+        ProductIidExpectedDrawPlan,
+        "__eq__",
+        lambda _self, _other: True,
+    )
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="differs from canonical frozen evidence",
+    ):
+        verify_product_iid_expected_draw_plan(
+            forged,
+            membership=membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=frame_json,
+            horizon_json=horizon_json,
+            authority_root=authority_root,
+        )
+
+
 def test_with_replacement_semantics_are_explicit_on_single_unit_frame(
     tmp_path,
     monkeypatch,

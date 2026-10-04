@@ -750,6 +750,9 @@ class SQLiteMarketStore:
             self.connection.execute("PRAGMA synchronous=FULL")
             self._init_schema()
             self._ensure_market_append_baseline_authority()
+            self._require_product_issued_positive_history(
+                self._market_append_authority()
+            )
             self._rebuild_current_quotes()
         except Exception:
             self.connection.close()

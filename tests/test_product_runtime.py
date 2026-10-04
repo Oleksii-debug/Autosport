@@ -19,6 +19,7 @@ from autosport.product_runtime import (
     ProductCompositionError,
     build_autonomous_product_runtime,
 )
+from autosport.storage import SQLiteMarketStore
 
 
 class _Clock:

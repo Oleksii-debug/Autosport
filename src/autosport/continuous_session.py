@@ -928,9 +928,15 @@ class _ContinuousSessionState:
             raise ContinuousSessionError(
                 "settlement evidence journal tip mismatch"
             )
-        return tuple(
+        normalized = tuple(
             self._normalized_item_from_record(record)
             for record in records
+        )
+        # Preserve the v2 public status contract: retained settlement evidence was
+        # materialized in global evidence_id order even though the v3 hash chain
+        # itself must remain append-ordered for crash-safe incremental commits.
+        return tuple(
+            sorted(normalized, key=lambda item: item["evidence_id"])
         )
 
     def _verify_evidence_tip(self, state: dict[str, Any]) -> None:

@@ -3,42 +3,102 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+import autosport.windows_entry as windows_entry
+from autosport.webview2_release_environment import WEBVIEW2_ENVIRONMENT_OVERRIDES
 from autosport.windows_entry import main
 
 
 class WindowsEntrypointFailClosedTests(unittest.TestCase):
     @staticmethod
-    def _failing_layout_module() -> types.ModuleType:
-        module = types.ModuleType("autosport.windows_layout")
+    def _failing_webview_module() -> types.ModuleType:
+        module = types.ModuleType("autosport.windows_webview_shell")
 
-        def unexpected_install() -> None:
-            raise AssertionError("malformed packaged args must fail before GUI/layout import")
+        class WindowsWebViewUnavailable(RuntimeError):
+            pass
 
-        module.install_compact_windows_layout = unexpected_install
+        def unexpected_start() -> int:
+            raise AssertionError("malformed packaged args must fail before WebView2 shell import")
+
+        module.WindowsWebViewUnavailable = WindowsWebViewUnavailable
+        module.main = unexpected_start
         return module
 
-    def test_unknown_packaged_argument_fails_before_gui_layout(self) -> None:
-        fake_gui = types.ModuleType("autosport.windows_gui")
+    @staticmethod
+    def _deployment_module(
+        *,
+        available: bool = True,
+        exc: Exception | None = None,
+        calls: list[str] | None = None,
+    ) -> types.ModuleType:
+        module = types.ModuleType("autosport.webview2_runtime_deployment")
 
-        def unexpected_gui() -> int:
-            raise AssertionError("unknown packaged arg must not start GUI")
+        def ensure_webview2_runtime():
+            if calls is not None:
+                calls.append("deployment")
+            if exc is not None:
+                raise exc
+            return types.SimpleNamespace(available=available)
 
-        fake_gui.main = unexpected_gui
+        module.ensure_webview2_runtime = ensure_webview2_runtime
+        return module
+
+    def _interactive_patches(
+        self,
+        *,
+        calls: list[str] | None = None,
+        lock_error: BaseException | None = None,
+    ):
+        workspace = Path.cwd().resolve() / ".autosport-entry-test-workspace"
+        if calls is None:
+            workspace_patch = patch.object(
+                windows_entry,
+                "_probe_workspace_writable",
+                return_value=None,
+            )
+        else:
+            workspace_patch = patch.object(
+                windows_entry,
+                "_probe_workspace_writable",
+                side_effect=lambda _workspace: calls.append("workspace"),
+            )
+
+        class FakeInteractiveLock:
+            def __init__(self, actual_workspace: Path) -> None:
+                self.workspace = actual_workspace
+
+            def __enter__(self):
+                if calls is not None:
+                    calls.append("instance_lock")
+                if lock_error is not None:
+                    raise lock_error
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback) -> bool:
+                del exc_type, exc_value, traceback
+                if calls is not None:
+                    calls.append("instance_unlock")
+                return False
+
+        return (
+            patch("autosport.paths.default_workspace", return_value=workspace),
+            workspace_patch,
+            patch("autosport.workspace_lock.WorkspaceInteractiveLock", FakeInteractiveLock),
+        )
+
+    def test_unknown_packaged_argument_fails_before_webview_shell(self) -> None:
         with patch.dict(
             sys.modules,
-            {
-                "autosport.windows_layout": self._failing_layout_module(),
-                "autosport.windows_gui": fake_gui,
-            },
+            {"autosport.windows_webview_shell": self._failing_webview_module()},
         ):
             self.assertEqual(main(["--not-a-real-autosport-mode"]), 2)
 
-    def test_known_machine_mode_with_wrong_arity_fails_before_gui_layout(self) -> None:
+    def test_known_machine_mode_with_wrong_arity_fails_before_webview_shell(self) -> None:
         with patch.dict(
             sys.modules,
-            {"autosport.windows_layout": self._failing_layout_module()},
+            {"autosport.windows_webview_shell": self._failing_webview_module()},
         ):
             self.assertEqual(main(["--diagnostic-output"]), 2)
             self.assertEqual(
@@ -46,55 +106,292 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
                 2,
             )
 
-    def test_no_args_preserves_normal_gui_startup_after_layout_install(self) -> None:
+    def test_no_args_requires_workspace_preflight_before_runtime_and_webview_startup(self) -> None:
         calls: list[str] = []
-        fake_layout = types.ModuleType("autosport.windows_layout")
-        fake_gui = types.ModuleType("autosport.windows_gui")
+        fake_emergency_stop = types.ModuleType(
+            "autosport.windows_webview_emergency_stop"
+        )
+        fake_shell = types.ModuleType("autosport.windows_webview_shell")
 
-        def install() -> None:
-            calls.append("layout")
+        class EmergencyStopWebController:
+            def __init__(self, workspace: Path) -> None:
+                calls.append("controller")
+                self.workspace = workspace
 
-        def gui_main() -> int:
-            calls.append("gui")
+        class AutosportWebBridge:
+            def __init__(self, controller: EmergencyStopWebController) -> None:
+                calls.append("bridge")
+                self.controller = controller
+
+        class WindowsWebViewUnavailable(RuntimeError):
+            pass
+
+        def launch_windows_shell(
+            bridge: AutosportWebBridge,
+            *,
+            storage_path: Path,
+        ) -> int:
+            self.assertIsInstance(bridge.controller, EmergencyStopWebController)
+            self.assertTrue(storage_path.is_absolute())
+            calls.append("webview")
             return 17
 
-        fake_layout.install_compact_windows_layout = install
-        fake_gui.main = gui_main
-        with patch.dict(
-            sys.modules,
-            {
-                "autosport.windows_layout": fake_layout,
-                "autosport.windows_gui": fake_gui,
-            },
+        fake_emergency_stop.EmergencyStopWebController = EmergencyStopWebController
+        fake_shell.AutosportWebBridge = AutosportWebBridge
+        fake_shell.WindowsWebViewUnavailable = WindowsWebViewUnavailable
+        fake_shell.launch_windows_shell = launch_windows_shell
+        path_patch, workspace_patch, instance_patch = self._interactive_patches(calls=calls)
+        with (
+            path_patch,
+            workspace_patch,
+            instance_patch,
+            patch.dict(
+                sys.modules,
+                {
+                    "autosport.webview2_runtime_deployment": self._deployment_module(
+                        available=True,
+                        calls=calls,
+                    ),
+                    "autosport.windows_webview_emergency_stop": fake_emergency_stop,
+                    "autosport.windows_webview_shell": fake_shell,
+                },
+            ),
         ):
             self.assertEqual(main([]), 17)
 
-        self.assertEqual(calls, ["layout", "gui"])
+        self.assertEqual(
+            calls,
+            [
+                "workspace",
+                "instance_lock",
+                "instance_lock",
+                "deployment",
+                "controller",
+                "bridge",
+                "webview",
+                "instance_unlock",
+                "instance_unlock",
+            ],
+        )
 
-    def test_valid_machine_mode_keeps_layout_before_dispatch(self) -> None:
+    def test_workspace_failure_precedes_runtime_dependency_check(self) -> None:
+        workspace = Path.cwd().resolve() / ".autosport-entry-test-workspace"
+        storage_error = PermissionError("synthetic workspace denied")
+        deployment = self._deployment_module(
+            exc=AssertionError("runtime dependency must not mask workspace failure")
+        )
+
+        with (
+            patch("autosport.paths.default_workspace", return_value=workspace),
+            patch.object(
+                windows_entry,
+                "_probe_workspace_writable",
+                side_effect=storage_error,
+            ) as workspace_probe,
+            patch.object(windows_entry, "_show_workspace_access_error") as show_storage_error,
+            patch.dict(
+                sys.modules,
+                {"autosport.webview2_runtime_deployment": deployment},
+            ),
+        ):
+            self.assertEqual(main([]), 2)
+
+        workspace_probe.assert_called_once_with(workspace)
+        show_storage_error.assert_called_once_with(workspace, storage_error)
+
+    def test_webview_override_fails_before_runtime_dependency_check(self) -> None:
         calls: list[str] = []
-        fake_layout = types.ModuleType("autosport.windows_layout")
-        fake_diagnostic = types.ModuleType("autosport.diagnostic")
+        environment = {name: "" for name in WEBVIEW2_ENVIRONMENT_OVERRIDES}
+        environment["WEBVIEW2_USER_DATA_FOLDER"] = " \t "
+        path_patch, workspace_patch, instance_patch = self._interactive_patches(calls=calls)
 
-        def install() -> None:
-            calls.append("layout")
+        with (
+            path_patch,
+            workspace_patch,
+            instance_patch,
+            patch.dict("os.environ", environment, clear=False),
+            patch.object(windows_entry, "_show_startup_error") as show_error,
+            patch.dict(
+                sys.modules,
+                {
+                    "autosport.webview2_runtime_deployment": self._deployment_module(
+                        calls=calls,
+                    ),
+                },
+            ),
+        ):
+            self.assertEqual(main([]), 3)
+
+        self.assertEqual(
+            calls,
+            [
+                "workspace",
+                "instance_lock",
+                "instance_lock",
+                "instance_unlock",
+                "instance_unlock",
+            ],
+        )
+        show_error.assert_called_once_with(windows_entry._WEBVIEW2_STARTUP_ERROR)
+
+    def test_second_interactive_instance_fails_before_runtime_or_controller(self) -> None:
+        from autosport.workspace_lock import WorkspaceEconomicLockBusyError
+
+        calls: list[str] = []
+        path_patch, workspace_patch, instance_patch = self._interactive_patches(
+            calls=calls,
+            lock_error=WorkspaceEconomicLockBusyError("secret internal busy detail"),
+        )
+        with (
+            path_patch,
+            workspace_patch,
+            instance_patch,
+            patch.object(windows_entry, "_show_startup_error") as show_error,
+            patch.dict(
+                sys.modules,
+                {
+                    "autosport.webview2_runtime_deployment": self._deployment_module(
+                        exc=AssertionError("busy lock must fail before runtime deployment"),
+                        calls=calls,
+                    ),
+                },
+            ),
+        ):
+            self.assertEqual(main([]), 2)
+
+        self.assertEqual(calls, ["workspace", "instance_lock"])
+        show_error.assert_called_once_with(windows_entry._WORKSPACE_INSTANCE_BUSY_ERROR)
+        self.assertNotIn("secret internal busy detail", show_error.call_args.args[0])
+
+    def test_interactive_lock_integrity_failure_is_bounded_and_secret_safe(self) -> None:
+        from autosport.workspace_lock import WorkspaceEconomicLockError
+
+        secret = "secret lock pathname detail"
+        calls: list[str] = []
+        path_patch, workspace_patch, instance_patch = self._interactive_patches(
+            calls=calls,
+            lock_error=WorkspaceEconomicLockError(secret),
+        )
+        with (
+            path_patch,
+            workspace_patch,
+            instance_patch,
+            patch.object(windows_entry, "_show_startup_error") as show_error,
+        ):
+            self.assertEqual(main([]), 2)
+
+        self.assertEqual(calls, ["workspace", "instance_lock"])
+        show_error.assert_called_once_with(windows_entry._WORKSPACE_INSTANCE_LOCK_ERROR)
+        self.assertNotIn(secret, show_error.call_args.args[0])
+
+    def test_unavailable_runtime_fails_before_webview_shell_start(self) -> None:
+        calls: list[str] = []
+        fake_shell = types.ModuleType("autosport.windows_webview_shell")
+
+        class WindowsWebViewUnavailable(RuntimeError):
+            pass
+
+        def shell_main() -> int:
+            calls.append("webview")
+            return 17
+
+        fake_shell.WindowsWebViewUnavailable = WindowsWebViewUnavailable
+        fake_shell.main = shell_main
+        path_patch, workspace_patch, instance_patch = self._interactive_patches()
+        with (
+            path_patch,
+            workspace_patch as workspace_probe,
+            instance_patch,
+            patch.object(windows_entry, "_show_startup_error") as show_error,
+            patch.dict(
+                sys.modules,
+                {
+                    "autosport.webview2_runtime_deployment": self._deployment_module(
+                        available=False
+                    ),
+                    "autosport.windows_webview_shell": fake_shell,
+                },
+            ),
+        ):
+            self.assertEqual(main([]), 3)
+
+        self.assertEqual(calls, [])
+        workspace_probe.assert_called_once()
+        show_error.assert_called_once_with(windows_entry._WEBVIEW2_STARTUP_ERROR)
+
+    def test_preflight_exception_fails_closed_without_detail_leak(self) -> None:
+        path_patch, workspace_patch, instance_patch = self._interactive_patches()
+        secret = "secret-bearing-preflight-detail"
+        with (
+            path_patch,
+            workspace_patch as workspace_probe,
+            instance_patch,
+            patch.object(windows_entry, "_show_startup_error") as show_error,
+            patch.dict(
+                sys.modules,
+                {
+                    "autosport.webview2_runtime_deployment": self._deployment_module(
+                        exc=RuntimeError(secret)
+                    ),
+                    "autosport.windows_webview_shell": self._failing_webview_module(),
+                },
+            ),
+        ):
+            self.assertEqual(main([]), 3)
+
+        workspace_probe.assert_called_once()
+        shown = show_error.call_args.args[0]
+        self.assertEqual(shown, windows_entry._WEBVIEW2_STARTUP_ERROR)
+        self.assertNotIn(secret, shown)
+
+    def test_valid_machine_mode_dispatches_without_runtime_preflight(self) -> None:
+        calls: list[str] = []
+        fake_diagnostic = types.ModuleType("autosport.diagnostic")
 
         def run_machine_diagnostic(output: str) -> int:
             calls.append(f"diagnostic:{output}")
             return 23
 
-        fake_layout.install_compact_windows_layout = install
         fake_diagnostic.run_machine_diagnostic = run_machine_diagnostic
+        poison_deployment = types.ModuleType("autosport.webview2_runtime_deployment")
+
+        def unexpected_deployment():
+            raise AssertionError("machine mode must not invoke interactive runtime preflight")
+
+        poison_deployment.ensure_webview2_runtime = unexpected_deployment
         with patch.dict(
             sys.modules,
             {
-                "autosport.windows_layout": fake_layout,
                 "autosport.diagnostic": fake_diagnostic,
+                "autosport.webview2_runtime_deployment": poison_deployment,
             },
         ):
             self.assertEqual(main(["--diagnostic-output", "report.json"]), 23)
 
-        self.assertEqual(calls, ["layout", "diagnostic:report.json"])
+        self.assertEqual(calls, ["diagnostic:report.json"])
+
+    def test_semantic_audit_flags_route_to_webview_audit_module(self) -> None:
+        calls: list[str] = []
+        fake_audit = types.ModuleType("autosport.windows_webview_audit")
+
+        def accessibility(output: str) -> int:
+            calls.append(f"a11y:{output}")
+            return 31
+
+        def keyboard(output: str) -> int:
+            calls.append(f"keyboard:{output}")
+            return 32
+
+        fake_audit.run_accessibility_audit = accessibility
+        fake_audit.run_keyboard_audit = keyboard
+        with patch.dict(
+            sys.modules,
+            {"autosport.windows_webview_audit": fake_audit},
+        ):
+            self.assertEqual(main(["--accessibility-audit-output", "a.json"]), 31)
+            self.assertEqual(main(["--keyboard-audit-output", "k.json"]), 32)
+
+        self.assertEqual(calls, ["a11y:a.json", "keyboard:k.json"])
 
 
 if __name__ == "__main__":

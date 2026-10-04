@@ -548,6 +548,116 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             stale.close()
             stopped.close()
 
+    def test_durable_pause_preempts_stale_cycle_before_provider_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            controller = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            stale_observer = _DurableObserver(workspace, [()])
+            stale = self._loop(
+                workspace,
+                observer=stale_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+
+            controller.pause()
+            result = stale.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.PAUSED)
+            self.assertTrue(stale.paused)
+            self.assertEqual(stale_observer.calls, 0)
+            self.assertFalse(stale.progress_path.exists())
+            controller.close()
+            stale.close()
+
+    def test_peer_resume_is_observed_by_stale_paused_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            controller = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            controller.pause()
+
+            stale_observer = _DurableObserver(workspace, [()])
+            stale = self._loop(
+                workspace,
+                observer=stale_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            self.assertTrue(stale.paused)
+
+            controller.resume()
+            result = stale.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.NO_CHANGE)
+            self.assertFalse(stale.paused)
+            self.assertEqual(stale_observer.calls, 1)
+            controller.close()
+            stale.close()
+
+    def test_stale_resume_cannot_clear_peer_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            controller = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            stale_observer = _DurableObserver(workspace, [()])
+            stale = self._loop(
+                workspace,
+                observer=stale_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+
+            controller.stop()
+            with self.assertRaisesRegex(RuntimeError, "durable STOP cannot be cleared"):
+                stale.resume()
+
+            self.assertEqual(stale.run_cycle().status, LiveCycleStatus.STOPPED)
+            self.assertTrue(stale.stopped)
+            self.assertEqual(stale_observer.calls, 0)
+            controller.close()
+            stale.close()
+
+    def test_stale_pause_cannot_replace_peer_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            controller = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            stale_observer = _DurableObserver(workspace, [()])
+            stale = self._loop(
+                workspace,
+                observer=stale_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+
+            controller.stop()
+            with self.assertRaisesRegex(RuntimeError, "durable STOP cannot be cleared"):
+                stale.pause()
+
+            self.assertEqual(stale.run_cycle().status, LiveCycleStatus.STOPPED)
+            self.assertTrue(stale.stopped)
+            self.assertEqual(stale_observer.calls, 0)
+            controller.close()
+            stale.close()
+
     def test_stale_cycle_rejects_newer_progress_before_provider_poll(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

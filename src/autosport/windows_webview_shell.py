@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import tempfile
+import weakref
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -2219,6 +2220,8 @@ _WEB_CONTROLLER_AUTHORITY_METHOD_WITNESSES = tuple(
     )
     for name in _WEB_CONTROLLER_AUTHORITY_METHOD_NAMES
 )
+_WEB_BRIDGE_CONTROLLER_REGISTRY = weakref.WeakKeyDictionary()
+_WEB_BRIDGE_CONTROLLER_REGISTRY_LOCK = threading.RLock()
 
 
 class AutosportWebBridge:
@@ -2233,6 +2236,8 @@ class AutosportWebBridge:
         self._trusted_url: str | None = None
         self._trust_revoked = False
         self._host_shutdown = False
+        with _WEB_BRIDGE_CONTROLLER_REGISTRY_LOCK:
+            _WEB_BRIDGE_CONTROLLER_REGISTRY[self] = resolved_controller
 
     def __setattr__(self, name: str, value: object) -> None:
         if name in {"_controller", "_controller_witness"} and hasattr(
@@ -2242,6 +2247,36 @@ class AutosportWebBridge:
                 "The WebView bridge controller authority is immutable"
             )
         object.__setattr__(self, name, value)
+
+    def _registered_controller_locked(
+        self,
+        *,
+        _registry=_WEB_BRIDGE_CONTROLLER_REGISTRY,
+        _registry_lock=_WEB_BRIDGE_CONTROLLER_REGISTRY_LOCK,
+    ) -> object:
+        """Return the construction-time controller independently of instance attrs."""
+
+        if (
+            _WEB_BRIDGE_CONTROLLER_REGISTRY is not _registry
+            or _WEB_BRIDGE_CONTROLLER_REGISTRY_LOCK is not _registry_lock
+        ):
+            self._trust_revoked = True
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge controller registry authority changed"
+            )
+        with _registry_lock:
+            controller = _registry.get(self)
+        if controller is None:
+            self._trust_revoked = True
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge lost its construction-time controller authority"
+            )
+        if self._controller is not controller or self._controller_witness is not controller:
+            self._trust_revoked = True
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge controller authority changed"
+            )
+        return controller
 
     def _assert_canonical_controller_surface_locked(
         self,
@@ -2324,12 +2359,7 @@ class AutosportWebBridge:
         return operation
 
     def _trusted_controller_locked(self) -> AutosportWebController:
-        controller = self._controller_witness
-        if self._controller is not controller:
-            self._trust_revoked = True
-            raise WindowsWebBridgeTrustError(
-                "The WebView bridge controller authority changed"
-            )
+        controller = self._registered_controller_locked()
         self._assert_canonical_controller_surface_locked(controller)
         self._assert_trusted_session_locked()
         if self._controller is not controller:
@@ -2376,12 +2406,12 @@ class AutosportWebBridge:
         """Return a witness path only from the immutable controller authority."""
 
         with self._trust_lock:
-            controller = self._controller_witness
-            if self._controller is not controller:
-                self._trust_revoked = True
+            try:
+                controller = self._registered_controller_locked()
+            except WindowsWebBridgeTrustError as exc:
                 raise WindowsWebBridgeTrustError(
                     "The WebView bridge controller authority changed before runtime witness binding"
-                )
+                ) from exc
             self._assert_canonical_controller_surface_locked(controller)
             if not isinstance(controller, _controller_type):
                 return None
@@ -2499,12 +2529,7 @@ class AutosportWebBridge:
         with self._trust_lock:
             if self._host_shutdown:
                 return
-            controller = self._controller_witness
-            if self._controller is not controller:
-                self._trust_revoked = True
-                raise WindowsWebBridgeTrustError(
-                    "The WebView bridge controller authority changed"
-                )
+            controller = self._registered_controller_locked()
             close = self._controller_operation_locked(controller, "close")
         close()
         with self._trust_lock:

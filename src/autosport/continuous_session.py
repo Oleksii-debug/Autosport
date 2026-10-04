@@ -336,50 +336,55 @@ class _ContinuousSessionState:
         self.source_id = _text(source_id, "source_id")
         self._clock = clock
 
-        if self.path.exists():
-            raw = self._read()
-            existing_source = raw["source_id"]
-            if existing_source != self.source_id:
-                raise ContinuousSessionError(
-                    "durable session source_id does not match configured source"
+        # Session identity and economic settlement evidence share the workspace's
+        # single-writer authority. Serialize first creation/read so two processes
+        # cannot independently mint competing session identities from the same
+        # pristine workspace.
+        with WorkspaceEconomicLock(self.path.parent):
+            if self.path.exists():
+                raw = self._read()
+                existing_source = raw["source_id"]
+                if existing_source != self.source_id:
+                    raise ContinuousSessionError(
+                        "durable session source_id does not match configured source"
+                    )
+                if session_id is not None and raw["session_id"] != _text(
+                    session_id, "session_id"
+                ):
+                    raise ContinuousSessionError(
+                        "durable session_id does not match configured session"
+                    )
+            else:
+                resolved_id = _text(
+                    session_id or str(uuid.uuid4()),
+                    "session_id",
                 )
-            if session_id is not None and raw["session_id"] != _text(
-                session_id, "session_id"
-            ):
-                raise ContinuousSessionError(
-                    "durable session_id does not match configured session"
+                started_at = clock()
+                _instant(started_at, "started_at")
+                atomic_write_json(
+                    self.path,
+                    {
+                        "schema": self._SCHEMA,
+                        "schema_version": self._VERSION,
+                        "session_id": resolved_id,
+                        "source_id": self.source_id,
+                        "state": SessionState.RUNNING.value,
+                        "started_at": started_at,
+                        "cycles_completed": 0,
+                        "last_success_at": None,
+                        "last_error_code": None,
+                        "last_full_refresh_at": None,
+                        "settlement_evidence": [],
+                        "settlement_outcome_digests": {},
+                        "source_gap_state": None,
+                        "source_sync_state": None,
+                        "source_state_delta_id": None,
+                        "source_unresolved_gap_delta_ids": [],
+                        "source_projection_stream_epoch": None,
+                        "source_state_projection_backlog": False,
+                    },
                 )
-        else:
-            resolved_id = _text(
-                session_id or str(uuid.uuid4()),
-                "session_id",
-            )
-            started_at = clock()
-            _instant(started_at, "started_at")
-            atomic_write_json(
-                self.path,
-                {
-                    "schema": self._SCHEMA,
-                    "schema_version": self._VERSION,
-                    "session_id": resolved_id,
-                    "source_id": self.source_id,
-                    "state": SessionState.RUNNING.value,
-                    "started_at": started_at,
-                    "cycles_completed": 0,
-                    "last_success_at": None,
-                    "last_error_code": None,
-                    "last_full_refresh_at": None,
-                    "settlement_evidence": [],
-                    "settlement_outcome_digests": {},
-                    "source_gap_state": None,
-                    "source_sync_state": None,
-                    "source_state_delta_id": None,
-                    "source_unresolved_gap_delta_ids": [],
-                    "source_projection_stream_epoch": None,
-                    "source_state_projection_backlog": False,
-                },
-            )
-            self._read()
+                self._read()
 
     @staticmethod
     def _validate_settlement_evidence(raw: object) -> tuple[dict[str, str], ...]:
@@ -573,10 +578,15 @@ class _ContinuousSessionState:
         return self._read()["session_id"]
 
     def _update(self, mutate: Callable[[dict[str, Any]], None]) -> None:
-        raw = self._read()
-        mutate(raw)
-        atomic_write_json(self.path, raw)
-        self._read()
+        # Keep read/validate/mutate/publish under the same cross-process economic
+        # writer authority. atomic_write_json makes replacement durable, but by
+        # itself cannot prevent two processes from both deriving from one stale
+        # pre-state and last-writer-wins erasing settlement evidence.
+        with WorkspaceEconomicLock(self.path.parent):
+            raw = self._read()
+            mutate(raw)
+            atomic_write_json(self.path, raw)
+            self._read()
 
     def set_state(self, state: SessionState, *, reason: str | None = None) -> None:
         if not isinstance(state, SessionState):

@@ -51,6 +51,7 @@ _OPTIONAL_ENTRY_FIELDS = frozenset(
         "abort_reason",
         "reconciled_from_summary",
         "outcome_lineage",
+        "sampling_draw_admission_receipt_sha256",
     }
 )
 _HASH_EVIDENCE_FIELDS = (
@@ -994,6 +995,7 @@ class RunRegistry:
         base_paper_book_sha256: str | None = None,
         base_decision_ledger_sha256: str | None = None,
         outcome_lineage: OutcomeLineageBinding | None = None,
+        sampling_draw_admission_receipt_sha256: str | None = None,
     ) -> str:
         _require_canonical_sha256("market_sha256", market_sha256)
         _require_canonical_sha256("results_sha256", results_sha256)
@@ -1008,6 +1010,11 @@ class RunRegistry:
             _require_canonical_sha256("base_decision_ledger_sha256", base_decision_ledger_sha256)
         if outcome_lineage is not None and not isinstance(outcome_lineage, OutcomeLineageBinding):
             raise ValueError("outcome_lineage must be an OutcomeLineageBinding or null")
+        if sampling_draw_admission_receipt_sha256 is not None:
+            _require_canonical_sha256(
+                "sampling_draw_admission_receipt_sha256",
+                sampling_draw_admission_receipt_sha256,
+            )
 
         state = self._read()
         if outcome_lineage is not None:
@@ -1069,6 +1076,10 @@ class RunRegistry:
             )
             entry["outcome_lineage"] = outcome_lineage_payload(
                 product_bound_lineage
+            )
+        if sampling_draw_admission_receipt_sha256 is not None:
+            entry["sampling_draw_admission_receipt_sha256"] = (
+                sampling_draw_admission_receipt_sha256
             )
         state["runs"][key] = entry
         self._validate_entry(key, entry)
@@ -1230,6 +1241,14 @@ class RunRegistry:
             "sealed_results_sha256": item.get("results_sha256"),
             "strategy_id": item.get("strategy_id"),
         }
+        if "sampling_draw_admission_receipt_sha256" in item:
+            expected_identity["sampling_draw_admission_receipt_sha256"] = item.get(
+                "sampling_draw_admission_receipt_sha256"
+            )
+        if "replay_execution_receipt_sha256" in manifest:
+            expected_identity["replay_execution_receipt_sha256"] = manifest.get(
+                "replay_execution_receipt_sha256"
+            )
         for field, expected_value in expected_identity.items():
             if summary.get(field) != expected_value or manifest.get(field) != expected_value:
                 raise ReconciliationError(
@@ -1241,6 +1260,40 @@ class RunRegistry:
             raise ReconciliationError("completed run transaction_run_id mismatch")
         if summary.get("transaction_schema_version") != manifest.get("schema_version"):
             raise ReconciliationError("completed run transaction schema mismatch")
+
+        replay_evidence_fields = (
+            "replay_input_event_payload_sequence_sha256",
+            "replay_consumed_event_payload_sequence_sha256",
+            "replay_applied_event_payload_sequence_sha256",
+            "replay_consumed_event_payload_multiset_sha256",
+            "replay_execution_receipt_sha256",
+        )
+        present_replay_evidence = tuple(
+            field_name
+            for field_name in replay_evidence_fields
+            if field_name in summary
+        )
+        if present_replay_evidence:
+            if len(present_replay_evidence) != len(replay_evidence_fields):
+                raise ReconciliationError(
+                    "completed run replay payload evidence is incomplete"
+                )
+            if any(
+                not _is_canonical_sha256(summary.get(field_name))
+                for field_name in replay_evidence_fields
+            ):
+                raise ReconciliationError(
+                    "completed run replay payload evidence is invalid"
+                )
+            event_count = summary.get("event_count")
+            if type(event_count) is not int or event_count < 0:
+                raise ReconciliationError(
+                    "completed run replay event_count is invalid"
+                )
+            if not _is_canonical_sha256(summary.get("replay_dataset_hash")):
+                raise ReconciliationError(
+                    "completed run replay dataset identity is invalid"
+                )
 
         targets = manifest.get("targets")
         new_state = manifest.get("new")
@@ -1652,6 +1705,13 @@ class RunRegistry:
         for field_name in _HASH_EVIDENCE_FIELDS:
             if field_name in item and not _is_canonical_sha256(item[field_name]):
                 raise ValueError(f"run registry contains invalid {field_name}")
+        if (
+            "sampling_draw_admission_receipt_sha256" in item
+            and not _is_canonical_sha256(item["sampling_draw_admission_receipt_sha256"])
+        ):
+            raise ValueError(
+                "run registry contains invalid sampling_draw_admission_receipt_sha256"
+            )
 
         if "outcome_lineage" in item:
             try:

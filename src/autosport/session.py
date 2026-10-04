@@ -478,7 +478,8 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
                 economic_goal=economic_goal,
                 risk_policy=risk_policy,
                 runtime_strategy_id=runtime_strategy_id,
-            )
+            ),
+            replay_execution_receipt=result.replay.execution_receipt,
         )
         transaction.commit()
 
@@ -671,6 +672,18 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
             "run_id": result.replay.run_id,
             "event_count": result.replay.event_count,
             "replay_dataset_hash": result.replay.dataset_hash,
+            "replay_input_event_payload_sequence_sha256": (
+                result.replay.input_event_payload_sequence_sha256
+            ),
+            "replay_consumed_event_payload_sequence_sha256": (
+                result.replay.consumed_event_payload_sequence_sha256
+            ),
+            "replay_applied_event_payload_sequence_sha256": (
+                result.replay.applied_event_payload_sequence_sha256
+            ),
+            "replay_consumed_event_payload_multiset_sha256": (
+                result.replay.consumed_event_payload_multiset_sha256
+            ),
             "campaign_causal_membership": campaign_causal_membership,
             "settled_ticket_ids": list(result.settled_ticket_ids),
             "balance": str(result.balance),

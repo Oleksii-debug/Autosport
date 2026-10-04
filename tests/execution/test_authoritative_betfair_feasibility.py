@@ -21,8 +21,10 @@ from autosport.execution.feasibility import (
     assess_authoritative_betfair_execution_feasibility,
 )
 from autosport.real_execution_ledger import (
+    AcknowledgementStatus,
     ExecutionAction,
     ExecutionPlan,
+    ExternalAcknowledgement,
     RealExecutionLedger,
 )
 from autosport.supervised_execution import (
@@ -176,6 +178,58 @@ def _bound(
         intent_sha256="e" * 64,
         approval_fingerprint="f" * 64,
         profile_bindings=bindings,
+        constraints=constraints,
+    )
+
+
+def _two_leg_bound(
+    decision_at: datetime,
+) -> BoundSupervisedExecutionPlan:
+    base = _bound(decision_at)
+    first = base.execution_plan.actions[0]
+    second = replace(
+        first,
+        action_id="b" * 64,
+        quote_id="quote-2",
+    )
+    provisional = ExecutionPlan(
+        plan_id="provisional-two-leg",
+        bookmaker_profile_version=base.execution_plan.bookmaker_profile_version,
+        decision_id=base.execution_plan.decision_id,
+        approval_id=base.execution_plan.approval_id,
+        created_at=base.execution_plan.created_at,
+        actions=(first, second),
+    )
+    constraints = (
+        base.constraints[0],
+        replace(base.constraints[0], leg_id=second.action_id),
+    )
+    binding_sha = _bound_binding_sha256(
+        provisional,
+        base.portfolio_plan_sha256,
+        base.economic_goal_contract_sha256,
+        base.intent_id,
+        base.intent_sha256,
+        base.approval_fingerprint,
+        base.profile_bindings,
+        constraints,
+    )
+    plan = ExecutionPlan(
+        plan_id=f"supervised-v2-{binding_sha}",
+        bookmaker_profile_version=provisional.bookmaker_profile_version,
+        decision_id=provisional.decision_id,
+        approval_id=provisional.approval_id,
+        created_at=provisional.created_at,
+        actions=provisional.actions,
+    )
+    return BoundSupervisedExecutionPlan(
+        execution_plan=plan,
+        portfolio_plan_sha256=base.portfolio_plan_sha256,
+        economic_goal_contract_sha256=base.economic_goal_contract_sha256,
+        intent_id=base.intent_id,
+        intent_sha256=base.intent_sha256,
+        approval_fingerprint=base.approval_fingerprint,
+        profile_bindings=base.profile_bindings,
         constraints=constraints,
     )
 
@@ -871,6 +925,53 @@ def test_plan_view_code_mutation_revokes_feasibility_authority(
                 bound,
                 receipt,
                 action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+def test_stale_multi_leg_plan_cannot_issue_liquidity_decision_evidence() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _two_leg_bound(datetime.now(timezone.utc))
+    second_action_id = "b" * 64
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        first_action = bound.execution_plan.actions[0]
+        transition_at = datetime.now(timezone.utc)
+        ledger.begin_attempt(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=first_action.action_id,
+            attempt_id="attempt-1",
+            reserved_at=transition_at.isoformat(),
+        )
+        ledger.mark_submitted(
+            "attempt-1",
+            submitted_at=(transition_at + timedelta(milliseconds=1)).isoformat(),
+        )
+        ledger.acknowledge(
+            ExternalAcknowledgement(
+                attempt_id="attempt-1",
+                external_receipt_id="receipt-1",
+                status=AcknowledgementStatus.ACCEPTED,
+                acknowledged_at=(
+                    transition_at + timedelta(milliseconds=2)
+                ).isoformat(),
+                accepted_odds=first_action.requested_odds,
+                accepted_stake=first_action.requested_stake,
+            )
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="execution plan is stale; recompute",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=second_action_id,
                 max_snapshot_age=timedelta(seconds=2),
             )
 

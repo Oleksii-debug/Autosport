@@ -121,6 +121,37 @@ class _MutatingDeltaEpochSource(_Source):
         return ()
 
 
+class _LearningHandoff:
+    _AUTHORITY_FIELDS = frozenset({"target"})
+
+    def __init__(self) -> None:
+        self.target = []
+        self.calls = []
+
+    def prepare_settlement(self, *, paper_book_path, resolutions, at):
+        self.calls.append(("prepare", paper_book_path, resolutions, at))
+        return ("prepared",)
+
+    def reconcile_after_settlement(
+        self,
+        *,
+        paper_book_path,
+        resolutions,
+        settled_ticket_ids,
+        at,
+    ):
+        self.calls.append(
+            ("reconcile", paper_book_path, resolutions, settled_ticket_ids, at)
+        )
+        return ("reconciled",)
+
+
+class _MutatingLearningHandoff(_LearningHandoff):
+    def prepare_settlement(self, *, paper_book_path, resolutions, at):
+        object.__setattr__(self, "target", [])
+        return ("prepared",)
+
+
 def _replacement_source_resolve_event(self, delta):
     if delta.event_id == "never":
         raise AssertionError("replacement resolver executable semantics")
@@ -222,6 +253,102 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 self.assertIsNotNone(restored.manifest.source_resolver_identity)
             finally:
                 restored.close()
+
+    def test_product_learning_handoff_is_proxied_and_authority_roots_are_reproved(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            handoff = _LearningHandoff()
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+                settlement_learning_handoff=handoff,
+            )
+            proxy = runtime.coordinator.settlement_learning_handoff
+            try:
+                self.assertIsNot(proxy, handoff)
+                self.assertEqual(
+                    proxy.prepare_settlement(
+                        paper_book_path=root / "paper_book.json",
+                        resolutions=(),
+                        at="2026-09-20T13:58:00+00:00",
+                    ),
+                    ("prepared",),
+                )
+                original_target = handoff.target
+                object.__setattr__(handoff, "target", [])
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "settlement learning authority field 'target' changed after composition",
+                ):
+                    proxy.reconcile_after_settlement(
+                        paper_book_path=root / "paper_book.json",
+                        resolutions=(),
+                        settled_ticket_ids=(),
+                        at="2026-09-20T13:58:00+00:00",
+                    )
+                object.__setattr__(handoff, "target", original_target)
+            finally:
+                runtime.close()
+
+    def test_product_learning_handoff_rejects_in_call_authority_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            handoff = _MutatingLearningHandoff()
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+                settlement_learning_handoff=handoff,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "settlement learning authority field 'target' changed after composition",
+                ):
+                    runtime.coordinator.settlement_learning_handoff.prepare_settlement(
+                        paper_book_path=root / "paper_book.json",
+                        resolutions=(),
+                        at="2026-09-20T13:58:00+00:00",
+                    )
+            finally:
+                runtime.close()
+
+    def test_product_learning_handoff_uses_captured_method_after_class_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            handoff = _LearningHandoff()
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+                settlement_learning_handoff=handoff,
+            )
+            original = _LearningHandoff.prepare_settlement
+            try:
+                def forged(*_args, **_kwargs):
+                    raise AssertionError("rebound handoff method must not become product authority")
+
+                _LearningHandoff.prepare_settlement = forged
+                self.assertEqual(
+                    runtime.coordinator.settlement_learning_handoff.prepare_settlement(
+                        paper_book_path=root / "paper_book.json",
+                        resolutions=(),
+                        at="2026-09-20T13:58:00+00:00",
+                    ),
+                    ("prepared",),
+                )
+            finally:
+                _LearningHandoff.prepare_settlement = original
+                runtime.close()
 
     def test_product_collector_rejects_post_build_source_reassignment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

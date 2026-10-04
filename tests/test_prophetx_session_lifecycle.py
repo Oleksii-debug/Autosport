@@ -1554,13 +1554,6 @@ def test_state_file_size_is_bounded_before_json_parse(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "state",
-    [
-        ProphetXSessionState.SESSION_POOL_EXHAUSTED,
-        ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
-    ],
-)
-@pytest.mark.parametrize(
     "state,expected_failure,wrong_failure",
     [
         (
@@ -1650,24 +1643,6 @@ def test_login_failure_state_rejects_renewal_failure_evidence(state, failure):
 
 
 @pytest.mark.parametrize(
-    "last_login_failure,last_renewal_failure",
-    [
-        (None, None),
-        (
-            ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE,
-            None,
-        ),
-        (
-            None,
-            ProphetXRenewalFailureClass.RETRYABLE,
-        ),
-        (
-            ProphetXLoginFailureClass.CREDENTIAL_REJECTED,
-            ProphetXRenewalFailureClass.CREDENTIAL_REJECTED,
-        ),
-    ],
-)
-@pytest.mark.parametrize(
     "state,renewal_failure",
     [
         (
@@ -1699,6 +1674,24 @@ def test_retryable_durable_state_accepts_matching_renewal_origin(
     assert snapshot.last_renewal_failure_class is renewal_failure
 
 
+@pytest.mark.parametrize(
+    "last_login_failure,last_renewal_failure",
+    [
+        (None, None),
+        (
+            ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE,
+            None,
+        ),
+        (
+            None,
+            ProphetXRenewalFailureClass.RETRYABLE,
+        ),
+        (
+            ProphetXLoginFailureClass.CREDENTIAL_REJECTED,
+            ProphetXRenewalFailureClass.CREDENTIAL_REJECTED,
+        ),
+    ],
+)
 def test_credential_rejected_state_requires_exact_single_rejection_cause(
     last_login_failure,
     last_renewal_failure,
@@ -1740,6 +1733,13 @@ def test_credential_rejected_state_accepts_login_or_renewal_rejection():
     assert renewal_rejected.state is ProphetXSessionState.CREDENTIAL_REJECTED
 
 
+@pytest.mark.parametrize(
+    "state",
+    [
+        ProphetXSessionState.SESSION_POOL_EXHAUSTED,
+        ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+    ],
+)
 def test_provider_slot_wait_rejects_nonfuture_hold(tmp_path, state):
     lifecycle = _lifecycle(tmp_path)
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)

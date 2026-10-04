@@ -296,10 +296,12 @@ class ProphetXSessionSnapshot:
             login_rejected = (
                 self.last_failure_class
                 is ProphetXLoginFailureClass.CREDENTIAL_REJECTED
+                and self.last_renewal_failure_class is None
             )
             renewal_rejected = (
                 self.last_renewal_failure_class
                 is ProphetXRenewalFailureClass.CREDENTIAL_REJECTED
+                and self.last_failure_class is None
             )
             if login_rejected == renewal_rejected:
                 raise ProphetXSessionLifecycleError(
@@ -940,6 +942,14 @@ class ProphetXSessionLifecycle:
                         lineage = current.session_lineage_id
                         expiry = current.access_expires_at
 
+                    login_failure_evidence = current.last_failure_class
+                    if state in {
+                        ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
+                        ProphetXSessionState.PROVIDER_UNAVAILABLE,
+                        ProphetXSessionState.CREDENTIAL_REJECTED,
+                    }:
+                        login_failure_evidence = None
+
                     updated = ProphetXSessionSnapshot(
                         state=state,
                         generation=current.generation + 1,
@@ -951,7 +961,7 @@ class ProphetXSessionLifecycle:
                         slot_hold_until=hold,
                         retry_not_before=retry,
                         transient_failures=failures,
-                        last_failure_class=current.last_failure_class,
+                        last_failure_class=login_failure_evidence,
                         last_renewal_failure_class=failure,
                     )
                     self._write_state(updated)

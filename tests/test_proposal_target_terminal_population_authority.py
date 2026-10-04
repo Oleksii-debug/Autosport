@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+from autosport.causal_integrity import contains_forbidden_future_key
 from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.domain import MarketEvent, MarketType, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
@@ -79,13 +80,21 @@ class ProductProposalTargetTerminalPopulationTests(unittest.TestCase):
         self._env.stop()
         self._temp.cleanup()
 
-    def _context(self) -> ProposedTicketRiskContext:
+    def _context(
+        self,
+        *,
+        event_id: str = "event-1",
+        market_id: str = "match_odds",
+        selection_id: str = "home",
+        exchange_side: str | None = None,
+    ) -> ProposedTicketRiskContext:
         leg = TicketLeg(
-            event_id="event-1",
-            market_id="match_odds",
-            selection_id="home",
+            event_id=event_id,
+            market_id=market_id,
+            selection_id=selection_id,
             locked_odds=Decimal("2.3"),
             sport="table_tennis",
+            exchange_side=exchange_side,
         )
         quote = MarketEvent(
             event_id=leg.event_id,
@@ -99,6 +108,7 @@ class ProductProposalTargetTerminalPopulationTests(unittest.TestCase):
             source_ts=self.QUOTE_TS,
             ingest_ts=self.QUOTE_TS,
             sport="table_tennis",
+            exchange_side=exchange_side,
         )
         return ProposedTicketRiskContext(
             legs=(leg,),
@@ -127,11 +137,12 @@ class ProductProposalTargetTerminalPopulationTests(unittest.TestCase):
         selection_ids: tuple[str, ...] = ("away", "draw", "home"),
         *,
         event_id: str = "event-1",
+        market_id: str = "match_odds",
         provider_publish_at: str = "2026-09-18T13:19:57+00:00",
         observed_at: str = "2026-09-18T13:19:58+00:00",
     ) -> MarketSettlementOutcomeAuthority:
         assessment = assess_betfair_historical_market_definition_authority(
-            market_id="match_odds",
+            market_id=market_id,
             market_definition=self._market_definition(
                 selection_ids,
                 event_id=event_id,
@@ -198,6 +209,7 @@ class ProductProposalTargetTerminalPopulationTests(unittest.TestCase):
         self.assertNotIn("outcome", payload)
         self.assertFalse(payload["probability_model_bound"])
         self.assertFalse(payload["iid_member_mapping_proven"])
+        self.assertFalse(contains_forbidden_future_key(payload))
 
     def test_public_constructor_cannot_mint_population_authority(self) -> None:
         with self.assertRaisesRegex(TypeError, "product-issued"):
@@ -266,6 +278,44 @@ class ProductProposalTargetTerminalPopulationTests(unittest.TestCase):
             authorities=(self._authority(),),
         )
         self.assertEqual(same.population_sha256, issued.population_sha256)
+
+    def test_multi_market_population_is_conservative_without_joint_state_authority(self) -> None:
+        second_target = issue_product_proposal_risk_target(
+            self.workspace,
+            signal_strengths=(Decimal("1"), Decimal("0.8")),
+            contexts=(
+                self._context(),
+                self._context(event_id="event-2", market_id="match_odds-2"),
+            ),
+        )
+        population = issue_product_proposal_target_terminal_population(
+            self.workspace,
+            target_sha256=second_target.target_sha256,
+            authorities=(
+                self._authority(),
+                self._authority(event_id="event-2", market_id="match_odds-2"),
+            ),
+        )
+        self.assertEqual(population.terminal_market_count, 2)
+        self.assertEqual(population.terminal_state_count, 27 * 27)
+        self.assertTrue(population.terminal_space_exhaustive)
+        self.assertFalse(population.terminal_space_exact)
+
+    def test_exchange_side_target_remains_outside_terminal_authority(self) -> None:
+        exchange_target = issue_product_proposal_risk_target(
+            self.workspace,
+            signal_strengths=(Decimal("1"),),
+            contexts=(self._context(exchange_side="back"),),
+        )
+        with self.assertRaisesRegex(
+            ProductProposalTargetTerminalPopulationError,
+            "does not yet prove exchange-side semantics",
+        ):
+            issue_product_proposal_target_terminal_population(
+                self.workspace,
+                target_sha256=exchange_target.target_sha256,
+                authorities=(self._authority(),),
+            )
 
     def test_duplicate_authority_identity_is_rejected(self) -> None:
         authority = self._authority()

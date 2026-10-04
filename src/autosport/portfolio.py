@@ -59,8 +59,21 @@ def _portfolio_arithmetic_error(exc: DecimalException) -> ValueError:
     )
 
 
+def _is_open_ticket_status(
+    value: object,
+    *,
+    _status_type: type[TicketStatus] = TicketStatus,
+    _open_status: TicketStatus = TicketStatus.OPEN,
+) -> bool:
+    if type(value) is not _status_type:
+        raise ValueError("portfolio ticket status must be exact TicketStatus")
+    return value is _open_status
+
+
 def _analysis_ticket_fingerprint(
     ticket: PaperTicket,
+    *,
+    _paper_ticket_type: type[PaperTicket] = PaperTicket,
 ) -> tuple[
     str,
     Decimal,
@@ -73,6 +86,8 @@ def _analysis_ticket_fingerprint(
 ]:
     """Return exactly the mutable ticket fields consumed by scenario analysis."""
 
+    if type(ticket) is not _paper_ticket_type:
+        raise ValueError("portfolio ticket must be exact PaperTicket")
     return (
         ticket.ticket_id,
         ticket.stake,
@@ -111,6 +126,9 @@ def _validate_open_ticket_economics_for_analysis(
 
 def _snapshot_open_tickets_for_analysis(
     tickets: list[PaperTicket],
+    *,
+    _paper_ticket_type: type[PaperTicket] = PaperTicket,
+    _open_status: TicketStatus = TicketStatus.OPEN,
 ) -> list[PaperTicket]:
     """Detach one causally coherent cut of mutable ticket economics.
 
@@ -144,9 +162,7 @@ def _snapshot_open_tickets_for_analysis(
         if ticket_id in seen_ticket_ids:
             raise ValueError("portfolio ticket_id values must be unique")
         seen_ticket_ids.add(ticket_id)
-        if type(status) is not TicketStatus:
-            raise ValueError("portfolio ticket status must be exact TicketStatus")
-        if status is not TicketStatus.OPEN:
+        if not _is_open_ticket_status(status):
             continue
         open_payout = _require_finite_decimal(
             payout,
@@ -167,12 +183,12 @@ def _snapshot_open_tickets_for_analysis(
             legs,
         )
         snapshots.append(
-            PaperTicket(
+            _paper_ticket_type(
                 ticket_id=ticket_id,
                 stake=stake,
                 legs=tuple(legs),
                 placed_at=placed_at,
-                status=TicketStatus.OPEN,
+                status=_open_status,
                 provider_source_ids=tuple(provider_source_ids),
             )
         )
@@ -202,7 +218,7 @@ def _scenario_profit_in_context(
 
     total = _canonical_decimal("0")
     for ticket in tickets:
-        if ticket.status is not TicketStatus.OPEN:
+        if not _is_open_ticket_status(ticket.status):
             continue
         stake = _require_finite_decimal(
             ticket.stake,
@@ -322,7 +338,7 @@ class PortfolioEngine:
             with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
                 total = _canonical_decimal("0")
                 for ticket in ticket_snapshot:
-                    if ticket.status is not TicketStatus.OPEN:
+                    if not _is_open_ticket_status(ticket.status):
                         continue
                     stake = _require_finite_decimal(
                         ticket.stake,

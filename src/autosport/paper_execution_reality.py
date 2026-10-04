@@ -519,7 +519,12 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         )
         durable_events = self.events()
         if observation_evidence_ids:
-            for evidence_id in observation_evidence_ids.values():
+            action_by_id = {
+                action.action_id: action for action in plan.actions
+            }
+            for action_id, evidence_id in (
+                observation_evidence_ids.items()
+            ):
                 matches = [
                     event
                     for event in durable_events
@@ -533,6 +538,24 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 if len(matches) != 1:
                     raise PaperExecutionStateError(
                         "reserved observation evidence is not durably registered"
+                    )
+                record = PaperExecutionEvidenceRecord.from_dict(
+                    matches[0]["payload"]["record"]
+                )
+                action = action_by_id[action_id]
+                if (
+                    record.evidence_id != evidence_id
+                    or record.action_id != action.action_id
+                    or record.bookmaker_id != action.bookmaker_id
+                    or record.account_id != action.account_id
+                    or record.event_id != action.event_id
+                    or record.market_id != action.market_id
+                    or record.selection_id != action.selection_id
+                    or record.side != action.side
+                    or record.quote_id != action.quote_id
+                ):
+                    raise PaperExecutionStateError(
+                        "reserved observation evidence does not bind exact action"
                     )
         run_events = [
             event

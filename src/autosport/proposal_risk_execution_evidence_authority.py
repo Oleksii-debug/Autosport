@@ -491,9 +491,17 @@ def derive_product_proposal_risk_execution_evidence(
         precommit.membership_outcome_reveal_after,
         "membership_outcome_reveal_after",
     )
+    target_decision_dt = _instant(
+        precommit.target_decision_ts,
+        "target_decision_ts",
+    )
     if evaluated_dt < reveal_after:
         raise ProductProposalRiskExecutionEvidenceError(
             "evaluation cannot precede the precommitted outcome reveal boundary"
+        )
+    if evaluated_dt < target_decision_dt:
+        raise ProductProposalRiskExecutionEvidenceError(
+            "evaluation cannot precede the proposal target decision"
         )
 
     expected_ids = precommit.planned_member_ids
@@ -538,6 +546,10 @@ def derive_product_proposal_risk_execution_evidence(
         if observed_dt < reveal_after:
             raise ProductProposalRiskExecutionEvidenceError(
                 f"rows[{index}] predates the outcome reveal boundary"
+            )
+        if observed_dt < target_decision_dt:
+            raise ProductProposalRiskExecutionEvidenceError(
+                f"rows[{index}] predates the proposal target decision"
             )
         if observed_dt > evaluated_dt:
             raise ProductProposalRiskExecutionEvidenceError(

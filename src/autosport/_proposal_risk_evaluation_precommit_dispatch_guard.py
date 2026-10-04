@@ -14,12 +14,49 @@ from . import proposal_risk_evaluation_precommit_authority as _authority
 from . import proposal_risk_execution_evidence_authority as _execution_authority
 
 
+def _make_write_once_slot(slot, name: str):
+    """Hide the mutable slot delegate in a closure and expose first-write-only access."""
+
+    class _WriteOnceSlot:
+        __slots__ = ()
+        _autosport_write_once_slot = True
+
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            return slot.__get__(instance, owner)
+
+        def __set__(self, instance, value) -> None:
+            try:
+                slot.__get__(instance, type(instance))
+            except AttributeError:
+                slot.__set__(instance, value)
+                return
+            raise AttributeError(f"{name} is write-once product evidence")
+
+        def __delete__(self, instance) -> None:
+            raise AttributeError(f"{name} is write-once product evidence")
+
+    return _WriteOnceSlot()
+
+
+def _seal_write_once_slots(owner, names) -> None:
+    for name in names:
+        current = owner.__dict__.get(name)
+        if getattr(current, "_autosport_write_once_slot", False) is True:
+            continue
+        if current is None or not hasattr(current, "__get__") or not hasattr(current, "__set__"):
+            raise RuntimeError(f"proposal risk product slot {name} is unavailable")
+        setattr(owner, name, _make_write_once_slot(current, name))
+
+
 def _install_precommit_guard() -> None:
     module = _authority
     error_type = module.ProductProposalRiskEvaluationPrecommitError
     canonical_issue = module.issue_product_proposal_risk_evaluation_precommit
     canonical_resolve = module.resolve_product_proposal_risk_evaluation_precommit
     canonical_require = module._require_dispatch
+    binding_type = module.ProductProposalRiskEvaluationPrecommit
 
     if (
         type(canonical_issue) is not FunctionType
@@ -54,6 +91,13 @@ def _install_precommit_guard() -> None:
         raise RuntimeError(
             "proposal risk evaluation precommit helper dispatch is unavailable"
         )
+    binding_descriptor_witnesses = tuple(
+        (name, binding_type.__dict__.get(name)) for name in module._BINDING_FIELDS
+    )
+    if any(value is None for _, value in binding_descriptor_witnesses):
+        raise RuntimeError(
+            "proposal risk evaluation precommit binding descriptors are unavailable"
+        )
 
     issue_code = canonical_issue.__code__
     resolve_code = canonical_resolve.__code__
@@ -67,6 +111,15 @@ def _install_precommit_guard() -> None:
             raise error_type(
                 "proposal risk evaluation precommit dispatch guard root changed"
             )
+        if module.ProductProposalRiskEvaluationPrecommit is not binding_type:
+            raise error_type(
+                "proposal risk evaluation precommit binding type was rebound"
+            )
+        for name, expected in binding_descriptor_witnesses:
+            if binding_type.__dict__.get(name) is not expected:
+                raise error_type(
+                    f"proposal risk evaluation precommit binding descriptor {name} changed"
+                )
         for name, expected, code in helper_witnesses:
             current = getattr(module, name, None)
             if current is not expected or getattr(current, "__code__", None) is not code:
@@ -202,6 +255,17 @@ def _install_execution_evidence_guard() -> None:
     )
     precommit_descriptor_names = (
         "__new__",
+        "workspace_instance_id",
+        "binding_sha256",
+        "target_sha256",
+        "target_decision_ts",
+        "candidate_vector_sha256",
+        "evaluated_stakes",
+        "planned_member_ids",
+        "membership_outcome_reveal_after",
+        "confidence_level",
+        "ruin_threshold",
+        "proposal_evaluation_scope",
         "binding_identity_proven",
         "proposal_target_counterfactual_execution_proven",
         "risk_upper_bound_for_target",
@@ -255,7 +319,7 @@ def _install_execution_evidence_guard() -> None:
     )
     if any(value is None for _, value in precommit_descriptor_witnesses):
         raise RuntimeError(
-            "proposal risk execution evidence precommit truth descriptors are unavailable"
+            "proposal risk execution evidence precommit input/truth descriptors are unavailable"
         )
     if any(value is None for _, value in row_descriptor_witnesses):
         raise RuntimeError(
@@ -396,8 +460,37 @@ def _install_execution_evidence_guard() -> None:
     )
 
 
+_seal_write_once_slots(
+    _execution_authority.ProductProposalRiskEvaluationPrecommit,
+    _authority._BINDING_FIELDS,
+)
+_seal_write_once_slots(
+    _execution_authority.CounterfactualMemberExecutionEvidence,
+    (
+        "member_id",
+        "binding_sha256",
+        "target_sha256",
+        "candidate_vector_sha256",
+        "executed_stakes",
+        "execution_engine_sha256",
+        "source_sha256",
+        "observed_at",
+        "starting_equity",
+        "minimum_equity",
+        "terminal_equity",
+        "gross_pnl",
+        "costs",
+        "net_pnl",
+    ),
+)
+_seal_write_once_slots(
+    _execution_authority.ProductProposalRiskExecutionEvidence,
+    _execution_authority._RESULT_FIELDS,
+)
 _install_precommit_guard()
 _install_execution_evidence_guard()
+del _seal_write_once_slots
+del _make_write_once_slot
 del _install_precommit_guard
 del _install_execution_evidence_guard
 del _authority

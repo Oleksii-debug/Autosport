@@ -358,6 +358,11 @@ def poll_open_market_store_once(
     if not isinstance(mirror_updates, BoundedMirrorInvalidationBuffer):
         raise TypeError("mirror_updates must be a BoundedMirrorInvalidationBuffer")
 
+    # Reconcile durable receipt-authoritative state before provider I/O. This both
+    # catches updates written by another process since the last cycle and binds the
+    # non-durable mirror to one canonical workspace store before live publication.
+    mirror_updates.reconcile_trusted_store(store)
+
     bus = MarketEventBus(store)
     bus.subscribe(mirror_updates.accept_persisted)
     engine = IngestionEngine(
@@ -399,21 +404,16 @@ def observe_workspace_once(
             if not isinstance(mirror_updates, BoundedMirrorInvalidationBuffer):
                 raise TypeError("mirror_updates must be a BoundedMirrorInvalidationBuffer")
             mirror = mirror_updates.mirror
-            # Reconcile the non-durable mirror from canonical append-only history at
-            # each observation boundary. Re-applying identical/stale events is
-            # idempotent and deliberately does not enqueue downstream invalidations.
-            for persisted_event in store.trusted_live_events():
-                mirror.apply(persisted_event)
 
-        bus = MarketEventBus(store)
-        bus.subscribe(mirror_updates.accept_persisted)
-        engine = IngestionEngine(
-            bus,
+        stats = poll_open_market_store_once(
+            store,
+            health_store,
+            provider,
+            mirror_updates=mirror_updates,
+            max_items=max_items,
             policy=policy,
-            health_store=health_store,
             clock=clock,
         )
-        stats = _drain_snapshot(engine, provider, max_items=max_items)
         source_id = stats.source_id
         current = tuple(
             sorted(

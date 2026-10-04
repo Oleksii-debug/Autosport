@@ -8,17 +8,24 @@ import pytest
 import autosport.risk_membership_publication as publication
 import autosport.risk_randomization_precommit as randomization
 import autosport.risk_sampling_occurrence_authority as draw_authority
+from autosport.decision_ledger import JsonlDecisionLedger
+from autosport.domain import MarketEvent
+from autosport.paper import PaperBook
+from autosport.replay import ReplayEngine, market_event_payload_sha256
 from autosport.risk_sampling_membership import ResolvedFixedNRiskMembership
 from autosport.risk_sampling_occurrence_authority import (
     ProductIidDrawPlanError,
     ProductIidExpectedDrawPlan,
     ProductIidExpectedMemberDraw,
     ProductIidRunAdmissionReceipt,
+    ProductIidRunExecutionReceipt,
     issue_product_iid_run_admission,
     resolve_product_iid_expected_draw_plan,
+    resolve_product_iid_run_execution,
     verify_product_iid_expected_draw_plan,
 )
 from autosport.run_registry import RunRegistry
+from autosport.run_transaction import RunTransaction
 
 
 RUN_ID = "run-001"
@@ -838,6 +845,276 @@ def test_run_admission_descriptor_rebinding_fails_before_attacker_executes(
     with pytest.raises(ProductIidDrawPlanError, match="authority dispatch changed"):
         _issue_admission(values)
     assert attacker_called is False
+
+
+
+def _market_event(
+    *,
+    event_id: str = "iid-event",
+    sequence: int = 1,
+    decimal_odds: str = "2.0",
+) -> MarketEvent:
+    return MarketEvent.from_dict(
+        {
+            "event_id": event_id,
+            "market_id": "winner",
+            "selection_id": "home",
+            "decimal_odds": decimal_odds,
+            "observed_ts": f"2026-01-01T00:00:0{sequence}+00:00",
+            "source_id": "iid-fixture",
+            "sequence": sequence,
+        }
+    )
+
+
+def _frame_for_payload(payload_sha256: str) -> str:
+    return _canonical(
+        {
+            "schema": "AUTOSPORT_RISK_IID_SAMPLING_FRAME_V1",
+            "units": [
+                {
+                    "payload_sha256": payload_sha256,
+                    "unit_id": "unit-a",
+                }
+            ],
+        }
+    )
+
+
+def _completed_iid_execution(
+    tmp_path,
+    monkeypatch,
+    *,
+    draw_count: int = 1,
+    replay_events: tuple[MarketEvent, ...] | None = None,
+):
+    frame_event = _market_event()
+    frame_json = _frame_for_payload(
+        market_event_payload_sha256(frame_event)
+    )
+    horizon_json = _horizon(draw_count)
+    values = _product_precommit(
+        tmp_path,
+        monkeypatch,
+        frame_json=frame_json,
+        horizon_json=horizon_json,
+    )
+    admission = _issue_admission(values)
+    (
+        _membership_value,
+        workspace,
+        _registry_path,
+        _authority_root,
+        _manifest,
+        _frame_json,
+        _horizon_json,
+    ) = values
+
+    book_path = workspace / "paper_book.json"
+    PaperBook("100").save(book_path)
+    ledger = JsonlDecisionLedger(workspace / "decisions.jsonl")
+    ledger.path.write_bytes(b"")
+    base_book_sha256 = hashlib.sha256(book_path.read_bytes()).hexdigest()
+    base_ledger_sha256 = hashlib.sha256(b"").hexdigest()
+
+    registry = RunRegistry(workspace / "run_registry.json")
+    experiment_key = registry.begin(
+        "a" * 64,
+        "b" * 64,
+        "iid-execution-strategy",
+        RUN_ID,
+        base_paper_book_sha256=base_book_sha256,
+        base_decision_ledger_sha256=base_ledger_sha256,
+        sampling_draw_admission_receipt_sha256=admission.receipt_sha256,
+    )
+    tx = RunTransaction.start(
+        workspace,
+        run_id=RUN_ID,
+        experiment_key=experiment_key,
+        market_sha256="a" * 64,
+        results_sha256="b" * 64,
+        strategy_id="iid-execution-strategy",
+        base_paper_book_sha256=base_book_sha256,
+        base_decision_ledger_sha256=base_ledger_sha256,
+        sampling_draw_admission_receipt_sha256=admission.receipt_sha256,
+    )
+    tx.run_ledger_path.write_bytes(b"")
+    new_book_sha256, new_ledger_sha256 = tx.stage_outputs(
+        PaperBook.load(book_path),
+        ledger.path,
+    )
+    events = (
+        replay_events
+        if replay_events is not None
+        else tuple(frame_event for _ in range(draw_count))
+    )
+    replay = ReplayEngine(events).run(
+        lambda _event: None,
+        run_id=RUN_ID,
+    )
+    summary = tx.precommit(
+        {
+            "schema_version": 2,
+            "run_id": RUN_ID,
+            "experiment_key": experiment_key,
+            "market_sha256": "a" * 64,
+            "sealed_results_sha256": "b" * 64,
+            "strategy_id": "iid-execution-strategy",
+            "real_money_execution": False,
+        },
+        replay_execution_receipt=replay.execution_receipt,
+    )
+    summary_path = tx.commit()
+    registry.complete(
+        experiment_key,
+        str(summary_path),
+        paper_book_sha256=new_book_sha256,
+        decision_ledger_sha256=new_ledger_sha256,
+    )
+    tx.mark_registry_completed()
+    return values, replay, summary
+
+
+def test_iid_run_execution_proves_exact_draw_reached_strategy_replay(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values, replay, summary = _completed_iid_execution(
+        tmp_path,
+        monkeypatch,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+
+    receipt = resolve_product_iid_run_execution(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        member_index=0,
+        authority_root=authority_root,
+    )
+
+    assert type(receipt) is ProductIidRunExecutionReceipt
+    assert receipt.member_id == RUN_ID
+    assert receipt.event_count == 1
+    assert receipt.replay_dataset_hash == replay.dataset_hash
+    assert (
+        receipt.replay_execution_receipt_sha256
+        == summary["replay_execution_receipt_sha256"]
+    )
+    assert receipt.product_precommit_bound is True
+    assert receipt.run_admission_bound is True
+    assert receipt.execution_consumption_proven is True
+    assert receipt.occurrence_ancestry_proven is True
+    assert receipt.iid_qualified is False
+    assert receipt.grants_real_money_authority is False
+
+
+def test_iid_run_execution_rejects_different_replay_payload(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    different = _market_event(
+        event_id="different-event",
+        decimal_odds="3.0",
+    )
+    values, _replay, _summary = _completed_iid_execution(
+        tmp_path,
+        monkeypatch,
+        replay_events=(different,),
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="did not consume and apply the exact IID draw transcript",
+    ):
+        resolve_product_iid_run_execution(
+            membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=frame_json,
+            horizon_json=horizon_json,
+            member_index=0,
+            authority_root=authority_root,
+        )
+
+
+def test_iid_run_execution_rejects_strategy_suppressed_duplicate_draw(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values, _replay, _summary = _completed_iid_execution(
+        tmp_path,
+        monkeypatch,
+        draw_count=2,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="did not consume and apply the exact IID draw transcript",
+    ):
+        resolve_product_iid_run_execution(
+            membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=frame_json,
+            horizon_json=horizon_json,
+            member_index=0,
+            authority_root=authority_root,
+        )
+
+
+def test_iid_run_execution_truth_cannot_be_caller_constructed_or_subclassed() -> None:
+    with pytest.raises(TypeError, match="product-resolved"):
+        ProductIidRunExecutionReceipt(
+            experiment_id="forged",
+            member_id=RUN_ID,
+            member_index=0,
+            expected_draw_plan_sha256="1" * 64,
+            expected_draw_transcript_sha256="2" * 64,
+            run_admission_receipt_sha256="3" * 64,
+            replay_execution_receipt_sha256="4" * 64,
+            replay_dataset_hash="5" * 64,
+            event_count=1,
+            expected_event_payload_sequence_sha256="6" * 64,
+            expected_event_payload_multiset_sha256="7" * 64,
+            completed_summary_sha256="8" * 64,
+            receipt_sha256="9" * 64,
+        )
+
+    with pytest.raises(TypeError, match="must not be subclassed"):
+        class ForgedExecution(ProductIidRunExecutionReceipt):
+            pass
 
 
 def test_run_admission_truth_cannot_be_caller_constructed_or_subclassed() -> None:

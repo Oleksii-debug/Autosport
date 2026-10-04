@@ -3466,6 +3466,75 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             resumed.close()
 
+    def test_pending_restart_rejects_rolled_back_market_append_frontier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many(
+                    (self._event(selection="selection-a", sequence=1),)
+                )
+            finally:
+                seed_store.close()
+
+            def fail_after_pending(input_id, snapshot):
+                del input_id, snapshot
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            strategy = self._strategy_version()
+            registry = self._scientific_registry(workspace, strategy)
+            first = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=fail_after_pending,
+                scientific_registry=registry,
+                provider=_EmptyProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+            first.close()
+
+            progress_path = workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+            rolled = json.loads(progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(rolled["market_append_generation"], 1)
+            rolled["market_append_generation"] = 0
+            progress_path.write_text(
+                json.dumps(rolled, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            resumed_provider = _EmptyProvider()
+            resumed_factory = _EmptyIntentFactory()
+            resumed = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=resumed_factory,
+                scientific_registry=registry,
+                provider=resumed_provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "replayed market state changed",
+            ):
+                resumed.run_cycle()
+
+            self.assertEqual(resumed_provider.calls, 0)
+            self.assertEqual(resumed_factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            resumed.close()
+
     def test_pending_restart_rejects_replayed_market_state_mismatch_before_poll(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

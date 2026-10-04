@@ -86,101 +86,263 @@ class SourceRightsAuthorization:
         object.__setattr__(self, "approval_reference", approval_reference)
 
 
-def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
+def _build_source_rights_authorization_init(
+    *,
+    _issuer_token=_AUTHORIZATION_ISSUER,
+    _error_type=SourceRightsManifestError,
+    _object_setattr=object.__setattr__,
+):
+    """Seal direct positive-result construction to the canonical issuer token."""
+
+    def _authorization_init(
+        self,
+        *,
+        source_identity: str,
+        required_scope: str,
+        checked_at: datetime,
+        manifest_sha256: str,
+        approved_by: str,
+        approval_reference: str,
+        _issuer: object | None = None,
+    ) -> None:
+        if _issuer is not _issuer_token:
+            raise _error_type(
+                "SourceRightsAuthorization can only be issued by authorize_source_use"
+            )
+        _object_setattr(self, "source_identity", source_identity)
+        _object_setattr(self, "required_scope", required_scope)
+        _object_setattr(self, "checked_at", checked_at)
+        _object_setattr(self, "manifest_sha256", manifest_sha256)
+        _object_setattr(self, "approved_by", approved_by)
+        _object_setattr(self, "approval_reference", approval_reference)
+
+    return _authorization_init
+
+
+SourceRightsAuthorization.__init__ = _build_source_rights_authorization_init()
+del _build_source_rights_authorization_init
+
+
+def _build_source_rights_authorization_issuer(
+    *,
+    _authorization_type=SourceRightsAuthorization,
+    _issuer_token=_AUTHORIZATION_ISSUER,
+):
+    """Return the only product-owned positive authorization constructor."""
+
+    def _issue_source_rights_authorization(
+        *,
+        source_identity: str,
+        required_scope: str,
+        checked_at: datetime,
+        manifest_sha256: str,
+        approved_by: str,
+        approval_reference: str,
+    ) -> SourceRightsAuthorization:
+        return _authorization_type(
+            source_identity=source_identity,
+            required_scope=required_scope,
+            checked_at=checked_at,
+            manifest_sha256=manifest_sha256,
+            approved_by=approved_by,
+            approval_reference=approval_reference,
+            _issuer=_issuer_token,
+        )
+
+    return _issue_source_rights_authorization
+
+
+_issue_source_rights_authorization = _build_source_rights_authorization_issuer()
+del _build_source_rights_authorization_issuer
+
+
+def _strict_object(
+    pairs: list[tuple[str, Any]],
+    *,
+    _error_type=SourceRightsManifestError,
+    _dict_type=dict,
+) -> dict[str, Any]:
+    result: dict[str, Any] = _dict_type()
     for key, value in pairs:
         if key in result:
-            raise SourceRightsManifestError(f"duplicate JSON object key: {key}")
+            raise _error_type(f"duplicate JSON object key: {key}")
         result[key] = value
     return result
 
 
-def _reject_nonfinite(value: str) -> None:
-    raise SourceRightsManifestError(f"non-finite JSON number: {value}")
+def _reject_nonfinite(
+    value: str,
+    *,
+    _error_type=SourceRightsManifestError,
+) -> None:
+    raise _error_type(f"non-finite JSON number: {value}")
 
 
-def _canonical_text(value: object, *, field_name: str) -> str:
-    if type(value) is not str or not value or len(value) > _MAX_TEXT_LENGTH:
-        raise SourceRightsManifestError(
+def _canonical_text(
+    value: object,
+    *,
+    field_name: str,
+    _error_type=SourceRightsManifestError,
+    _str_type=str,
+    _max_text_length=_MAX_TEXT_LENGTH,
+    _type=type,
+) -> str:
+    if (
+        _type(value) is not _str_type
+        or not value
+        or len(value) > _max_text_length
+    ):
+        raise _error_type(
             f"{field_name} must be a non-empty canonical string without surrounding whitespace"
         )
     if value != value.strip():
-        raise SourceRightsManifestError(
+        raise _error_type(
             f"{field_name} must be a non-empty canonical string without surrounding whitespace"
         )
     return value
 
 
-def _timestamp(value: object, *, field_name: str) -> datetime:
-    text = _canonical_text(value, field_name=field_name)
+def _timestamp(
+    value: object,
+    *,
+    field_name: str,
+    _canonical_text_impl=_canonical_text,
+    _datetime_type=datetime,
+    _timezone_type=timezone,
+    _timedelta_type=timedelta,
+    _error_type=SourceRightsManifestError,
+    _type=type,
+) -> datetime:
+    text = _canonical_text_impl(value, field_name=field_name)
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = _datetime_type.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise SourceRightsManifestError(
+        raise _error_type(
             f"{field_name} must be an ISO-8601 timestamp"
         ) from exc
     if parsed.tzinfo is None:
-        raise SourceRightsManifestError(
+        raise _error_type(
             f"{field_name} must include an explicit timezone"
         )
-    if type(parsed.tzinfo) is not timezone or parsed.utcoffset() != timedelta(0):
-        raise SourceRightsManifestError(f"{field_name} must use UTC")
+    if (
+        _type(parsed.tzinfo) is not _timezone_type
+        or parsed.utcoffset() != _timedelta_type(0)
+    ):
+        raise _error_type(f"{field_name} must use UTC")
     return parsed
 
 
-def _runtime_timestamp(value: object, *, field_name: str) -> datetime:
-    if type(value) is not datetime or type(value.tzinfo) is not timezone:
-        raise SourceRightsManifestError(f"{field_name} must be a built-in UTC datetime")
-    if value.utcoffset() != timedelta(0):
-        raise SourceRightsManifestError(f"{field_name} must use UTC")
+def _runtime_timestamp(
+    value: object,
+    *,
+    field_name: str,
+    _datetime_type=datetime,
+    _timezone_type=timezone,
+    _timedelta_type=timedelta,
+    _error_type=SourceRightsManifestError,
+    _type=type,
+) -> datetime:
+    if (
+        _type(value) is not _datetime_type
+        or _type(value.tzinfo) is not _timezone_type
+    ):
+        raise _error_type(f"{field_name} must be a built-in UTC datetime")
+    if value.utcoffset() != _timedelta_type(0):
+        raise _error_type(f"{field_name} must use UTC")
     return value
 
 
-def _scopes(value: object) -> tuple[str, ...]:
-    if type(value) is not list or not value:
-        raise SourceRightsManifestError(
-            "authorized_scopes must be a non-empty list"
-        )
-    if len(value) > _MAX_AUTHORIZED_SCOPES:
-        raise SourceRightsManifestError(
+def _scopes(
+    value: object,
+    *,
+    _canonical_text_impl=_canonical_text,
+    _max_scopes=_MAX_AUTHORIZED_SCOPES,
+    _error_type=SourceRightsManifestError,
+    _list_type=list,
+    _tuple_type=tuple,
+    _set_type=set,
+    _sorted=sorted,
+    _type=type,
+) -> tuple[str, ...]:
+    if _type(value) is not _list_type or not value:
+        raise _error_type("authorized_scopes must be a non-empty list")
+    if len(value) > _max_scopes:
+        raise _error_type(
             "authorized_scopes exceeds the maximum supported scope count"
         )
     normalized: list[str] = []
     for item in value:
-        scope = _canonical_text(item, field_name="authorized_scopes item")
+        scope = _canonical_text_impl(
+            item,
+            field_name="authorized_scopes item",
+        )
         if "*" in scope:
-            raise SourceRightsManifestError(
+            raise _error_type(
                 "authorized_scopes must use explicit scopes; wildcard scopes are forbidden"
             )
         normalized.append(scope)
-    if len(set(normalized)) != len(normalized):
-        raise SourceRightsManifestError("authorized_scopes must not contain duplicates")
-    return tuple(sorted(normalized))
+    if len(_set_type(normalized)) != len(normalized):
+        raise _error_type("authorized_scopes must not contain duplicates")
+    return _tuple_type(_sorted(normalized))
 
 
-def _runtime_scopes(value: object) -> tuple[str, ...]:
-    if type(value) is not tuple or not value:
-        raise SourceRightsManifestError("manifest authorized_scopes snapshot is malformed")
-    if len(value) > _MAX_AUTHORIZED_SCOPES:
-        raise SourceRightsManifestError(
+def _runtime_scopes(
+    value: object,
+    *,
+    _canonical_text_impl=_canonical_text,
+    _max_scopes=_MAX_AUTHORIZED_SCOPES,
+    _error_type=SourceRightsManifestError,
+    _tuple_type=tuple,
+    _set_type=set,
+    _sorted=sorted,
+    _type=type,
+    _any=any,
+) -> tuple[str, ...]:
+    if _type(value) is not _tuple_type or not value:
+        raise _error_type(
+            "manifest authorized_scopes snapshot is malformed"
+        )
+    if len(value) > _max_scopes:
+        raise _error_type(
             "manifest authorized_scopes snapshot exceeds the maximum supported scope count"
         )
-    normalized = tuple(
-        _canonical_text(item, field_name="manifest authorized_scopes item")
+    normalized = _tuple_type(
+        _canonical_text_impl(
+            item,
+            field_name="manifest authorized_scopes item",
+        )
         for item in value
     )
-    if normalized != tuple(sorted(normalized)) or len(set(normalized)) != len(normalized):
-        raise SourceRightsManifestError("manifest authorized_scopes snapshot is malformed")
-    if any("*" in scope for scope in normalized):
-        raise SourceRightsManifestError("manifest authorized_scopes snapshot is malformed")
+    if (
+        normalized != _tuple_type(_sorted(normalized))
+        or len(_set_type(normalized)) != len(normalized)
+    ):
+        raise _error_type(
+            "manifest authorized_scopes snapshot is malformed"
+        )
+    if _any("*" in scope for scope in normalized):
+        raise _error_type(
+            "manifest authorized_scopes snapshot is malformed"
+        )
     return normalized
 
 
-def _bounded_manifest_bytes(value: object) -> bytes:
-    if type(value) is not bytes:
-        raise SourceRightsManifestError("source-rights manifest snapshot bytes are malformed")
-    if len(value) > _MAX_MANIFEST_BYTES:
-        raise SourceRightsManifestError("source-rights manifest exceeds the maximum supported size")
+def _bounded_manifest_bytes(
+    value: object,
+    *,
+    _bytes_type=bytes,
+    _max_manifest_bytes=_MAX_MANIFEST_BYTES,
+    _error_type=SourceRightsManifestError,
+    _type=type,
+) -> bytes:
+    if _type(value) is not _bytes_type:
+        raise _error_type(
+            "source-rights manifest snapshot bytes are malformed"
+        )
+    if len(value) > _max_manifest_bytes:
+        raise _error_type(
+            "source-rights manifest exceeds the maximum supported size"
+        )
     return value
 
 

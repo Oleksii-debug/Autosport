@@ -33,7 +33,9 @@ from .risk_sampling_membership import ResolvedFixedNRiskMembership
 from .risk_sampling_occurrence_authority import (
     ProductIidDrawPlanError,
     ProductIidExpectedDrawPlan,
+    ProductIidRunAdmissionReceipt,
     resolve_product_iid_expected_draw_plan,
+    resolve_product_iid_run_admission,
 )
 from .run_transaction import RunTransaction, RunTransactionError
 
@@ -89,6 +91,9 @@ _STRUCTURE_CODE = getattr(_STRUCTURE, "__code__", None)
 _DRAW_PLAN_TYPE = ProductIidExpectedDrawPlan
 _DRAW_PLAN = resolve_product_iid_expected_draw_plan
 _DRAW_PLAN_CODE = getattr(_DRAW_PLAN, "__code__", None)
+_RUN_ADMISSION_TYPE = ProductIidRunAdmissionReceipt
+_RUN_ADMISSION = resolve_product_iid_run_admission
+_RUN_ADMISSION_CODE = getattr(_RUN_ADMISSION, "__code__", None)
 
 
 class ProductRunCapitalPathError(RuntimeError):
@@ -344,6 +349,9 @@ def _require_dispatch() -> None:
         or ProductIidExpectedDrawPlan is not _DRAW_PLAN_TYPE
         or resolve_product_iid_expected_draw_plan is not _DRAW_PLAN
         or getattr(_DRAW_PLAN, "__code__", None) is not _DRAW_PLAN_CODE
+        or ProductIidRunAdmissionReceipt is not _RUN_ADMISSION_TYPE
+        or resolve_product_iid_run_admission is not _RUN_ADMISSION
+        or getattr(_RUN_ADMISSION, "__code__", None) is not _RUN_ADMISSION_CODE
     ):
         raise ProductRunCapitalPathError(
             "risk-path occurrence authority dispatch changed"
@@ -610,6 +618,7 @@ class ProductRunCapitalPathEvidence:
     outcome_available_at: str
     expected_draw_plan_sha256: str
     expected_draw_transcript_sha256: str
+    run_admission_receipt_sha256: str
     settlement_effects_sha256: str
     replay_source_evidence_sha256: str
     source_evidence_sha256: str
@@ -643,6 +652,14 @@ class ProductRunCapitalPathEvidence:
     @property
     def expected_draw_product_derived(self) -> bool:
         return True
+
+    @property
+    def run_admission_bound(self) -> bool:
+        return True
+
+    @property
+    def execution_consumption_proven(self) -> bool:
+        return False
 
     @property
     def sampling_occurrence_ancestry_proven(self) -> bool:
@@ -701,6 +718,16 @@ def resolve_product_run_capital_path_evidence(
             horizon_json=horizon_json,
             authority_root=authority_root,
         )
+        admission = _RUN_ADMISSION(
+            membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=sampling_manifest_json,
+            sampling_frame_json=sampling_frame_json,
+            horizon_json=horizon_json,
+            member_index=member_index,
+            authority_root=authority_root,
+        )
     except (
         ProductIidDrawPlanError,
         OSError,
@@ -727,6 +754,20 @@ def resolve_product_run_capital_path_evidence(
         or draw_plan.sampling_frame_sha256 != structure.sampling_frame_sha256
         or draw_plan.horizon_sha256 != structure.horizon_sha256
         or len(draw_plan.member_draws) != structure.planned_n
+        or type(admission) is not _RUN_ADMISSION_TYPE
+        or admission.run_admission_bound is not True
+        or admission.product_precommit_bound is not True
+        or admission.execution_consumption_proven is not False
+        or admission.occurrence_ancestry_proven is not False
+        or admission.iid_qualified is not False
+        or admission.grants_real_money_authority is not False
+        or admission.member_id != run_id
+        or type(admission.member_index) is not int
+        or admission.member_index != member_index
+        or admission.expected_draw_plan_sha256 != draw_plan.plan_sha256
+        or admission.sampling_manifest_sha256 != structure.manifest_sha256
+        or admission.sampling_frame_sha256 != structure.sampling_frame_sha256
+        or admission.horizon_sha256 != structure.horizon_sha256
     ):
         raise ProductRunCapitalPathError(
             "product fixed-N precommit truth boundary is inconsistent"
@@ -747,6 +788,9 @@ def resolve_product_run_capital_path_evidence(
         or expected_draw.stream_sha256 != structure.member_stream_sha256[member_index]
         or expected_draw.execution_consumption_proven is not False
         or expected_draw.grants_real_money_authority is not False
+        or admission.stream_sha256 != expected_draw.stream_sha256
+        or admission.expected_draw_transcript_sha256
+        != expected_draw.draw_transcript_sha256
     ):
         raise ProductRunCapitalPathError(
             "expected IID draw does not bind the exact fixed-N member"
@@ -873,12 +917,18 @@ def resolve_product_run_capital_path_evidence(
             expected_draw.draw_transcript_sha256,
             "expected_draw_transcript_sha256",
         ),
+        "run_admission_receipt_sha256": _sha(
+            admission.receipt_sha256,
+            "run_admission_receipt_sha256",
+        ),
         "settlement_effects_sha256": effects_sha,
         "replay_source_evidence_sha256": replay.source_evidence_sha256,
         "product_precommit_bound": True,
         "run_path_ancestry_proven": True,
         "sampling_frame_materialized": True,
         "expected_draw_product_derived": True,
+        "run_admission_bound": True,
+        "execution_consumption_proven": False,
         "sampling_occurrence_ancestry_proven": False,
         "iid_qualified": False,
         "grants_real_money_authority": False,
@@ -907,6 +957,10 @@ def resolve_product_run_capital_path_evidence(
                 expected_draw.draw_transcript_sha256,
                 "expected_draw_transcript_sha256",
             ),
+        ),
+        (
+            "run_admission_receipt_sha256",
+            _sha(admission.receipt_sha256, "run_admission_receipt_sha256"),
         ),
         ("settlement_effects_sha256", effects_sha),
         (
@@ -1012,6 +1066,7 @@ def _build_product_run_capital_path_evidence_verifier(
         "outcome_available_at",
         "expected_draw_plan_sha256",
         "expected_draw_transcript_sha256",
+        "run_admission_receipt_sha256",
         "settlement_effects_sha256",
         "replay_source_evidence_sha256",
         "source_evidence_sha256",

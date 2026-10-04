@@ -904,6 +904,40 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(len(replay.events), 1)
             store.close()
 
+    def test_live_bootstrap_current_projection_does_not_dispatch_through_trusted_events_method(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store)
+
+            with patch.object(
+                SQLiteMarketStore,
+                "trusted_live_events",
+                side_effect=AssertionError("mutable trusted history method must not control current projection"),
+            ):
+                current = store.trusted_live_current_by_source()
+                live = MarketMirror.from_live_store(store)
+
+            self.assertEqual(len(current), 1)
+            self.assertEqual(len(live.snapshot()), 1)
+            store.close()
+
+    def test_trusted_store_readers_use_sealed_query_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store)
+
+            with patch.object(
+                storage_module,
+                "_trusted_live_events_from_connection",
+                side_effect=AssertionError("mutable trusted query helper must not be consulted"),
+            ):
+                trusted = store.trusted_live_events()
+                current = store.trusted_live_current_by_source()
+
+            self.assertEqual(len(trusted), 1)
+            self.assertEqual(len(current), 1)
+            store.close()
+
     def test_live_bootstrap_uses_sealed_current_reader_descriptor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

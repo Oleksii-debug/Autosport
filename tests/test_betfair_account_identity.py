@@ -407,33 +407,22 @@ def test_personal_developer_identity_never_claims_cross_session_stability(
 
 
 @pytest.mark.parametrize(
-    ("attribute", "forged_value"),
+    ("attribute", "replacement"),
     [
-        ("remote_provider_origin_proven", True),
-        ("provider_account_details_origin_proven", True),
-        ("stable_account_identity_proven", True),
-        ("stable_account_id", "forged-stable-account"),
-        ("cross_session_equivalence_proven", True),
-        ("identity_id", "0" * 64),
+        ("remote_provider_origin_proven", property(lambda _self: True)),
+        ("provider_account_details_origin_proven", property(lambda _self: True)),
+        ("stable_account_identity_proven", property(lambda _self: True)),
+        ("stable_account_id", property(lambda _self: "forged-stable-account")),
+        ("cross_session_equivalence_proven", property(lambda _self: True)),
+        ("identity_id", property(lambda _self: "0" * 64)),
     ],
 )
-def test_authority_projection_rebind_revokes_issued_identity(
-    monkeypatch: pytest.MonkeyPatch,
+def test_authority_projection_rebind_is_rejected(
     attribute: str,
-    forged_value: object,
+    replacement: object,
 ) -> None:
-    _install_details_transport(monkeypatch)
-    client = _client()
-    value = resolve_betfair_authenticated_account_identity(client)
-
-    monkeypatch.setattr(
-        BetfairAuthenticatedAccountIdentity,
-        attribute,
-        property(lambda _self, result=forged_value: result),
-    )
-
-    assert getattr(value, attribute) == forged_value
-    assert not is_authoritative_betfair_account_identity(value, client=client)
+    with pytest.raises(TypeError, match="authority surface is sealed"):
+        setattr(BetfairAuthenticatedAccountIdentity, attribute, replacement)
 
 
 @pytest.mark.parametrize("copy_kind", ["copy", "replace", "pickle"])
@@ -488,7 +477,7 @@ def test_caller_constructed_matching_dto_cannot_mint_authority(
         ("session_context_id", "betfair-session-context:" + "1" * 64),
     ],
 )
-def test_same_object_authority_bearing_mutation_revokes_identity(
+def test_same_object_authority_bearing_mutation_revokes_identity_monotonically(
     monkeypatch: pytest.MonkeyPatch,
     field: str,
     replacement: object,
@@ -498,8 +487,11 @@ def test_same_object_authority_bearing_mutation_revokes_identity(
     value = resolve_betfair_authenticated_account_identity(client)
     assert is_authoritative_betfair_account_identity(value, client=client)
 
+    original = getattr(value, field)
     object.__setattr__(value, field, replacement)
+    assert not is_authoritative_betfair_account_identity(value, client=client)
 
+    object.__setattr__(value, field, original)
     assert not is_authoritative_betfair_account_identity(value, client=client)
 
 
@@ -728,3 +720,49 @@ def test_instance_level_transport_method_replacement_revokes_issued_identity(
     client._transport.post = lambda *args, **kwargs: b"{}"
 
     assert not is_authoritative_betfair_account_identity(value, client=client)
+
+
+def test_k07_hard_false_getters_are_non_python_and_sealed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(monkeypatch)
+    value = resolve_betfair_authenticated_account_identity(_client())
+
+    for name in (
+        "remote_provider_origin_proven",
+        "provider_account_details_origin_proven",
+        "stable_account_identity_proven",
+        "stable_account_id",
+        "cross_session_equivalence_proven",
+    ):
+        descriptor = BetfairAuthenticatedAccountIdentity.__dict__[name]
+        assert isinstance(descriptor, property)
+        assert descriptor.fget is not None
+        assert not hasattr(descriptor.fget, "__code__")
+
+    assert value.remote_provider_origin_proven is False
+    assert value.provider_account_details_origin_proven is False
+    assert value.stable_account_identity_proven is False
+    assert value.stable_account_id is None
+    assert value.cross_session_equivalence_proven is False
+
+    with pytest.raises(TypeError, match="authority surface is sealed"):
+        BetfairAuthenticatedAccountIdentity._stable_account_identity_proven_constant = True
+
+
+def test_k07_semantic_slot_descriptors_cannot_be_class_rebound() -> None:
+    for name in (
+        "venue_id",
+        "mode",
+        "identity_scope",
+        "session_context_id",
+        "currency_code",
+        "account_details_sha256",
+        "observed_at",
+    ):
+        with pytest.raises(TypeError, match="authority surface is sealed"):
+            setattr(
+                BetfairAuthenticatedAccountIdentity,
+                name,
+                property(lambda _self: None),
+            )

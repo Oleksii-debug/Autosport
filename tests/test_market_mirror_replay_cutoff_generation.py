@@ -229,24 +229,28 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 reopened.close()
 
     def test_database_authority_key_folds_win32_case_and_trailing_aliases(self) -> None:
+        mixed_case = Path("Odds.DB")
+        trailing_alias = Path("ODDS.DB. ")
         with patch.object(storage_module.os, "name", "nt"):
             self.assertEqual(
-                storage_module._database_authority_key(Path("Odds.DB")),
+                storage_module._database_authority_key(mixed_case),
                 "odds.db",
             )
             self.assertEqual(
-                storage_module._database_authority_key(Path("ODDS.DB. ")),
+                storage_module._database_authority_key(trailing_alias),
                 "odds.db",
             )
 
     def test_database_authority_key_preserves_posix_case_distinction(self) -> None:
+        mixed_case = Path("Odds.DB")
+        lower_case = Path("odds.db")
         with patch.object(storage_module.os, "name", "posix"):
             self.assertEqual(
-                storage_module._database_authority_key(Path("Odds.DB")),
+                storage_module._database_authority_key(mixed_case),
                 "Odds.DB",
             )
             self.assertEqual(
-                storage_module._database_authority_key(Path("odds.db")),
+                storage_module._database_authority_key(lower_case),
                 "odds.db",
             )
 

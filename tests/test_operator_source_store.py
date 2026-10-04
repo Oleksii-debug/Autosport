@@ -320,6 +320,28 @@ def test_symlinked_operator_source_config_is_rejected_without_following_target(
     assert OperatorSourceConfigStore(target).read().source_id == "paper-fixture"
 
 
+def test_dangling_symlink_config_is_invalid_not_missing_setup(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "operator-source.json"
+    missing_target = tmp_path / "missing-external-config.json"
+    try:
+        path.symlink_to(missing_target)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable on this runner: {exc}")
+
+    store = OperatorSourceConfigStore(path)
+    with pytest.raises(OperatorSourceStoreError, match="cannot be read"):
+        store.read()
+
+    result = store.resolve(admin_override_source_id=None)
+    assert result.state is OperatorSourceSelectionState.INVALID
+    assert result.source_id is None
+    assert path.is_symlink()
+    assert not missing_target.exists()
+
+
+
 def test_hard_linked_operator_source_config_is_rejected(
     tmp_path: Path,
 ) -> None:

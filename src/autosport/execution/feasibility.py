@@ -14,6 +14,7 @@ from ..betfair_account_readonly import (
     assert_market_book_depth_authoritative,
     market_book_depth_acquisition_started_at,
 )
+from ..betfair_price_ladder_admission import BetfairPriceLadderAdmission
 from ..real_execution_ledger import RealExecutionLedger
 from ..supervised_execution import BoundSupervisedExecutionPlan
 
@@ -340,6 +341,7 @@ def _assess_execution_feasibility(
     *,
     max_snapshot_age: timedelta,
     product_owned: bool,
+    additional_reasons: Sequence[str] = (),
 ) -> ExecutionFeasibilitySnapshot:
     """Validate caller assertions and derive conservative displayed depth.
 
@@ -350,7 +352,7 @@ def _assess_execution_feasibility(
     if max_snapshot_age <= timedelta(0):
         raise ValueError("max_snapshot_age must be positive")
 
-    reasons: list[str] = []
+    reasons: list[str] = list(additional_reasons)
     _append_if(reasons, request.side != "BACK", "UNSUPPORTED_SIDE")
     _append_if(reasons, request.order_type != "LIMIT", "UNSUPPORTED_ORDER_TYPE")
     _append_if(reasons, request.leg_count != 1, "MULTI_LEG_LIQUIDITY_REUSE_FORBIDDEN")
@@ -477,7 +479,10 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     *,
     action_id: str,
     max_snapshot_age: timedelta,
+    price_ladder_admission: BetfairPriceLadderAdmission | None,
     _verified_execution_view,
+    _price_ladder_type,
+    _price_ladder_admissible,
 ) -> ExecutionFeasibilitySnapshot:
     """Resolve provider depth against the durable plan and fail closed on limits.
 
@@ -542,6 +547,52 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     decision_utc = decision_at.astimezone(timezone.utc)
     if decision_utc >= action_expiry:
         raise ValueError("execution action expired before feasibility decision")
+
+    price_ladder_authoritative = False
+    price_ladder_reasons: list[str] = []
+    price_ladder_evidence_digest: str | None = None
+    if price_ladder_admission is None:
+        price_ladder_reasons.append("PRICE_LADDER_AUTHORITY_UNPROVEN")
+    else:
+        if type(price_ladder_admission) is not _price_ladder_type:
+            raise TypeError(
+                "price_ladder_admission must be exact "
+                "BetfairPriceLadderAdmission or None"
+            )
+        _require_exact_decimal(
+            price_ladder_admission.price,
+            "price_ladder_admission.price",
+            positive=True,
+        )
+        _require_aware(
+            price_ladder_admission.decision_at,
+            "price_ladder_admission.decision_at",
+        )
+        if (
+            price_ladder_admission.provider_id != action.bookmaker_id
+            or price_ladder_admission.account_id != action.account_id
+            or price_ladder_admission.market_id != action.market_id
+            or price_ladder_admission.price != action.requested_odds
+        ):
+            raise ValueError(
+                "price-ladder admission does not match durable execution action"
+            )
+        if (
+            price_ladder_admission.decision_at.astimezone(timezone.utc)
+            > decision_utc
+        ):
+            price_ladder_reasons.append(
+                "PRICE_LADDER_EVIDENCE_AFTER_DECISION"
+            )
+        elif _price_ladder_admissible(price_ladder_admission):
+            price_ladder_authoritative = True
+            price_ladder_evidence_digest = (
+                price_ladder_admission.evidence_digest
+            )
+        else:
+            price_ladder_reasons.append(
+                "PRICE_LADDER_AUTHORITY_UNPROVEN"
+            )
 
     binding = bound.profile_for(action.bookmaker_id, action.account_id)
     action_digest = _canonical_digest(action.to_dict())
@@ -645,9 +696,14 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
         {
             "schema": (
                 "autosport.execution-feasibility-"
-                "unqualified-provider-limit-evidence.v1"
+                "unqualified-provider-limit-evidence.v2"
             ),
             "provider_limit_authority_available": False,
+            "price_ladder": {
+                "provided": price_ladder_admission is not None,
+                "authoritative_for_action": price_ladder_authoritative,
+                "evidence_digest": price_ladder_evidence_digest,
+            },
             "plan_id": bound.execution_plan.plan_id,
             "plan_fingerprint": bound.execution_plan.fingerprint,
             "plan_reserved_event_id": plan_view.plan_reserved_event_id,
@@ -680,6 +736,7 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
         limits,
         max_snapshot_age=max_snapshot_age,
         product_owned=True,
+        additional_reasons=tuple(price_ladder_reasons),
     )
     return result
 
@@ -692,6 +749,12 @@ def _install_execution_feasibility_result_authority():
     canonical_assess_code = canonical_assess.__code__
     verified_execution_view = RealExecutionLedger.verified_execution_view
     verified_execution_view_code = verified_execution_view.__code__
+    price_ladder_type = BetfairPriceLadderAdmission
+    price_ladder_admissible_property = price_ladder_type.admissible
+    price_ladder_admissible = price_ladder_admissible_property.fget
+    if price_ladder_admissible is None:
+        raise RuntimeError("Betfair price-ladder admissible property has no getter")
+    price_ladder_admissible_code = price_ladder_admissible.__code__
     fingerprint = _feasibility_result_fingerprint
 
     def assess(
@@ -701,6 +764,7 @@ def _install_execution_feasibility_result_authority():
         *,
         action_id: str,
         max_snapshot_age: timedelta,
+        price_ladder_admission: BetfairPriceLadderAdmission | None = None,
     ) -> ExecutionFeasibilitySnapshot:
         if (
             raw_assess.__code__ is not raw_assess_code
@@ -719,13 +783,28 @@ def _install_execution_feasibility_result_authority():
             raise RuntimeError(
                 "canonical execution ledger verified plan view changed"
             )
+        if (
+            BetfairPriceLadderAdmission is not price_ladder_type
+            or price_ladder_type.admissible
+            is not price_ladder_admissible_property
+            or price_ladder_admissible_property.fget
+            is not price_ladder_admissible
+            or price_ladder_admissible.__code__
+            is not price_ladder_admissible_code
+        ):
+            raise RuntimeError(
+                "canonical Betfair price-ladder authority changed"
+            )
         result = raw_assess(
             ledger,
             bound,
             receipt,
             action_id=action_id,
             max_snapshot_age=max_snapshot_age,
+            price_ladder_admission=price_ladder_admission,
             _verified_execution_view=verified_execution_view,
+            _price_ladder_type=price_ladder_type,
+            _price_ladder_admissible=price_ladder_admissible,
         )
         if type(result) is not ExecutionFeasibilitySnapshot:
             raise TypeError("authoritative feasibility resolver returned invalid result type")

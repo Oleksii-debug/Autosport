@@ -343,6 +343,32 @@ class MarketMirror:
         )
         return MirrorSnapshot(revision=revision, events=filtered)
 
+    def causal_view(
+        self,
+        *,
+        source_ids: str | Iterable[str] | None = None,
+        sports: str | Iterable[str] | None = None,
+        event_ids: str | Iterable[str] | None = None,
+        market_ids: str | Iterable[str] | None = None,
+        selection_ids: str | Iterable[str] | None = None,
+    ) -> MirrorSnapshot:
+        """Return product-issued current state without freshness/status filtering.
+
+        This is the operator/current-state counterpart to active_view: it excludes
+        sealed generation-zero migration rows from live product truth while retaining
+        positive durable rows even when they are stale, closed, or otherwise not
+        decision-eligible. Use view()/snapshot() when raw audit/order state is required.
+        """
+
+        return self.view(
+            source_ids=source_ids,
+            sports=sports,
+            event_ids=event_ids,
+            market_ids=market_ids,
+            selection_ids=selection_ids,
+            _causal_only=True,
+        )
+
     def active_view(
         self,
         *,
@@ -362,13 +388,12 @@ class MarketMirror:
         ``source_ts`` is preferred over the local observation clock when available.
         """
         boundary, age_limit = self._decision_boundary(as_of=as_of, max_age=max_age)
-        captured = self.view(
+        captured = self.causal_view(
             source_ids=source_ids,
             sports=sports,
             event_ids=event_ids,
             market_ids=market_ids,
             selection_ids=selection_ids,
-            _causal_only=True,
         )
         eligible = tuple(
             event

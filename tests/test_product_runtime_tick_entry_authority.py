@@ -38,6 +38,35 @@ class _Source:
         raise AssertionError(f"unexpected delta resolution: {delta!r}")
 
 
+def test_product_runtime_entry_tick_does_not_materialize_settlement_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=_Source(),
+        clock=lambda: "2026-09-27T05:44:59+00:00",
+        sleep=lambda _: None,
+        initial_bankroll="100",
+    )
+
+    def forbidden_history_scan(*_args, **_kwargs):
+        raise AssertionError(
+            "canonical product tick materialized settlement history"
+        )
+
+    monkeypatch.setattr(
+        runtime.coordinator._state,
+        "_load_evidence_history",
+        forbidden_history_scan,
+    )
+    try:
+        result = tick_autonomous_product_runtime(runtime)
+        assert result.session_id == runtime.coordinator.session_id
+    finally:
+        runtime.close()
+
+
 def test_product_runtime_entry_rejects_direct_tick_slot_replacement(tmp_path: Path) -> None:
     runtime = build_autonomous_product_runtime(
         workspace=tmp_path,

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import fields, replace
 import hashlib
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from autosport.domain import MarketEvent
 from autosport.market_state_identity import (
     MarketStateIdentityError,
     PROPHETX_REST_MARKET_STATE_CONTRACT,
@@ -348,6 +349,24 @@ class ProphetXRestSemanticStateContractTests(unittest.TestCase):
 
         self.assertIsNone(semantic_market_state_identity(legacy))
         self.assertFalse(same_semantic_market_state(legacy, events[0]))
+
+    def test_market_event_subclass_cannot_redefine_identity_serialization(self) -> None:
+        provider = self._provider([_payload()])
+        _batch, events = self._normalized(provider)
+        original = events[0]
+
+        class DerivedMarketEvent(MarketEvent):
+            def to_dict(self):
+                return {"forged": True}
+
+        derived = DerivedMarketEvent(
+            **{
+                field.name: getattr(original, field.name)
+                for field in fields(MarketEvent)
+            }
+        )
+        with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+            semantic_market_state_identity(derived)
 
     def test_contract_rejects_another_source_id(self) -> None:
         provider = self._provider([_payload()])

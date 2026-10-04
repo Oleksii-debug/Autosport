@@ -1164,7 +1164,7 @@ class ManualNvdaAcceptanceLedger:
         )
 
     def events(self) -> tuple[ManualNvdaDecisionRecord, ...]:
-        writer_lock = _ManualNvdaWriterLock(self.path)
+        writer_lock = writer_lock_type(self.path)
         try:
             with writer_lock:
                 self._recover_pending_locked()
@@ -1182,6 +1182,7 @@ class ManualNvdaAcceptanceLedger:
         self,
         *,
         structural: object,
+        writer_lock_type: object,
         reviewer_ref: str,
         reviewer_attestation: str,
         reviewed_at: str,
@@ -1292,6 +1293,38 @@ def _install_record_decision_authority() -> None:
     implementation_code = implementation.__code__
     structural_result = _structural_result
     structural_result_code = structural_result.__code__
+    writer_lock_type = _ManualNvdaWriterLock
+    writer_lock_method_names = (
+        "__init__",
+        "__enter__",
+        "__exit__",
+        "acquire",
+        "release",
+    )
+    writer_lock_method_witnesses = tuple(
+        (
+            name,
+            getattr(writer_lock_type, name),
+            getattr(getattr(writer_lock_type, name), "__code__", None),
+        )
+        for name in writer_lock_method_names
+    )
+
+    def require_writer_lock_authority() -> None:
+        if _ManualNvdaWriterLock is not writer_lock_type:
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA decision writer-lock authority changed"
+            )
+        for name, expected_callable, expected_code in writer_lock_method_witnesses:
+            current_callable = getattr(writer_lock_type, name, None)
+            if (
+                current_callable is not expected_callable
+                or getattr(current_callable, "__code__", None)
+                is not expected_code
+            ):
+                raise NvdaManualAcceptanceStateError(
+                    "manual NVDA decision writer-lock authority changed: " + name
+                )
 
     def record_decision(
         self,
@@ -1319,6 +1352,7 @@ def _install_record_decision_authority() -> None:
             raise NvdaManualAcceptanceStateError(
                 "manual NVDA decision issuance authority changed"
             )
+        require_writer_lock_authority()
         structural = structural_result(
             transcript,
             expected_artifact_sha256=expected_artifact_sha256,
@@ -1335,9 +1369,11 @@ def _install_record_decision_authority() -> None:
             raise NvdaManualAcceptanceStateError(
                 "manual NVDA decision issuance authority changed"
             )
+        require_writer_lock_authority()
         return implementation(
             self,
             structural=structural,
+            writer_lock_type=writer_lock_type,
             reviewer_ref=reviewer_ref,
             reviewer_attestation=reviewer_attestation,
             reviewed_at=reviewed_at,

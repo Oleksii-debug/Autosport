@@ -40,10 +40,8 @@ class PriceSize:
     size: Decimal
 
     def __post_init__(self) -> None:
-        if self.price <= 0:
-            raise ValueError("price must be positive")
-        if self.size < 0:
-            raise ValueError("size must be non-negative")
+        _require_exact_decimal(self.price, "price", positive=True)
+        _require_exact_decimal(self.size, "size", nonnegative=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,16 +83,51 @@ class ExecutionFeasibilityRequest:
             self.market_id,
             self.selection_id,
         )
-        if self.requested_stake <= 0:
-            raise ValueError("requested_stake must be positive")
-        if self.limit_price <= 0:
-            raise ValueError("limit_price must be positive")
-        if self.expected_market_version is not None and self.expected_market_version < 0:
-            raise ValueError("expected_market_version must be non-negative")
+        _require_exact_decimal(
+            self.requested_stake,
+            "requested_stake",
+            positive=True,
+        )
+        _require_exact_decimal(
+            self.limit_price,
+            "limit_price",
+            positive=True,
+        )
+        if self.minimum_fill_size is not None:
+            _require_exact_decimal(
+                self.minimum_fill_size,
+                "minimum_fill_size",
+                positive=True,
+            )
+        if (
+            self.expected_market_version is not None
+            and (
+                type(self.expected_market_version) is not int
+                or self.expected_market_version < 0
+            )
+        ):
+            raise ValueError("expected_market_version must be a non-negative integer")
         if self.expected_inplay is not None and type(self.expected_inplay) is not bool:
             raise ValueError("expected_inplay must be bool when supplied")
-        if self.expected_bet_delay_seconds is not None and self.expected_bet_delay_seconds < 0:
-            raise ValueError("expected_bet_delay_seconds must be non-negative")
+        if (
+            self.expected_bet_delay_seconds is not None
+            and (
+                type(self.expected_bet_delay_seconds) is not int
+                or self.expected_bet_delay_seconds < 0
+            )
+        ):
+            raise ValueError(
+                "expected_bet_delay_seconds must be a non-negative integer"
+            )
+        if type(self.leg_count) is not int or self.leg_count <= 0:
+            raise ValueError("leg_count must be a positive integer")
+        if type(self.fill_or_kill) is not bool:
+            raise ValueError("fill_or_kill must be bool")
+        if type(self.smart_order) is not bool:
+            raise ValueError("smart_order must be bool")
+        _require_nonempty(self.side, self.order_type)
+        if self.bet_target_type is not None:
+            _require_nonempty(self.bet_target_type)
         _require_aware(self.decision_at, "decision_at")
 
 
@@ -117,6 +150,28 @@ class ProviderLimitAuthority:
             self.market_id,
             self.evidence_digest,
         )
+        if type(self.permitted) is not bool:
+            raise ValueError("permitted must be bool")
+        for name, value in (
+            ("min_stake", self.min_stake),
+            ("max_stake", self.max_stake),
+            ("min_price", self.min_price),
+            ("max_price", self.max_price),
+        ):
+            if value is not None:
+                _require_exact_decimal(value, name, positive=True)
+        if (
+            self.min_stake is not None
+            and self.max_stake is not None
+            and self.min_stake > self.max_stake
+        ):
+            raise ValueError("min_stake cannot exceed max_stake")
+        if (
+            self.min_price is not None
+            and self.max_price is not None
+            and self.min_price > self.max_price
+        ):
+            raise ValueError("min_price cannot exceed max_price")
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,16 +210,37 @@ class MarketBookSnapshot:
             self.status,
             self.selection_status,
         )
-        if self.projection_depth is not None and self.projection_depth <= 0:
-            raise ValueError("projection_depth must be positive when supplied")
-        if self.market_version < 0:
-            raise ValueError("market_version must be non-negative")
-        if self.bet_delay_seconds < 0:
-            raise ValueError("bet_delay_seconds must be non-negative")
-        if self.sequence is not None and self.sequence < 0:
-            raise ValueError("sequence must be non-negative when supplied")
+        if type(self.source_mode) is not SourceMode:
+            raise ValueError("source_mode must be SourceMode")
+        if type(self.projection_kind) is not ProjectionKind:
+            raise ValueError("projection_kind must be ProjectionKind")
+        if self.projection_depth is not None and (
+            type(self.projection_depth) is not int or self.projection_depth <= 0
+        ):
+            raise ValueError("projection_depth must be a positive integer when supplied")
+        if type(self.virtualise) is not bool:
+            raise ValueError("virtualise must be bool")
+        if type(self.is_truncated) is not bool:
+            raise ValueError("is_truncated must be bool")
+        if type(self.market_version) is not int or self.market_version < 0:
+            raise ValueError("market_version must be a non-negative integer")
+        if type(self.inplay) is not bool:
+            raise ValueError("inplay must be bool")
+        if type(self.bet_delay_seconds) is not int or self.bet_delay_seconds < 0:
+            raise ValueError("bet_delay_seconds must be a non-negative integer")
+        if self.sequence is not None and (
+            type(self.sequence) is not int or self.sequence < 0
+        ):
+            raise ValueError("sequence must be a non-negative integer when supplied")
         if self.has_ordering_gap is not None and type(self.has_ordering_gap) is not bool:
             raise ValueError("has_ordering_gap must be bool or None")
+        if type(self.available_to_back) is not tuple:
+            raise ValueError("available_to_back must be a tuple")
+        if any(type(item) is not PriceSize for item in self.available_to_back):
+            raise ValueError("available_to_back must contain exact PriceSize values")
+        prices = tuple(item.price for item in self.available_to_back)
+        if len(prices) != len(set(prices)):
+            raise ValueError("available_to_back cannot contain duplicate price levels")
         _require_aware(self.observed_at, "observed_at")
         _require_aware(self.received_at, "received_at")
 
@@ -659,13 +735,35 @@ def _append_if(reasons: list[str], condition: bool, reason: str) -> None:
 
 
 def _require_aware(value: datetime, name: str) -> None:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{name} must be timezone-aware")
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must be an exact timezone-aware datetime")
 
 
 def _require_nonempty(*values: str) -> None:
-    if any(not value.strip() for value in values):
-        raise ValueError("identity and digest fields must be non-empty")
+    if any(
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        for value in values
+    ):
+        raise ValueError(
+            "identity and digest fields must be non-empty trimmed strings"
+        )
+
+
+def _require_exact_decimal(
+    value: Decimal,
+    name: str,
+    *,
+    positive: bool = False,
+    nonnegative: bool = False,
+) -> None:
+    if type(value) is not Decimal or not value.is_finite():
+        raise ValueError(f"{name} must be a finite exact Decimal")
+    if positive and value <= 0:
+        raise ValueError(f"{name} must be positive")
+    if nonnegative and value < 0:
+        raise ValueError(f"{name} must be non-negative")
 
 
 def _decimal(value: Decimal | None) -> str | None:

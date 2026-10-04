@@ -4,7 +4,6 @@ from decimal import Decimal
 import json
 from pathlib import Path
 import tempfile
-import time
 import urllib.request as urllib_request
 
 import pytest
@@ -527,6 +526,44 @@ def test_structurally_copied_price_ladder_witness_cannot_cross_consumer_gate() -
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
 
 
+def test_unproven_price_ladder_digest_cannot_control_feasibility_identity() -> None:
+    transport = MarketBookAndPriceLadderTransport()
+    receipt, ladder, canonical_source = (
+        _synthetic_authoritative_market_and_ladder(
+            transport,
+            price=Decimal("2.00"),
+        )
+    )
+    forged_a = replace(ladder, evidence_digest="0" * 64)
+    forged_b = replace(ladder, evidence_digest="1" * 64)
+    assert forged_a.admissible is False
+    assert forged_b.admissible is False
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        result_a = assess_authoritative_betfair_execution_feasibility(
+            ledger,
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+            price_ladder_admission=forged_a,
+        )
+        result_b = assess_authoritative_betfair_execution_feasibility(
+            ledger,
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+            price_ladder_admission=forged_b,
+        )
+
+    assert "PRICE_LADDER_AUTHORITY_UNPROVEN" in result_a.reasons
+    assert "PRICE_LADDER_AUTHORITY_UNPROVEN" in result_b.reasons
+    assert result_a.evidence_digest == result_b.evidence_digest
+
+
 def test_forged_future_ladder_dto_cannot_choose_late_evidence_reason() -> None:
     transport = MarketBookAndPriceLadderTransport()
     receipt, ladder, canonical_source = (
@@ -563,45 +600,55 @@ def test_price_ladder_before_durable_action_quote_cannot_satisfy_gate() -> None:
     try:
         urllib_request._opener = _CanonicalUrlOpenerHarness(transport)
         canonical_source = _canonical_client()
-        ladder_observation = canonical_source.read_market_price_ladder(
-            "1.234"
-        )
-        ladder = assess_betfair_price_ladder_admission(
-            ladder_observation,
+        first_observation = canonical_source.read_market_price_ladder("1.234")
+        first_ladder = assess_betfair_price_ladder_admission(
+            first_observation,
             Decimal("2.00"),
             max_evidence_age=timedelta(seconds=5),
         )
-        # Put the durable quote just after the ladder observation, then acquire
-        # MarketBook depth after that quote. This isolates the ladder's causal
-        # backdating from the parent's existing MarketBook quote fence.
-        time.sleep(0.005)
-        bound = _bound(
-            ladder.decision_at
-            + timedelta(seconds=1, milliseconds=1)
+        second_observation = canonical_source.read_market_price_ladder("1.234")
+        second_ladder = assess_betfair_price_ladder_admission(
+            second_observation,
+            Decimal("2.00"),
+            max_evidence_age=timedelta(seconds=5),
         )
+        # _bound derives quote_at = decision_at - 1 second. Put that quote
+        # strictly after both sealed ladder decisions without sleeping; the
+        # subsequent MarketBook acquisition then occurs after the quote.
+        quote_at = second_ladder.decision_at + timedelta(microseconds=1)
+        bound = _bound(quote_at + timedelta(seconds=1))
         receipt = canonical_source.read_market_book_depth("1.234", 42)
     finally:
         urllib_request._opener = original_opener
 
-    assert ladder.admissible is True
+    assert first_ladder.admissible is True
+    assert second_ladder.admissible is True
+    assert first_ladder.evidence_digest != second_ladder.evidence_digest
     with tempfile.TemporaryDirectory() as tmp:
-        result = assess_authoritative_betfair_execution_feasibility(
-            _reserved_ledger(tmp, bound),
+        ledger = _reserved_ledger(tmp, bound)
+        first_result = assess_authoritative_betfair_execution_feasibility(
+            ledger,
             bound,
             receipt,
             action_id=ACTION_ID,
             max_snapshot_age=timedelta(seconds=2),
-            price_ladder_admission=ladder,
+            price_ladder_admission=first_ladder,
+        )
+        second_result = assess_authoritative_betfair_execution_feasibility(
+            ledger,
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+            price_ladder_admission=second_ladder,
         )
 
-    assert (
-        "PRICE_LADDER_EVIDENCE_PREDATES_ACTION_QUOTE"
-        in result.reasons
-    )
-    assert "PRICE_LADDER_AUTHORITY_UNPROVEN" not in result.reasons
-    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
-    assert result.sufficient is False
-
+    for result in (first_result, second_result):
+        assert "PRICE_LADDER_EVIDENCE_PREDATES_ACTION_QUOTE" in result.reasons
+        assert "PRICE_LADDER_AUTHORITY_UNPROVEN" not in result.reasons
+        assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+        assert result.sufficient is False
+    assert first_result.evidence_digest != second_result.evidence_digest
 
 def test_price_ladder_observed_after_plan_reservation_cannot_backdate_gate() -> None:
     transport = MarketBookAndPriceLadderTransport()
@@ -637,6 +684,56 @@ def test_price_ladder_observed_after_plan_reservation_cannot_backdate_gate() -> 
     assert "PRICE_LADDER_EVIDENCE_AFTER_DECISION" in result.reasons
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
     assert result.sufficient is False
+
+
+def test_late_canonical_price_ladder_identity_remains_evidence_bound() -> None:
+    transport = MarketBookAndPriceLadderTransport()
+    receipt, canonical_source = _synthetic_authoritative_receipt(transport)
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        original_opener = urllib_request._opener
+        try:
+            urllib_request._opener = _CanonicalUrlOpenerHarness(transport)
+            admissions = []
+            for _ in range(2):
+                observation = canonical_source.read_market_price_ladder("1.234")
+                admissions.append(
+                    assess_betfair_price_ladder_admission(
+                        observation,
+                        Decimal("2.00"),
+                        max_evidence_age=timedelta(seconds=5),
+                    )
+                )
+        finally:
+            urllib_request._opener = original_opener
+
+        first_result = assess_authoritative_betfair_execution_feasibility(
+            ledger,
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+            price_ladder_admission=admissions[0],
+        )
+        second_result = assess_authoritative_betfair_execution_feasibility(
+            ledger,
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+            price_ladder_admission=admissions[1],
+        )
+
+    assert admissions[0].admissible is True
+    assert admissions[1].admissible is True
+    assert admissions[0].evidence_digest != admissions[1].evidence_digest
+    for result in (first_result, second_result):
+        assert "PRICE_LADDER_EVIDENCE_AFTER_DECISION" in result.reasons
+        assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+        assert result.sufficient is False
+    assert first_result.evidence_digest != second_result.evidence_digest
 
 
 def test_price_ladder_witness_must_match_exact_durable_action() -> None:

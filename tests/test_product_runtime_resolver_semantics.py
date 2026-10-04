@@ -10,6 +10,7 @@ from autosport.product_runtime import (
     _settlement_authority_identity,
     build_autonomous_product_runtime,
 )
+from autosport.product_source import ParlayApiProductSource
 from autosport.resolver_semantics import (
     ResolverSemanticIdentityError,
     function_semantic_sha256,
@@ -103,6 +104,40 @@ class _ModuleHelperProductSource(_ProductSource):
 
     def resolve(self, record: EventLifecycleRecord, *, as_of: str):
         return _PROVIDER_HELPER_MODULE._provider_settlement_helper(record, as_of)
+
+
+def test_canonical_parlay_product_source_resolver_is_fingerprintable_and_composable(
+    tmp_path,
+) -> None:
+    class _Provider:
+        source_id = "parlayapi:table_tennis"
+
+        def read_batch(self, _max_items=1000):
+            raise AssertionError("composition test must not perform provider I/O")
+
+    source = ParlayApiProductSource(
+        _Provider(),
+        workspace=tmp_path / "source-workspace",
+        authority_root=tmp_path / "authority",
+        lawful_terms_ref="terms:parlayapi:test",
+        retention_ref="retention:parlayapi:test",
+        clock=lambda: NOW,
+    )
+    digest = function_semantic_sha256(
+        ParlayApiProductSource.resolve_event,
+        runtime_owner=ParlayApiProductSource,
+    )
+    assert len(digest) == 64
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path / "runtime-workspace",
+        source=source,
+        clock=lambda: NOW,
+        initial_bankroll="100",
+    )
+    try:
+        assert runtime.manifest.source_resolver_identity is not None
+    finally:
+        runtime.close()
 
 
 def test_resolver_semantic_fingerprint_ignores_install_relocation() -> None:

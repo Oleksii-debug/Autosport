@@ -577,21 +577,24 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
             raise ValueError(
                 "price-ladder admission does not match durable execution action"
             )
-        if (
+        if not _price_ladder_admissible(price_ladder_admission):
+            # Caller-constructed or copied DTOs are not allowed to choose a
+            # stronger diagnostic reason such as "valid but too late". First
+            # prove the exact closure-issued witness, then classify causality.
+            price_ladder_reasons.append(
+                "PRICE_LADDER_AUTHORITY_UNPROVEN"
+            )
+        elif (
             price_ladder_admission.decision_at.astimezone(timezone.utc)
             > decision_utc
         ):
             price_ladder_reasons.append(
                 "PRICE_LADDER_EVIDENCE_AFTER_DECISION"
             )
-        elif _price_ladder_admissible(price_ladder_admission):
+        else:
             price_ladder_authoritative = True
             price_ladder_evidence_digest = (
                 price_ladder_admission.evidence_digest
-            )
-        else:
-            price_ladder_reasons.append(
-                "PRICE_LADDER_AUTHORITY_UNPROVEN"
             )
 
     binding = bound.profile_for(action.bookmaker_id, action.account_id)

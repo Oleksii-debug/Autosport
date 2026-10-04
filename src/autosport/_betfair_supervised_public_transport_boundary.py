@@ -68,6 +68,55 @@ _CONFIRMATION_WITNESS_MATERIAL = _CONFIRMATION_WITNESS_TYPE._material
 _CONFIRMATION_SPEC_TYPE = _confirmation.BetfairExecutionConfirmationSpec
 _CONFIRMATION_SPEC_INIT = _CONFIRMATION_SPEC_TYPE.__init__
 _CONFIRMATION_GENERIC_MODULE = _confirmation._confirmation
+
+# Independently pin the final-confirmation module's own cached generic-authority roots.
+# The inner module compares live authority against these aliases and then calls the
+# aliases directly, so they must not be allowed to move together and become a new
+# self-consistent trust root.
+_CONFIRMATION_INNER_AUTHORITY_TYPE = _confirmation._AUTHORITY_TYPE
+_CONFIRMATION_INNER_AUTHORITY_INIT = _confirmation._AUTHORITY_INIT
+_CONFIRMATION_INNER_AUTHORITY_INIT_CODE = _confirmation._AUTHORITY_INIT_CODE
+_CONFIRMATION_INNER_RESOLVE_BINDING = _confirmation._RESOLVE_BINDING
+_CONFIRMATION_INNER_RESOLVE_BINDING_CODE = _confirmation._RESOLVE_BINDING_CODE
+_CONFIRMATION_INNER_CONSUME_RECEIPT = _confirmation._CONSUME_RECEIPT
+_CONFIRMATION_INNER_CONSUME_RECEIPT_CODE = _confirmation._CONSUME_RECEIPT_CODE
+_CONFIRMATION_INNER_BINDING_TYPE = _confirmation._BINDING_TYPE
+_CONFIRMATION_INNER_ERROR = _confirmation._CONFIRMATION_ERROR
+
+# The generic durable authority methods dynamically resolve module helpers and class
+# helpers.  Pin the complete callable surfaces once at composition so changing a
+# transitive helper cannot preserve the public method code while changing authority.
+def _snapshot_callable_graph(namespace: dict[str, object]):
+    return tuple(
+        (name, value, getattr(value, "__code__", None))
+        for name, value in sorted(namespace.items())
+        if callable(value)
+    )
+
+
+def _snapshot_class_callable_graph(authority_type: type):
+    return tuple(
+        (
+            name,
+            getattr(authority_type, name),
+            getattr(getattr(authority_type, name), "__code__", None),
+        )
+        for name in sorted(vars(authority_type))
+        if callable(getattr(authority_type, name, None))
+    )
+
+
+_CONFIRMATION_GENERIC_AUTHORITY_TYPE = (
+    _CONFIRMATION_GENERIC_MODULE.SupervisedConfirmationAuthority
+)
+_CONFIRMATION_GENERIC_CALLABLE_GRAPH = _snapshot_callable_graph(
+    vars(_CONFIRMATION_GENERIC_MODULE)
+)
+_CONFIRMATION_GENERIC_AUTHORITY_METHOD_GRAPH = _snapshot_class_callable_graph(
+    _CONFIRMATION_GENERIC_AUTHORITY_TYPE
+)
+del _snapshot_callable_graph, _snapshot_class_callable_graph
+
 _CONFIRMATION_HASHLIB = _confirmation.hashlib
 _CONFIRMATION_HASHLIB_SHA256 = _CONFIRMATION_HASHLIB.sha256
 _CONFIRMATION_JSON = _confirmation.json
@@ -205,6 +254,27 @@ def _confirmation_graph_unchanged() -> bool:
         and _confirmation.BetfairExecutionConfirmationSpec is _CONFIRMATION_SPEC_TYPE
         and _CONFIRMATION_SPEC_TYPE.__init__ is _CONFIRMATION_SPEC_INIT
         and _confirmation._confirmation is _CONFIRMATION_GENERIC_MODULE
+        and _confirmation._AUTHORITY_TYPE is _CONFIRMATION_INNER_AUTHORITY_TYPE
+        and _confirmation._AUTHORITY_INIT is _CONFIRMATION_INNER_AUTHORITY_INIT
+        and _confirmation._AUTHORITY_INIT_CODE is _CONFIRMATION_INNER_AUTHORITY_INIT_CODE
+        and _confirmation._RESOLVE_BINDING is _CONFIRMATION_INNER_RESOLVE_BINDING
+        and _confirmation._RESOLVE_BINDING_CODE is _CONFIRMATION_INNER_RESOLVE_BINDING_CODE
+        and _confirmation._CONSUME_RECEIPT is _CONFIRMATION_INNER_CONSUME_RECEIPT
+        and _confirmation._CONSUME_RECEIPT_CODE is _CONFIRMATION_INNER_CONSUME_RECEIPT_CODE
+        and _confirmation._BINDING_TYPE is _CONFIRMATION_INNER_BINDING_TYPE
+        and _confirmation._CONFIRMATION_ERROR is _CONFIRMATION_INNER_ERROR
+        and _CONFIRMATION_GENERIC_MODULE.SupervisedConfirmationAuthority
+        is _CONFIRMATION_GENERIC_AUTHORITY_TYPE
+        and all(
+            getattr(_CONFIRMATION_GENERIC_MODULE, name, None) is value
+            and getattr(value, "__code__", None) is code
+            for name, value, code in _CONFIRMATION_GENERIC_CALLABLE_GRAPH
+        )
+        and all(
+            getattr(_CONFIRMATION_GENERIC_AUTHORITY_TYPE, name, None) is value
+            and getattr(value, "__code__", None) is code
+            for name, value, code in _CONFIRMATION_GENERIC_AUTHORITY_METHOD_GRAPH
+        )
         and _confirmation.hashlib is _CONFIRMATION_HASHLIB
         and _CONFIRMATION_HASHLIB.sha256 is _CONFIRMATION_HASHLIB_SHA256
         and _confirmation.json is _CONFIRMATION_JSON

@@ -91,3 +91,60 @@ def test_transitive_confirmation_authority_rebinding_fails_closed(
         )
 
     assert not boundary._confirmation_graph_unchanged()
+
+@pytest.mark.parametrize(
+    "target",
+    (
+        "coordinated_resolve_root",
+        "coordinated_consume_root",
+        "generic_module_helper",
+        "generic_authority_helper",
+    ),
+)
+def test_final_send_rejects_moving_generic_confirmation_trust_roots(
+    monkeypatch,
+    target: str,
+) -> None:
+    assert boundary._confirmation_graph_unchanged()
+
+    if target == "coordinated_resolve_root":
+        replacement = lambda *args, **kwargs: None
+        monkeypatch.setattr(
+            confirmation._AUTHORITY_TYPE,
+            "resolve_receipt_binding",
+            replacement,
+        )
+        monkeypatch.setattr(confirmation, "_RESOLVE_BINDING", replacement)
+        monkeypatch.setattr(
+            confirmation,
+            "_RESOLVE_BINDING_CODE",
+            replacement.__code__,
+        )
+    elif target == "coordinated_consume_root":
+        replacement = lambda *args, **kwargs: None
+        monkeypatch.setattr(
+            confirmation._AUTHORITY_TYPE,
+            "consume_receipt",
+            replacement,
+        )
+        monkeypatch.setattr(confirmation, "_CONSUME_RECEIPT", replacement)
+        monkeypatch.setattr(
+            confirmation,
+            "_CONSUME_RECEIPT_CODE",
+            replacement.__code__,
+        )
+    elif target == "generic_module_helper":
+        monkeypatch.setattr(
+            confirmation._confirmation,
+            "_require_sha256",
+            lambda *args, **kwargs: "0" * 64,
+        )
+    else:
+        monkeypatch.setattr(
+            confirmation._confirmation.SupervisedConfirmationAuthority,
+            "_load",
+            lambda *args, **kwargs: None,
+        )
+
+    assert not boundary._confirmation_graph_unchanged()
+

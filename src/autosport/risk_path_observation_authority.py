@@ -603,9 +603,11 @@ def _witness_effect(
 class ProductRunCapitalPathEvidence:
     """Product-owned completed PAPER run-capital evidence.
 
-    This proves exact run/transaction/ticket/settlement ancestry and a conservative
-    minimum-equity floor. It does not prove that the run executed the IID stream,
-    sampling frame, stake-policy or horizon encoded by the research manifest.
+    This proves exact run/transaction/ticket/settlement ancestry, a conservative
+    minimum-equity floor, materialization of the frozen IID frame/horizon and the
+    pre-run admission of the exact product-derived draw transcript. It deliberately
+    does not prove that simulator execution consumed those draws, followed the
+    precommitted stake policy, or therefore qualifies as IID evidence.
     """
 
     member_id: str

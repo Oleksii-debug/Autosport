@@ -58,6 +58,7 @@ class MarketImpliedOutcomeRosterOriginFalsifierTests(unittest.TestCase):
                 "eventTypeId": "2593174",
                 "marketType": "MATCH_ODDS",
                 "status": "OPEN",
+                "complete": True,
                 # Deliberately omit canonical durable selection "draw".
                 "runners": [{"id": "away"}, {"id": "home"}],
             },

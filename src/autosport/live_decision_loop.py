@@ -771,6 +771,7 @@ class PersistentLiveDecisionLoop:
         self.max_quote_age = max_quote_age
         self.bounds = bounds or LiveLoopBounds()
         self.clock = resolved_clock
+        self._last_clock_time = provenance_as_of
         self.post_append_hook = post_append_hook
         if catalog_lifecycle is not None and not isinstance(
             catalog_lifecycle, ContinuousEventLifecycle
@@ -882,6 +883,13 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "persisted live progress belongs to a different loop_id"
             )
+        if self._progress is not None:
+            _, durable_decision_time = _canonical_timestamp(
+                "persisted decision_ts",
+                self._progress.decision_ts,
+            )
+            if durable_decision_time > self._last_clock_time:
+                self._last_clock_time = durable_decision_time
         if self.decision_ledger.path.exists():
             with WorkspaceEconomicLock(self.workspace):
                 self.decision_ledger.verify_integrity()
@@ -1044,6 +1052,17 @@ class PersistentLiveDecisionLoop:
     def stop(self) -> None:
         self._persist_control(LiveControlState.STOPPED)
 
+    def _sample_clock(self) -> datetime:
+        """Return UTC wall time without allowing causal decision chronology to regress."""
+
+        now = self._sample_clock()
+        if now < self._last_clock_time:
+            raise LiveDecisionProgressError(
+                "live decision clock moved backwards across causal chronology"
+            )
+        self._last_clock_time = now
+        return now
+
     def run(
         self,
         *,
@@ -1088,7 +1107,7 @@ class PersistentLiveDecisionLoop:
         ):
             return self._recover_unfinished_progress()
 
-        catalog_now = _require_utc_clock(self.clock)
+        catalog_now = self._sample_clock()
         try:
             if self.catalog_lifecycle is not None:
                 self._refresh_catalog_lifecycle(catalog_now)
@@ -1096,7 +1115,7 @@ class PersistentLiveDecisionLoop:
         except ProviderUnavailableError as exc:
             self._needs_cache_rebuild = True
             return self._persist_provider_gap(
-                _require_utc_clock(self.clock),
+                self._sample_clock(),
                 exc,
             )
 

@@ -113,6 +113,26 @@ _SQLITE_INTEGER_MIN = -(2**63)
 _SQLITE_INTEGER_MAX = 2**63 - 1
 
 
+def _bind_live_batch_writer(
+    implementation,
+    canonical_append,
+    receipt_writer,
+    market_event_type,
+):
+    """Capture authority-bearing callables outside mutable runtime descriptors."""
+
+    def bound(self, events):
+        return implementation(
+            self,
+            events,
+            _market_event_type=market_event_type,
+            _canonical_append=canonical_append,
+            _receipt_writer=receipt_writer,
+        )
+
+    return bound
+
+
 def _timezone_aware_instant(value: str, field_name: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -853,8 +873,6 @@ class SQLiteMarketStore:
         if cursor.rowcount != 1:
             raise RuntimeError("live receipt authority insert did not persist exactly one row")
 
-    _sealed_live_receipt_writer = _insert_live_receipt_authority
-
     def _append_batch_accepted_canonical(
         self,
         events: Iterable[MarketEvent],
@@ -877,16 +895,16 @@ class SQLiteMarketStore:
                     self.connection.commit()
         return accepted
 
-    _sealed_canonical_append = _append_batch_accepted_canonical
-
     def _before_live_append_attempt(self, events: Iterable[MarketEvent]) -> None:
         """Non-authoritative pre-transaction retry/fault-injection seam."""
 
-    def _append_live_batch_accepted(
+    def _append_live_batch_accepted_impl(
         self,
         events: Iterable[MarketEvent],
         *,
-        _market_event_type: type[MarketEvent] = MarketEvent,
+        _market_event_type: type[MarketEvent],
+        _canonical_append,
+        _receipt_writer,
     ) -> list[MarketEvent]:
         """Persist one live-ingestion batch and its receipt witnesses atomically.
 
@@ -901,8 +919,6 @@ class SQLiteMarketStore:
             raise TypeError(
                 "live receipt authority requires an exact SQLiteMarketStore"
             )
-        if _market_event_type is not _SEALED_MARKET_EVENT_TYPE:
-            raise TypeError("live receipt authority type override is not allowed")
         materialized = tuple(events)
         if any(type(event) is not _SEALED_MARKET_EVENT_TYPE for event in materialized):
             raise TypeError("live receipt authority requires exact MarketEvent values")
@@ -965,10 +981,7 @@ class SQLiteMarketStore:
                         projection_state[projection_key] = event
 
                 changes_before = self.connection.total_changes
-                accepted = __class__._sealed_canonical_append(
-                    self,
-                    batch,
-                )
+                accepted = _canonical_append(self, batch)
                 if not self.connection.in_transaction:
                     raise RuntimeError(
                         "live append hook relinquished transaction ownership"
@@ -1016,7 +1029,7 @@ class SQLiteMarketStore:
 
                 receipt_changes_before = self.connection.total_changes
                 for event in expected:
-                    __class__._sealed_live_receipt_writer(self, event)
+                    _receipt_writer(self, event)
                 if not self.connection.in_transaction:
                     raise RuntimeError(
                         "live receipt writer relinquished transaction ownership"
@@ -1045,6 +1058,14 @@ class SQLiteMarketStore:
             else:
                 self.connection.commit()
                 return expected
+
+    _append_live_batch_accepted = _bind_live_batch_writer(
+        _append_live_batch_accepted_impl,
+        _append_batch_accepted_canonical,
+        _insert_live_receipt_authority,
+        _SEALED_MARKET_EVENT_TYPE,
+    )
+    del _append_live_batch_accepted_impl
 
     def append(self, event: MarketEvent) -> bool:
         with self._connection_lock:

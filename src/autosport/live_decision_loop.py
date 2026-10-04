@@ -3046,6 +3046,10 @@ class PersistentLiveDecisionLoop:
                 "committed live decision intent execution evidence conflicts with plan"
             )
         provenance = self.intent_provenance
+        _, evidence_decision_time = _canonical_timestamp(
+            "committed decision_ts",
+            progress.decision_ts,
+        )
         expected_intent_keys = {
             "schema",
             "schema_version",
@@ -3104,16 +3108,63 @@ class PersistentLiveDecisionLoop:
                     }
                 ):
                     raise ValueError("risk_context audit fields are invalid")
-                for field_name in (
-                    "measurement_window_start",
-                    "measurement_window_end",
-                    "proposal_ts",
+                _, evidence_observed = _canonical_timestamp(
+                    "intent evidence observed_at",
+                    evidence.observed_at,
+                )
+                _, evidence_cutoff = _canonical_timestamp(
+                    "intent evidence causal_cutoff",
+                    evidence.causal_cutoff,
+                )
+                if (
+                    evidence_observed > evidence_decision_time
+                    or evidence_cutoff > evidence_decision_time
                 ):
-                    value = risk_context[field_name]
-                    if value is not None:
-                        _canonical_timestamp(
-                            f"intent risk_context {field_name}",
-                            value,
+                    raise ValueError(
+                        "intent evidence is from the future"
+                    )
+
+                measurement_start = risk_context[
+                    "measurement_window_start"
+                ]
+                measurement_end = risk_context[
+                    "measurement_window_end"
+                ]
+                proposal_ts = risk_context["proposal_ts"]
+                if (measurement_start is None) != (
+                    measurement_end is None
+                ):
+                    raise ValueError(
+                        "measurement window bounds disagree"
+                    )
+                proposal_time = None
+                if proposal_ts is not None:
+                    _, proposal_time = _canonical_timestamp(
+                        "intent risk_context proposal_ts",
+                        proposal_ts,
+                    )
+                    if proposal_time > evidence_decision_time:
+                        raise ValueError(
+                            "intent proposal is from the future"
+                        )
+                if measurement_start is not None:
+                    _, window_start = _canonical_timestamp(
+                        "intent risk_context measurement_window_start",
+                        measurement_start,
+                    )
+                    _, window_end = _canonical_timestamp(
+                        "intent risk_context measurement_window_end",
+                        measurement_end,
+                    )
+                    if (
+                        window_start > window_end
+                        or (
+                            proposal_time is not None
+                            and window_end > proposal_time
+                        )
+                    ):
+                        raise ValueError(
+                            "intent measurement window is invalid"
                         )
             except (
                 InvalidOperation,
@@ -3165,12 +3216,8 @@ class PersistentLiveDecisionLoop:
                 raise DecisionLedgerIntegrityError(
                     "committed live decision lacks proven market prefix"
                 )
-            _, committed_decision_time = _canonical_timestamp(
-                "committed decision_ts",
-                progress.decision_ts,
-            )
             boundary, age_limit = MarketMirror._decision_boundary(
-                as_of=committed_decision_time,
+                as_of=evidence_decision_time,
                 max_age=self.max_quote_age,
             )
             committed_snapshot = (
@@ -3196,16 +3243,12 @@ class PersistentLiveDecisionLoop:
                     "proven append prefix"
                 )
 
-            history_events = tuple(
-                event
-                for event, generation in committed_market_history
-                if generation > 0
-            )
+            decision_visible_events = committed_snapshot.events
             for opportunity in canonical_opportunities:
                 for quote in opportunity.quotes:
                     matching_events = tuple(
                         event
-                        for event in history_events
+                        for event in decision_visible_events
                         if QuoteRef.from_market_event(
                             event,
                             market_snapshot_hash=(

@@ -2,6 +2,7 @@ import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -141,6 +142,46 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(generic_event.sequence, 2)
             self.assertEqual(live_event.sequence, 1)
             self.assertEqual(live_event, trusted)
+            store.close()
+
+    def test_live_recovery_replay_excludes_untrusted_history_until_trusted_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            legacy = self._direct_event(sequence=1)
+            self.assertTrue(store.append(legacy))
+            self._ingest(store, sequence=2)
+
+            before_live_receipt = datetime(
+                2026, 10, 4, 3, 0, 1, 500000, tzinfo=timezone.utc
+            )
+            generic = MarketMirror.replay_view_from_store(
+                store,
+                as_of=before_live_receipt,
+                max_age=timedelta(seconds=30),
+            )
+            trusted = MarketMirror.replay_view_from_store(
+                store,
+                as_of=before_live_receipt,
+                max_age=timedelta(seconds=30),
+                require_live_receipt_authority=True,
+            )
+            self.assertEqual(tuple(event.sequence for event in generic.events), (1,))
+            self.assertEqual(trusted.events, ())
+
+            after_live_receipt = datetime(
+                2026, 10, 4, 3, 0, 3, tzinfo=timezone.utc
+            )
+            trusted_after = MarketMirror.replay_view_from_store(
+                store,
+                as_of=after_live_receipt,
+                max_age=timedelta(seconds=30),
+                require_live_receipt_authority=True,
+            )
+            self.assertEqual(
+                tuple(event.sequence for event in trusted_after.events),
+                (2,),
+            )
             store.close()
 
     def test_receipt_persistence_failure_rolls_back_market_insert_atomically(self) -> None:

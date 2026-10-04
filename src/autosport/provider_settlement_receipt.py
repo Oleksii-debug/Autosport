@@ -68,6 +68,47 @@ def _string(
     return _text_impl(value, label)
 
 
+def _canonical_disposition_value(
+    value: object,
+    *,
+    _bindings=(
+        (SettlementDisposition.WIN, "win"),
+        (SettlementDisposition.LOSS, "loss"),
+        (SettlementDisposition.VOID, "void"),
+        (SettlementDisposition.PUSH, "push"),
+    ),
+    _error_type=ProviderSettlementReceiptError,
+) -> str:
+    for member, canonical_value in _bindings:
+        if member.value != canonical_value:
+            raise _error_type(
+                "settlement disposition canonical member state changed"
+            )
+        if value is member:
+            return canonical_value
+    raise _error_type("disposition must be exact SettlementDisposition")
+
+
+def _parse_canonical_disposition(
+    value: object,
+    *,
+    _string_impl=_string,
+    _members=(
+        SettlementDisposition.WIN,
+        SettlementDisposition.LOSS,
+        SettlementDisposition.VOID,
+        SettlementDisposition.PUSH,
+    ),
+    _value_impl=_canonical_disposition_value,
+    _error_type=ProviderSettlementReceiptError,
+) -> SettlementDisposition:
+    text = _string_impl(value, "disposition")
+    for member in _members:
+        if _value_impl(member) == text:
+            return member
+    raise _error_type("unsupported settlement disposition")
+
+
 def _sha256(
     value: object,
     label: str,
@@ -177,6 +218,7 @@ def _receipt_payload_unchecked(
     _schema_version=SCHEMA_VERSION,
     _source_family=SOURCE_FAMILY,
     _datetime_text_impl=_datetime_text,
+    _disposition_value_impl=_canonical_disposition_value,
 ) -> dict[str, Any]:
     """Canonical payload projection used only by the sealed integrity authority."""
 
@@ -188,7 +230,7 @@ def _receipt_payload_unchecked(
         "execution_id": receipt.execution_id,
         "market_id": receipt.market_id,
         "selection_id": receipt.selection_id,
-        "disposition": receipt.disposition.value,
+        "disposition": _disposition_value_impl(receipt.disposition),
         "settled_at": _datetime_text_impl(receipt.settled_at),
         "rule_id": receipt.rule_id,
         "rule_version": receipt.rule_version,
@@ -275,6 +317,7 @@ class ProviderSettlementReceipt:
         self,
         _text_impl=_text,
         _disposition_type=SettlementDisposition,
+        _disposition_value_impl=_canonical_disposition_value,
         _utc_impl=_utc,
         _sha256_impl=_sha256,
         _seal_impl=_seal_receipt,
@@ -296,6 +339,7 @@ class ProviderSettlementReceipt:
             raise _error_type(
                 "disposition must be exact SettlementDisposition"
             )
+        _disposition_value_impl(self.disposition)
         _utc_impl(self.settled_at, "settled_at")
         _sha256_impl(self.rule_sha256, "rule_sha256")
         _sha256_impl(
@@ -365,7 +409,7 @@ def _build_receipt_from_dict(
     _keys_impl=_keys,
     _string_impl=_string,
     _parse_datetime_impl=_parse_datetime,
-    _disposition_type=SettlementDisposition,
+    _parse_disposition_impl=_parse_canonical_disposition,
     _schema_version=SCHEMA_VERSION,
     _source_family=SOURCE_FAMILY,
     _error_type=ProviderSettlementReceiptError,
@@ -416,12 +460,7 @@ def _build_receipt_from_dict(
             raw["disposition"],
             "disposition",
         )
-        try:
-            disposition = _disposition_type(disposition_raw)
-        except ValueError as exc:
-            raise _error_type(
-                "unsupported settlement disposition"
-            ) from exc
+        disposition = _parse_disposition_impl(disposition_raw)
         revision = raw["revision"]
         if _type(revision) is not _int_type:
             raise _error_type("revision must be an integer")

@@ -301,6 +301,37 @@ def test_from_dict_rejects_json_bool_schema_version_alias() -> None:
     with pytest.raises(ProviderSettlementReceiptError, match="unsupported settlement"):
         ProviderSettlementReceipt.from_dict(raw)
 
+def test_exact_disposition_member_state_mutation_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = _receipt()
+    serialized = existing.to_dict()
+
+    monkeypatch.setattr(
+        SettlementDisposition.WIN,
+        "_value_",
+        "corrupted-win",
+    )
+
+    with pytest.raises(
+        ProviderSettlementReceiptError,
+        match="canonical member state changed",
+    ):
+        _ = existing.receipt_sha256
+
+    with pytest.raises(
+        ProviderSettlementReceiptError,
+        match="canonical member state changed",
+    ):
+        _receipt(disposition=SettlementDisposition.WIN)
+
+    with pytest.raises(
+        ProviderSettlementReceiptError,
+        match="canonical member state changed",
+    ):
+        ProviderSettlementReceipt.from_dict(serialized)
+
+
 def test_canonical_receipt_authority_resists_module_global_rebinding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

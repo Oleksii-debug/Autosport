@@ -1172,6 +1172,29 @@ class PersistentLiveDecisionLoop:
         try:
             if self.catalog_lifecycle is not None:
                 self._refresh_catalog_lifecycle(catalog_now)
+                # Catalog refresh can perform provider I/O and may publish durable
+                # dependency changes through register/retire callbacks.  Re-fence
+                # every workspace authority before starting the main market poll:
+                # a peer STOP/PAUSE, decision-progress advance, or registry mutation
+                # that happened while catalog I/O was in flight must win at this
+                # safe boundary rather than allowing one more stale provider call.
+                self._refresh_cycle_authorities()
+                if self.stopped:
+                    return LiveCycleResult(
+                        LiveCycleStatus.STOPPED,
+                        detail=(
+                            "durable STOP became active during catalog refresh; "
+                            "market provider was not polled"
+                        ),
+                    )
+                if self.paused:
+                    return LiveCycleResult(
+                        LiveCycleStatus.PAUSED,
+                        detail=(
+                            "durable PAUSE became active during catalog refresh; "
+                            "market provider was not polled"
+                        ),
+                    )
             self._observe(self.mirror_updates)
         except ProviderUnavailableError as exc:
             self._needs_cache_rebuild = True

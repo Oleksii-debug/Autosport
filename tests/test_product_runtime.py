@@ -488,6 +488,51 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_product_restart_rejects_tampered_pending_settlement_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:restart-pending-tamper",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="restart-pending-tamper-evidence",
+                evidence_sha256="f" * 64,
+                available_at="2026-09-20T13:57:00+00:00",
+            )
+            runtime.coordinator._state.record_settlement_evidence(
+                settlement_evidence=(resolution,),
+            )
+            runtime.close()
+
+            state_path = root / "continuous_session.json"
+            raw = json.loads(state_path.read_text(encoding="utf-8"))
+            raw["pending_settlement_resolutions"][0]["quote_outcomes"][
+                "event-1|winner|home"
+            ] = "loss"
+            state_path.write_text(
+                json.dumps(raw, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ContinuousSessionError,
+                "pending settlement outcome digest conflicts with durable evidence",
+            ):
+                build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+
     def test_settlement_learning_handoff_identity_is_stable_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+import autosport.reward_attribution as reward_attribution_module
 from autosport.reward_attribution import (
     AttributionAuthorityRef,
     AttributionTruth,
@@ -365,3 +366,120 @@ def test_envelope_allows_same_authority_identity_with_same_digest_reuse() -> Non
     assert evidence.component(RewardAttributionComponent.EXECUTION).authority_refs == (shared,)
     assert evidence.source_resolved is False
     assert evidence.policy_update_eligible is False
+
+def test_module_global_type_rebind_cannot_redefine_canonical_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical_ref = _ref("canonical", "evidence-1", SHA_A)
+
+    class ForgedRef:
+        def __init__(self) -> None:
+            self.family = "forged"
+            self.evidence_id = "forged"
+            self.sha256 = SHA_A
+
+    monkeypatch.setattr(
+        reward_attribution_module,
+        "AttributionAuthorityRef",
+        ForgedRef,
+    )
+    with pytest.raises(
+        RewardAttributionError,
+        match="exact AttributionAuthorityRef",
+    ):
+        RewardComponentAttribution(
+            RewardAttributionComponent.EXECUTION,
+            AttributionTruth.OBSERVED,
+            authority_refs=(ForgedRef(),),  # type: ignore[arg-type]
+        )
+
+    class ForgedComponent:
+        pass
+
+    monkeypatch.setattr(
+        reward_attribution_module,
+        "RewardAttributionComponent",
+        ForgedComponent,
+    )
+    with pytest.raises(
+        RewardAttributionError,
+        match="exact RewardAttributionComponent",
+    ):
+        RewardComponentAttribution(
+            ForgedComponent(),  # type: ignore[arg-type]
+            AttributionTruth.UNKNOWN,
+        )
+
+    accepted = RewardComponentAttribution(
+        RewardAttributionComponent.EXECUTION,
+        AttributionTruth.OBSERVED,
+        authority_refs=(canonical_ref,),
+    )
+    assert accepted.authority_refs == (canonical_ref,)
+
+
+def test_module_digest_rebind_cannot_redirect_canonical_evidence_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = _unknown()
+    semantic_key = evidence.semantic_key
+    evidence_id = evidence.evidence_id
+
+    monkeypatch.setattr(
+        reward_attribution_module,
+        "_digest",
+        lambda payload: SHA_A,
+    )
+
+    class ForgedJson:
+        @staticmethod
+        def dumps(*args: object, **kwargs: object) -> str:
+            return "forged"
+
+    class ForgedHashlib:
+        @staticmethod
+        def sha256(payload: bytes) -> object:
+            raise AssertionError("forged sha256 must not execute")
+
+    monkeypatch.setattr(reward_attribution_module, "json", ForgedJson)
+    monkeypatch.setattr(reward_attribution_module, "hashlib", ForgedHashlib)
+
+    assert evidence.semantic_key == semantic_key
+    assert evidence.evidence_id == evidence_id
+    assert _unknown().semantic_key == semantic_key
+    assert _unknown().evidence_id == evidence_id
+
+
+def test_parser_helper_rebind_cannot_bypass_exact_schema_or_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = _unknown()
+    raw = canonical.to_dict()
+    raw["unexpected"] = "forged"
+
+    monkeypatch.setattr(
+        reward_attribution_module,
+        "_exact_keys",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        reward_attribution_module,
+        "_sha256",
+        lambda value, name: (
+            canonical.semantic_key if name == "semantic_key" else canonical.evidence_id
+        ),
+    )
+
+    with pytest.raises(RewardAttributionError, match="keys mismatch"):
+        RewardAttributionEvidence.from_dict(raw)
+
+    raw = canonical.to_dict()
+    raw["semantic_key"] = "0" * 64
+    with pytest.raises(RewardAttributionError, match="semantic key mismatch"):
+        RewardAttributionEvidence.from_dict(raw)
+
+    component_raw = canonical.components[0].to_dict()
+    component_raw["unexpected"] = "forged"
+    with pytest.raises(RewardAttributionError, match="keys mismatch"):
+        RewardComponentAttribution.from_dict(component_raw)
+

@@ -327,7 +327,15 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             joined.membership_outcome_reveal_after,
             membership.outcome_reveal_after,
         )
-        self.assertEqual(joined.risk_target_scope, "FROZEN_STAKE_POLICY")
+        self.assertEqual(
+            joined.scientific_risk_target_scope,
+            "FROZEN_STAKE_POLICY",
+        )
+        self.assertEqual(joined.scientific_stake_policy_sha256, "6" * 64)
+        self.assertEqual(
+            joined.scientific_initial_capital_state_sha256,
+            "5" * 64,
+        )
         self.assertEqual(
             joined.proposal_evaluation_scope,
             "EXACT_PROPOSAL_TARGET_FIXED_STAKE_VECTOR_COUNTERFACTUAL_V1",

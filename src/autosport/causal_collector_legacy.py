@@ -293,6 +293,21 @@ class _JsonAtomicStore:
 class _CanonicalDesktopApplicationStore(_JsonAtomicStore):
     """Durable coordination evidence; market and health stores remain canonical truth."""
 
+    def __init__(self, path: str | Path) -> None:
+        # Completed application receipts are now restart decision authority. Publish
+        # the initial empty file under the same cross-process economic lock used by
+        # the desktop apply+ack handoff so a delayed first opener cannot overwrite a
+        # peer's first completed receipt after both observed the path as missing.
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.exists():
+            self._read()
+            return
+        with WorkspaceEconomicLock(self.path.parent):
+            if not self.path.exists():
+                self._write(self._empty())
+            self._read()
+
     def _empty(self) -> dict[str, Any]:
         return {"schema_version": 1, "applications": {}}
 

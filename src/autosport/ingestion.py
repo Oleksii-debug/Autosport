@@ -344,7 +344,7 @@ class IngestionEngine:
         ordered_flags = tuple(sorted(flags))
         try:
             accepted = (
-                self.bus._publish_many_live_ingestion(normalized)
+                MarketEventBus._publish_many_live_ingestion(self.bus, normalized)
                 if isinstance(self.bus, MarketEventBus)
                 else self.bus.publish_many(normalized)
             )

@@ -3700,6 +3700,47 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_frozen_cutoff_survives_later_unissued_tail_but_new_cutoff_rejects_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(first))
+                frozen = self.replay(store)
+                self.assertEqual(self.semantic_events(frozen), (first.to_dict(),))
+
+                forged_tail = self.event(
+                    sequence=2,
+                    odds="9.99",
+                    observed_ts="2026-09-16T19:00:02+00:00",
+                )
+                self.direct_insert_positive_generation(
+                    store,
+                    forged_tail,
+                    generation=2,
+                )
+
+                self.assertEqual(
+                    self.semantic_events(self.replay(store)),
+                    (first.to_dict(),),
+                )
+
+                later_cutoff = self.CUTOFF + timedelta(seconds=2)
+                with self.assertRaises(MonotonicAuthorityRollbackError):
+                    self.replay(store, as_of=later_cutoff)
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (1,),
+                )
+            finally:
+                store.close()
+
     def test_cutoff_with_unissued_positive_generation_is_rejected_even_if_cutoff_authority_committed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

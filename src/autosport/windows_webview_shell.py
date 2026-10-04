@@ -2222,6 +2222,33 @@ _WEB_CONTROLLER_BASE_METHOD_WITNESSES = tuple(
 )
 _WEB_BRIDGE_CONTROLLER_REGISTRY = weakref.WeakKeyDictionary()
 _WEB_BRIDGE_CONTROLLER_REGISTRY_LOCK = threading.RLock()
+_WEB_EMERGENCY_CONTROLLER_AUTHORITY_CLASS: type[AutosportWebController] | None = None
+_WEB_EMERGENCY_CONTROLLER_AUTHORITY_LOCK = threading.RLock()
+
+
+def _register_emergency_stop_controller_authority(
+    controller_type: type[AutosportWebController],
+) -> None:
+    """Register the one packaged emergency controller class exactly once."""
+
+    global _WEB_EMERGENCY_CONTROLLER_AUTHORITY_CLASS
+    if (
+        not isinstance(controller_type, type)
+        or not issubclass(controller_type, _WEB_CONTROLLER_AUTHORITY_CLASS)
+        or controller_type is _WEB_CONTROLLER_AUTHORITY_CLASS
+    ):
+        raise WindowsWebBridgeTrustError(
+            "The WebView bridge refused an invalid emergency controller authority"
+        )
+    with _WEB_EMERGENCY_CONTROLLER_AUTHORITY_LOCK:
+        registered = _WEB_EMERGENCY_CONTROLLER_AUTHORITY_CLASS
+        if registered is None:
+            _WEB_EMERGENCY_CONTROLLER_AUTHORITY_CLASS = controller_type
+            return
+        if registered is not controller_type:
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge emergency controller authority changed"
+            )
 
 
 def _canonical_product_controller_type(
@@ -2261,11 +2288,19 @@ def _canonical_product_controller_type(
     # windows_webview_emergency_stop imports this module to define that subclass.
     from .windows_webview_emergency_stop import EmergencyStopWebController
 
-    if type(controller) is not EmergencyStopWebController:
+    registered_emergency = _WEB_EMERGENCY_CONTROLLER_AUTHORITY_CLASS
+    if (
+        registered_emergency is None
+        or EmergencyStopWebController is not registered_emergency
+    ):
+        raise WindowsWebBridgeTrustError(
+            "The WebView bridge emergency controller authority changed"
+        )
+    if type(controller) is not registered_emergency:
         raise WindowsWebBridgeTrustError(
             "The WebView bridge refused a non-canonical controller subclass"
         )
-    return EmergencyStopWebController
+    return registered_emergency
 
 
 class AutosportWebBridge:
@@ -2392,7 +2427,10 @@ class AutosportWebBridge:
             if controller_type is not _base_type:
                 from .windows_webview_emergency_stop import EmergencyStopWebController
 
-                if EmergencyStopWebController is not controller_type:
+                if (
+                    EmergencyStopWebController is not controller_type
+                    or _WEB_EMERGENCY_CONTROLLER_AUTHORITY_CLASS is not controller_type
+                ):
                     self._trust_revoked = True
                     raise WindowsWebBridgeTrustError(
                         "The WebView bridge emergency controller authority changed"

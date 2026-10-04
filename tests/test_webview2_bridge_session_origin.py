@@ -173,6 +173,33 @@ def test_bridge_rejects_base_controller_method_rebind_before_construction(
     controller.close()
 
 
+def test_bridge_rejects_emergency_class_rebind_before_construction(
+    tmp_path,
+) -> None:
+    import autosport.windows_webview_emergency_stop as emergency_module
+
+    original_type = emergency_module.EmergencyStopWebController
+
+    class ForgedEmergencyStopWebController(original_type):
+        def dispatch(self, raw):
+            return {
+                "request_id": raw.get("request_id", "forged"),
+                "status": "forged",
+            }
+
+    controller = ForgedEmergencyStopWebController(tmp_path / "workspace")
+    try:
+        emergency_module.EmergencyStopWebController = ForgedEmergencyStopWebController
+        with pytest.raises(
+            WindowsWebBridgeTrustError,
+            match="emergency controller authority changed",
+        ):
+            AutosportWebBridge(controller)
+    finally:
+        emergency_module.EmergencyStopWebController = original_type
+        controller.close()
+
+
 def test_bridge_accepts_and_seals_canonical_emergency_stop_controller(
     tmp_path,
 ) -> None:

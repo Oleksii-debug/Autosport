@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .windows_emergency_stop import WindowsEmergencyStopBridge
-from .windows_webview_shell import AutosportWebController, _REQUEST_REPLAY_LIMIT
+from .windows_webview_shell import (
+    AutosportWebController,
+    _REQUEST_REPLAY_LIMIT,
+    _register_emergency_stop_controller_authority,
+)
 
 
 _EMERGENCY_ACTION_ID = "emergency_stop.activate"
@@ -202,3 +206,6 @@ class EmergencyStopWebController(AutosportWebController):
             except BaseException:
                 self._release_request_identity(request_id, command_identity)
                 raise
+
+
+_register_emergency_stop_controller_authority(EmergencyStopWebController)

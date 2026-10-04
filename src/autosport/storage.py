@@ -1094,12 +1094,18 @@ class SQLiteMarketStore:
         if not committed:
             if history:
                 pending = history[-1]
+                expected_binding_sha256 = _append_baseline_binding_sha256(
+                    observed_state_sha256
+                )
                 if (
                     pending.phase is not AuthorityPhase.PREPARE
                     or _APPEND_BASELINE_TX_RE.fullmatch(pending.tx_id) is None
+                    or pending.previous_committed_state_sha256 is not None
+                    or pending.intended_state_sha256 != observed_state_sha256
+                    or pending.semantic_binding_sha256 != expected_binding_sha256
                 ):
                     raise MonotonicAuthorityRollbackError(
-                        "market append authority lacks a committed generation-zero baseline"
+                        "market append authority has noncanonical generation-zero PREPARE"
                     )
                 try:
                     authority.recover(
@@ -1287,6 +1293,61 @@ class SQLiteMarketStore:
                 "positive market append authority does not cover durable entries"
             )
 
+    @staticmethod
+    def _require_canonical_pending_append_binding(
+        pending: AuthorityRecord,
+        entries: tuple[tuple[int, str, str], ...],
+        *,
+        committed_head: int,
+        committed_state_sha256: str,
+    ) -> None:
+        """Reject a non-product PREPARE before recovery can turn it into COMMIT."""
+
+        match = _APPEND_TX_RE.fullmatch(pending.tx_id)
+        if (
+            pending.phase is not AuthorityPhase.PREPARE
+            or match is None
+            or pending.previous_committed_state_sha256 != committed_state_sha256
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "positive market append authority has noncanonical pending transition"
+            )
+
+        start = int(match.group("start"))
+        end = int(match.group("end"))
+        transition_entries = entries[committed_head:]
+        if (
+            start != committed_head + 1
+            or end < start
+            or len(transition_entries) != end - start + 1
+            or tuple(entry[0] for entry in transition_entries)
+            != tuple(range(start, end + 1))
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "positive market append PREPARE does not match durable entries"
+            )
+
+        intended_state_sha256 = committed_state_sha256
+        for generation, dedupe_key, payload_json in transition_entries:
+            intended_state_sha256 = _append_state_step_sha256(
+                intended_state_sha256,
+                append_generation=generation,
+                dedupe_key=dedupe_key,
+                payload_json=payload_json,
+            )
+        expected_binding_sha256 = _append_binding_sha256(
+            previous_state_sha256=committed_state_sha256,
+            intended_state_sha256=intended_state_sha256,
+            entries=transition_entries,
+        )
+        if (
+            pending.intended_state_sha256 != intended_state_sha256
+            or pending.semantic_binding_sha256 != expected_binding_sha256
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "positive market append PREPARE semantic binding is invalid"
+            )
+
     def _positive_append_generation_head(self) -> int:
         row = self.connection.execute(
             """SELECT COUNT(*), COALESCE(MAX(append_generation), 0)
@@ -1362,13 +1423,32 @@ class SQLiteMarketStore:
         if history and history[-1].phase is AuthorityPhase.PREPARE:
             pending = history[-1]
             entries = self._validated_positive_append_entries()
+            baseline_state_sha256 = self._generation_zero_baseline_state_sha256()
+            committed_head, committed_state_sha256 = (
+                self._append_authority_committed_tip(history)
+            )
+            if len(entries) < committed_head:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append chronology is missing durable committed entries"
+                )
+            self._require_canonical_append_authority_bindings(
+                history,
+                entries[:committed_head],
+                baseline_state_sha256=baseline_state_sha256,
+            )
             observed_state_sha256 = self._append_state_from_entries(
                 entries,
-                baseline_state_sha256=self._generation_zero_baseline_state_sha256(),
+                baseline_state_sha256=baseline_state_sha256,
             )
             try:
                 authority.recover(observed_state_sha256=observed_state_sha256)
             except MonotonicAuthorityRecoveryRequiredError:
+                self._require_canonical_pending_append_binding(
+                    pending,
+                    entries,
+                    committed_head=committed_head,
+                    committed_state_sha256=committed_state_sha256,
+                )
                 authority.recover(
                     observed_state_sha256=observed_state_sha256,
                     tx_id=pending.tx_id,

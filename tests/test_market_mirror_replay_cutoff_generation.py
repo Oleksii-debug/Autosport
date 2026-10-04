@@ -2330,6 +2330,65 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 first.close()
 
+    def test_cutoff_resolver_recovers_abandoned_append_prepare_after_lock_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            first = SQLiteMarketStore(path)
+            second = SQLiteMarketStore(path)
+            original_recover = MonotonicWorkspaceAuthority.recover
+            failed_append_commit = False
+
+            def fail_append_machine_commit_once(authority, **kwargs):
+                nonlocal failed_append_commit
+                tx_id = kwargs.get("tx_id")
+                if (
+                    not failed_append_commit
+                    and isinstance(tx_id, str)
+                    and tx_id.startswith("append-")
+                ):
+                    failed_append_commit = True
+                    raise RuntimeError("simulated abandoned append PREPARE")
+                return original_recover(authority, **kwargs)
+
+            try:
+                with patch.object(
+                    MonotonicWorkspaceAuthority,
+                    "recover",
+                    new=fail_append_machine_commit_once,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "simulated abandoned append PREPARE",
+                    ):
+                        first.append(
+                            self.event(
+                                sequence=1,
+                                odds="2.00",
+                                observed_ts="2026-09-16T19:00:00+00:00",
+                            )
+                        )
+
+                # SQLite is committed and the live writer has released the append
+                # sibling lock. A different store may now prove/recover the abandoned
+                # PREPARE before issuing its first replay cutoff.
+                history_before = second._market_append_authority().read_history()
+                self.assertEqual(history_before[-1].phase.value, "PREPARE")
+
+                snapshot = self.replay(second)
+                self.assertEqual(len(snapshot.events), 1)
+
+                history_after = second._market_append_authority().read_history()
+                self.assertEqual(history_after[-1].phase.value, "COMMIT")
+                self.assertEqual(
+                    second.connection.execute(
+                        "SELECT COUNT(*) FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (1,),
+                )
+            finally:
+                second.close()
+                first.close()
+
     def test_cutoff_resolver_does_not_recover_live_append_prepare(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

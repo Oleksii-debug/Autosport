@@ -276,8 +276,7 @@ class _ForeignFirstDocumentWebview(_FakeWebview):
     def start(self, *, gui: str, **kwargs) -> None:
         del kwargs
         self.requested_gui = gui
-        assert self.window.events.initialized.fire("edgechromium") == [True]
-        assert self.window.events.before_load.fire() == [False]
+        assert self.window.events.initialized.fire("edgechromium") == [False]
         with pytest.raises(WindowsWebBridgeTrustError):
             self.api.get_state()
         self.first_document_rejected = True
@@ -299,6 +298,42 @@ def test_first_remote_document_never_becomes_bridge_trust_on_first_load(
         launch_windows_shell(bridge, storage_path=tmp_path / "webview")
 
     assert fake.first_document_rejected is True
+    assert controller.events == [("close", None)]
+
+
+class _LoopbackRetargetBeforeFirstLoadWebview(_FakeWebview):
+    def __init__(self) -> None:
+        super().__init__()
+        self.retarget_rejected = False
+
+    def start(self, *, gui: str, **kwargs) -> None:
+        del kwargs
+        self.requested_gui = gui
+        assert self.window.events.initialized.fire("edgechromium") == [True]
+        self.window.real_url = "http://127.0.0.1:42099/index.html"
+        self.window.current_url = self.window.real_url
+        assert self.window.events.before_load.fire() == [False]
+        with pytest.raises(WindowsWebBridgeTrustError):
+            self.api.get_state()
+        self.retarget_rejected = True
+
+
+def test_loopback_retarget_after_initialize_cannot_replace_packaged_document(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    fake = _LoopbackRetargetBeforeFirstLoadWebview()
+    controller = _Controller()
+    bridge = AutosportWebBridge(controller)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    with pytest.raises(
+        WindowsWebViewUnavailable,
+        match="lost its trusted WebView document binding",
+    ):
+        launch_windows_shell(bridge, storage_path=tmp_path / "webview")
+
+    assert fake.retarget_rejected is True
     assert controller.events == [("close", None)]
 
 

@@ -2458,6 +2458,7 @@ def launch_windows_shell(
     canonical_bridge = True
     required_renderer = "edgechromium"
     renderer_observed = False
+    expected_real_url: str | None = None
     trusted_document_observed = not canonical_bridge
     trusted_document_violation = False
     runtime_browser_version: str | None = None
@@ -2481,12 +2482,26 @@ def launch_windows_shell(
     window: object | None = None
 
     def verify_initialized_renderer(renderer: object) -> bool:
-        nonlocal renderer_observed
+        nonlocal expected_real_url, renderer_observed, trusted_document_violation
         if type(renderer) is not str or renderer != required_renderer:
             if canonical_bridge:
                 api._revoke_trust()
             return False
         renderer_observed = True
+        if canonical_bridge:
+            if window is None:
+                api._revoke_trust()
+                trusted_document_violation = True
+                return False
+            try:
+                expected_real_url = _require_packaged_launch_document(
+                    window,
+                    expected_original_url=expected_original_url,
+                )
+            except WindowsWebBridgeTrustError:
+                api._revoke_trust()
+                trusted_document_violation = True
+                return False
         return True
 
     def bind_trusted_document() -> bool | None:
@@ -2515,10 +2530,17 @@ def launch_windows_shell(
                 trusted_document_violation = True
                 return False
         try:
-            expected_real_url = _require_packaged_launch_document(
+            current_resolved_url = _require_packaged_launch_document(
                 window,
                 expected_original_url=expected_original_url,
             )
+            if (
+                expected_real_url is None
+                or current_resolved_url != expected_real_url
+            ):
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge rejected packaged URL retargeting"
+                )
             api._bind_trusted_window(window, expected_url=expected_real_url)
         except WindowsWebBridgeTrustError:
             api._revoke_trust()

@@ -707,8 +707,11 @@ class ProphetXSessionLifecycle:
     def state_path(self) -> Path:
         return self._state_path
 
-    def effect_authorized(self, admission: ProphetXLoginAdmission) -> bool:
-        """Revalidate coordinator-issued login/renewal authority against durable state."""
+    def consume_effect_authority(
+        self,
+        admission: ProphetXLoginAdmission,
+    ) -> bool:
+        """Consume one coordinator-issued login/renewal side-effect authority."""
 
         if type(admission) is not ProphetXLoginAdmission:
             return False
@@ -752,7 +755,10 @@ class ProphetXSessionLifecycle:
                         is ProphetXLoginAdmissionAction.CREATE_LOGIN
                         else current.access_expires_at
                     )
-                    return admission.retry_at == expected_retry
+                    if admission.retry_at != expected_retry:
+                        return False
+                    self._issued_effect_admissions.pop(attempt, None)
+                    return True
             except WorkspaceEconomicLockBusyError:
                 return False
             except WorkspaceEconomicLockError as exc:

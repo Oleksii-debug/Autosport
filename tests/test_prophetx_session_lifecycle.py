@@ -73,8 +73,9 @@ def test_two_consumers_share_one_persisted_login_reservation(tmp_path):
 
     assert one.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
     assert one.login_authorized is False
-    assert first.effect_authorized(one) is True
-    assert second.effect_authorized(one) is False
+    assert first.consume_effect_authority(one) is True
+    assert second.consume_effect_authority(one) is False
+    assert first.consume_effect_authority(one) is False
     assert two.action is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
     assert two.login_authorized is False
     assert two.snapshot is not None
@@ -1589,7 +1590,7 @@ def test_same_process_stale_renewal_recovers_after_uncertainty_deadline(tmp_path
     assert recovered.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
     assert recovered.attempt_id != started.attempt_id
     assert recovered.login_authorized is False
-    assert lifecycle.effect_authorized(recovered) is True
+    assert lifecycle.consume_effect_authority(recovered) is True
 
 
 def test_available_token_without_durable_state_fails_closed(tmp_path):
@@ -2015,7 +2016,7 @@ def test_structurally_valid_forged_login_admission_has_no_effect_authority(
     )
 
     assert forged.login_authorized is False
-    assert lifecycle.effect_authorized(forged) is False
+    assert lifecycle.consume_effect_authority(forged) is False
 
 
 def test_reconstructed_login_admission_cannot_reuse_issued_attempt_authority(
@@ -2030,17 +2031,17 @@ def test_reconstructed_login_admission_cannot_reuse_issued_attempt_authority(
         retry_at=issued.retry_at,
     )
 
-    assert lifecycle.effect_authorized(issued) is True
-    assert lifecycle.effect_authorized(forged) is False
+    assert lifecycle.consume_effect_authority(issued) is True
+    assert lifecycle.consume_effect_authority(forged) is False
 
     restarted = _lifecycle(tmp_path)
-    assert restarted.effect_authorized(issued) is False
+    assert restarted.consume_effect_authority(issued) is False
 
 
-def test_effect_authority_is_revoked_after_login_completion(tmp_path):
+def test_consumed_effect_authority_cannot_be_reused_after_login_completion(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     issued = lifecycle.begin_login(now=NOW, access_token_available=False)
-    assert lifecycle.effect_authorized(issued) is True
+    assert lifecycle.consume_effect_authority(issued) is True
 
     lifecycle.complete_login_failure(
         attempt_id=issued.attempt_id,
@@ -2048,7 +2049,7 @@ def test_effect_authority_is_revoked_after_login_completion(tmp_path):
         failure=ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE,
     )
 
-    assert lifecycle.effect_authorized(issued) is False
+    assert lifecycle.consume_effect_authority(issued) is False
 
 
 def test_completed_login_attempt_is_removed_from_effect_registry(tmp_path):
@@ -2109,8 +2110,9 @@ def test_reconstructed_renewal_admission_cannot_reuse_issued_authority(tmp_path)
         retry_at=issued.retry_at,
     )
 
-    assert lifecycle.effect_authorized(issued) is True
-    assert lifecycle.effect_authorized(forged) is False
+    assert lifecycle.consume_effect_authority(issued) is True
+    assert lifecycle.consume_effect_authority(forged) is False
+    assert lifecycle.consume_effect_authority(issued) is False
 
 
 def test_admission_cannot_forge_login_authority_without_reservation():

@@ -467,6 +467,7 @@ class MarketMirror:
         *,
         as_of: datetime,
         max_age: timedelta,
+        require_live_receipt_authority: bool = False,
         source_ids: str | Iterable[str] | None = None,
         sports: str | Iterable[str] | None = None,
         event_ids: str | Iterable[str] | None = None,
@@ -475,8 +476,10 @@ class MarketMirror:
     ) -> MirrorSnapshot:
         """Reconstruct exactly the decision-visible mirror state at as_of.
 
-        Replay is read-only over canonical append-only history. Events whose local
-        observation or ingestion/receipt instant is after as_of are never applied,
+        Replay is read-only over canonical append-only history. Live-decision recovery
+        may additionally require durable product-owned receipt authority, preventing
+        legacy/import rows from promoting caller-supplied ingest_ts into a live clock.
+        Events whose local observation or ingestion/receipt instant is after as_of are never applied,
         even when their provider timestamp is older, so later-received evidence cannot
         leak into an earlier decision. Malformed causal clocks fail closed. The
         reconstructed mirror then applies the same canonical status/freshness/selectors
@@ -484,9 +487,16 @@ class MarketMirror:
         """
         if not isinstance(store, SQLiteMarketStore):
             raise TypeError("store must be a SQLiteMarketStore")
+        if type(require_live_receipt_authority) is not bool:
+            raise TypeError("require_live_receipt_authority must be bool")
         boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
         mirror = cls()
-        for event in store.events():
+        history = (
+            store.trusted_live_events()
+            if require_live_receipt_authority
+            else store.events()
+        )
+        for event in history:
             observed = cls._utc_timestamp(event.observed_ts)
             ingested = cls._utc_timestamp(event.ingest_ts)
             if observed is None or ingested is None:

@@ -1148,6 +1148,64 @@ def test_renewal_persisted_state_remains_secret_free(tmp_path):
     assert "Bearer " not in raw
 
 
+@pytest.mark.parametrize(
+    "state",
+    [
+        ProphetXSessionState.RENEWAL_DUE,
+        ProphetXSessionState.RENEWING,
+    ],
+)
+def test_persisted_renewal_state_cannot_precede_lead_window(state):
+    access_expires_at = NOW + timedelta(minutes=10)
+    kwargs = {
+        "state": state,
+        "generation": 3,
+        "credential_revision": "rev-1",
+        "integration_role": "market-maker-primary",
+        "last_transition_at": NOW,
+        "session_lineage_id": sha256(b"session").hexdigest(),
+        "access_expires_at": access_expires_at,
+        "slot_hold_until": NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
+    }
+    if state is ProphetXSessionState.RENEWING:
+        kwargs["attempt_id"] = sha256(b"renewal-attempt").hexdigest()
+        kwargs["attempt_started_at"] = NOW
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="renewal state cannot precede its lead window",
+    ):
+        ProphetXSessionSnapshot(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        ProphetXSessionState.RENEWAL_DUE,
+        ProphetXSessionState.RENEWING,
+    ],
+)
+def test_persisted_renewal_state_accepts_time_inside_lead_window(state):
+    access_expires_at = NOW + timedelta(minutes=10)
+    due_at = access_expires_at - timedelta(minutes=1)
+    kwargs = {
+        "state": state,
+        "generation": 4,
+        "credential_revision": "rev-1",
+        "integration_role": "market-maker-primary",
+        "last_transition_at": due_at,
+        "session_lineage_id": sha256(b"session").hexdigest(),
+        "access_expires_at": access_expires_at,
+        "slot_hold_until": NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
+    }
+    if state is ProphetXSessionState.RENEWING:
+        kwargs["attempt_id"] = sha256(b"renewal-attempt").hexdigest()
+        kwargs["attempt_started_at"] = due_at
+
+    snapshot = ProphetXSessionSnapshot(**kwargs)
+    assert snapshot.state is state
+
+
 def test_renewal_before_lead_window_is_rejected(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)

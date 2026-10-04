@@ -372,6 +372,17 @@ class ProphetXSessionSnapshot:
                 raise ProphetXSessionLifecycleError(
                     "active access expiry must follow the latest transition"
                 )
+            if (
+                self.state in {
+                    ProphetXSessionState.RENEWAL_DUE,
+                    ProphetXSessionState.RENEWING,
+                }
+                and self.last_transition_at
+                < self.access_expires_at - RENEWAL_LEAD_TIME
+            ):
+                raise ProphetXSessionLifecycleError(
+                    "renewal state cannot precede its lead window"
+                )
             if self.slot_hold_until < self.access_expires_at:
                 raise ProphetXSessionLifecycleError(
                     "active slot hold cannot precede access expiry"

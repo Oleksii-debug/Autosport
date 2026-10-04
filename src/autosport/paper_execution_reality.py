@@ -447,6 +447,16 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         observation_evidence_ids: Mapping[str, str],
         suspended_action_ids: frozenset[str],
     ) -> dict[str, Any]:
+        try:
+            _impl._text(trigger_id, "trigger_id")
+            _impl._text(plan.plan_id, "plan_id")
+            _sha256_text(plan.fingerprint, "plan_fingerprint")
+            _sha256_text(config.fingerprint, "model_fingerprint")
+            _impl._timestamp(started_at, "started_at")
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise PaperExecutionStateError(
+                "reservation identity fields are invalid"
+            ) from exc
         if type(suspended_action_ids) is not frozenset or any(
             type(action_id) is not str or not action_id
             for action_id in suspended_action_ids

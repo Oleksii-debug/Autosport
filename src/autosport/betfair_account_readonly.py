@@ -1805,6 +1805,8 @@ def _install_market_price_ladder_authority():
             int,
             tuple[object, object, object, object, object] | None,
             int,
+            int | None,
+            tuple[object, object, object, object, object] | None,
         ],
     ] = {}
     generation_lock = Lock()
@@ -1966,10 +1968,18 @@ def _install_market_price_ladder_authority():
                 # current generation for this exact market. If provider I/O
                 # fails or the authority graph changes mid-read, the market
                 # remains unresolved until a later fresh canonical read.
+                prior_stable_generation = (
+                    None if previous is None or previous[1] is None else previous[0]
+                )
+                prior_stable_definition = (
+                    None if previous is None or previous[1] is None else previous[1]
+                )
                 latest_definitions[market_key_at_start] = (
                     pending_generation,
                     None,
                     acquisition_sequence,
+                    prior_stable_generation,
+                    prior_stable_definition,
                 )
         acquisition_started_at = canonical_now("acquisition-start instant")
         observation = raw_read(self, market)
@@ -2016,27 +2026,47 @@ def _install_market_price_ladder_authority():
                     generation,
                     definition,
                     acquisition_sequence,
-                )
-            elif previous[1] == definition:
-                generation = previous[0]
-                latest_definitions[market_key] = (
-                    generation,
-                    definition,
-                    max(previous[2], acquisition_sequence),
+                    None,
+                    None,
                 )
             elif acquisition_sequence < previous[2]:
+                # A newer acquisition started before this older response returned.
+                # Without a provider revision token, even byte/semantic equality of
+                # the two MarketDescription payloads cannot prove which response is
+                # causally current. Poison the market until a later fresh read.
                 generation = -1
                 latest_definitions[market_key] = (
                     previous[0] + 1,
                     None,
                     previous[2],
+                    None,
+                    None,
                 )
-            else:
-                generation = previous[0] + 1
+            elif previous[4] is not None and previous[4] == definition:
+                # A non-overlapping successful refresh that confirms the same exact
+                # definition may restore the prior stable generation. The start of
+                # the refresh revoked it while I/O was unresolved; successful causal
+                # confirmation makes both identical receipts current again.
+                assert previous[3] is not None
+                generation = previous[3]
                 latest_definitions[market_key] = (
                     generation,
                     definition,
                     acquisition_sequence,
+                    None,
+                    None,
+                )
+            else:
+                # New definition, first successful definition, or recovery after a
+                # failed/poisoned refresh: establish the pending generation rather
+                # than resurrecting any older receipt (ABA-safe).
+                generation = previous[0]
+                latest_definitions[market_key] = (
+                    generation,
+                    definition,
+                    acquisition_sequence,
+                    None,
+                    None,
                 )
             issued[observation_id] = (
                 ref(observation, forget),
@@ -2068,6 +2098,7 @@ def _install_market_price_ladder_authority():
                 or current[0]() is not observation
                 or current[1] != fingerprint(observation)
                 or latest is None
+                or latest[1] is None
                 or current[4] != latest[0]
                 or not source_origin_authoritative(source)
                 or not ladder_read_dispatch_intact()

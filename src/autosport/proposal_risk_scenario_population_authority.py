@@ -909,6 +909,18 @@ def _require_dispatch(
             None,
         )
         is not _PUBLIC_ISSUE_CLOSURE
+        or any(
+            cell is not expected_cell
+            or cell.cell_contents is not expected_value
+            or getattr(expected_value, "__code__", None) is not expected_code
+            for cell, (expected_cell, expected_value, expected_code)
+            in zip(
+                _PUBLIC_ISSUE_CLOSURE or (),
+                _PUBLIC_ISSUE_CLOSURE_WITNESSES,
+            )
+        )
+        or len(_PUBLIC_ISSUE_CLOSURE or ())
+        != len(_PUBLIC_ISSUE_CLOSURE_WITNESSES)
         or resolve_product_proposal_risk_scenario_population
         is not _PUBLIC_RESOLVE_EXPECTED
         or getattr(
@@ -923,6 +935,18 @@ def _require_dispatch(
             None,
         )
         is not _PUBLIC_RESOLVE_CLOSURE
+        or any(
+            cell is not expected_cell
+            or cell.cell_contents is not expected_value
+            or getattr(expected_value, "__code__", None) is not expected_code
+            for cell, (expected_cell, expected_value, expected_code)
+            in zip(
+                _PUBLIC_RESOLVE_CLOSURE or (),
+                _PUBLIC_RESOLVE_CLOSURE_WITNESSES,
+            )
+        )
+        or len(_PUBLIC_RESOLVE_CLOSURE or ())
+        != len(_PUBLIC_RESOLVE_CLOSURE_WITNESSES)
     ):
         raise ProductProposalRiskScenarioPopulationError(
             "scenario population authority dispatch changed"
@@ -2100,9 +2124,25 @@ def _make_public_operations(_bind_identity):
 _PUBLIC_ISSUE_EXPECTED = issue_product_proposal_risk_scenario_population
 _PUBLIC_ISSUE_CODE = getattr(_PUBLIC_ISSUE_EXPECTED, "__code__", None)
 _PUBLIC_ISSUE_CLOSURE = getattr(_PUBLIC_ISSUE_EXPECTED, "__closure__", None)
+_PUBLIC_ISSUE_CLOSURE_WITNESSES = tuple(
+    (
+        cell,
+        cell.cell_contents,
+        getattr(cell.cell_contents, "__code__", None),
+    )
+    for cell in (_PUBLIC_ISSUE_CLOSURE or ())
+)
 _PUBLIC_RESOLVE_EXPECTED = resolve_product_proposal_risk_scenario_population
 _PUBLIC_RESOLVE_CODE = getattr(_PUBLIC_RESOLVE_EXPECTED, "__code__", None)
 _PUBLIC_RESOLVE_CLOSURE = getattr(_PUBLIC_RESOLVE_EXPECTED, "__closure__", None)
+_PUBLIC_RESOLVE_CLOSURE_WITNESSES = tuple(
+    (
+        cell,
+        cell.cell_contents,
+        getattr(cell.cell_contents, "__code__", None),
+    )
+    for cell in (_PUBLIC_RESOLVE_CLOSURE or ())
+)
 del _make_public_operations
 
 

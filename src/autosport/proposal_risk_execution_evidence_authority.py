@@ -238,6 +238,11 @@ def _make_identity_capability():
 _IDENTITY_PROVEN, _BIND_IDENTITY = _make_identity_capability()
 del _make_identity_capability
 
+# One definition-time capability authorizes only the canonical derivation path
+# to mint positive product-derived identity. It is removed from module globals
+# after the public derivation function is built.
+_MINT_CAPABILITY = object()
+
 
 @dataclass(frozen=True, slots=True, init=False)
 class ProductProposalRiskExecutionEvidence:
@@ -422,11 +427,23 @@ def _evidence_payload(values: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _mint(values: dict[str, object]) -> ProductProposalRiskExecutionEvidence:
-    instance = object.__new__(ProductProposalRiskExecutionEvidence)
-    for name in _RESULT_FIELDS:
+def _mint(
+    values: dict[str, object],
+    *,
+    mint_capability: object,
+    _expected_capability=_MINT_CAPABILITY,
+    _bind_identity=_BIND_IDENTITY,
+    _result_fields=_RESULT_FIELDS,
+    _result_type=ProductProposalRiskExecutionEvidence,
+) -> ProductProposalRiskExecutionEvidence:
+    if mint_capability is not _expected_capability:
+        raise ProductProposalRiskExecutionEvidenceError(
+            "proposal risk execution evidence mint capability is invalid"
+        )
+    instance = object.__new__(_result_type)
+    for name in _result_fields:
         object.__setattr__(instance, name, values[name])
-    _BIND_IDENTITY(instance)
+    _bind_identity(instance)
     return instance
 
 
@@ -435,6 +452,7 @@ def derive_product_proposal_risk_execution_evidence(
     rows: tuple[CounterfactualMemberExecutionEvidence, ...],
     *,
     evaluated_at: str,
+    _mint_capability=_MINT_CAPABILITY,
 ) -> ProductProposalRiskExecutionEvidence:
     """Validate assertions and compute a fail-closed canonical fixed-N ruin bound."""
 
@@ -609,4 +627,11 @@ def derive_product_proposal_risk_execution_evidence(
         "evidence_sha256": "",
     }
     values["evidence_sha256"] = _digest(_evidence_payload(values))
-    return _mint(values)
+    return _mint(values, mint_capability=_mint_capability)
+
+
+# Capability roots are intentionally absent from the module namespace. The
+# canonical property and derivation function retain definition-time references.
+del _IDENTITY_PROVEN
+del _BIND_IDENTITY
+del _MINT_CAPABILITY

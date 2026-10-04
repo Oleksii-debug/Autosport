@@ -51,6 +51,64 @@ class ProductProposalRiskExecutionEvidenceDispatchGuardTests(unittest.TestCase):
         finally:
             evidence_authority.ProductProposalRiskExecutionEvidence = original
 
+    def test_identity_binder_and_mint_key_are_not_module_capabilities(self) -> None:
+        self.assertFalse(hasattr(evidence_authority, "_BIND_IDENTITY"))
+        self.assertFalse(hasattr(evidence_authority, "_IDENTITY_PROVEN"))
+        self.assertFalse(hasattr(evidence_authority, "_MINT_CAPABILITY"))
+        with self.assertRaises(TypeError):
+            evidence_authority._mint({})
+
+    def test_precommit_positive_identity_descriptor_rebinding_is_rejected(self) -> None:
+        precommit_type = evidence_authority.ProductProposalRiskEvaluationPrecommit
+        original = precommit_type.__dict__["binding_identity_proven"]
+        try:
+            precommit_type.binding_identity_proven = property(lambda self: True)
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "precommit descriptor binding_identity_proven changed",
+            ):
+                evidence_authority.derive_product_proposal_risk_execution_evidence(
+                    None,
+                    (),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            precommit_type.binding_identity_proven = original
+
+    def test_result_risk_truth_descriptor_rebinding_is_rejected(self) -> None:
+        result_type = evidence_authority.ProductProposalRiskExecutionEvidence
+        original = result_type.__dict__["proposal_target_risk_qualified"]
+        try:
+            result_type.proposal_target_risk_qualified = property(lambda self: True)
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "result descriptor proposal_target_risk_qualified changed",
+            ):
+                evidence_authority.derive_product_proposal_risk_execution_evidence(
+                    None,
+                    (),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            result_type.proposal_target_risk_qualified = original
+
+    def test_result_execution_provenance_descriptor_rebinding_is_rejected(self) -> None:
+        result_type = evidence_authority.ProductProposalRiskExecutionEvidence
+        original = result_type.__dict__["product_execution_provenance_proven"]
+        try:
+            result_type.product_execution_provenance_proven = property(lambda self: True)
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "result descriptor product_execution_provenance_proven changed",
+            ):
+                evidence_authority.derive_product_proposal_risk_execution_evidence(
+                    None,
+                    (),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            result_type.product_execution_provenance_proven = original
+
 
 if __name__ == "__main__":
     unittest.main()

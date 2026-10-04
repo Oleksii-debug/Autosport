@@ -175,6 +175,45 @@ def _install_execution_evidence_guard() -> None:
         "_evidence_payload",
         "_mint",
     )
+    precommit_descriptor_names = (
+        "__new__",
+        "binding_identity_proven",
+        "proposal_target_counterfactual_execution_proven",
+        "risk_upper_bound_for_target",
+        "grants_ticket_authority",
+        "grants_real_money_authority",
+    )
+    result_descriptor_names = (
+        "__new__",
+        "execution_evidence_identity_proven",
+        "fixed_n_cohort_complete",
+        "statistical_bound_computed",
+        "product_execution_provenance_proven",
+        "proposal_target_counterfactual_execution_proven",
+        "risk_upper_bound_for_target",
+        "proposal_target_risk_qualified",
+        "grants_risk_approval_authority",
+        "grants_ticket_authority",
+        "grants_broker_execution_authority",
+        "grants_real_money_authority",
+        "grants_state_mutation_authority",
+    )
+    precommit_descriptor_witnesses = tuple(
+        (name, precommit_type.__dict__.get(name))
+        for name in precommit_descriptor_names
+    )
+    result_descriptor_witnesses = tuple(
+        (name, result_type.__dict__.get(name))
+        for name in result_descriptor_names
+    )
+    if any(value is None for _, value in precommit_descriptor_witnesses):
+        raise RuntimeError(
+            "proposal risk execution evidence precommit truth descriptors are unavailable"
+        )
+    if any(value is None for _, value in result_descriptor_witnesses):
+        raise RuntimeError(
+            "proposal risk execution evidence result truth descriptors are unavailable"
+        )
     helper_witnesses: tuple[tuple[str, object, object], ...] = tuple(
         (
             name,
@@ -202,6 +241,16 @@ def _install_execution_evidence_guard() -> None:
             raise error_type(
                 "proposal risk execution evidence result type was rebound"
             )
+        for name, expected in precommit_descriptor_witnesses:
+            if precommit_type.__dict__.get(name) is not expected:
+                raise error_type(
+                    f"proposal risk execution evidence precommit descriptor {name} changed"
+                )
+        for name, expected in result_descriptor_witnesses:
+            if result_type.__dict__.get(name) is not expected:
+                raise error_type(
+                    f"proposal risk execution evidence result descriptor {name} changed"
+                )
         for name, expected, code in helper_witnesses:
             current = getattr(module, name, None)
             if current is not expected or getattr(current, "__code__", None) is not code:

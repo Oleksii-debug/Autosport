@@ -3355,6 +3355,22 @@ class PersistentLiveDecisionLoop:
             for event in execution_events
             if event.get("event_type") == "RUN_COMPLETED"
         )
+        allowed_execution_event_types = {
+            PaperExecutionAdoptionRuntime._EXPOSURE_SCOPE_EVENT_TYPE,
+            "RUN_RESERVED",
+            "ATTEMPT_RECORDED",
+            "RUN_COMPLETED",
+        }
+        if (
+            len(execution_events) != len(attempt_events) + 3
+            or any(
+                event.get("event_type") not in allowed_execution_event_types
+                for event in execution_events
+            )
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 run contains noncanonical events"
+            )
         try:
             attempts = tuple(
                 PaperLegAttempt.from_dict(event.get("payload"))

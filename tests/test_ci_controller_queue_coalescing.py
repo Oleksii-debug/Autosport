@@ -3383,6 +3383,113 @@ def test_active_run_pagination_bound_cannot_be_rebound_to_hide_second_page(
         "event=pull_request&status=queued&per_page=100&page=2",
     ]
 
+def test_active_run_pagination_overlap_cannot_fake_snapshot_completion(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    requested: list[str] = []
+
+    def run_payload(run_id: int) -> dict[str, object]:
+        return {
+            "id": run_id,
+            "head_sha": HEAD,
+            "name": "CI",
+            "status": "queued",
+            "pull_requests": [{"number": 303}],
+            "head_branch": "feature/head",
+            "head_repository": {"full_name": "owner/repo"},
+        }
+
+    def fake_request(
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ) -> object:
+        assert method == "GET"
+        assert not allowed_http_errors
+        requested.append(path)
+        if "page=1" in path:
+            return {
+                "total_count": 200,
+                "workflow_runs": [run_payload(run_id) for run_id in range(1, 101)],
+            }
+        if "page=2" in path:
+            # Fifty rows overlap page 1 after concurrent queue growth. Counting raw
+            # observations would reach total_count=200 here and incorrectly stop,
+            # leaving 151..200 invisible to this sweep.
+            return {
+                "total_count": 200,
+                "workflow_runs": [run_payload(run_id) for run_id in range(51, 151)],
+            }
+        if "page=3" in path:
+            return {
+                "total_count": 200,
+                "workflow_runs": [run_payload(run_id) for run_id in range(151, 201)],
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    runs = api._active_runs_for_status("queued")
+
+    assert {run.run_id for run in runs} == set(range(1, 201))
+    assert requested == [
+        "/actions/workflows/356678400/runs?"
+        "event=pull_request&status=queued&per_page=100&page=1",
+        "/actions/workflows/356678400/runs?"
+        "event=pull_request&status=queued&per_page=100&page=2",
+        "/actions/workflows/356678400/runs?"
+        "event=pull_request&status=queued&per_page=100&page=3",
+    ]
+
+
+def test_active_run_reader_rejects_provider_page_larger_than_requested_bound(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+
+    def run_payload(run_id: int) -> dict[str, object]:
+        return {
+            "id": run_id,
+            "head_sha": HEAD,
+            "name": "CI",
+            "status": "queued",
+            "pull_requests": [{"number": 303}],
+            "head_branch": "feature/head",
+            "head_repository": {"full_name": "owner/repo"},
+        }
+
+    def fake_request(
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ) -> object:
+        assert "per_page=100&page=1" in path
+        assert method == "GET"
+        assert not allowed_http_errors
+        return {
+            "total_count": 101,
+            "workflow_runs": [run_payload(run_id) for run_id in range(1, 102)],
+        }
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    with pytest.raises(CancellationError, match="invalid workflow-runs page size"):
+        api._active_runs_for_status("queued")
+
+
 def test_sweep_decision_helpers_are_captured_before_active_run_callback_rebind(
     monkeypatch,
 ) -> None:

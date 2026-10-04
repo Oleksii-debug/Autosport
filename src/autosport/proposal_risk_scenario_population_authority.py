@@ -106,6 +106,40 @@ _HASHLIB_SHA256 = hashlib.sha256
 _HASHLIB_SHA256_EXPECTED = _HASHLIB_SHA256
 _UTC_NOW_ISO = utc_now_iso
 _UTC_NOW_ISO_CODE = getattr(_UTC_NOW_ISO, "__code__", None)
+_PRECOMMIT_PROPERTY_NAMES = (
+    "binding_identity_proven",
+    "proposal_target_identity_proven",
+    "scientific_precommit_proven",
+    "scientific_preoutcome_chronology_proven",
+    "proposal_target_bound_after_scientific_precommit",
+    "scientific_precommit_proves_proposal_execution_scope",
+    "proposal_target_counterfactual_execution_proven",
+    "risk_upper_bound_for_target",
+    "grants_ticket_authority",
+    "grants_real_money_authority",
+)
+_PRECOMMIT_PROPERTY_WITNESSES = tuple(
+    (
+        name,
+        _PRECOMMIT_TYPE.__dict__[name],
+        _PRECOMMIT_TYPE.__dict__[name].fget,
+        getattr(_PRECOMMIT_TYPE.__dict__[name].fget, "__code__", None),
+        getattr(_PRECOMMIT_TYPE.__dict__[name].fget, "__defaults__", None),
+        tuple(
+            (
+                default,
+                getattr(default, "__code__", None),
+            )
+            for default in (
+                getattr(_PRECOMMIT_TYPE.__dict__[name].fget, "__defaults__", None)
+                or ()
+            )
+        ),
+    )
+    for name in _PRECOMMIT_PROPERTY_NAMES
+)
+_PRECOMMIT_PROPERTY_WITNESSES_EXPECTED = _PRECOMMIT_PROPERTY_WITNESSES
+
 _TERMINAL_POPULATION_TYPE = ProductProposalTargetTerminalPopulation
 _TERMINAL_POPULATION_PROPERTY_NAMES = (
     "population_identity_proven",
@@ -125,6 +159,21 @@ _TERMINAL_POPULATION_PROPERTY_WITNESSES = tuple(
         _TERMINAL_POPULATION_TYPE.__dict__[name],
         _TERMINAL_POPULATION_TYPE.__dict__[name].fget,
         getattr(_TERMINAL_POPULATION_TYPE.__dict__[name].fget, "__code__", None),
+        getattr(_TERMINAL_POPULATION_TYPE.__dict__[name].fget, "__defaults__", None),
+        tuple(
+            (
+                default,
+                getattr(default, "__code__", None),
+            )
+            for default in (
+                getattr(
+                    _TERMINAL_POPULATION_TYPE.__dict__[name].fget,
+                    "__defaults__",
+                    None,
+                )
+                or ()
+            )
+        ),
     )
     for name in _TERMINAL_POPULATION_PROPERTY_NAMES
 )
@@ -557,6 +606,17 @@ _RESULT_AUTHORITY_PROPERTY_WITNESSES = tuple(
         _RESULT_TYPE.__dict__[name],
         _RESULT_TYPE.__dict__[name].fget,
         getattr(_RESULT_TYPE.__dict__[name].fget, "__code__", None),
+        getattr(_RESULT_TYPE.__dict__[name].fget, "__defaults__", None),
+        tuple(
+            (
+                default,
+                getattr(default, "__code__", None),
+            )
+            for default in (
+                getattr(_RESULT_TYPE.__dict__[name].fget, "__defaults__", None)
+                or ()
+            )
+        ),
     )
     for name in _RESULT_AUTHORITY_PROPERTY_NAMES
 )
@@ -603,6 +663,8 @@ _DISPATCH_ROOT = (
     _HASHLIB_SHA256,
     _UTC_NOW_ISO,
     _TERMINAL_POPULATION_TYPE,
+    _PRECOMMIT_PROPERTY_WITNESSES,
+    _TERMINAL_POPULATION_PROPERTY_WITNESSES,
     _PROTOCOL_CONSTANTS,
     _LOCK_METHOD_WITNESSES,
     _AUTHORITY_METHOD_WITNESSES,
@@ -636,6 +698,8 @@ def _require_dispatch(
         hashlib.sha256,
         utc_now_iso,
         ProductProposalTargetTerminalPopulation,
+        _PRECOMMIT_PROPERTY_WITNESSES,
+        _TERMINAL_POPULATION_PROPERTY_WITNESSES,
         _PROTOCOL_CONSTANTS,
         _LOCK_METHOD_WITNESSES,
         _AUTHORITY_METHOD_WITNESSES,
@@ -664,6 +728,8 @@ def _require_dispatch(
         _HASHLIB_SHA256,
         _UTC_NOW_ISO,
         _TERMINAL_POPULATION_TYPE,
+        _PRECOMMIT_PROPERTY_WITNESSES,
+        _TERMINAL_POPULATION_PROPERTY_WITNESSES,
         _PROTOCOL_CONSTANTS,
         _LOCK_METHOD_WITNESSES,
         _AUTHORITY_METHOD_WITNESSES,
@@ -705,6 +771,36 @@ def _require_dispatch(
         or len(current) != len(_expected)
         or any(actual is not expected for actual, expected in zip(current, _expected))
         or any(actual is not expected for actual, expected in zip(aliases, _expected))
+        or _PRECOMMIT_PROPERTY_WITNESSES
+        is not _PRECOMMIT_PROPERTY_WITNESSES_EXPECTED
+        or any(
+            ProductProposalRiskEvaluationPrecommit.__dict__.get(name)
+            is not descriptor
+            or getattr(
+                ProductProposalRiskEvaluationPrecommit.__dict__.get(name),
+                "fget",
+                None,
+            )
+            is not getter
+            or getattr(getter, "__code__", None) is not code
+            or getattr(getter, "__defaults__", None) is not defaults
+            or any(
+                current_default is not expected_default
+                or getattr(current_default, "__code__", None) is not default_code
+                for current_default, (expected_default, default_code)
+                in zip(defaults or (), default_witnesses)
+            )
+            or len(defaults or ()) != len(default_witnesses)
+            for (
+                name,
+                descriptor,
+                getter,
+                code,
+                defaults,
+                default_witnesses,
+            )
+            in _PRECOMMIT_PROPERTY_WITNESSES_EXPECTED
+        )
         or _TERMINAL_POPULATION_PROPERTY_WITNESSES
         is not _TERMINAL_POPULATION_PROPERTY_WITNESSES_EXPECTED
         or any(
@@ -717,7 +813,22 @@ def _require_dispatch(
             )
             is not getter
             or getattr(getter, "__code__", None) is not code
-            for name, descriptor, getter, code
+            or getattr(getter, "__defaults__", None) is not defaults
+            or any(
+                current_default is not expected_default
+                or getattr(current_default, "__code__", None) is not default_code
+                for current_default, (expected_default, default_code)
+                in zip(defaults or (), default_witnesses)
+            )
+            or len(defaults or ()) != len(default_witnesses)
+            for (
+                name,
+                descriptor,
+                getter,
+                code,
+                defaults,
+                default_witnesses,
+            )
             in _TERMINAL_POPULATION_PROPERTY_WITNESSES_EXPECTED
         )
         or ProductProposalRiskScenarioPopulation is not _RESULT_TYPE_EXPECTED
@@ -734,7 +845,22 @@ def _require_dispatch(
             )
             is not getter
             or getattr(getter, "__code__", None) is not code
-            for name, descriptor, getter, code
+            or getattr(getter, "__defaults__", None) is not defaults
+            or any(
+                current_default is not expected_default
+                or getattr(current_default, "__code__", None) is not default_code
+                for current_default, (expected_default, default_code)
+                in zip(defaults or (), default_witnesses)
+            )
+            or len(defaults or ()) != len(default_witnesses)
+            for (
+                name,
+                descriptor,
+                getter,
+                code,
+                defaults,
+                default_witnesses,
+            )
             in _RESULT_AUTHORITY_PROPERTY_WITNESSES_EXPECTED
         )
         or _JSON_DUMPS is not _JSON_DUMPS_EXPECTED
@@ -871,6 +997,8 @@ def _require_precommit(
         or precommit.proposal_target_identity_proven is not True
         or precommit.scientific_precommit_proven is not True
         or precommit.scientific_preoutcome_chronology_proven is not True
+        or precommit.proposal_target_bound_after_scientific_precommit is not True
+        or precommit.scientific_precommit_proves_proposal_execution_scope is not False
         or precommit.proposal_target_counterfactual_execution_proven is not False
         or precommit.risk_upper_bound_for_target is not False
         or precommit.grants_ticket_authority is not False
@@ -1413,7 +1541,7 @@ def _record_values(
                 f"scenario population member {index} schema changed"
             )
         members.append(
-            CounterfactualScenarioMemberBinding(
+            _MEMBER_BINDING_TYPE(
                 member_id=raw["member_id"],
                 scenario_id=raw["scenario_id"],
                 mapping_sha256=raw["mapping_sha256"],

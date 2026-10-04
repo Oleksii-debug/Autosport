@@ -184,6 +184,89 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 os.chdir(original_cwd)
 
+    def test_database_file_symlink_reuses_canonical_authority_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            primary_path = Path(directory) / "market.db"
+            first = SQLiteMarketStore(primary_path)
+            try:
+                self.assertTrue(
+                    first.append(
+                        self.event(
+                            sequence=1,
+                            odds="2.00",
+                            observed_ts="2026-09-16T19:00:00+00:00",
+                        )
+                    )
+                )
+                expected = self.semantic_events(self.replay(first))
+                append_journal = first._market_append_authority().journal_dir
+                cutoff_journal = first._replay_cutoff_authority().journal_dir
+            finally:
+                first.close()
+
+            alias_path = Path(directory) / "market-alias.db"
+            try:
+                alias_path.symlink_to(primary_path.name)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"file symlinks unavailable on this platform: {exc}")
+
+            reopened = SQLiteMarketStore(alias_path)
+            try:
+                self.assertEqual(reopened.path, primary_path.resolve(strict=False))
+                self.assertEqual(
+                    reopened._market_append_authority().journal_dir,
+                    append_journal,
+                )
+                self.assertEqual(
+                    reopened._replay_cutoff_authority().journal_dir,
+                    cutoff_journal,
+                )
+                self.assertEqual(
+                    self.semantic_events(self.replay(reopened)),
+                    expected,
+                )
+            finally:
+                reopened.close()
+
+    def test_append_uses_same_global_lock_order_as_trusted_readers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            entered: list[str] = []
+
+            class RecordingLock:
+                def __init__(self, name: str) -> None:
+                    self.name = name
+
+                def __enter__(self):
+                    entered.append(self.name)
+                    return self
+
+                def __exit__(self, exc_type, exc_value, traceback) -> None:
+                    return None
+
+            store._connection_lock = RecordingLock("connection")
+            try:
+                with patch.object(
+                    SQLiteMarketStore,
+                    "_market_append_issuance_lock",
+                    return_value=RecordingLock("append-authority"),
+                ):
+                    self.assertTrue(
+                        store.append(
+                            self.event(
+                                sequence=1,
+                                odds="2.00",
+                                observed_ts="2026-09-16T19:00:00+00:00",
+                            )
+                        )
+                    )
+                self.assertEqual(
+                    entered[:2],
+                    ["append-authority", "connection"],
+                )
+            finally:
+                store.close()
+
     def test_late_backdated_append_cannot_rewrite_frozen_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

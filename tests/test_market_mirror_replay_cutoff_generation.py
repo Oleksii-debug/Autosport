@@ -1146,6 +1146,68 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_post_machine_path_failure_does_not_escape_into_live_mirror(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            moved_path = Path(directory) / "market-moved.db"
+            store = SQLiteMarketStore(path)
+            authority = store._market_append_authority()
+            mirror = MarketMirror()
+            original_require = store._require_database_path_identity
+            calls = 0
+            replaced = False
+
+            def replace_on_post_machine_check():
+                nonlocal calls, replaced
+                calls += 1
+                if calls == 5 and not replaced:
+                    try:
+                        os.replace(path, moved_path)
+                        path.touch()
+                        replaced = True
+                    except OSError as exc:
+                        self.skipTest(
+                            f"database pathname replacement unavailable on this platform: {exc}"
+                        )
+                return original_require()
+
+            event = self.event(
+                sequence=1,
+                odds="2.00",
+                observed_ts="2026-09-16T19:00:00+00:00",
+            )
+            try:
+                with patch.object(
+                    store,
+                    "_require_database_path_identity",
+                    new=replace_on_post_machine_check,
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "market database pathname no longer identifies the opened database",
+                    ):
+                        mirror.persist_and_apply(store, event)
+
+                self.assertTrue(replaced)
+                self.assertEqual(mirror.snapshot(), ())
+                self.assertEqual(authority.read_history()[-1].phase.value, "COMMIT")
+
+                try:
+                    path.unlink()
+                    os.replace(moved_path, path)
+                except OSError as exc:
+                    self.skipTest(
+                        f"database pathname restoration unavailable on this platform: {exc}"
+                    )
+
+                restored = MarketMirror.from_store(store)
+                self.assertEqual(
+                    tuple(item.dedupe_key for item in restored.snapshot()),
+                    (event.dedupe_key,),
+                )
+            finally:
+                store.close()
+
     def test_late_backdated_append_cannot_rewrite_frozen_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

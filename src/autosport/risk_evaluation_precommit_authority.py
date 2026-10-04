@@ -58,13 +58,23 @@ def _canonical_decimal(value: Decimal, name: str) -> str:
         )
     if value.is_zero():
         return "0"
-    text = format(value, "f")
-    if "." in text:
-        text = text.rstrip("0").rstrip(".")
-    if len(text) > 128:
+    decimal_tuple = value.as_tuple()
+    exponent = int(decimal_tuple.exponent)
+    digits = len(decimal_tuple.digits)
+    sign = 1 if decimal_tuple.sign else 0
+    if exponent >= 0:
+        materialized_length = sign + digits + exponent
+    elif digits + exponent > 0:
+        materialized_length = sign + digits + 1
+    else:
+        materialized_length = sign + 2 - exponent
+    if materialized_length > 128:
         raise ProductRiskEvaluationPrecommitError(
             f"{name} exceeds supported canonical size"
         )
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
     return text
 
 

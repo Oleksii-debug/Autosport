@@ -483,3 +483,61 @@ def test_parser_helper_rebind_cannot_bypass_exact_schema_or_digest(
     with pytest.raises(RewardAttributionError, match="keys mismatch"):
         RewardComponentAttribution.from_dict(component_raw)
 
+def test_serialization_dispatch_rebind_cannot_change_immutable_evidence_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = RewardComponentAttribution(
+        RewardAttributionComponent.EXECUTION,
+        AttributionTruth.OBSERVED,
+        authority_refs=(_ref("execution", "receipt-1", SHA_A),),
+    )
+    baseline = _unknown()
+    evidence = replace(
+        baseline,
+        components=tuple(
+            observed
+            if item.component is RewardAttributionComponent.EXECUTION
+            else item
+            for item in baseline.components
+        ),
+    )
+    canonical_payload = evidence.payload()
+    canonical_semantic_key = evidence.semantic_key
+    canonical_evidence_id = evidence.evidence_id
+    canonical_dict = evidence.to_dict()
+
+    monkeypatch.setattr(
+        AttributionAuthorityRef,
+        "to_dict",
+        lambda self: {"forged": True},
+    )
+    monkeypatch.setattr(
+        RewardComponentAttribution,
+        "to_dict",
+        lambda self: {"forged": True},
+    )
+    monkeypatch.setattr(
+        RewardAttributionEvidence,
+        "payload",
+        lambda self: {"forged": True},
+    )
+    monkeypatch.setattr(
+        reward_attribution_module,
+        "_reward_attribution_semantic_payload",
+        lambda evidence: {"forged": True},
+    )
+    monkeypatch.setattr(
+        reward_attribution_module,
+        "_reward_attribution_payload",
+        lambda evidence: {"forged": True},
+    )
+
+    assert evidence.semantic_key == canonical_semantic_key
+    assert evidence.evidence_id == canonical_evidence_id
+    assert evidence.to_dict() == canonical_dict
+    assert canonical_payload["components"][3]["authority_refs"][0] == {
+        "family": "execution",
+        "evidence_id": "receipt-1",
+        "sha256": SHA_A,
+    }
+

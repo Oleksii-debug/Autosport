@@ -71,6 +71,7 @@ _IID_EXPECTED_MULTISET = expected_replay_consumed_payload_multiset_sha256
 _IID_EXPECTED_MULTISET_CODE = getattr(_IID_EXPECTED_MULTISET, "__code__", None)
 _IID_REPLAY_ENGINE = ReplayEngine
 _IID_DATASET_TYPE = ReplayDataset
+_IID_MEMBERSHIP_TYPE = ResolvedFixedNRiskMembership
 _IID_DATASET_LOADER = load_dataset
 _IID_DATASET_LOADER_CODE = getattr(_IID_DATASET_LOADER, "__code__", None)
 _IID_EXECUTION_RECEIPT_TYPE = ProductIidRunExecutionReceipt
@@ -100,6 +101,7 @@ def _require_iid_session_dispatch() -> None:
         is not _IID_EXPECTED_MULTISET_CODE
         or ReplayEngine is not _IID_REPLAY_ENGINE
         or ReplayDataset is not _IID_DATASET_TYPE
+        or ResolvedFixedNRiskMembership is not _IID_MEMBERSHIP_TYPE
         or load_dataset is not _IID_DATASET_LOADER
         or getattr(_IID_DATASET_LOADER, "__code__", None)
         is not _IID_DATASET_LOADER_CODE
@@ -427,6 +429,10 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
         _require_iid_session_dispatch()
         if type(dataset) is not _IID_DATASET_TYPE:
             raise TypeError("dataset must be an exact ReplayDataset")
+        if type(membership) is not _IID_MEMBERSHIP_TYPE:
+            raise TypeError(
+                "membership must be an exact ResolvedFixedNRiskMembership"
+            )
         dataset_root = Path(dataset.root).expanduser().resolve(strict=True)
         manifest_path = dataset_root / "manifest.json"
         try:
@@ -554,7 +560,9 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
                 economic_goal,
                 risk_policy,
             )
-            outcome_lineage = outcome_lineage_binding_from_dataset(dataset)
+            outcome_lineage = outcome_lineage_binding_from_dataset(
+                canonical_dataset
+            )
             if outcome_lineage is not None:
                 self.registry.assert_outcome_lineage_compatible(outcome_lineage)
 

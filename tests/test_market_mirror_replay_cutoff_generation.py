@@ -3024,6 +3024,71 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_live_active_view_excludes_late_local_availability(self) -> None:
+        mirror = MarketMirror()
+        late_ingest = self.event(
+            sequence=1,
+            odds="2.00",
+            observed_ts="2026-09-16T18:59:58+00:00",
+            ingest_ts="2026-09-16T19:00:02+00:00",
+            source_ts="2026-09-16T18:59:57+00:00",
+        )
+        future_observation = self.event(
+            sequence=2,
+            odds="2.10",
+            observed_ts="2026-09-16T19:00:02+00:00",
+            ingest_ts="2026-09-16T19:00:01+00:00",
+            source_ts="2026-09-16T18:59:59+00:00",
+        )
+        mirror.apply(late_ingest)
+        mirror.apply(future_observation)
+
+        active = mirror.active_view(
+            as_of=self.CUTOFF,
+            max_age=timedelta(minutes=2),
+        )
+
+        self.assertEqual(active.events, ())
+        self.assertEqual(len(mirror.snapshot()), 1)
+
+    def test_focused_active_view_excludes_late_ingest_even_with_fresh_source_time(self) -> None:
+        mirror = MarketMirror()
+        event = self.event(
+            sequence=1,
+            odds="2.00",
+            observed_ts="2026-09-16T18:59:59+00:00",
+            ingest_ts="2026-09-16T19:00:01.000001+00:00",
+            source_ts="2026-09-16T19:00:00+00:00",
+        )
+        mirror.apply(event)
+
+        active = mirror.active_view_for_keys(
+            ((event.source_id, event.quote_key),),
+            as_of=self.CUTOFF,
+            max_age=timedelta(minutes=2),
+        )
+
+        self.assertEqual(active.events, ())
+        self.assertEqual(active.revision, 1)
+
+    def test_live_active_view_accepts_local_availability_exactly_at_boundary(self) -> None:
+        mirror = MarketMirror()
+        event = self.event(
+            sequence=1,
+            odds="2.00",
+            observed_ts="2026-09-16T19:00:00+00:00",
+            ingest_ts=self.CUTOFF.isoformat(),
+            source_ts="2026-09-16T18:59:59+00:00",
+        )
+        mirror.apply(event)
+
+        active = mirror.active_view(
+            as_of=self.CUTOFF,
+            max_age=timedelta(minutes=2),
+        )
+
+        self.assertEqual(active.events, (event,))
+
 
 if __name__ == "__main__":
     unittest.main()

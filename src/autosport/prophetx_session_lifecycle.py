@@ -34,7 +34,7 @@ from .workspace_lock import (
 
 
 PROVIDER_ID = "prophetx"
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 CONSERVATIVE_SESSION_SLOT_HOLD = timedelta(minutes=20)
 RENEWAL_LEAD_TIME = timedelta(minutes=2)
 _BASE_RETRY_SECONDS = 5
@@ -212,6 +212,7 @@ class ProphetXSessionSnapshot:
     attempt_started_at: datetime | None = None
     session_lineage_id: str | None = None
     access_expires_at: datetime | None = None
+    slot_hold_started_at: datetime | None = None
     slot_hold_until: datetime | None = None
     retry_not_before: datetime | None = None
     transient_failures: int = 0
@@ -231,12 +232,31 @@ class ProphetXSessionSnapshot:
         for name in (
             "attempt_started_at",
             "access_expires_at",
+            "slot_hold_started_at",
             "slot_hold_until",
             "retry_not_before",
         ):
             value = getattr(self, name)
             if value is not None:
                 _aware_utc(value, name)
+
+        if (self.slot_hold_started_at is None) != (self.slot_hold_until is None):
+            raise ProphetXSessionLifecycleError(
+                "provider-slot hold requires exact durable floor provenance"
+            )
+        if self.slot_hold_started_at is not None:
+            if self.slot_hold_started_at > self.last_transition_at:
+                raise ProphetXSessionLifecycleError(
+                    "provider-slot floor provenance cannot be in the future"
+                )
+            if (
+                self.slot_hold_until
+                < self.slot_hold_started_at + CONSERVATIVE_SESSION_SLOT_HOLD
+            ):
+                raise ProphetXSessionLifecycleError(
+                    "provider-slot hold is below its durable conservative floor"
+                )
+
         for name in ("attempt_id", "session_lineage_id"):
             value = getattr(self, name)
             if value is not None:
@@ -614,6 +634,7 @@ class ProphetXSessionSnapshot:
             "attempt_started_at": _iso(self.attempt_started_at),
             "session_lineage_id": self.session_lineage_id,
             "access_expires_at": _iso(self.access_expires_at),
+            "slot_hold_started_at": _iso(self.slot_hold_started_at),
             "slot_hold_until": _iso(self.slot_hold_until),
             "retry_not_before": _iso(self.retry_not_before),
             "transient_failures": self.transient_failures,
@@ -965,6 +986,7 @@ class ProphetXSessionLifecycle:
                         attempt_started_at=timestamp,
                         session_lineage_id=current.session_lineage_id,
                         access_expires_at=current.access_expires_at,
+                        slot_hold_started_at=current.slot_hold_started_at,
                         slot_hold_until=current.slot_hold_until,
                         transient_failures=current.transient_failures,
                         last_failure_class=current.last_failure_class,
@@ -1037,6 +1059,7 @@ class ProphetXSessionLifecycle:
                         integration_role=current.integration_role,
                         last_transition_at=timestamp,
                         access_expires_at=expires,
+                        slot_hold_started_at=timestamp,
                         slot_hold_until=conservative_hold,
                         transient_failures=0,
                         last_failure_class=current.last_failure_class,
@@ -1120,6 +1143,15 @@ class ProphetXSessionLifecycle:
                         lineage = current.session_lineage_id
                         expiry = current.access_expires_at
 
+                    hold_started_at = (
+                        timestamp
+                        if failure
+                        is ProphetXRenewalFailureClass.AMBIGUOUS_PROVIDER_RESULT
+                        else current.slot_hold_started_at
+                        if hold is not None
+                        else None
+                    )
+
                     login_failure_evidence = current.last_failure_class
                     if state in {
                         ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
@@ -1136,6 +1168,7 @@ class ProphetXSessionLifecycle:
                         last_transition_at=timestamp,
                         session_lineage_id=lineage,
                         access_expires_at=expiry,
+                        slot_hold_started_at=hold_started_at,
                         slot_hold_until=hold,
                         retry_not_before=retry,
                         transient_failures=failures,
@@ -1183,6 +1216,7 @@ class ProphetXSessionLifecycle:
                         last_transition_at=timestamp,
                         session_lineage_id=attempt,
                         access_expires_at=expires,
+                        slot_hold_started_at=timestamp,
                         slot_hold_until=max(
                             expires,
                             timestamp + CONSERVATIVE_SESSION_SLOT_HOLD,
@@ -1220,10 +1254,12 @@ class ProphetXSessionLifecycle:
                     self._require_monotonic_transition(current, timestamp)
                     failures = current.transient_failures + 1
                     retry_not_before: datetime | None = None
+                    slot_hold_started_at: datetime | None = None
                     slot_hold_until: datetime | None = None
 
                     if failure is ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED:
                         state = ProphetXSessionState.SESSION_POOL_EXHAUSTED
+                        slot_hold_started_at = timestamp
                         slot_hold_until = timestamp + CONSERVATIVE_SESSION_SLOT_HOLD
                     elif failure is ProphetXLoginFailureClass.CREDENTIAL_REJECTED:
                         state = ProphetXSessionState.CREDENTIAL_REJECTED
@@ -1236,6 +1272,7 @@ class ProphetXSessionLifecycle:
                         retry_not_before = timestamp + self._retry_delay(failures)
                     else:
                         state = ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+                        slot_hold_started_at = timestamp
                         slot_hold_until = timestamp + CONSERVATIVE_SESSION_SLOT_HOLD
 
                     updated = ProphetXSessionSnapshot(
@@ -1244,6 +1281,7 @@ class ProphetXSessionLifecycle:
                         credential_revision=self.scope.credential_revision,
                         integration_role=self.scope.integration_role,
                         last_transition_at=timestamp,
+                        slot_hold_started_at=slot_hold_started_at,
                         slot_hold_until=slot_hold_until,
                         retry_not_before=retry_not_before,
                         transient_failures=failures,
@@ -1271,18 +1309,21 @@ class ProphetXSessionLifecycle:
                     current = self._load_state()
                     if current is None:
                         generation = 0
+                        hold_started_at = None
                         hold = None
                         failures = 0
                     else:
                         self._require_monotonic_transition(current, timestamp)
                         self._require_role_compatible(current)
                         generation = current.generation + 1
+                        hold_started_at = current.slot_hold_started_at
                         hold = current.slot_hold_until
                         if current.state is ProphetXSessionState.RENEWING:
                             renewal_hold = self._renewal_uncertainty_deadline(current)
                             if hold is None or renewal_hold > hold:
                                 hold = renewal_hold
                         if hold is not None and hold <= timestamp:
+                            hold_started_at = None
                             hold = None
                         failures = current.transient_failures
                     updated = ProphetXSessionSnapshot(
@@ -1291,6 +1332,7 @@ class ProphetXSessionLifecycle:
                         credential_revision=self.scope.credential_revision,
                         integration_role=self.scope.integration_role,
                         last_transition_at=timestamp,
+                        slot_hold_started_at=hold_started_at,
                         slot_hold_until=hold,
                         transient_failures=failures,
                         last_failure_class=ProphetXLoginFailureClass.CREDENTIAL_REJECTED,
@@ -1450,6 +1492,7 @@ class ProphetXSessionLifecycle:
                         credential_revision=current.credential_revision,
                         integration_role=current.integration_role,
                         last_transition_at=now,
+                        slot_hold_started_at=current.slot_hold_started_at,
                         slot_hold_until=current.slot_hold_until,
                         transient_failures=current.transient_failures,
                         last_failure_class=current.last_failure_class,
@@ -1497,6 +1540,7 @@ class ProphetXSessionLifecycle:
                         last_transition_at=now,
                         session_lineage_id=current.session_lineage_id,
                         access_expires_at=current.access_expires_at,
+                        slot_hold_started_at=current.slot_hold_started_at,
                         slot_hold_until=current.slot_hold_until,
                         transient_failures=current.transient_failures,
                         last_failure_class=current.last_failure_class,
@@ -1577,6 +1621,7 @@ class ProphetXSessionLifecycle:
             last_transition_at=now,
             attempt_id=attempt,
             attempt_started_at=now,
+            slot_hold_started_at=now,
             slot_hold_until=hold,
             transient_failures=transient_failures,
         )
@@ -1734,6 +1779,7 @@ class ProphetXSessionLifecycle:
             "attempt_started_at",
             "session_lineage_id",
             "access_expires_at",
+            "slot_hold_started_at",
             "slot_hold_until",
             "retry_not_before",
             "transient_failures",
@@ -1827,6 +1873,11 @@ class ProphetXSessionLifecycle:
             access_expires_at=_parse_iso(
                 payload["access_expires_at"],
                 "access_expires_at",
+                optional=True,
+            ),
+            slot_hold_started_at=_parse_iso(
+                payload["slot_hold_started_at"],
+                "slot_hold_started_at",
                 optional=True,
             ),
             slot_hold_until=_parse_iso(

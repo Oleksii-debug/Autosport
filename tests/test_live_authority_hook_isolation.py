@@ -76,7 +76,40 @@ class LiveAuthorityHookIsolationTests(unittest.TestCase):
 
             self.assertEqual(store._append_live_batch_accepted([event]), [event])
             self.assertTrue(store.has_trusted_live_receipt(event))
+
+            with self.assertRaises(TypeError):
+                store._rebuild_trusted_live_current_quotes(
+                    _trusted_events=lambda _connection: [],
+                )
+            self.assertEqual(
+                store.trusted_live_current_by_source(),
+                {(event.source_id, event.quote_key): event},
+            )
             store.close()
+
+    def test_receipt_writer_requires_active_live_capability_and_rejects_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self._event()
+            try:
+                self.assertTrue(store.append(event))
+                self.assertFalse(store.has_trusted_live_receipt(event))
+
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "internal to canonical live ingestion",
+                ):
+                    store._insert_live_receipt_authority(event)
+                with self.assertRaises(TypeError):
+                    store._insert_live_receipt_authority(
+                        event,
+                        _authority="forged-authority",
+                    )
+
+                self.assertFalse(store.has_trusted_live_receipt(event))
+                self.assertEqual(store.trusted_live_current_by_source(), {})
+            finally:
+                store.close()
 
     def test_live_bus_seam_rejects_dependency_override_but_canonical_path_works(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

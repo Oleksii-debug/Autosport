@@ -2028,6 +2028,71 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertTrue(item["health_applied"])
             market_store.close()
 
+    def test_canonical_application_lookup_rejects_missing_durable_market_effect(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "canonical-application.json"
+            health_path = root / "health.json"
+            market_store = SQLiteMarketStore(root / "market.db")
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                SourceHealthStore(health_path),
+                state_path,
+                clock=lambda: "2026-01-01T00:00:05+00:00",
+            )
+            receipt = application.apply(delta, event)
+            self.assertEqual(application.lookup_receipt(delta), receipt)
+
+            missing_market = SQLiteMarketStore(root / "missing-market.db")
+            reopened = CanonicalDesktopApplication(
+                MarketEventBus(missing_market),
+                SourceHealthStore(health_path),
+                state_path,
+                clock=lambda: "2026-01-01T00:00:06+00:00",
+            )
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "does not resolve to exactly one durable canonical market effect",
+            ):
+                reopened.lookup_receipt(delta)
+            missing_market.close()
+            market_store.close()
+
+    def test_canonical_application_lookup_rejects_missing_durable_health_effect(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "canonical-application.json"
+            health_path = root / "health.json"
+            market_store = SQLiteMarketStore(root / "market.db")
+            health_store = SourceHealthStore(health_path)
+            pristine_health = health_path.read_text(encoding="utf-8")
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                health_store,
+                state_path,
+                clock=lambda: "2026-01-01T00:00:05+00:00",
+            )
+            receipt = application.apply(delta, event)
+            self.assertEqual(application.lookup_receipt(delta), receipt)
+
+            health_path.write_text(pristine_health, encoding="utf-8")
+            reopened = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                SourceHealthStore(health_path),
+                state_path,
+                clock=lambda: "2026-01-01T00:00:06+00:00",
+            )
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "lacks its durable canonical health effect",
+            ):
+                reopened.lookup_receipt(delta)
+            market_store.close()
+
     def test_canonical_application_receipt_time_is_after_durable_completion(self):
         event = MarketEvent.from_dict(event_payload())
         payload = event.to_dict()

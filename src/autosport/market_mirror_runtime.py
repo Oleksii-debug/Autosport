@@ -573,7 +573,9 @@ class BoundedMirrorInvalidationBuffer:
         store: SQLiteMarketStore,
         *,
         _store_type: type[SQLiteMarketStore] = SQLiteMarketStore,
+        _mirror_type: type[MarketMirror] = MarketMirror,
         _trusted_current=SQLiteMarketStore.trusted_live_current_by_source,
+        _has_trusted_receipt=SQLiteMarketStore.has_trusted_live_receipt,
         _event_type: type[MarketEvent] = MarketEvent,
         _quote_key=MarketEvent.quote_key.fget,
     ) -> tuple[MirrorApplyResult, ...]:
@@ -595,25 +597,54 @@ class BoundedMirrorInvalidationBuffer:
             raise RuntimeError("canonical MarketEvent.quote_key descriptor is unavailable")
 
         store_path = store.path.resolve()
-        current = _trusted_current(store)
-        ordered_events: list[MarketEvent] = []
-        for expected_key in sorted(current):
-            event = current[expected_key]
-            if type(event) is not _event_type:
-                raise TypeError("trusted reconciliation requires exact MarketEvent values")
-            if expected_key != (event.source_id, _quote_key(event)):
-                raise ValueError(
-                    "trusted live current key does not match MarketEvent identity"
-                )
-            ordered_events.append(event)
-
         with self._lock:
-            if self._reconciliation_store_path is None:
-                self._reconciliation_store_path = store_path
-            elif self._reconciliation_store_path != store_path:
+            if (
+                self._reconciliation_store_path is not None
+                and self._reconciliation_store_path != store_path
+            ):
                 raise ValueError(
                     "invalidation buffer is already bound to a different market store"
                 )
+
+            if self._reconciliation_store_path is None:
+                if type(self._mirror) is not _mirror_type:
+                    raise TypeError(
+                        "trusted reconciliation requires an exact MarketMirror"
+                    )
+                # A pre-populated unbound mirror may have been bootstrapped from a
+                # different workspace. Prove every existing value against this
+                # store's durable receipt authority before admitting the binding.
+                with self._mirror._lock:
+                    existing = tuple(
+                        self._mirror._latest[key]
+                        for key in sorted(self._mirror._latest)
+                    )
+                for event in existing:
+                    if type(event) is not _event_type:
+                        raise TypeError(
+                            "trusted reconciliation requires exact MarketEvent values"
+                        )
+                    if not _has_trusted_receipt(store, event):
+                        raise ValueError(
+                            "pre-existing mirror state is not trusted by this market store"
+                        )
+
+            current = _trusted_current(store)
+            ordered_events: list[MarketEvent] = []
+            for expected_key in sorted(current):
+                event = current[expected_key]
+                if type(event) is not _event_type:
+                    raise TypeError(
+                        "trusted reconciliation requires exact MarketEvent values"
+                    )
+                if expected_key != (event.source_id, _quote_key(event)):
+                    raise ValueError(
+                        "trusted live current key does not match MarketEvent identity"
+                    )
+                ordered_events.append(event)
+
+            if self._reconciliation_store_path is None:
+                self._reconciliation_store_path = store_path
             return tuple(
                 self._accept_persisted_locked(event)
                 for event in ordered_events

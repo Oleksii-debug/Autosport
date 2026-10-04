@@ -4,16 +4,19 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 from .scientific_registry import RegistryEntry, ScientificRegistry
 
 
-_DESIGN_KIND = "autosport-risk-fixed-n-run-membership-v1"
+_DESIGN_KIND_V1 = "autosport-risk-fixed-n-run-membership-v1"
+_DESIGN_KIND_V2 = "autosport-risk-fixed-n-run-membership-v2"
+_DESIGN_KIND = _DESIGN_KIND_V1
 _RISK_METHOD = "CLOPPER_PEARSON_ONE_SIDED"
 _DEPENDENCE_STATUS = "SEPARATE_REQUIRED"
-_REQUIRED_DESIGN_FIELDS = frozenset(
+_REQUIRED_DESIGN_FIELDS_V1 = frozenset(
     {
         "kind",
         "dataset_snapshot_id",
@@ -24,7 +27,21 @@ _REQUIRED_DESIGN_FIELDS = frozenset(
         "dependence_qualification",
     }
 )
+_REQUIRED_DESIGN_FIELDS_V2 = _REQUIRED_DESIGN_FIELDS_V1 | frozenset(
+    {
+        "bankroll_id",
+        "currency",
+        "target_kind",
+        "target_sha256",
+        "evaluated_stakes",
+        "confidence_level",
+        "ruin_threshold",
+    }
+)
 _HEX = frozenset("0123456789abcdef")
+_TARGET_KINDS = frozenset({"single", "vector"})
+_MAX_FIXED_POINT_TEXT = 512
+_MAX_EVALUATED_STAKES = 10_000
 
 
 class RiskSamplingMembershipError(RuntimeError):
@@ -76,6 +93,38 @@ def _reject_nonfinite(value: str) -> None:
     )
 
 
+def _canonical_fixed_point_decimal(value: object, name: str) -> Decimal:
+    text = _canonical_text(value, name)
+    if (
+        len(text) > _MAX_FIXED_POINT_TEXT
+        or "e" in text.lower()
+    ):
+        raise RiskSamplingMembershipError(
+            f"{name} must use bounded canonical fixed-point decimal text"
+        )
+    try:
+        parsed = Decimal(text)
+    except (InvalidOperation, ValueError) as exc:
+        raise RiskSamplingMembershipError(
+            f"{name} must use canonical fixed-point decimal text"
+        ) from exc
+    if not parsed.is_finite():
+        raise RiskSamplingMembershipError(
+            f"{name} must be a finite canonical fixed-point decimal"
+        )
+    if parsed.is_zero():
+        canonical = "0"
+    else:
+        canonical = format(parsed, "f")
+        if "." in canonical:
+            canonical = canonical.rstrip("0").rstrip(".")
+    if text != canonical:
+        raise RiskSamplingMembershipError(
+            f"{name} must use canonical fixed-point decimal text"
+        )
+    return parsed
+
+
 def _parse_design(text: object) -> tuple[dict[str, Any], str]:
     raw = _canonical_text(text, "binding.evaluation_design")
     try:
@@ -88,7 +137,20 @@ def _parse_design(text: object) -> tuple[dict[str, Any], str]:
         raise RiskSamplingMembershipError(
             "binding.evaluation_design must be canonical JSON"
         ) from exc
-    if type(payload) is not dict or set(payload) != _REQUIRED_DESIGN_FIELDS:
+    if type(payload) is not dict:
+        raise RiskSamplingMembershipError(
+            "fixed-N evaluation design must be a JSON object"
+        )
+    kind = payload.get("kind")
+    if kind == _DESIGN_KIND_V1:
+        required_fields = _REQUIRED_DESIGN_FIELDS_V1
+    elif kind == _DESIGN_KIND_V2:
+        required_fields = _REQUIRED_DESIGN_FIELDS_V2
+    else:
+        raise RiskSamplingMembershipError(
+            "fixed-N evaluation design kind is unsupported"
+        )
+    if set(payload) != required_fields:
         raise RiskSamplingMembershipError(
             "fixed-N evaluation design fields do not match the supported schema"
         )
@@ -104,6 +166,90 @@ def _parse_design(text: object) -> tuple[dict[str, Any], str]:
             "binding.evaluation_design must use canonical JSON serialization"
         )
     return payload, hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _parse_frozen_risk_estimand(
+    design: dict[str, Any],
+) -> tuple[
+    str,
+    str,
+    str,
+    str,
+    tuple[Decimal, ...],
+    Decimal,
+    Decimal,
+]:
+    bankroll_id = _canonical_text(design.get("bankroll_id"), "fixed-N bankroll_id")
+    currency = _canonical_text(design.get("currency"), "fixed-N currency")
+    if (
+        len(currency) != 3
+        or not currency.isascii()
+        or not currency.isalpha()
+        or currency != currency.upper()
+    ):
+        raise RiskSamplingMembershipError(
+            "fixed-N currency must be a three-letter uppercase ASCII code"
+        )
+
+    target_kind = _canonical_text(
+        design.get("target_kind"),
+        "fixed-N target_kind",
+    )
+    if target_kind not in _TARGET_KINDS:
+        raise RiskSamplingMembershipError(
+            "fixed-N target_kind is unsupported"
+        )
+    target_sha256 = _sha256(
+        design.get("target_sha256"),
+        "fixed-N target_sha256",
+    )
+
+    raw_stakes = design.get("evaluated_stakes")
+    if type(raw_stakes) is not list or not raw_stakes:
+        raise RiskSamplingMembershipError(
+            "fixed-N evaluated_stakes must be a non-empty JSON array"
+        )
+    if len(raw_stakes) > _MAX_EVALUATED_STAKES:
+        raise RiskSamplingMembershipError(
+            "fixed-N evaluated_stakes exceed the supported work domain"
+        )
+    evaluated_stakes = tuple(
+        _canonical_fixed_point_decimal(
+            value,
+            f"fixed-N evaluated_stakes[{index}]",
+        )
+        for index, value in enumerate(raw_stakes)
+    )
+    if any(stake <= 0 for stake in evaluated_stakes):
+        raise RiskSamplingMembershipError(
+            "fixed-N evaluated_stakes must be positive"
+        )
+    if target_kind == "single" and len(evaluated_stakes) != 1:
+        raise RiskSamplingMembershipError(
+            "fixed-N single target requires exactly one evaluated stake"
+        )
+
+    confidence_level = _canonical_fixed_point_decimal(
+        design.get("confidence_level"),
+        "fixed-N confidence_level",
+    )
+    if confidence_level <= 0 or confidence_level >= 1:
+        raise RiskSamplingMembershipError(
+            "fixed-N confidence_level must be strictly between 0 and 1"
+        )
+    ruin_threshold = _canonical_fixed_point_decimal(
+        design.get("ruin_threshold"),
+        "fixed-N ruin_threshold",
+    )
+    return (
+        bankroll_id,
+        currency,
+        target_kind,
+        target_sha256,
+        evaluated_stakes,
+        confidence_level,
+        ruin_threshold,
+    )
 
 
 def _entry(
@@ -142,10 +288,37 @@ class ResolvedFixedNRiskMembership:
     sampling_frame_sha256: str
     design_sha256: str
     risk_method: str = _RISK_METHOD
+    design_kind: str = _DESIGN_KIND_V1
+    bankroll_id: str | None = None
+    currency: str | None = None
+    target_kind: str | None = None
+    target_sha256: str | None = None
+    evaluated_stakes: tuple[Decimal, ...] = ()
+    confidence_level: Decimal | None = None
+    ruin_threshold: Decimal | None = None
 
     @property
     def planned_n(self) -> int:
         return len(self.planned_run_ids)
+
+    @property
+    def risk_estimand_structurally_precommitted(self) -> bool:
+        """Whether the inspected protocol structurally freezes evaluator inputs.
+
+        This is structural protocol truth only, not bearer capability and not
+        non-backdateable causal-precommit authority.
+        """
+
+        return (
+            self.design_kind == _DESIGN_KIND_V2
+            and self.bankroll_id is not None
+            and self.currency is not None
+            and self.target_kind is not None
+            and self.target_sha256 is not None
+            and bool(self.evaluated_stakes)
+            and self.confidence_level is not None
+            and self.ruin_threshold is not None
+        )
 
     @property
     def causal_precommit_proven(self) -> bool:
@@ -240,8 +413,10 @@ def inspect_fixed_n_risk_membership_structure(
         )
 
     design, design_sha256 = _parse_design(binding.get("evaluation_design"))
-    if design.get("kind") != _DESIGN_KIND:
-        raise RiskSamplingMembershipError("fixed-N evaluation design kind is unsupported")
+    design_kind = _canonical_text(
+        design.get("kind"),
+        "fixed-N evaluation design kind",
+    )
     if design.get("dataset_snapshot_id") != dataset_id:
         raise RiskSamplingMembershipError(
             "fixed-N evaluation design dataset identity mismatch"
@@ -284,6 +459,24 @@ def inspect_fixed_n_risk_membership_structure(
         design.get("sampling_frame_sha256"),
         "fixed-N sampling_frame_sha256",
     )
+
+    bankroll_id: str | None = None
+    currency: str | None = None
+    target_kind: str | None = None
+    target_sha256: str | None = None
+    evaluated_stakes: tuple[Decimal, ...] = ()
+    confidence_level: Decimal | None = None
+    ruin_threshold: Decimal | None = None
+    if design_kind == _DESIGN_KIND_V2:
+        (
+            bankroll_id,
+            currency,
+            target_kind,
+            target_sha256,
+            evaluated_stakes,
+            confidence_level,
+            ruin_threshold,
+        ) = _parse_frozen_risk_estimand(design)
 
     binding_cutoff = _canonical_text(binding.get("causal_cutoff"), "binding.causal_cutoff")
     dataset_cutoff = _canonical_text(
@@ -348,6 +541,14 @@ def inspect_fixed_n_risk_membership_structure(
         planned_run_ids=run_ids,
         sampling_frame_sha256=sampling_frame_sha256,
         design_sha256=design_sha256,
+        design_kind=design_kind,
+        bankroll_id=bankroll_id,
+        currency=currency,
+        target_kind=target_kind,
+        target_sha256=target_sha256,
+        evaluated_stakes=evaluated_stakes,
+        confidence_level=confidence_level,
+        ruin_threshold=ruin_threshold,
     )
 
 def resolve_fixed_n_risk_membership(

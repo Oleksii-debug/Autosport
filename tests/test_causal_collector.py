@@ -1917,6 +1917,57 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertIsNone(progress["completed_at"])
             market_store.close()
 
+    def test_canonical_application_health_write_uses_preproved_outcome(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            class MutatingHealthStore(SourceHealthStore):
+                def __init__(self, path):
+                    super().__init__(path)
+                    self.get_calls = 0
+
+                def get(self, source_id):
+                    self.get_calls += 1
+                    state = super().get(source_id)
+                    if self.get_calls == 2:
+                        object.__setattr__(
+                            event,
+                            "source_ts",
+                            "2026-01-01T00:00:02+00:00",
+                        )
+                    return state
+
+            market_store = SQLiteMarketStore(root / "market.db")
+            health_store = MutatingHealthStore(root / "health.json")
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                health_store,
+                root / "canonical-application.json",
+                clock=lambda: "2026-01-01T00:00:05+00:00",
+            )
+
+            with self.assertRaisesRegex(
+                DeltaConflictError,
+                "changed before application completion",
+            ):
+                application.apply(delta, event)
+
+            expected_after = application._state.health_after(delta)
+            actual = SourceHealthStore(root / "health.json").get(delta.source_id)
+            self.assertEqual(actual, expected_after)
+            self.assertEqual(
+                actual.latest_source_ts,
+                "2026-01-01T00:00:00+00:00",
+            )
+            progress = application._state.progress(delta)
+            self.assertIsNotNone(progress)
+            self.assertTrue(progress["market_applied"])
+            self.assertTrue(progress["health_applied"])
+            self.assertIsNone(progress["completed_at"])
+            market_store.close()
+
     def test_canonical_application_refuses_unprovable_market_publication(self):
         event = MarketEvent.from_dict(event_payload())
         delta = self.make_delta(payload=event.to_dict())

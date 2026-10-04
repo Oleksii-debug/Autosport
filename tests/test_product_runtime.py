@@ -5,10 +5,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.causal_collector_legacy as causal_collector_legacy_module
 import autosport.product_runtime as product_runtime_module
 
 from autosport.causal_collector import (
     CollectorDelta,
+    DesktopApplicationReceipt,
     DesktopDeltaCheckpointStore,
     canonical_event_digest,
     digest_source_payload,
@@ -296,6 +298,73 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 )
             finally:
                 restored.close()
+
+    def test_runtime_restart_ignores_application_receipt_dispatch_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            applied = _event()
+            delta = _delta(applied)
+            source = _Source(resolved_event=applied)
+
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                self.assertEqual(
+                    runtime.coordinator.desktop_consumer.drain(as_of=clock.value),
+                    (delta.delta_id,),
+                )
+                self.assertEqual(runtime.mirror.snapshot(), (applied,))
+            finally:
+                runtime.close()
+
+            generic_newer = MarketEvent.from_dict(
+                {
+                    **applied.to_dict(),
+                    "decimal_odds": "9.99",
+                    "sequence": 99,
+                    "observed_ts": "2026-09-20T13:58:05+00:00",
+                    "ingest_ts": "2026-09-20T13:58:06+00:00",
+                    "metadata": {"origin": "forged-restart-receipt"},
+                }
+            )
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                self.assertTrue(store.append(generic_newer))
+            finally:
+                store.close()
+
+            forged_receipt = DesktopApplicationReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=canonical_event_digest(generic_newer),
+                receipt_id="forged-receipt",
+                applied_at=clock.value,
+            )
+
+            with patch.object(
+                causal_collector_legacy_module._CanonicalDesktopApplicationStore,
+                "completed_receipts_for_source",
+                lambda _self, _source_id: (forged_receipt,),
+            ):
+                restored = build_autonomous_product_runtime(
+                    workspace=root,
+                    source=source,
+                    clock=clock,
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+                try:
+                    snapshot = restored.mirror.snapshot()
+                    self.assertEqual(snapshot, (applied,))
+                    self.assertEqual(str(snapshot[0].decimal_odds), "1.80")
+                finally:
+                    restored.close()
 
     def test_runtime_restart_rejects_receipt_without_durable_health_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

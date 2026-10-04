@@ -846,6 +846,19 @@ def test_product_fixed_n_risk_observations_match_evaluator_manifest(
         observations=cohort.observations,
     )
     assert request.observation_manifest_sha256 == cohort.observation_manifest_sha256
+    qualification = resolve_product_fixed_n_iid_qualification(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+    assert tuple(
+        item.source_evidence_sha256 for item in cohort.observations
+    ) == qualification.member_path_evidence_sha256
 
 
 def test_product_fixed_n_risk_observation_truth_cannot_be_caller_minted_or_subclassed() -> None:
@@ -897,6 +910,77 @@ def test_product_fixed_n_risk_observation_verifier_rejects_object_new_forgery(
     with pytest.raises(
         ProductFixedNRiskObservationSetError,
         match="differs from canonical durable evidence",
+    ):
+        verify_product_fixed_n_risk_observations(
+            forged,
+            membership=membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridges=(bridge,),
+            authority_root=authority_root,
+        )
+
+
+def test_product_fixed_n_risk_observation_verifier_rejects_equality_forgery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        bridge,
+        _initial_capital_sha256,
+        _stake_policy_sha256,
+    ) = _qualified_fixed_n_fixture(tmp_path, monkeypatch)
+    canonical = resolve_product_fixed_n_risk_observations(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+    forged_observation = object.__new__(RiskPathObservation)
+    source = canonical.observations[0]
+    for field_name in RiskPathObservation.__dataclass_fields__:
+        object.__setattr__(
+            forged_observation,
+            field_name,
+            object.__getattribute__(source, field_name),
+        )
+
+    class AlwaysEqual:
+        def __eq__(self, _other):
+            return True
+
+        def __ne__(self, _other):
+            return False
+
+    object.__setattr__(
+        forged_observation,
+        "minimum_equity",
+        AlwaysEqual(),
+    )
+    forged = object.__new__(ProductFixedNRiskObservationSet)
+    for field_name in ProductFixedNRiskObservationSet.__dataclass_fields__:
+        object.__setattr__(
+            forged,
+            field_name,
+            object.__getattribute__(canonical, field_name),
+        )
+    object.__setattr__(forged, "observations", (forged_observation,))
+
+    with pytest.raises(
+        ProductFixedNRiskObservationSetError,
+        match="minimum_equity must be an exact finite Decimal",
     ):
         verify_product_fixed_n_risk_observations(
             forged,

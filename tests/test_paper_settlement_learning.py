@@ -2596,5 +2596,187 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
             )
 
 
+    def test_reopen_revalidates_bound_ticket_against_paperbook(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                goal,
+                risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            book_path = root / "paper_book.json"
+            raw = json.loads(book_path.read_text(encoding="utf-8"))
+            raw["tickets"][0]["strategy_reason"] = "coherent-late-rewrite"
+            book_path.write_text(
+                json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            PaperBook.load(book_path)
+
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "economics changed after binding",
+            ):
+                PaperSettlementLearningBridge(
+                    root / "paper_learning_bridge.json",
+                    paper_book_path=book_path,
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=runtime,
+                    economic_goal=goal,
+                    risk_policy=risk,
+                )
+
+    def test_reopen_rejects_rehashed_outbox_with_wrong_net_reward(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                goal,
+                risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(root, outcomes={leg.quote_key: "win"})
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket.ticket_id,),
+                at="2026-09-19T21:20:00+00:00",
+            )
+
+            def rewrite_net_reward(binding):
+                outbox = binding["outbox"]
+                outbox["net_reward"] = "999"
+                semantic = {
+                    key: value
+                    for key, value in outbox.items()
+                    if key != "outbox_id"
+                }
+                outbox["outbox_id"] = hashlib.sha256(
+                    json.dumps(
+                        semantic,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+
+            _mutate_bridge_binding(root, rewrite_net_reward)
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "outbox differs from bound ticket economics",
+            ):
+                PaperSettlementLearningBridge(
+                    root / "paper_learning_bridge.json",
+                    paper_book_path=root / "paper_book.json",
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=runtime,
+                    economic_goal=goal,
+                    risk_policy=risk,
+                )
+
+    def test_reopen_revalidates_acked_ticket_against_paperbook(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                goal,
+                risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(root, outcomes={leg.quote_key: "win"})
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket.ticket_id,),
+                at="2026-09-19T21:20:00+00:00",
+            )
+            book_path = root / "paper_book.json"
+            raw = json.loads(book_path.read_text(encoding="utf-8"))
+            raw["tickets"][0]["strategy_reason"] = "acked-late-rewrite"
+            book_path.write_text(
+                json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            PaperBook.load(book_path)
+
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "economics changed after binding",
+            ):
+                PaperSettlementLearningBridge(
+                    root / "paper_learning_bridge.json",
+                    paper_book_path=book_path,
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=runtime,
+                    economic_goal=goal,
+                    risk_policy=risk,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

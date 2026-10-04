@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from threading import Event, Thread
 
 from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
@@ -20,6 +21,7 @@ from autosport.paper_execution_reality import (
     PaperExecutionEvidenceRegistry,
     PaperExecutionLedger,
     PaperExecutionModelConfig,
+    PaperExecutionStateError,
 )
 from autosport.real_execution_ledger import ExecutionAction, ExecutionPlan
 
@@ -427,6 +429,100 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 )
             self.assertEqual(len(ledger.events()), event_count)
             self.assertEqual(book.tickets, {})
+
+    def test_exposure_scope_publication_serializes_against_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            entered = Event()
+            release = Event()
+
+            class PausingLedger(PaperExecutionLedger):
+                def __init__(self, ledger_path):
+                    super().__init__(ledger_path)
+                    self.pause_next_load = False
+
+                def _load_unlocked(self):
+                    events = super()._load_unlocked()
+                    if self.pause_next_load:
+                        self.pause_next_load = False
+                        entered.set()
+                        if not release.wait(5):
+                            raise AssertionError(
+                                "timed out waiting to release scope publication"
+                            )
+                    return events
+
+            ledger = PausingLedger(path)
+            book = PaperBook("100.00")
+            runtime = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=ledger,
+                config=config(),
+                max_quote_age=__import__("datetime").timedelta(seconds=5),
+                paper_book_path=Path(tmp) / "paper-book.json",
+            )
+            current_prepared = prepared(runtime, action("a1"))
+            trigger_id = "trigger-scope-reservation-race"
+            run_id = runtime.expected_run_id(
+                current_prepared,
+                trigger_id,
+            )
+            ledger.pause_next_load = True
+            failures = []
+
+            def publish_scope():
+                try:
+                    runtime._publish_exposure_scope(
+                        prepared=current_prepared,
+                        run_id=run_id,
+                    )
+                except BaseException as exc:
+                    failures.append(exc)
+
+            worker = Thread(target=publish_scope)
+            worker.start()
+            self.assertTrue(
+                entered.wait(2),
+                "scope publication did not enter ledger critical section",
+            )
+
+            competing = PaperExecutionLedger(path)
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "writer lock exists",
+            ):
+                competing.reserve_run(
+                    run_id=run_id,
+                    trigger_id=trigger_id,
+                    plan=current_prepared.execution_plan,
+                    config=runtime.config,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={},
+                )
+
+            release.set()
+            worker.join(5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(failures, [])
+
+            competing.reserve_run(
+                run_id=run_id,
+                trigger_id=trigger_id,
+                plan=current_prepared.execution_plan,
+                config=runtime.config,
+                started_at=STARTED_AT,
+                observation_evidence_ids={},
+            )
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in ledger.events(run_id)
+                ],
+                [
+                    "PAPER_EXPOSURE_SCOPE_BOUND",
+                    "RUN_RESERVED",
+                ],
+            )
 
     def test_observed_attempt_restart_recovers_inputs_without_caller_state(self):
         with tempfile.TemporaryDirectory() as tmp:

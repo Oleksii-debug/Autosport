@@ -3387,6 +3387,45 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
         self.assertEqual(active.events, (event,))
 
+    def test_live_active_view_rejects_submicrosecond_future_source_time(self) -> None:
+        mirror = MarketMirror()
+        event = self.event(
+            sequence=1,
+            odds="2.00",
+            observed_ts="2026-09-16T19:00:01+00:00",
+            ingest_ts="2026-09-16T19:00:01+00:00",
+            source_ts="2026-09-16T19:00:01.0000001+00:00",
+        )
+        mirror.apply(event)
+
+        active = mirror.active_view(
+            as_of=self.CUTOFF,
+            max_age=timedelta(minutes=2),
+        )
+
+        self.assertEqual(active.events, ())
+        self.assertEqual(len(mirror.snapshot()), 1)
+
+    def test_live_active_view_rejects_submicrosecond_future_local_time(self) -> None:
+        mirror = MarketMirror()
+        event = self.event(
+            sequence=1,
+            odds="2.00",
+            observed_ts="2026-09-16T19:00:01.0000001+00:00",
+            ingest_ts="2026-09-16T19:00:01+00:00",
+            source_ts="2026-09-16T19:00:00+00:00",
+        )
+        mirror.apply(event)
+
+        active = mirror.active_view_for_keys(
+            ((event.source_id, event.quote_key),),
+            as_of=self.CUTOFF,
+            max_age=timedelta(minutes=2),
+        )
+
+        self.assertEqual(active.events, ())
+        self.assertEqual(active.revision, 1)
+
     def test_generation_zero_baseline_is_sealed_inside_append_issuance_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state = {"held": False, "baseline": False, "rebuild": False}

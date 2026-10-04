@@ -73,6 +73,14 @@ def _sync_parent_directory(path: Path) -> None:
             os.close(fd)
 
 
+def _sync_existing_file(path: Path) -> None:
+    """Flush an already-published SourceHealthStore image before authority COMMIT."""
+
+    with path.open("rb+") as handle:
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def _validate_source_id(value: object) -> str:
     if not isinstance(value, str) or not value or value.strip() != value:
         raise ValueError("source_id must be a non-empty trimmed string")
@@ -392,6 +400,10 @@ class SourceHealthStore:
         if not history:
             if observed is None:
                 return authority
+            # A first validated legacy image becomes the authority baseline only
+            # after the exact existing file and directory entry are durable.
+            _sync_existing_file(self.path)
+            _sync_parent_directory(self.path.parent)
             binding = self._authority_binding(
                 None,
                 observed,
@@ -416,6 +428,11 @@ class SourceHealthStore:
             authority.recover(observed_state_sha256=observed)
             return authority
 
+        if observed == pending.intended_state_sha256:
+            # The local replace happened before the prior writer stopped. Retry
+            # the durability barrier before converting PREPARE into COMMIT.
+            _sync_existing_file(self.path)
+            _sync_parent_directory(self.path.parent)
         authority.recover(
             observed_state_sha256=observed,
             tx_id=pending.tx_id,

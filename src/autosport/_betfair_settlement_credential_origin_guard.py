@@ -28,12 +28,14 @@ _CAPTURE_TYPE = _adapter.BetfairExecutionReadbackEnvelope
 _IDENTITY_TYPE = _identity.BetfairAuthenticatedAccountIdentity
 _ORIGINAL_QUALIFIED_READ = _semantics.read_currency_qualified_execution_readback
 _ORIGINAL_CURRENCY_FOR_CAPTURE = _semantics._currency_for_capture
+_ORIGINAL_CURRENCY_CODE = _semantics._currency_code
 _RESOLVE_IDENTITY = _identity.resolve_betfair_authenticated_account_identity
 _REQUIRE_IDENTITY = _identity.require_authoritative_betfair_account_identity
 
 if (
     not callable(_ORIGINAL_QUALIFIED_READ)
     or not callable(_ORIGINAL_CURRENCY_FOR_CAPTURE)
+    or not callable(_ORIGINAL_CURRENCY_CODE)
     or not callable(_RESOLVE_IDENTITY)
     or not callable(_REQUIRE_IDENTITY)
 ):
@@ -54,6 +56,7 @@ def _install_credential_origin_guard():
     identity_type = _IDENTITY_TYPE
     original_qualified_read = _ORIGINAL_QUALIFIED_READ
     original_currency_for_capture = _ORIGINAL_CURRENCY_FOR_CAPTURE
+    original_currency_code = _ORIGINAL_CURRENCY_CODE
     resolve_identity = _RESOLVE_IDENTITY
     require_identity = _REQUIRE_IDENTITY
 
@@ -108,6 +111,7 @@ def _install_credential_origin_guard():
     require_identity_graph = _executable_graph_snapshot(require_identity)
     qualified_read_graph = _executable_graph_snapshot(original_qualified_read)
     currency_lookup_graph = _executable_graph_snapshot(original_currency_for_capture)
+    currency_code_graph = _executable_graph_snapshot(original_currency_code)
 
     def _function_record_current(record) -> bool:
         (
@@ -179,6 +183,12 @@ def _install_credential_origin_guard():
             and _executable_graph_current(currency_lookup_graph)
         )
 
+    def _currency_code_current() -> bool:
+        return (
+            globals().get("_ORIGINAL_CURRENCY_CODE") is original_currency_code
+            and _executable_graph_current(currency_code_graph)
+        )
+
     def _assert_identity_verifier_current() -> None:
         if not _identity_verifier_current():
             raise error_type(
@@ -192,6 +202,22 @@ def _install_credential_origin_guard():
     def _assert_currency_lookup_current() -> None:
         if not _currency_lookup_current():
             raise error_type("settlement currency evidence lookup authority changed")
+
+    def _assert_currency_code_current() -> None:
+        if not _currency_code_current():
+            raise error_type("settlement currency code authority changed")
+
+    def canonical_currency_code(value: object) -> str:
+        """Keep persisted money currency inside the exact K07 identity shape."""
+
+        _assert_currency_code_current()
+        code = original_currency_code(value)
+        _assert_currency_code_current()
+        if len(code) != 3 or not code.isalpha():
+            raise error_type(
+                "provider_profit_currency must be three-letter uppercase ASCII letters"
+            )
+        return code
 
     def _require_k07(client, *, stage: str) -> _IDENTITY_TYPE:
         _assert_identity_verifier_current()
@@ -354,20 +380,27 @@ def _install_credential_origin_guard():
             raise error_type(
                 "settlement currency evidence changed before persistence"
             )
-        return expected_currency
+        return canonical_currency_code(expected_currency)
 
-    return read_currency_qualified_execution_readback, currency_for_capture
+    return (
+        read_currency_qualified_execution_readback,
+        currency_for_capture,
+        canonical_currency_code,
+    )
 
 
 (
     read_currency_qualified_execution_readback,
     _currency_for_capture,
+    _currency_code,
 ) = _install_credential_origin_guard()
 
 if _semantics.read_currency_qualified_execution_readback is not _ORIGINAL_QUALIFIED_READ:
     raise RuntimeError("Betfair settlement currency read dispatch changed before K07 guard")
 if _semantics._currency_for_capture is not _ORIGINAL_CURRENCY_FOR_CAPTURE:
     raise RuntimeError("Betfair settlement currency lookup changed before K07 guard")
+if _semantics._currency_code is not _ORIGINAL_CURRENCY_CODE:
+    raise RuntimeError("Betfair settlement currency code changed before K07 guard")
 if _settlement.read_currency_qualified_execution_readback is not _ORIGINAL_QUALIFIED_READ:
     raise RuntimeError("Betfair settlement public currency read changed before K07 guard")
 
@@ -375,6 +408,7 @@ _semantics.read_currency_qualified_execution_readback = (
     read_currency_qualified_execution_readback
 )
 _semantics._currency_for_capture = _currency_for_capture
+_semantics._currency_code = _currency_code
 _settlement.read_currency_qualified_execution_readback = (
     read_currency_qualified_execution_readback
 )

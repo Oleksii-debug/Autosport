@@ -1160,6 +1160,29 @@ def issue_product_iid_run_admission(
                 semantic_binding_sha256=semantic_binding,
             )
             atomic_write_json(path, state)
+            try:
+                readback = json.loads(
+                    path.read_text(encoding="utf-8"),
+                    object_pairs_hook=_reject_duplicate_keys,
+                    parse_constant=_reject_nonfinite,
+                )
+            except (
+                OSError,
+                UnicodeError,
+                json.JSONDecodeError,
+                ValueError,
+            ) as exc:
+                raise ProductIidDrawPlanError(
+                    "IID run-admission state cannot be read back after prepare"
+                ) from exc
+            if (
+                type(readback) is not dict
+                or readback != state
+                or _sha_bytes(_canonical_json(readback)) != state_sha256
+            ):
+                raise ProductIidDrawPlanError(
+                    "IID run-admission state changed before authority commit"
+                )
             record = authority.commit(
                 tx_id=tx_id,
                 observed_state_sha256=state_sha256,

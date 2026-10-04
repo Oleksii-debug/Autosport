@@ -15,8 +15,10 @@ from .causal_collector import (
     CanonicalDesktopApplication,
     CollectorDelta,
     CollectorDeltaStore,
+    DesktopApplicationReceipt,
     DesktopDeltaCheckpointStore,
     DesktopDeltaConsumer,
+    canonical_event_digest,
 )
 from .collector_service import CollectorServiceSource, HeadlessCollectorService
 from .continuous_session import (
@@ -824,6 +826,114 @@ class AutonomousProductRuntime:
         self._runtime_lease.release()
 
 
+def _desktop_receipt_authoritative_events(
+    *,
+    source_id: str,
+    market_store: SQLiteMarketStore,
+    collector_store: CollectorDeltaStore,
+    canonical_application: CanonicalDesktopApplication,
+    _market_store_type: type[SQLiteMarketStore] = SQLiteMarketStore,
+    _collector_store_type: type[CollectorDeltaStore] = CollectorDeltaStore,
+    _application_type: type[CanonicalDesktopApplication] = CanonicalDesktopApplication,
+    _receipt_type: type[DesktopApplicationReceipt] = DesktopApplicationReceipt,
+    _read_deltas=CollectorDeltaStore.deltas_after_commit,
+    _lookup_receipt=CanonicalDesktopApplication.lookup_receipt,
+    _read_events=SQLiteMarketStore.events,
+    _event_digest=canonical_event_digest,
+) -> tuple[MarketEvent, ...]:
+    """Recover only market state proven by completed desktop applications.
+
+    The autonomous product runtime is a collector/desktop composition, not the
+    live-ingestion composition.  Generic market history and live-ingestion receipts
+    therefore cannot bootstrap its mirror.  A restart may reuse a market event only
+    when the canonical collector delta has a durable DesktopApplicationReceipt whose
+    digest binds that exact persisted event.
+    """
+    if type(market_store) is not _market_store_type:
+        raise ProductCompositionError(
+            "product runtime preload requires the canonical SQLite market store"
+        )
+    if type(collector_store) is not _collector_store_type:
+        raise ProductCompositionError(
+            "product runtime preload requires the canonical collector delta store"
+        )
+    if type(canonical_application) is not _application_type:
+        raise ProductCompositionError(
+            "product runtime preload requires the canonical desktop application"
+        )
+
+    authoritative_digests: dict[str, str] = {}
+    after_delta_id: str | None = None
+    while True:
+        batch = _read_deltas(
+            collector_store,
+            source_id=source_id,
+            after_delta_id=after_delta_id,
+            max_items=1000,
+        )
+        if not batch:
+            break
+        if batch[-1].delta_id == after_delta_id:
+            raise ProductCompositionError(
+                "collector delta preload cursor did not advance"
+            )
+        for delta in batch:
+            if delta.source_id != source_id:
+                raise ProductCompositionError(
+                    "collector delta preload crossed provider authority"
+                )
+            receipt = _lookup_receipt(canonical_application, delta)
+            if receipt is None:
+                continue
+            if type(receipt) is not _receipt_type:
+                raise ProductCompositionError(
+                    "desktop application returned a non-canonical receipt"
+                )
+            if (
+                receipt.delta_id != delta.delta_id
+                or receipt.canonical_event_digest != delta.canonical_event_digest
+            ):
+                raise ProductCompositionError(
+                    "desktop application receipt is not bound to collector evidence"
+                )
+            previous = authoritative_digests.get(delta.event_dedupe_key)
+            if (
+                previous is not None
+                and previous != delta.canonical_event_digest
+            ):
+                raise ProductCompositionError(
+                    "desktop application receipts conflict for one market event"
+                )
+            authoritative_digests[delta.event_dedupe_key] = (
+                delta.canonical_event_digest
+            )
+        after_delta_id = batch[-1].delta_id
+
+    if not authoritative_digests:
+        return ()
+
+    matched: set[str] = set()
+    events: list[MarketEvent] = []
+    for event in _read_events(market_store):
+        if event.source_id != source_id:
+            continue
+        expected_digest = authoritative_digests.get(event.dedupe_key)
+        if expected_digest is None:
+            continue
+        if _event_digest(event) != expected_digest:
+            raise ProductCompositionError(
+                "desktop application receipt conflicts with canonical market history"
+            )
+        matched.add(event.dedupe_key)
+        events.append(event)
+
+    if matched != set(authoritative_digests):
+        raise ProductCompositionError(
+            "desktop application receipt references missing canonical market history"
+        )
+    return tuple(events)
+
+
 def build_autonomous_product_runtime(
     *,
     workspace: str | Path,
@@ -886,20 +996,7 @@ def build_autonomous_product_runtime(
         lifecycle = ContinuousEventLifecycle(root / "catalog.json")
         market_store = SQLiteMarketStore(root / "market.db")
         lease_stack.callback(market_store.close)
-        mirror = MarketMirror()
-        invalidations = BoundedMirrorInvalidationBuffer(mirror)
-
-        # This composition owns exactly one provider/source. Canonical market.db may
-        # legitimately also contain audit/import/live history for other providers;
-        # none of that state may seed this runtime's in-memory decision projection.
-        for (stored_source_id, _quote_key), event in (
-            market_store.current_by_source().items()
-        ):
-            if stored_source_id == source_id:
-                invalidations.accept_persisted(event)
-
         market_bus = MarketEventBus(market_store)
-        market_bus.subscribe(invalidations.accept_persisted)
         source_health = SourceHealthStore(root / "source_health.json")
         canonical_application = CanonicalDesktopApplication(
             market_bus,
@@ -907,9 +1004,20 @@ def build_autonomous_product_runtime(
             root / "desktop_application.json",
             clock=resolved_clock,
         )
-
-        dependencies = FocusedMirrorDependencyIndex(mirror)
         collector_store = CollectorDeltaStore(root / "collector_deltas.json")
+
+        mirror = MarketMirror()
+        invalidations = BoundedMirrorInvalidationBuffer(mirror)
+        for event in _desktop_receipt_authoritative_events(
+            source_id=source_id,
+            market_store=market_store,
+            collector_store=collector_store,
+            canonical_application=canonical_application,
+        ):
+            invalidations.accept_persisted(event)
+
+        market_bus.subscribe(invalidations.accept_persisted)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
         collector = HeadlessCollectorService(
             delta_store=collector_store,
             lifecycle=lifecycle,

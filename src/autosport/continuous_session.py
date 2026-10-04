@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins as _builtins
 import hashlib
 import json
 import uuid
@@ -56,7 +57,25 @@ def _build_settlement_callback_authority():
     exact_zip = zip
     exact_tuple = tuple
     exact_callable = callable
-    exact_dict_get = dict.get
+    exact_dict_type = dict
+    exact_dict_get = exact_dict_type.get
+    canonical_builtins = _builtins.__dict__
+    canonical_builtin_bindings = (
+        ("type", exact_type),
+        ("len", exact_len),
+        ("any", exact_any),
+        ("zip", exact_zip),
+        ("tuple", exact_tuple),
+        ("callable", exact_callable),
+        ("dict", exact_dict_type),
+    )
+
+    def require_canonical_builtins(*, label: str) -> None:
+        for name, expected in canonical_builtin_bindings:
+            if exact_dict_get(canonical_builtins, name, missing_callback_value) is not expected:
+                raise ContinuousSessionError(
+                    f"settlement {label} builtin authority changed during tick"
+                )
 
     def capture_python_surface(function: FunctionType) -> tuple[object, ...]:
         closure = function.__closure__
@@ -348,6 +367,7 @@ def _build_settlement_callback_authority():
         optional: bool = False,
         relookup: bool = True,
     ) -> None:
+        require_canonical_builtins(label=label)
         current = stable_callback_lookup(owner, name) if relookup else callback
         if callback is None:
             if not optional or current is not None:
@@ -1518,6 +1538,17 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 label="outcome authority resolve",
             )
             resolution = resolve(record, as_of=as_of)
+            # The callback is allowed to compute a resolution, not to retarget the
+            # interpreter primitives used by canonical settlement validation,
+            # snapshotting, PaperBook materialization, or the callback witness itself.
+            # Revalidate before any post-callback product dispatch can consume them.
+            _require_callback_fn(
+                outcome_authority,
+                "resolve",
+                resolve,
+                resolve_witness,
+                label="outcome authority resolve",
+            )
             if self.outcome_authority is not outcome_authority:
                 raise ContinuousSessionError(
                     "settlement outcome authority changed during resolution"

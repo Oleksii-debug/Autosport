@@ -258,7 +258,7 @@ def test_canonical_lineage_binding_rejects_changed_descriptor_or_bytes(tmp_path:
         snapshot_id="snapshot-1",
         shard_root=tmp_path,
         shards=(descriptor,),
-    ) is record
+    ) == record
     assert read_registered_shard_bytes(
         authority,
         snapshot_id="snapshot-1",
@@ -440,7 +440,7 @@ def test_shard_ending_exactly_at_causal_cutoff_is_accepted(tmp_path: Path) -> No
         snapshot_id="snapshot-1",
         shard_root=tmp_path,
         shards=(descriptor,),
-    ) is record
+    ) == record
     assert read_registered_shard_bytes(
         authority,
         snapshot_id="snapshot-1",
@@ -486,15 +486,20 @@ def test_read_revalidates_target_after_authority_lookup_to_close_toctou(
     manifest = verify_shard_files(tmp_path, (descriptor,))
     authority, _ = _canonical_authority(tmp_path, manifest)
     canonical_read = authority._read_and_verify
+    mutating_read_calls: list[str] = []
 
     def _mutating_read() -> object:
+        mutating_read_calls.append("read")
         result = canonical_read()
         path.write_bytes(rewritten)
         return result
 
     monkeypatch.setattr(authority, "_read_and_verify", _mutating_read)
 
-    with pytest.raises(DatasetShardManifestError, match="SHA-256"):
+    with pytest.raises(
+        DatasetShardManifestError,
+        match="canonical DatasetSnapshotLineageAuthority instance dispatch shadowed",
+    ):
         read_registered_shard_bytes(
             authority,
             snapshot_id="snapshot-1",
@@ -502,6 +507,7 @@ def test_read_revalidates_target_after_authority_lookup_to_close_toctou(
             shards=(descriptor,),
             shard_id="s0",
         )
+    assert mutating_read_calls == []
 
 
 def test_descriptor_subclass_cannot_rebind_verified_bytes_to_registered_member(
@@ -558,21 +564,27 @@ def test_authority_lookup_cannot_rebind_verified_descriptor_object(
     path.write_bytes(replacement_payload)
     candidate = _descriptor(0, "s0", "s.bin", replacement_payload)
     canonical_read = authority._read_and_verify
+    mutating_read_calls: list[str] = []
 
     def _mutating_read() -> object:
+        mutating_read_calls.append("read")
         result = canonical_read()
         object.__setattr__(candidate, "content_sha256", committed.content_sha256)
         return result
 
     monkeypatch.setattr(authority, "_read_and_verify", _mutating_read)
 
-    with pytest.raises(DatasetShardManifestError, match="commitments"):
+    with pytest.raises(
+        DatasetShardManifestError,
+        match="canonical DatasetSnapshotLineageAuthority instance dispatch shadowed",
+    ):
         verify_registered_dataset_shards(
             authority,
             snapshot_id="snapshot-1",
             shard_root=tmp_path,
             shards=(candidate,),
         )
+    assert mutating_read_calls == []
 
 
 def test_boolean_schema_versions_are_rejected(tmp_path: Path) -> None:
@@ -608,8 +620,10 @@ def test_read_rejects_shard_root_rebound_to_symlink_after_authority_lookup(
     manifest = verify_shard_files(shard_root, (descriptor,))
     authority, _ = _canonical_authority(tmp_path, manifest)
     canonical_read = authority._read_and_verify
+    mutating_read_calls: list[str] = []
 
     def _rebind_root() -> object:
+        mutating_read_calls.append("read")
         result = canonical_read()
         (shard_root / "s.bin").unlink()
         shard_root.rmdir()
@@ -621,7 +635,10 @@ def test_read_rejects_shard_root_rebound_to_symlink_after_authority_lookup(
 
     monkeypatch.setattr(authority, "_read_and_verify", _rebind_root)
 
-    with pytest.raises(DatasetShardManifestError, match="shard_root itself must not be a symlink"):
+    with pytest.raises(
+        DatasetShardManifestError,
+        match="canonical DatasetSnapshotLineageAuthority instance dispatch shadowed",
+    ):
         read_registered_shard_bytes(
             authority,
             snapshot_id="snapshot-1",
@@ -629,6 +646,7 @@ def test_read_rejects_shard_root_rebound_to_symlink_after_authority_lookup(
             shards=(descriptor,),
             shard_id="s0",
         )
+    assert mutating_read_calls == []
 
 
 def test_observer_rejects_parent_symlink_rebind_after_candidate_resolution(tmp_path: Path) -> None:

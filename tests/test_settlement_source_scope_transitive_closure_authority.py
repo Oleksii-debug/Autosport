@@ -18,11 +18,12 @@ _HOSTILE_CLASSIFIER_CALLS: list[str] = []
 
 
 def _hostile_classifier_with_matching_closure_shape():
+    exact_any = any
     exact_type = type
     session_module = object()
 
     def hostile(_ticket, _leg, event_identity):
-        _ = (exact_type, session_module)
+        _ = (exact_any, exact_type, session_module)
         _HOSTILE_CLASSIFIER_CALLS.append(event_identity)
         return "sourced"
 

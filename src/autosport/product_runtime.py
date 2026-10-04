@@ -2115,6 +2115,7 @@ class AutonomousProductRuntime:
 def _build_product_runtime_type(
     base_type: type[AutonomousProductRuntime],
     error_type: type[ProductCompositionError],
+    market_store_close,
 ):
     """Freeze the top-level product runtime graph outside caller-writable slots."""
 
@@ -2152,6 +2153,26 @@ def _build_product_runtime_type(
     )
     base_methods = {name: getattr(base_type, name) for name in dispatch_methods}
     base_init = base_type.__init__
+
+    def product_close(self) -> None:
+        object.__setattr__(self, "_closed", True)
+        try:
+            market_store_close(self.market_store)
+        except BaseException as primary_error:
+            try:
+                self._runtime_lease.release()
+            except BaseException as release_error:
+                try:
+                    primary_error.add_note(
+                        "product runtime lease release also failed while closing "
+                        f"market storage: {type(release_error).__name__}: {release_error}"
+                    )
+                except BaseException:
+                    pass
+            raise
+        self._runtime_lease.release()
+
+    base_methods["close"] = product_close
 
     class ProductRuntimeClassIdentity:
         __slots__ = ()
@@ -2258,6 +2279,7 @@ def _build_product_runtime_type(
 _ProductAutonomousProductRuntime = _build_product_runtime_type(
     AutonomousProductRuntime,
     ProductCompositionError,
+    SQLiteMarketStore.close,
 )
 del _build_product_runtime_type
 

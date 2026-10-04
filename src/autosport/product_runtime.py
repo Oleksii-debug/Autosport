@@ -1503,6 +1503,18 @@ def _build_autonomous_product_runtime_impl(
         )
 
         accept_persisted = invalidations.accept_persisted
+        source_resolve_event = source.resolve_event
+
+        def resolve_product_event(delta: CollectorDelta) -> MarketEvent:
+            current_identity = _source_resolver_identity_fn(
+                source=source,
+                source_id=source_id,
+            )
+            if current_identity != manifest.source_resolver_identity:
+                raise ProductCompositionError(
+                    "source resolver authority changed after product composition"
+                )
+            return source_resolve_event(delta)
 
         def lookup_completed_desktop_application(
             delta: CollectorDelta,
@@ -1558,7 +1570,7 @@ def _build_autonomous_product_runtime_impl(
         desktop = _desktop_consumer_type(
             collector_store,
             _checkpoint_type(root / "desktop_acks.json"),
-            resolve_event=source.resolve_event,
+            resolve_event=resolve_product_event,
             apply_event=apply_completed_desktop_application,
             lookup_application_receipt=lookup_completed_desktop_application,
             acknowledgement_clock=resolved_clock,

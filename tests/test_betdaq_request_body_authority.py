@@ -208,3 +208,42 @@ def test_request_builder_code_identity_drift_is_rejected_before_dispatch(
         builder.__code__ = original_code
 
     assert opener.calls == []
+
+
+
+def test_inflight_request_builder_rebind_is_rejected_before_https_dispatch(
+    monkeypatch,
+):
+    client, opener = _economic_client(monkeypatch)
+    account = client._account_client
+    original_builder = settlement_module._request_xml
+    mutated = False
+
+    def hostile_builder(credentials, method, attributes):
+        body = original_builder(credentials, method, attributes)
+        return body.replace(b'OrderId="123"', b'OrderId="999"', 1)
+
+    class _MutatingCallLock:
+        def __enter__(self):
+            nonlocal mutated
+            mutated = True
+            monkeypatch.setattr(
+                settlement_module,
+                "_request_xml",
+                hostile_builder,
+            )
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    account._call_lock = _MutatingCallLock()
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="request body does not match exact economic request authority",
+    ):
+        client.read_order_details(123)
+
+    assert mutated is True
+    assert opener.calls == []

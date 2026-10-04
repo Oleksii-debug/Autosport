@@ -4,6 +4,7 @@ import unittest
 
 import autosport.proposal_risk_execution_evidence_authority as evidence_authority
 from autosport.proposal_risk_execution_evidence_authority import (
+    ProductProposalRiskExecutionEvidence,
     ProductProposalRiskExecutionEvidenceError,
 )
 
@@ -137,6 +138,21 @@ class ProductProposalRiskExecutionEvidenceDispatchGuardTests(unittest.TestCase):
                 )
         finally:
             result_type.product_execution_provenance_proven = original
+
+    def test_malformed_row_is_domain_error_not_attribute_error(self) -> None:
+        forged_precommit = object.__new__(
+            evidence_authority.ProductProposalRiskEvaluationPrecommit
+        )
+        with self.assertRaises(ProductProposalRiskExecutionEvidenceError):
+            evidence_authority.derive_product_proposal_risk_execution_evidence(
+                forged_precommit,
+                (object(),),
+                evaluated_at="2026-10-04T10:02:00+00:00",
+            )
+
+    def test_result_type_still_cannot_be_directly_constructed(self) -> None:
+        with self.assertRaises(TypeError):
+            ProductProposalRiskExecutionEvidence()
 
 
 if __name__ == "__main__":

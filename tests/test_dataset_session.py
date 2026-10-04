@@ -35,6 +35,18 @@ class DatasetSessionTests(unittest.TestCase):
             )
             self.assertTrue(summary["strategy_runtime"]["opens_paper_tickets"])
             self.assertEqual(summary["paper_book_sha256"], sha256_file(session.book_path))
+            self.assertRegex(
+                summary["replay_input_event_payload_sequence_sha256"],
+                r"^[0-9a-f]{64}$",
+            )
+            self.assertRegex(
+                summary["replay_consumed_event_payload_sequence_sha256"],
+                r"^[0-9a-f]{64}$",
+            )
+            self.assertRegex(
+                summary["replay_applied_event_payload_sequence_sha256"],
+                r"^[0-9a-f]{64}$",
+            )
             self.assertFalse(summary["real_money_execution"])
             session.close()
             restored = AutosportSession(tmp, "1")

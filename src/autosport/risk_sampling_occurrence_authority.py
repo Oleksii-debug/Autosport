@@ -1721,10 +1721,115 @@ def resolve_product_iid_run_execution(
     return result
 
 
+
+_RUN_EXECUTION_RECEIPT_FIELDS = (
+    "experiment_id",
+    "member_id",
+    "member_index",
+    "expected_draw_plan_sha256",
+    "expected_draw_transcript_sha256",
+    "run_admission_receipt_sha256",
+    "replay_execution_receipt_sha256",
+    "replay_dataset_hash",
+    "event_count",
+    "expected_event_payload_sequence_sha256",
+    "expected_event_payload_multiset_sha256",
+    "completed_summary_sha256",
+    "receipt_sha256",
+)
+
+
+def _build_run_execution_verifier(
+    resolver,
+    receipt_type: type[ProductIidRunExecutionReceipt],
+):
+    """Bind verification to canonical durable re-resolution, not object possession."""
+
+    module_globals = globals()
+    resolver_code = getattr(resolver, "__code__", None)
+    if resolver_code is None:
+        raise RuntimeError("IID run-execution resolver authority is unavailable")
+    fields = _RUN_EXECUTION_RECEIPT_FIELDS
+
+    def verifier(
+        candidate: ProductIidRunExecutionReceipt,
+        *,
+        membership: ResolvedFixedNRiskMembership,
+        registry_path: str | Path,
+        workspace: str | Path,
+        sampling_manifest_json: str,
+        sampling_frame_json: str,
+        horizon_json: str,
+        member_index: int,
+        authority_root: str | Path | None = None,
+    ) -> ProductIidRunExecutionReceipt:
+        def require_dispatch() -> None:
+            if (
+                module_globals.get("resolve_product_iid_run_execution") is not resolver
+                or getattr(resolver, "__code__", None) is not resolver_code
+                or module_globals.get("ProductIidRunExecutionReceipt")
+                is not receipt_type
+            ):
+                raise ProductIidDrawPlanError(
+                    "IID run-execution verifier authority dispatch changed"
+                )
+
+        require_dispatch()
+        if type(candidate) is not receipt_type:
+            raise TypeError(
+                "candidate must be an exact ProductIidRunExecutionReceipt"
+            )
+
+        canonical = resolver(
+            membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=sampling_manifest_json,
+            sampling_frame_json=sampling_frame_json,
+            horizon_json=horizon_json,
+            member_index=member_index,
+            authority_root=authority_root,
+        )
+        require_dispatch()
+        if type(canonical) is not receipt_type:
+            raise ProductIidDrawPlanError(
+                "IID run-execution resolver returned invalid receipt type"
+            )
+
+        try:
+            differs = any(
+                object.__getattribute__(candidate, field_name)
+                != object.__getattribute__(canonical, field_name)
+                for field_name in fields
+            )
+        except AttributeError as exc:
+            raise ProductIidDrawPlanError(
+                "IID run-execution receipt differs from canonical completed evidence"
+            ) from exc
+        if differs:
+            raise ProductIidDrawPlanError(
+                "IID run-execution receipt differs from canonical completed evidence"
+            )
+        require_dispatch()
+        return canonical
+
+    verifier.__name__ = "verify_product_iid_run_execution"
+    verifier.__qualname__ = "verify_product_iid_run_execution"
+    return verifier
+
+
+verify_product_iid_run_execution = _build_run_execution_verifier(
+    resolve_product_iid_run_execution,
+    ProductIidRunExecutionReceipt,
+)
+del _build_run_execution_verifier
+
+
 __all__.extend(
     [
         "ProductIidRunExecutionReceipt",
         "resolve_product_iid_run_execution",
+        "verify_product_iid_run_execution",
     ]
 )
 

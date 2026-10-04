@@ -302,6 +302,37 @@ class LiveReceiptReconvergenceTests(unittest.TestCase):
             store.close()
 
 
+    def test_provider_reentry_cannot_redirect_live_store_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            primary = SQLiteMarketStore(Path(directory) / "primary.db")
+            foreign = SQLiteMarketStore(Path(directory) / "foreign.db")
+            bus = MarketEventBus(primary)
+            engine = IngestionEngine(
+                bus,
+                clock=lambda: self.RECEIVE_TIME,
+            )
+
+            class StoreSwappingProvider(InMemoryProvider):
+                def read_batch(self, max_items=1000):
+                    bus.store = foreign
+                    return super().read_batch(max_items=max_items)
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "live ingestion store authority changed during provider I/O",
+            ):
+                engine.poll_once(
+                    StoreSwappingProvider("provider-a", [self._quote()]),
+                    max_items=10,
+                )
+
+            self.assertEqual(primary.events(), [])
+            self.assertEqual(primary.trusted_live_events(), [])
+            self.assertEqual(foreign.events(), [])
+            self.assertEqual(foreign.trusted_live_events(), [])
+            primary.close()
+            foreign.close()
+
     def test_provider_reentry_cannot_swap_poll_authorities(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

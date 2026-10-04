@@ -211,6 +211,21 @@ _AUTHORITY_METHOD_WITNESSES = tuple(
     for name in ("prepare", "commit", "recover", "read_history")
 )
 _AUTHORITY_METHOD_WITNESSES_EXPECTED = _AUTHORITY_METHOD_WITNESSES
+_CONSTRUCTOR_WITNESSES = tuple(
+    (
+        label,
+        owner,
+        owner.__init__,
+        getattr(owner.__init__, "__code__", None),
+    )
+    for label, owner in (
+        ("EconomicGoalStore", EconomicGoalStore),
+        ("PaperRiskPolicy", PaperRiskPolicy),
+        ("JsonlDecisionLedger", JsonlDecisionLedger),
+        ("MonotonicWorkspaceAuthority", MonotonicWorkspaceAuthority),
+    )
+)
+_CONSTRUCTOR_WITNESSES_EXPECTED = _CONSTRUCTOR_WITNESSES
 
 
 def _make_target_identity_capability():
@@ -458,6 +473,10 @@ def _require_dispatch() -> None:
         (_REPLACE is replace, "dataclasses.replace helper"),
         (_PROVENANCE_FOR is provenance_for, "economic-goal provenance helper"),
         (_ENSURE_DURABLE_FILE is ensure_durable_file, "durable-file helper"),
+        (
+            _CONSTRUCTOR_WITNESSES is _CONSTRUCTOR_WITNESSES_EXPECTED,
+            "constructor witness root",
+        ),
     )
     for valid, name in checks:
         if not valid:
@@ -481,6 +500,13 @@ def _require_dispatch() -> None:
         ):
             raise ProductProposalRiskTargetError(
                 f"proposal-risk target dispatch authority changed: WorkspaceEconomicLock.{name}"
+            )
+
+    for label, owner, expected, code in _CONSTRUCTOR_WITNESSES_EXPECTED:
+        current = owner.__init__
+        if current is not expected or getattr(current, "__code__", None) is not code:
+            raise ProductProposalRiskTargetError(
+                f"proposal-risk target dispatch authority changed: {label}.__init__"
             )
 
     descriptors = (

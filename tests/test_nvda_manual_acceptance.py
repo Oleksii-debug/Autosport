@@ -1130,6 +1130,61 @@ def test_unknown_protocol_cannot_mint_or_resolve_decision(tmp_path):
         )
 
 
+def test_record_decision_rejects_writer_lock_global_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger = _ledger(tmp_path)
+    hostile_called = False
+
+    class HostileLock:
+        def __init__(self, *_args, **_kwargs):
+            nonlocal hostile_called
+            hostile_called = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        nvda_manual_module,
+        "_ManualNvdaWriterLock",
+        HostileLock,
+    )
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="writer-lock authority changed",
+    ):
+        _record(ledger, _transcript())
+    assert hostile_called is False
+
+
+def test_record_decision_rejects_writer_lock_method_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger = _ledger(tmp_path)
+    hostile_called = False
+
+    def hostile_acquire(self):
+        nonlocal hostile_called
+        del self
+        hostile_called = True
+        raise AssertionError("hostile writer lock acquire executed")
+
+    monkeypatch.setattr(_ManualNvdaWriterLock, "acquire", hostile_acquire)
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="writer-lock authority changed: acquire",
+    ):
+        _record(ledger, _transcript())
+    assert hostile_called is False
+
+
 def test_active_writer_lock_fails_closed(tmp_path):
     transcript = _transcript()
     ledger = _ledger(tmp_path)

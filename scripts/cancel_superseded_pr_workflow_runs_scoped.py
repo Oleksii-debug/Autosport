@@ -1653,6 +1653,8 @@ def cancel_superseded_explicit_pr_runs(
     workflow_name: str,
     current_run_id: int,
     runs: tuple[WorkflowRun, ...] | None = None,
+    _selector=select_superseded_runs,
+    _selector_code=select_superseded_runs.__code__,
     _cancel_effect=_cancel_run_or_defer_active_conflict,
     _cancel_effect_code=_cancel_run_or_defer_active_conflict.__code__,
     _qualification_reader=None,
@@ -1698,7 +1700,8 @@ def cancel_superseded_explicit_pr_runs(
 
     def require_decision_authorities() -> None:
         if (
-            _qualification_reader_code is None
+            getattr(_selector, "__code__", None) is not _selector_code
+            or _qualification_reader_code is None
             or getattr(_qualification_reader, "__code__", None)
             is not _qualification_reader_code
             or _identity_checker_code is None
@@ -1789,7 +1792,7 @@ def cancel_superseded_explicit_pr_runs(
             continue
         qualification_state = qualification_state_from_trusted_read(qualification)
         qualification_head, integration_capable = qualification_state
-        selected = select_superseded_runs(
+        selected = _selector(
             explicit_singleton_runs,
             pr_number=pr_number,
             live_head_sha=qualification_head,

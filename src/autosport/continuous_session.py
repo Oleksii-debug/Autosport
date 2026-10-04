@@ -229,6 +229,7 @@ class _ContinuousSessionCoordinatorMeta(type):
         protected = {
             "_settle",
             "_settlement_resolutions",
+            "_recovered_settlement_resolutions",
             "__setattr__",
             "__delattr__",
             "_settlement_consumer_bindings_sealed",
@@ -255,6 +256,7 @@ class _ContinuousSessionCoordinatorMeta(type):
         if sealed and name in {
             "_settle",
             "_settlement_resolutions",
+            "_recovered_settlement_resolutions",
             "__setattr__",
             "__delattr__",
             "_settlement_consumer_bindings_sealed",
@@ -270,6 +272,7 @@ class _ContinuousSessionCoordinatorMeta(type):
         if sealed and name in {
             "_settle",
             "_settlement_resolutions",
+            "_recovered_settlement_resolutions",
             "__setattr__",
             "__delattr__",
             "_settlement_consumer_bindings_sealed",

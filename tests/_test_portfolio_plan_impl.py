@@ -1325,6 +1325,15 @@ class PortfolioPlanTests(unittest.TestCase):
             (authority.authority_sha256,),
         )
 
+        with self.assertRaisesRegex(
+            ValueError,
+            "not issued by canonical portfolio analysis",
+        ):
+            replace(
+                plan,
+                terminal_economics=copy.copy(plan.terminal_economics),
+            )
+
         copied_authority = copy.copy(authority)
         with self.assertRaisesRegex(
             ValueError,

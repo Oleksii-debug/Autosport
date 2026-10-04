@@ -1146,6 +1146,10 @@ class ProphetXSessionLifecycle:
                 raise ProphetXSessionLifecycleError(
                     "renewal attempt was not issued by this coordinator"
                 )
+            if attempt in self._issued_effect_admissions:
+                raise ProphetXSessionLifecycleError(
+                    "renewal effect authority was not consumed"
+                )
             try:
                 with WorkspaceEconomicLock(self._scope_dir):
                     current = self._require_owned_renewal(attempt)
@@ -1193,6 +1197,10 @@ class ProphetXSessionLifecycle:
             if attempt not in self._owned_attempts:
                 raise ProphetXSessionLifecycleError(
                     "renewal attempt was not issued by this coordinator"
+                )
+            if attempt in self._issued_effect_admissions:
+                raise ProphetXSessionLifecycleError(
+                    "renewal effect authority was not consumed"
                 )
             try:
                 with WorkspaceEconomicLock(self._scope_dir):
@@ -1311,6 +1319,10 @@ class ProphetXSessionLifecycle:
                 raise ProphetXSessionLifecycleError(
                     "login attempt was not issued by this coordinator"
                 )
+            if attempt in self._issued_effect_admissions:
+                raise ProphetXSessionLifecycleError(
+                    "login effect authority was not consumed"
+                )
             try:
                 with WorkspaceEconomicLock(self._scope_dir):
                     current = self._require_owned_inflight(attempt)
@@ -1354,6 +1366,10 @@ class ProphetXSessionLifecycle:
             if attempt not in self._owned_attempts:
                 raise ProphetXSessionLifecycleError(
                     "login attempt was not issued by this coordinator"
+                )
+            if attempt in self._issued_effect_admissions:
+                raise ProphetXSessionLifecycleError(
+                    "login effect authority was not consumed"
                 )
             try:
                 with WorkspaceEconomicLock(self._scope_dir):

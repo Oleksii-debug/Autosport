@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 
 from autosport.proposal_risk_execution_evidence_authority import (
     ProductProposalRiskExecutionEvidenceError,
@@ -18,6 +19,20 @@ class ProductProposalRiskExecutionEvidenceTargetChronologyTests(unittest.TestCas
 
     def _row(self, member_id: str, **kwargs: object):
         return _row_impl(self.precommit, member_id, **kwargs)
+
+    def test_product_precommit_slots_reject_object_setattr_mutation(self) -> None:
+        original = self.precommit.ruin_threshold
+        with self.assertRaisesRegex(AttributeError, "write-once product evidence"):
+            object.__setattr__(self.precommit, "ruin_threshold", Decimal("999"))
+        self.assertEqual(self.precommit.ruin_threshold, original)
+        self.assertTrue(self.precommit.binding_identity_proven)
+
+    def test_member_assertion_slots_reject_object_setattr_mutation(self) -> None:
+        row = self._row("member-a", source="source-a")
+        original = row.minimum_equity
+        with self.assertRaisesRegex(AttributeError, "write-once product evidence"):
+            object.__setattr__(row, "minimum_equity", Decimal("0"))
+        self.assertEqual(row.minimum_equity, original)
 
     def test_member_assertion_after_reveal_but_before_target_is_rejected(self) -> None:
         pre_target = self._row(

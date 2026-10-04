@@ -1038,6 +1038,10 @@ class PaperSettlementLearningBridge:
                 raise PaperSettlementLearningBridgeError(
                     "campaign plan anchor requires an existing ticket binding"
                 )
+            book = PaperBook.load(self.paper_book_path)
+            ticket = self._bound_ticket(book, binding)
+            if binding["status"] != BOUND:
+                self._require_outbox_matches_ticket(binding, ticket)
             anchor = binding.get("campaign_plan_anchor")
             if anchor is None:
                 return None
@@ -1085,6 +1089,9 @@ class PaperSettlementLearningBridge:
                 raise PaperSettlementLearningBridgeError(
                     "campaign plan anchor requires sealed resolution evidence"
                 )
+            book = PaperBook.load(self.paper_book_path)
+            ticket = self._bound_ticket(book, binding)
+            self._require_outbox_matches_ticket(binding, ticket)
             existing = binding.get("campaign_plan_anchor")
             if existing is not None:
                 if existing != expected:
@@ -1826,6 +1833,9 @@ class PaperSettlementLearningBridge:
                 raise PaperSettlementLearningBridgeError(
                     "ticket has no durable learner outbox"
                 )
+            book = PaperBook.load(self.paper_book_path)
+            ticket = self._bound_ticket(book, binding)
+            self._require_outbox_matches_ticket(binding, ticket)
             outcome, reward, transition, checkpoint = self._outbox_objects(outbox)
             try:
                 raw_observation = binding["observation"]

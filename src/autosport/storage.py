@@ -1156,7 +1156,7 @@ class SQLiteMarketStore:
                             _decode_current(row) if row is not None else None
                         )
                     previous = projection_state[projection_key]
-                    if previous is None or _projection_key(event) > _projection_order_key(
+                    if previous is None or _projection_key(event) > _projection_key(
                         previous
                     ):
                         expected_append_changes += 1

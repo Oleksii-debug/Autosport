@@ -109,3 +109,7 @@ def _build_require_store_guard():
 
 _issuance._require_store = _build_require_store_guard()
 del _build_require_store_guard
+
+# The canonical reader is only one transitive seam. Install the same-lineage direct
+# issuance/constructor/clock dispatch seal after the reader guard has composed.
+from . import _policy_evaluation_issuance_dispatch_guard as _policy_evaluation_issuance_dispatch_guard  # noqa: F401,E402

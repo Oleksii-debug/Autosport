@@ -873,6 +873,7 @@ class GitHubApi:
                 raise CancellationError("invalid workflow-runs response")
             page_runs = payload["workflow_runs"]
             total_count = payload["total_count"]
+            unique_before_page = len(seen_run_ids)
             if len(page_runs) > _runs_per_page:
                 raise CancellationError("invalid workflow-runs page size")
             if total_count < len(page_runs):
@@ -887,6 +888,7 @@ class GitHubApi:
             if (
                 not page_runs
                 or len(page_runs) < _runs_per_page
+                or len(seen_run_ids) == unique_before_page
                 or len(seen_run_ids) >= total_count
             ):
                 break

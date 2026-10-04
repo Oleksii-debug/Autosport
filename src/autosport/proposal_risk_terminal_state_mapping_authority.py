@@ -444,6 +444,7 @@ class ProductProposalRiskTerminalStateMapping:
     terminal_population_sha256: str
     scenario_population_sha256: str
     market_group_sha256s: tuple[str, ...]
+    per_market_terminal_space_exact: bool
     joint_terminal_space_exact: bool
     planned_member_ids: tuple[str, ...]
     member_scenario_ids: tuple[str, ...]
@@ -484,7 +485,10 @@ class ProductProposalRiskTerminalStateMapping:
     def per_market_terminal_states_exact(
         self, _proven=_MAPPING_PROVEN
     ) -> bool:
-        return _proven(self)
+        return (
+            _proven(self)
+            and getattr(self, "per_market_terminal_space_exact", False) is True
+        )
 
     @property
     def terminal_mapping_proven(self, _proven=_MAPPING_PROVEN) -> bool:
@@ -544,6 +548,7 @@ _RESULT_FIELDS = (
     "terminal_population_sha256",
     "scenario_population_sha256",
     "market_group_sha256s",
+    "per_market_terminal_space_exact",
     "joint_terminal_space_exact",
     "planned_member_ids",
     "member_scenario_ids",
@@ -703,11 +708,6 @@ def _terminal_groups(
             raise ProductProposalRiskTerminalStateMappingError(
                 "terminal market-group exactness is not canonical bool"
             )
-        if terminal_space_exact is not True:
-            raise ProductProposalRiskTerminalStateMappingError(
-                "terminal mapping requires exact per-market terminal semantics"
-            )
-
         providers = [by_sha[digest] for digest in group_authority_sha256s]
         baseline_states = _AUTHORITY_TERMINAL_STATES_GETTER(providers[0])
         if type(baseline_states) is not tuple or not baseline_states:
@@ -745,7 +745,7 @@ def _terminal_groups(
             _TerminalGroupModel(
                 market_group_sha256=group_sha,
                 authority_sha256s=group_authority_sha256s,
-                terminal_space_exact=True,
+                terminal_space_exact=terminal_space_exact,
                 state_by_id=state_by_id,
             )
         )
@@ -1206,6 +1206,10 @@ def _resolve_product_proposal_risk_terminal_state_mapping_values(
             "terminal mapping lost fixed-N member cardinality"
         )
 
+    per_market_terminal_space_exact = all(
+        group.terminal_space_exact for group in groups
+    )
+
     result_material = {
         "schema": _RESULT_SCHEMA,
         "workspace_instance_id": precommit.workspace_instance_id,
@@ -1215,6 +1219,7 @@ def _resolve_product_proposal_risk_terminal_state_mapping_values(
         "terminal_population_sha256": terminal_population.population_sha256,
         "scenario_population_sha256": scenario_population.population_sha256,
         "market_group_sha256s": list(terminal_population.market_group_sha256s),
+        "per_market_terminal_space_exact": per_market_terminal_space_exact,
         "joint_terminal_space_exact": terminal_population.terminal_space_exact,
         "planned_member_ids": list(precommit.planned_member_ids),
         "members": [
@@ -1238,7 +1243,7 @@ def _resolve_product_proposal_risk_terminal_state_mapping_values(
         ],
         "provider_terminal_population_proven": True,
         "fixed_n_member_mapping_complete": True,
-        "per_market_terminal_states_exact": True,
+        "per_market_terminal_states_exact": per_market_terminal_space_exact,
         "terminal_mapping_proven": True,
         "product_scenario_source_provenance_proven": False,
         "iid_member_mapping_proven": False,
@@ -1261,6 +1266,7 @@ def _resolve_product_proposal_risk_terminal_state_mapping_values(
         "terminal_population_sha256": terminal_population.population_sha256,
         "scenario_population_sha256": scenario_population.population_sha256,
         "market_group_sha256s": terminal_population.market_group_sha256s,
+        "per_market_terminal_space_exact": per_market_terminal_space_exact,
         "joint_terminal_space_exact": terminal_population.terminal_space_exact,
         "planned_member_ids": precommit.planned_member_ids,
         "member_scenario_ids": scenario_population.member_scenario_ids,

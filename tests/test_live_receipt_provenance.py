@@ -12,7 +12,7 @@ from autosport.ingestion import IngestionEngine
 from autosport.market_bus import MarketEventBus
 from autosport.market_mirror import MarketMirror
 from autosport.providers import CanonicalNormalizer, InMemoryProvider, ProviderQuote
-from autosport.storage import SQLiteMarketStore
+from autosport.storage import SQLiteMarketStore, _LiveReceiptBatch
 
 
 class LiveReceiptProvenanceTests(unittest.TestCase):
@@ -95,6 +95,84 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
 
             self.assertEqual(accepted, [event])
             self.assertFalse(store.has_trusted_live_receipt(event))
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
+    def test_public_batch_with_forged_live_wrapper_remains_receipt_neutral(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+
+            # Neither the private wrapper nor a caller-authored legacy depth marker
+            # can grant live receipt authority through the public append seam.
+            store._live_receipt_write_depth = 1
+            accepted = store.append_batch_accepted(_LiveReceiptBatch((event,)))
+
+            self.assertEqual(accepted, [event])
+            self.assertFalse(store.has_trusted_live_receipt(event))
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
+    def test_live_append_hook_cannot_mint_receipt_without_persisting_row(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+
+            with patch.object(
+                store,
+                "append_batch_accepted",
+                return_value=[event],
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "did not persist an expected market event",
+                ):
+                    store._append_live_batch_accepted([event])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertFalse(store.connection.in_transaction)
+            store.close()
+
+    def test_live_append_hook_cannot_retroactively_upgrade_existing_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+            self.assertTrue(store.append(event))
+
+            with patch.object(
+                store,
+                "append_batch_accepted",
+                return_value=[event],
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "outside the canonical inserted set",
+                ):
+                    store._append_live_batch_accepted([event])
+
+            self.assertEqual(store.events(), [event])
+            self.assertFalse(store.has_trusted_live_receipt(event))
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertFalse(store.connection.in_transaction)
+            store.close()
+
+    def test_public_batch_preserves_outer_transaction_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+
+            store.connection.execute("BEGIN IMMEDIATE")
+            accepted = store.append_batch_accepted([event])
+            self.assertEqual(accepted, [event])
+            self.assertTrue(store.connection.in_transaction)
+            store.connection.rollback()
+
+            self.assertEqual(store.events(), [])
             self.assertEqual(store.trusted_live_events(), [])
             store.close()
 

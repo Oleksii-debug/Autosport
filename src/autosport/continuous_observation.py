@@ -364,7 +364,10 @@ def run_continuous_observation(
                 0.0,
                 earned_backoff - causally_elapsed,
             )
-        mirror = MarketMirror.from_store(store)
+        # Continuous live decisions must restart only from rows carrying
+        # product-owned live receipt authority. Generic/import history remains
+        # canonical audit evidence but cannot seed the live in-memory projection.
+        mirror = MarketMirror.from_live_store(store)
         mirror_updates = BoundedMirrorInvalidationBuffer(mirror)
         publish("running")
 

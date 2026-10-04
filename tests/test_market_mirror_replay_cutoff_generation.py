@@ -4695,6 +4695,33 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_replay_preserves_predecessor_when_successor_source_time_is_future(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                predecessor = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                successor = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:00.500000+00:00",
+                    ingest_ts="2026-09-16T19:00:00.500000+00:00",
+                    source_ts="2026-09-16T19:00:02+00:00",
+                )
+                self.assertTrue(store.append(predecessor))
+                self.assertTrue(store.append(successor))
+
+                replayed = self.replay(store)
+
+                self.assertEqual(len(replayed.events), 1)
+                self.assertEqual(replayed.events[0].sequence, 1)
+                self.assertEqual(replayed.events[0].decimal_odds, Decimal("2.00"))
+            finally:
+                store.close()
+
     def test_verified_current_history_preserves_predecessor_hidden_by_future_successor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

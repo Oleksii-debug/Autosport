@@ -1789,6 +1789,90 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(factory.calls, [("input-a", (("selection-a", 2, "open"),))])
             loop.close()
 
+    def test_normal_live_hot_path_does_not_scan_durable_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            with patch.object(
+                SQLiteMarketStore,
+                "events_with_append_generation",
+                side_effect=AssertionError(
+                    "ordinary current live decision must not scan durable history"
+                ),
+            ):
+                self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            loop.close()
+
+    def test_future_stale_successor_supersedes_still_fresh_predecessor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=9))
+            predecessor = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.00"),
+                observed_ts=(self.START + timedelta(seconds=8)).isoformat(),
+                source_id="provider-a",
+                sequence=1,
+                status="open",
+                source_ts=(self.START + timedelta(seconds=8)).isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=8)).isoformat(),
+            )
+            stale_successor = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.10"),
+                observed_ts=(self.START + timedelta(seconds=9)).isoformat(),
+                source_id="provider-a",
+                sequence=2,
+                status="open",
+                source_ts=self.START.isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=10)).isoformat(),
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(predecessor,), (stale_successor,), ()],
+                ),
+                factory=factory,
+                clock=clock,
+                max_quote_age=timedelta(seconds=5),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            factory.calls.clear()
+            clock.value = self.START + timedelta(seconds=9, microseconds=500000)
+            loop.run_cycle()
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+            self.assertEqual(
+                loop._availability_deadlines["input-a"],
+                self.START + timedelta(seconds=10),
+            )
+
+            factory.calls.clear()
+            clock.value = self.START + timedelta(seconds=10)
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls, [("input-a", ())])
+            loop.close()
+
     def test_future_local_availability_recomputes_at_exact_boundary_without_new_market_delta(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

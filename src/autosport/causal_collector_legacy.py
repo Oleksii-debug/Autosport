@@ -973,9 +973,13 @@ class CanonicalDesktopApplication:
         *,
         _market_event_type,
         _canonical_digest,
+        _market_bus_type,
+        _market_publish,
         _market_store_type,
         _market_events,
         _dedupe_getter,
+        _health_store_type,
+        _health_get,
         _health_state_type,
         _health_read,
         _health_state_from_payload,
@@ -996,19 +1000,17 @@ class CanonicalDesktopApplication:
         market_bus = self.market_bus
         health_store = self.health_store
         application_clock = self.clock
-        market_publish = getattr(market_bus, "publish", None)
-        health_get = getattr(health_store, "get", None)
         if type(state) is not _application_store_type:
             raise ApplicationReceiptError(
                 "canonical application lacks canonical journal authority"
             )
-        if not callable(market_publish):
+        if type(market_bus) is not _market_bus_type:
             raise ApplicationReceiptError(
-                "canonical application market publication authority is unavailable"
+                "canonical application lacks canonical market bus authority"
             )
-        if not callable(health_get):
+        if type(health_store) is not _health_store_type:
             raise ApplicationReceiptError(
-                "canonical application health projection authority is unavailable"
+                "canonical application lacks canonical health-store authority"
             )
         if not callable(application_clock):
             raise ApplicationReceiptError(
@@ -1052,7 +1054,7 @@ class CanonicalDesktopApplication:
                 raise ApplicationReceiptError(
                     "canonical application cannot predate desktop availability"
                 )
-            health_before = health_get(delta.source_id)
+            health_before = _health_get(health_store, delta.source_id)
             outcome = _outcome_builder(
                 delta,
                 event,
@@ -1093,7 +1095,7 @@ class CanonicalDesktopApplication:
                 raise DeltaConflictError(
                     "canonical market event changed during desktop application"
                 )
-            market_publish(event)
+            _market_publish(market_bus, event)
             if _canonical_digest(event) != digest:
                 raise DeltaConflictError(
                     "canonical market event changed during market persistence"
@@ -1138,7 +1140,7 @@ class CanonicalDesktopApplication:
                 raise ApplicationReceiptError("canonical application progress disappeared")
 
         if not progress.get("health_applied"):
-            current = health_get(delta.source_id)
+            current = _health_get(health_store, delta.source_id)
             if current == expected_after:
                 if durable_health_state() != expected_after:
                     raise ApplicationReceiptError(
@@ -1221,13 +1223,18 @@ def _bind_canonical_desktop_application_apply(implementation):
 
     from .ingestion import CommittedIngestionOutcome
     from .ingestion_health import SourceHealthState, SourceHealthStore
+    from .market_bus import MarketEventBus
     from .storage import SQLiteMarketStore
 
     market_event_type = MarketEvent
     canonical_digest = canonical_event_digest
+    market_bus_type = MarketEventBus
+    market_publish = MarketEventBus.publish
     market_store_type = SQLiteMarketStore
     market_events = SQLiteMarketStore.events
     dedupe_getter = MarketEvent.dedupe_key.fget
+    health_store_type = SourceHealthStore
+    health_get = SourceHealthStore.get
     health_state_type = SourceHealthState
     health_read = SourceHealthStore._read
     health_state_from_payload = SourceHealthStore._state_from_payload
@@ -1254,9 +1261,13 @@ def _bind_canonical_desktop_application_apply(implementation):
             event,
             _market_event_type=market_event_type,
             _canonical_digest=canonical_digest,
+            _market_bus_type=market_bus_type,
+            _market_publish=market_publish,
             _market_store_type=market_store_type,
             _market_events=market_events,
             _dedupe_getter=dedupe_getter,
+            _health_store_type=health_store_type,
+            _health_get=health_get,
             _health_state_type=health_state_type,
             _health_read=health_read,
             _health_state_from_payload=health_state_from_payload,

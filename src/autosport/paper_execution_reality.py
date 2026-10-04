@@ -167,34 +167,157 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     "PAPER execution ledger run_id is invalid"
                 ) from exc
             event_key = event.get("event_key")
+            payload = event.get("payload")
             if event_type == "OBSERVATION_EVIDENCE_REGISTERED":
-                payload = event.get("payload")
-                evidence_id = (
-                    payload.get("evidence_id")
-                    if type(payload) is dict
-                    else None
+                if (
+                    type(payload) is not dict
+                    or set(payload)
+                    != {"evidence_id", "evidence_sha256", "record"}
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER execution evidence payload schema is invalid"
+                    )
+                evidence_id = payload.get("evidence_id")
+                record = PaperExecutionEvidenceRecord.from_dict(
+                    payload.get("record")
                 )
                 if (
                     type(evidence_id) is not str
                     or not evidence_id
                     or run_id != evidence_id
                     or event_key != f"evidence:{evidence_id}"
+                    or record.evidence_id != evidence_id
+                    or payload.get("evidence_sha256")
+                    != record.evidence_sha256
                 ):
                     raise PaperExecutionIntegrityError(
                         "PAPER execution evidence event identity is invalid"
                     )
             elif event_type == "PAPER_EXPOSURE_SCOPE_BOUND":
-                if event_key != f"{run_id}:exposure-scope":
+                expected_scope_keys = {
+                    "schema",
+                    "schema_version",
+                    "plan_id",
+                    "plan_fingerprint",
+                    "intent_evidence_sha256",
+                    "bindings",
+                    "binding_sha256",
+                }
+                if (
+                    event_key != f"{run_id}:exposure-scope"
+                    or type(payload) is not dict
+                    or set(payload) != expected_scope_keys
+                    or payload.get("schema")
+                    != "autosport.paper_execution.exposure_scope_binding"
+                    or payload.get("schema_version") != 1
+                    or type(payload.get("bindings")) is not list
+                ):
                     raise PaperExecutionIntegrityError(
-                        "PAPER exposure-scope event identity is invalid"
+                        "PAPER exposure-scope payload is invalid"
+                    )
+                for binding in payload["bindings"]:
+                    if (
+                        type(binding) is not dict
+                        or set(binding)
+                        != {
+                            "action_id",
+                            "sport",
+                            "bankroll_id",
+                            "currency",
+                        }
+                        or type(binding.get("action_id")) is not str
+                        or not binding["action_id"]
+                    ):
+                        raise PaperExecutionIntegrityError(
+                            "PAPER exposure-scope binding is invalid"
+                        )
+                scope_body = dict(payload)
+                binding_sha256 = scope_body.pop("binding_sha256")
+                if binding_sha256 != _impl._digest(scope_body):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER exposure-scope digest is invalid"
                     )
             elif event_type == "RUN_RESERVED":
-                if event_key != f"{run_id}:reserve":
+                base_reservation_keys = {
+                    "trigger_id",
+                    "plan_id",
+                    "plan_fingerprint",
+                    "model_fingerprint",
+                    "started_at",
+                    "action_ids",
+                    "observation_evidence_ids",
+                }
+                allowed_reservation_keys = {
+                    frozenset(base_reservation_keys),
+                    frozenset(
+                        base_reservation_keys | {"suspended_action_ids"}
+                    ),
+                }
+                if (
+                    event_key != f"{run_id}:reserve"
+                    or type(payload) is not dict
+                    or frozenset(payload) not in allowed_reservation_keys
+                ):
                     raise PaperExecutionIntegrityError(
-                        "PAPER reservation event identity is invalid"
+                        "PAPER reservation payload is invalid"
                     )
+                action_ids = payload.get("action_ids")
+                observation_ids = payload.get(
+                    "observation_evidence_ids"
+                )
+                suspended_ids = payload.get("suspended_action_ids", [])
+                if (
+                    type(action_ids) is not list
+                    or any(
+                        type(action_id) is not str or not action_id
+                        for action_id in action_ids
+                    )
+                    or len(action_ids) != len(set(action_ids))
+                    or type(observation_ids) is not dict
+                    or any(
+                        type(action_id) is not str
+                        or not action_id
+                        or action_id not in action_ids
+                        or type(evidence_id) is not str
+                        or not evidence_id
+                        for action_id, evidence_id
+                        in observation_ids.items()
+                    )
+                    or type(suspended_ids) is not list
+                    or any(
+                        type(action_id) is not str
+                        or not action_id
+                        or action_id not in action_ids
+                        for action_id in suspended_ids
+                    )
+                    or suspended_ids != sorted(suspended_ids)
+                    or len(suspended_ids) != len(set(suspended_ids))
+                    or set(observation_ids) & set(suspended_ids)
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER reservation execution inputs are invalid"
+                    )
+                try:
+                    _impl._text(payload.get("trigger_id"), "trigger_id")
+                    _impl._text(payload.get("plan_id"), "plan_id")
+                    _impl._text(
+                        payload.get("plan_fingerprint"),
+                        "plan_fingerprint",
+                    )
+                    _impl._text(
+                        payload.get("model_fingerprint"),
+                        "model_fingerprint",
+                    )
+                    _impl._timestamp(
+                        payload.get("started_at"),
+                        "started_at",
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise PaperExecutionIntegrityError(
+                        "PAPER reservation identity fields are invalid"
+                    ) from exc
             elif event_type == "ATTEMPT_RECORDED":
-                attempt = PaperLegAttempt.from_dict(event.get("payload"))
+                attempt = PaperLegAttempt.from_dict(payload)
                 if (
                     attempt.run_id != run_id
                     or event_key
@@ -204,10 +327,42 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                         "PAPER attempt event identity is invalid"
                     )
             elif event_type == "RUN_COMPLETED":
-                if event_key != f"{run_id}:complete":
+                if (
+                    event_key != f"{run_id}:complete"
+                    or type(payload) is not dict
+                    or set(payload)
+                    != {
+                        "pending_action_ids",
+                        "recovery_decision",
+                        "worst_case_exposure",
+                    }
+                ):
                     raise PaperExecutionIntegrityError(
-                        "PAPER completion event identity is invalid"
+                        "PAPER completion payload is invalid"
                     )
+                pending_ids = payload.get("pending_action_ids")
+                if (
+                    type(pending_ids) is not list
+                    or any(
+                        type(action_id) is not str or not action_id
+                        for action_id in pending_ids
+                    )
+                    or len(pending_ids) != len(set(pending_ids))
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER completion pending actions are invalid"
+                    )
+                try:
+                    RecoveryDecision(payload.get("recovery_decision"))
+                    _impl._decimal(
+                        payload.get("worst_case_exposure"),
+                        "worst_case_exposure",
+                        allow_zero=True,
+                    )
+                except (TypeError, ValueError, InvalidOperation) as exc:
+                    raise PaperExecutionIntegrityError(
+                        "PAPER completion economics are invalid"
+                    ) from exc
         return events
 
     @staticmethod

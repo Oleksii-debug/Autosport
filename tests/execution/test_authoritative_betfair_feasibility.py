@@ -1712,3 +1712,172 @@ def test_authoritative_path_leaves_market_state_expectations_unbound() -> None:
     assert result.bet_delay_seconds == receipt.bet_delay_seconds
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
 
+
+def test_bound_plan_action_for_class_rebind_revokes_feasibility_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, _ = _synthetic_authoritative_receipt(MarketBookTransport())
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+
+        def forged_action_for(self, action_id: str):
+            raise AssertionError("class-substituted action_for must not execute")
+
+        monkeypatch.setattr(
+            BoundSupervisedExecutionPlan,
+            "action_for",
+            forged_action_for,
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="canonical supervised execution plan authority changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+def test_bound_plan_profile_for_class_rebind_revokes_feasibility_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, _ = _synthetic_authoritative_receipt(MarketBookTransport())
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+
+        def forged_profile_for(self, venue_id: str, account_id: str):
+            raise AssertionError("class-substituted profile_for must not execute")
+
+        monkeypatch.setattr(
+            BoundSupervisedExecutionPlan,
+            "profile_for",
+            forged_profile_for,
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="canonical supervised execution plan authority changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+def test_bound_plan_verify_binding_code_mutation_revokes_feasibility_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, _ = _synthetic_authoritative_receipt(MarketBookTransport())
+    bound = _bound(datetime.now(timezone.utc))
+    canonical_verify = BoundSupervisedExecutionPlan.verify_binding
+
+    def forged_verify(self) -> None:
+        raise AssertionError("mutated verify_binding must not execute")
+
+    monkeypatch.setattr(canonical_verify, "__code__", forged_verify.__code__)
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        with pytest.raises(
+            RuntimeError,
+            match="canonical supervised execution plan authority changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+def test_ledger_type_alias_rebind_revokes_feasibility_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, _ = _synthetic_authoritative_receipt(MarketBookTransport())
+    bound = _bound(datetime.now(timezone.utc))
+
+    class ForgedLedgerAlias(RealExecutionLedger):
+        pass
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        monkeypatch.setattr(
+            feasibility_module,
+            "RealExecutionLedger",
+            ForgedLedgerAlias,
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="canonical execution ledger authority changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+def test_market_book_receipt_type_alias_rebind_revokes_feasibility_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, _ = _synthetic_authoritative_receipt(MarketBookTransport())
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        monkeypatch.setattr(
+            feasibility_module,
+            "BetfairMarketBookDepthObservation",
+            object,
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="canonical MarketBook receipt type changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+def test_market_book_authority_alias_rebind_revokes_feasibility_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, _ = _synthetic_authoritative_receipt(MarketBookTransport())
+    bound = _bound(datetime.now(timezone.utc))
+
+    def forged_acquisition_started_at(receipt):
+        raise AssertionError("substituted MarketBook authority must not execute")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        monkeypatch.setattr(
+            feasibility_module,
+            "market_book_depth_acquisition_started_at",
+            forged_acquisition_started_at,
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="canonical MarketBook receipt authority changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )

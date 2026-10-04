@@ -61,7 +61,7 @@ def test_workspace_atomic_preflight_invokes_canonical_atomic_writer(
     assert len(calls) == 1
     destination, payload = calls[0]
     assert destination.name == "probe.json"
-    assert destination.parent.parent == workspace
+    assert destination.parent == workspace
     assert payload == {
         "probe": "autosport workspace atomic publish probe",
         "schema_version": 1,
@@ -69,7 +69,7 @@ def test_workspace_atomic_preflight_invokes_canonical_atomic_writer(
     assert list(workspace.iterdir()) == []
 
 
-def test_workspace_atomic_preflight_cleans_private_probe_when_canonical_replace_fails(
+def test_workspace_atomic_preflight_cleans_probe_when_canonical_replace_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

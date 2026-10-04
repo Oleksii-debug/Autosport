@@ -24,9 +24,12 @@ class MirrorInvalidationBatch:
     pretending that an incomplete affected-key list is authoritative.
 
     ``semantic_refresh_keys`` is only a classification subset of ``changed_keys``.
-    It preserves the already-proven distinction between a fresh acquisition that
-    changed economic/provider state and a fresh acquisition that only refreshed local
-    liveness. It does not suppress invalidation and is not positive execution authority.
+    It preserves the already-proven distinction between a decision-causal acquisition
+    that changed economic/provider state and one that only refreshed local liveness.
+    ``semantic_refresh_identities`` binds every classified key to the exact
+    source-local acquisition sequence; stale or noncausal classifications therefore
+    cannot be reused against newer mirror truth. This metadata does not suppress
+    invalidation and is not positive execution authority.
     """
 
     changed_keys: tuple[MirrorQuoteKey, ...]

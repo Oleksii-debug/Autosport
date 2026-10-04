@@ -1,8 +1,11 @@
 import hashlib
 import unittest
+from dataclasses import replace
 from decimal import Decimal
+from unittest.mock import patch
 from fractions import Fraction
 
+import autosport.transparent_bandit_policy as policy_module
 from autosport.learning_environment import (
     CausalLearningEnvironment,
     EnvironmentIdentity,
@@ -16,6 +19,43 @@ from autosport.transparent_bandit_policy import ActionEstimate, BanditPolicyStat
 
 
 class TransparentBanditPolicyTests(unittest.TestCase):
+    def test_action_estimate_rejects_rebound_decimal_root_before_dispatch(self) -> None:
+        hostile_calls: list[str] = []
+
+        class ForgedDecimal:
+            def is_finite(self):
+                hostile_calls.append("is_finite")
+                raise AssertionError("forged Decimal dispatch executed")
+
+        forged = object.__new__(ForgedDecimal)
+        with patch.object(policy_module, "Decimal", ForgedDecimal):
+            with self.assertRaisesRegex(
+                LearningEnvironmentError,
+                "finite exact Decimal",
+            ):
+                ActionEstimate("PAPER_PROPOSAL", 1, forged)
+
+        self.assertEqual(hostile_calls, [])
+
+    def test_policy_state_rejects_rebound_estimate_root_before_dispatch(self) -> None:
+        policy, _action, _reward, _transition = self._resolved_paper_step()
+        hostile_calls: list[str] = []
+
+        class ForgedEstimate:
+            def __getattribute__(self, name):
+                hostile_calls.append(name)
+                raise AssertionError("forged ActionEstimate dispatch executed")
+
+        forged = object.__new__(ForgedEstimate)
+        with patch.object(policy_module, "ActionEstimate", ForgedEstimate):
+            with self.assertRaisesRegex(
+                LearningEnvironmentError,
+                "exact ActionEstimate",
+            ):
+                replace(policy, estimates=(forged,))
+
+        self.assertEqual(hostile_calls, [])
+
     def _resolved_paper_step(self):
         identity = EnvironmentIdentity(
             source_id="paper-replay-source-v1",

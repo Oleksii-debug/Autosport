@@ -26,6 +26,7 @@ from .learning_environment import (
 POLICY_SCHEMA: Final = "autosport.transparent_bandit_policy"
 POLICY_SCHEMA_VERSION: Final = 1
 
+_CANONICAL_DECIMAL_TYPE = Decimal
 _CANONICAL_ACTION_TYPE = Action
 _CANONICAL_REWARD_EVIDENCE_TYPE = RewardEvidence
 _CANONICAL_TRANSITION_TYPE = Transition
@@ -47,7 +48,7 @@ def _sha256(name: str, value: object) -> str:
 
 
 def _exact_decimal(name: str, value: object) -> Decimal:
-    if type(value) is not Decimal:
+    if type(value) is not _CANONICAL_DECIMAL_TYPE:
         raise LearningEnvironmentError(f"{name} must be a finite exact Decimal")
     if not value.is_finite():
         raise LearningEnvironmentError(f"{name} must be a finite exact Decimal")
@@ -78,7 +79,7 @@ def _exact_decimal_add(left: Decimal, right: Decimal) -> Decimal:
     )
     sign = 1 if coefficient < 0 else 0
     digits = tuple(int(character) for character in str(abs(coefficient))) if coefficient else (0,)
-    return Decimal((sign, digits, exponent))
+    return _CANONICAL_DECIMAL_TYPE((sign, digits, exponent))
 
 
 def _stable_hash(payload: object) -> str:
@@ -109,7 +110,10 @@ class ActionEstimate:
         if self.observations < 0:
             raise LearningEnvironmentError("observations must be non-negative")
         _exact_decimal("reward_sum", self.reward_sum)
-        if self.observations == 0 and self.reward_sum != Decimal("0"):
+        if (
+            self.observations == 0
+            and self.reward_sum != _CANONICAL_DECIMAL_TYPE("0")
+        ):
             raise LearningEnvironmentError("unobserved action estimate must have zero reward_sum")
 
     @property
@@ -118,7 +122,7 @@ class ActionEstimate:
             raise LearningEnvironmentError(
                 "unobserved action has no empirical mean reward"
             )
-        return self.reward_sum / Decimal(self.observations)
+        return self.reward_sum / _CANONICAL_DECIMAL_TYPE(self.observations)
 
     @property
     def exact_mean_reward(self) -> Fraction:
@@ -142,6 +146,9 @@ class ActionEstimate:
             "observations": self.observations,
             "reward_sum": str(self.reward_sum),
         }
+
+
+_CANONICAL_ACTION_ESTIMATE_TYPE = ActionEstimate
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +185,10 @@ class BanditPolicyState:
             raise LearningEnvironmentError("generation must be non-negative")
         if type(self.estimates) is not tuple or not self.estimates:
             raise LearningEnvironmentError("estimates must be a non-empty tuple")
-        if any(type(item) is not ActionEstimate for item in self.estimates):
+        if any(
+            type(item) is not _CANONICAL_ACTION_ESTIMATE_TYPE
+            for item in self.estimates
+        ):
             raise LearningEnvironmentError("estimates must contain exact ActionEstimate values")
         action_types = tuple(item.action_type for item in self.estimates)
         if action_types != tuple(sorted(action_types)) or len(action_types) != len(set(action_types)):
@@ -228,7 +238,14 @@ class BanditPolicyState:
             config_sha256=_sha256("config_sha256", config_sha256),
             seed=seed,
             generation=0,
-            estimates=tuple(ActionEstimate(name, 0, Decimal("0")) for name in canonical),
+            estimates=tuple(
+                _CANONICAL_ACTION_ESTIMATE_TYPE(
+                    name,
+                    0,
+                    _CANONICAL_DECIMAL_TYPE("0"),
+                )
+                for name in canonical
+            ),
         )
 
     @property
@@ -297,7 +314,7 @@ class BanditPolicyState:
             if type(reward_text) is not str:
                 raise LearningEnvironmentError("policy reward_sum must be Decimal text")
             try:
-                reward_sum = Decimal(reward_text)
+                reward_sum = _CANONICAL_DECIMAL_TYPE(reward_text)
             except InvalidOperation as exc:
                 raise LearningEnvironmentError(
                     "policy reward_sum must be finite canonical Decimal text"
@@ -307,7 +324,7 @@ class BanditPolicyState:
                     "policy reward_sum must be finite canonical Decimal text"
                 )
             estimates.append(
-                ActionEstimate(
+                _CANONICAL_ACTION_ESTIMATE_TYPE(
                     action_type=raw["action_type"],
                     observations=raw["observations"],
                     reward_sum=reward_sum,
@@ -402,7 +419,7 @@ class BanditPolicyState:
         current = estimates.get(action.action_type)
         if current is None:
             raise LearningEnvironmentError("resolved action is outside immutable policy identity")
-        estimates[action.action_type] = ActionEstimate(
+        estimates[action.action_type] = _CANONICAL_ACTION_ESTIMATE_TYPE(
             action.action_type,
             current.observations + 1,
             _exact_decimal_add(current.reward_sum, reward.reward),

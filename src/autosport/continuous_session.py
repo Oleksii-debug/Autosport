@@ -960,6 +960,78 @@ class _ContinuousSessionState:
                 "settlement evidence journal tip is inconsistent"
             )
 
+    def _verify_pending_recovery_prefix(
+        self,
+        state: dict[str, Any],
+        pending: dict[str, Any],
+    ) -> None:
+        """Verify committed history plus any exact already-written pending prefix."""
+
+        base_count = pending["base_count"]
+        pending_records = tuple(pending["records"])
+        paths = self._record_paths()
+        if (
+            len(paths) < base_count
+            or len(paths) > base_count + len(pending_records)
+        ):
+            raise ContinuousSessionError(
+                "settlement evidence journal cardinality conflicts with pending recovery"
+            )
+
+        records = sorted(
+            (self._read_evidence_path(path) for path in paths),
+            key=lambda item: item["sequence"],
+        )
+        previous = self._EMPTY_EVIDENCE_TIP
+        evidence_ids: set[str] = set()
+        for expected_sequence, record in enumerate(records, start=1):
+            if record["sequence"] != expected_sequence:
+                raise ContinuousSessionError(
+                    "settlement evidence recovery sequence is not contiguous"
+                )
+            if record["previous_record_sha256"] != previous:
+                raise ContinuousSessionError(
+                    "settlement evidence recovery chain mismatch"
+                )
+            evidence_id = record["evidence_id"]
+            if evidence_id in evidence_ids:
+                raise ContinuousSessionError(
+                    "settlement evidence recovery repeats evidence_id"
+                )
+            evidence_ids.add(evidence_id)
+
+            if expected_sequence > base_count:
+                pending_offset = expected_sequence - base_count - 1
+                if record != pending_records[pending_offset]:
+                    raise ContinuousSessionError(
+                        "settlement evidence recovery tail conflicts with pending transaction"
+                    )
+            previous = record["record_sha256"]
+
+        if base_count == 0:
+            if records:
+                first = records[0]
+                if first != pending_records[0]:
+                    raise ContinuousSessionError(
+                        "settlement evidence recovery has an unexpected initial record"
+                    )
+            return
+
+        if len(records) < base_count:
+            raise ContinuousSessionError(
+                "settlement evidence recovery base history is incomplete"
+            )
+        base_tip = records[base_count - 1]
+        if (
+            base_tip["record_sha256"]
+            != state["settlement_evidence_tip_sha256"]
+            or base_tip["evidence_key_sha256"]
+            != state["settlement_evidence_tip_key_sha256"]
+        ):
+            raise ContinuousSessionError(
+                "settlement evidence recovery base tip mismatch"
+            )
+
     def _state_from_v2(
         self,
         raw: dict[str, Any],
@@ -1052,10 +1124,10 @@ class _ContinuousSessionState:
             return state
         pending = self._validate_pending(pending, state)
         # Recovery crosses a durability boundary: validate the entire committed
-        # base journal before publishing any prepared tail. This path is
-        # exceptional, so O(history) verification here does not reintroduce
-        # history-proportional work into ordinary operational checkpoints.
-        self._load_evidence_history(state)
+        # base plus any exact pending prefix already published by an interrupted
+        # prior recovery before writing more. This exceptional O(history) check
+        # does not reintroduce history-proportional ordinary checkpoint work.
+        self._verify_pending_recovery_prefix(state, pending)
         for record in pending["records"]:
             self._write_evidence_record(record)
         final = dict(state)

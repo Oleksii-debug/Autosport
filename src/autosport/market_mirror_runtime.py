@@ -36,6 +36,20 @@ class MirrorInvalidationBatch:
     def __post_init__(self) -> None:
         if type(self.full_refresh_required) is not bool or type(self.has_more) is not bool:
             raise TypeError("invalidation batch flags must be booleans")
+        if type(self.changed_keys) is not tuple or type(self.semantic_refresh_keys) is not tuple:
+            raise TypeError("invalidation key collections must be tuples")
+        for key in (*self.changed_keys, *self.semantic_refresh_keys):
+            if (
+                type(key) is not tuple
+                or len(key) != 2
+                or type(key[0]) is not str
+                or type(key[1]) is not str
+                or not key[0]
+                or not key[1]
+            ):
+                raise ValueError(
+                    "invalidation keys must be non-empty (source_id, quote_key) strings"
+                )
         if len(set(self.changed_keys)) != len(self.changed_keys):
             raise ValueError("changed invalidation keys must be unique")
         if len(set(self.semantic_refresh_keys)) != len(self.semantic_refresh_keys):

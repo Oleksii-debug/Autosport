@@ -526,6 +526,110 @@ class _ProductStartTransitionStore:
         )
 
 
+def _read_product_start_transition_impl(
+    store,
+    *,
+    _loads,
+    _error_type,
+    _object_getattribute,
+    _running_state: str,
+    _paused_state: str,
+    _stopped_state: str,
+) -> dict[str, object] | None:
+    path = _object_getattribute(store, "path")
+    if not path.exists():
+        return None
+    try:
+        raw = _loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError) as exc:
+        raise _error_type(
+            "cannot verify durable product START transition"
+        ) from exc
+    fields = frozenset(
+        {
+            "schema",
+            "schema_version",
+            "generation",
+            "phase",
+            "collector_was_stopped",
+            "session_pre_state",
+        }
+    )
+    if (
+        type(raw) is not dict
+        or set(raw) != fields
+        or raw.get("schema") != "autosport.product_runtime_start_transition"
+        or raw.get("schema_version") != 1
+    ):
+        raise _error_type(
+            "durable product START transition schema mismatch"
+        )
+    generation = raw.get("generation")
+    if (
+        isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation <= 0
+    ):
+        raise _error_type(
+            "durable product START transition generation is invalid"
+        )
+    phase = raw.get("phase")
+    if phase not in frozenset(
+        {"STARTING", "COMPLETED", "ROLLED_BACK", "RECOVERY_REQUIRED"}
+    ):
+        raise _error_type(
+            "durable product START transition phase is invalid"
+        )
+    collector_was_stopped = raw.get("collector_was_stopped")
+    if type(collector_was_stopped) is not bool:
+        raise _error_type(
+            "durable product START transition collector pre-state is invalid"
+        )
+    session_pre_state = raw.get("session_pre_state")
+    if session_pre_state not in {
+        _running_state,
+        _paused_state,
+        _stopped_state,
+    }:
+        raise _error_type(
+            "durable product START transition session pre-state is invalid"
+        )
+    if collector_was_stopped != (session_pre_state == _stopped_state):
+        raise _error_type(
+            "durable product START transition pre-state is incoherent"
+        )
+    return raw
+
+
+def _bind_product_start_transition_reader(implementation):
+    loads = strict_json_loads
+    error_type = ProductCompositionError
+    object_getattribute = object.__getattribute__
+    running_state = SessionState.RUNNING.value
+    paused_state = SessionState.PAUSED.value
+    stopped_state = SessionState.STOPPED.value
+
+    def bound(store) -> dict[str, object] | None:
+        return implementation(
+            store,
+            _loads=loads,
+            _error_type=error_type,
+            _object_getattribute=object_getattribute,
+            _running_state=running_state,
+            _paused_state=paused_state,
+            _stopped_state=stopped_state,
+        )
+
+    return bound
+
+
+_read_product_start_transition = _bind_product_start_transition_reader(
+    _read_product_start_transition_impl
+)
+del _read_product_start_transition_impl
+del _bind_product_start_transition_reader
+
+
 class ProductCollectorSource(CollectorServiceSource, Protocol):
     """One acquisition source plus canonical delta-to-event resolution.
 

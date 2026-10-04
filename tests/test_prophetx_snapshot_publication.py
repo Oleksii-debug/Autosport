@@ -283,7 +283,7 @@ class ProphetXSnapshotPublicationTests(unittest.TestCase):
         ):
             self.journal.resolve(result.publication.acquisition_sequence)
 
-    def test_durable_payload_tamper_fails_closed(self):
+    def test_durable_noncanonical_payload_tamper_fails_closed(self):
         result = self.journal.acquire_and_publish(self._provider())
         connection = sqlite3.connect(self.journal_path)
         try:
@@ -292,6 +292,44 @@ class ProphetXSnapshotPublicationTests(unittest.TestCase):
                    SET batch_json=batch_json || ' '
                    WHERE acquisition_sequence=?""",
                 (result.publication.acquisition_sequence,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaisesRegex(
+            ProphetXSnapshotPublicationError,
+            "durable batch payload is not canonical",
+        ):
+            self.journal.resolve(result.publication.acquisition_sequence)
+
+    def test_durable_canonical_payload_hash_tamper_fails_closed(self):
+        result = self.journal.acquire_and_publish(self._provider())
+        connection = sqlite3.connect(self.journal_path)
+        try:
+            row = connection.execute(
+                """SELECT batch_json
+                   FROM prophetx_snapshot_publications_v1
+                   WHERE acquisition_sequence=?""",
+                (result.publication.acquisition_sequence,),
+            ).fetchone()
+            self.assertIsNotNone(row)
+            payload = json.loads(row[0])
+            payload["quotes"][0]["sport"] = "tampered-sport"
+            canonical_tamper = json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            self.assertNotEqual(canonical_tamper, row[0])
+            connection.execute(
+                """UPDATE prophetx_snapshot_publications_v1
+                   SET batch_json=?
+                   WHERE acquisition_sequence=?""",
+                (
+                    canonical_tamper,
+                    result.publication.acquisition_sequence,
+                ),
             )
             connection.commit()
         finally:

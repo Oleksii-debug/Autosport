@@ -308,6 +308,7 @@ class BetfairProviderConstraintObservation(
             raise _error_type("available_at cannot precede reviewed_at")
         if review_expiry <= available:
             raise _error_type("review_expires_at must be after available_at")
+        effective_end = None
         if effective_until is not None:
             effective_end = _utc_fn(effective_until, "effective_until")
             if effective_end <= effective_start:
@@ -351,9 +352,7 @@ class BetfairProviderConstraintObservation(
                 "available_at": available.isoformat(),
                 "effective_from": effective_start.isoformat(),
                 "effective_until": (
-                    None
-                    if effective_until is None
-                    else _utc_fn(effective_until, "effective_until").isoformat()
+                    None if effective_end is None else effective_end.isoformat()
                 ),
                 "review_expires_at": review_expiry.isoformat(),
             }
@@ -371,12 +370,12 @@ class BetfairProviderConstraintObservation(
                 source_ref,
                 source_revision,
                 source_sha256,
-                retrieved_at,
-                reviewed_at,
-                available_at,
-                effective_from,
-                effective_until,
-                review_expires_at,
+                retrieved,
+                reviewed,
+                available,
+                effective_start,
+                effective_end,
+                review_expiry,
                 order_family,
                 schema_version,
                 semantic_sha256,

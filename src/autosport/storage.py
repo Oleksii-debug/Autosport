@@ -1754,14 +1754,19 @@ class SQLiteMarketStore:
             # product would have issued. Infer the previous durable row-set by
             # removing each current row in turn and matching the PREPARE ancestry;
             # then bind the newly added row to its exact frozen corpus digest.
-            candidates: list[tuple[str, str, int]] = []
+            candidates: list[
+                tuple[
+                    tuple[str, str, int],
+                    tuple[tuple[str, str, int], ...],
+                ]
+            ] = []
             for index, row in enumerate(cutoff_rows):
                 prior_rows = cutoff_rows[:index] + cutoff_rows[index + 1 :]
                 prior_state_sha256 = self._replay_cutoff_authority_state_sha256(
                     prior_rows
                 )
                 if prior_state_sha256 == pending.previous_committed_state_sha256:
-                    candidates.append(row)
+                    candidates.append((row, prior_rows))
             if (
                 len(candidates) != 1
                 or pending.intended_state_sha256 != observed_state_sha256
@@ -1770,7 +1775,10 @@ class SQLiteMarketStore:
                     "causal replay cutoff PREPARE is not one canonical row addition"
                 )
 
-            cutoff_id, canonical_as_of, max_generation = candidates[0]
+            (
+                (cutoff_id, canonical_as_of, max_generation),
+                prior_rows,
+            ) = candidates[0]
             tx_prefix = f"{cutoff_id[:32]}-"
             tx_suffix = pending.tx_id[len(tx_prefix) :] if pending.tx_id.startswith(tx_prefix) else ""
             corpus_sha256 = self._frozen_replay_corpus_sha256(max_generation)
@@ -1790,10 +1798,16 @@ class SQLiteMarketStore:
                 )
 
             # Recovery itself is an irreversible machine-authority effect.
-            # Prove that the pending cutoff's generation is already an exact
-            # independently committed append transition before converting PREPARE to
-            # COMMIT. Otherwise a forged/unissued SQLite tail could permanently poison
-            # cutoff authority even though the subsequent read would fail closed.
+            # First prove the complete committed cutoff ancestry represented by the
+            # PREPARE's previous state, then prove that the new cutoff generation is
+            # already an exact independently committed append transition. Otherwise an
+            # invalid historical cutoff chain or forged/unissued SQLite tail could be
+            # extended by a durable machine COMMIT before the subsequent read fails.
+            self._require_canonical_cutoff_authority_bindings(
+                authority,
+                append_authority,
+                prior_rows,
+            )
             self._require_committed_append_authority_through(
                 append_authority,
                 max_generation,

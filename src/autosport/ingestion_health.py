@@ -712,13 +712,26 @@ class SourceHealthStore:
         if type(expected_before) is not SourceHealthState:
             raise TypeError("expected_before must be exact SourceHealthState")
         expected_before.validate()
+        # SourceHealthState is intentionally mutable for store-side transition
+        # construction. Freeze the caller's CAS assertion into a fresh exact DTO
+        # before acquiring the writer lock so concurrent caller mutation cannot
+        # change which durable state this operation claims to have observed.
+        expected_snapshot = self._state_from_payload(
+            self._payload(expected_before),
+            normalize_failed_flags=False,
+        )
+        ambiguous_snapshot: SourceHealthState | None = None
         if ambiguous_after is not None:
             if type(ambiguous_after) is not SourceHealthState:
                 raise TypeError(
                     "ambiguous_after must be exact SourceHealthState or null"
                 )
             ambiguous_after.validate()
-            if ambiguous_after.source_id != expected_before.source_id:
+            ambiguous_snapshot = self._state_from_payload(
+                self._payload(ambiguous_after),
+                normalize_failed_flags=False,
+            )
+            if ambiguous_snapshot.source_id != expected_snapshot.source_id:
                 raise ValueError("ambiguous_after source_id must match expected_before")
         self._validate_success_update(
             received=received,
@@ -729,13 +742,13 @@ class SourceHealthStore:
 
         with self._writer_guard():
             self._recover_current_for_write()
-            current = self.get(expected_before.source_id)
-            if ambiguous_after is not None and current == ambiguous_after:
+            current = self.get(expected_snapshot.source_id)
+            if ambiguous_snapshot is not None and current == ambiguous_snapshot:
                 raise RuntimeError(
                     "source health matches the expected post-state but this outcome "
                     "cannot prove it performed that durable mutation; refusing ambiguous retry"
                 )
-            if current != expected_before:
+            if current != expected_snapshot:
                 raise RuntimeError(
                     "source health changed since the committed ingestion outcome; "
                     "refusing ambiguous retry"

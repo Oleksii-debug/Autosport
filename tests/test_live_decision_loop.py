@@ -5524,6 +5524,58 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(final.status, LiveCycleStatus.DECIDED)
             self.assertGreater((workspace / "decisions.jsonl").stat().st_size, before_size)
 
+    def test_restart_rejects_semantically_rehashed_committed_plan_tamper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            loop.close()
+
+            ledger_path = workspace / "decisions.jsonl"
+            envelope = json.loads(ledger_path.read_text(encoding="utf-8"))
+            record = envelope["record"]
+            record["payload"]["plan"]["reason"] = "semantically rewritten plan"
+            canonical = JsonlDecisionLedger._canonical_record(record)
+            envelope["sha256"] = hashlib.sha256(
+                canonical.encode("utf-8")
+            ).hexdigest()
+            ledger_path.write_text(
+                json.dumps(
+                    envelope,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            # Envelope integrity alone is deliberately insufficient: restart must
+            # re-enter the canonical PortfolioPlan parser and reject the stale inner
+            # plan_sha256 instead of trusting the separately copied top-level digest.
+            JsonlDecisionLedger(ledger_path).verify_integrity()
+            resumed_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "PortfolioPlan is invalid",
+            ):
+                self._loop(
+                    workspace,
+                    observer=resumed_observer,
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                )
+            self.assertEqual(resumed_observer.calls, 0)
+
     def test_restart_verifies_complete_historical_decision_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

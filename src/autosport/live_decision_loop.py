@@ -2842,6 +2842,21 @@ class PersistentLiveDecisionLoop:
             self.authority.contract,
             self.authority.risk_policy,
         )
+        try:
+            detached_payload = existing.to_dict()["payload"]
+            durable_plan = PortfolioPlan.from_dict(detached_payload.get("plan"))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision PortfolioPlan is invalid"
+            ) from exc
+        if (
+            durable_plan.plan_sha256 != progress.plan_sha256
+            or durable_plan.decision_ts != progress.decision_ts
+            or existing.action != f"LIVE_{durable_plan.action.value.upper()}"
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision PortfolioPlan conflicts with progress"
+            )
         payload_version = existing.payload.get("schema_version")
         if payload_version not in {1, 2}:
             raise DecisionLedgerIntegrityError(

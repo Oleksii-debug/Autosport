@@ -168,6 +168,50 @@ def test_current_head_cancels_stale_runs_on_both_sides_of_run_id_ordering() -> N
     assert api.cancelled == [40, 42]
 
 
+def test_base_cancel_defers_conflicting_observations_for_same_run_id() -> None:
+    api = FakeApi(
+        [HEAD_B, HEAD_B],
+        (
+            _run(60, HEAD_A, pr_numbers=(2008,)),
+            _run(60, HEAD_A, pr_numbers=(999,)),
+            _run(61, HEAD_B),
+        ),
+    )
+
+    result = cancel_superseded(
+        api=api,
+        pr_number=2008,
+        event_head_sha=HEAD_B,
+        workflow_name="CI",
+        current_run_id=61,
+    )
+
+    assert result == CancellationResult(current_head=True, cancelled_run_ids=())
+    assert api.cancelled == []
+
+
+def test_base_cancel_collapses_consistent_duplicate_observations() -> None:
+    api = FakeApi(
+        [HEAD_B, HEAD_B, HEAD_B],
+        (
+            _run(62, HEAD_A),
+            _run(62, HEAD_A),
+            _run(63, HEAD_B),
+        ),
+    )
+
+    result = cancel_superseded(
+        api=api,
+        pr_number=2008,
+        event_head_sha=HEAD_B,
+        workflow_name="CI",
+        current_run_id=63,
+    )
+
+    assert result == CancellationResult(current_head=True, cancelled_run_ids=(62,))
+    assert api.cancelled == [62]
+
+
 def test_qualification_eq_rebind_cannot_self_confirm_head_change() -> None:
     api = FakeApi(
         [HEAD_B, HEAD_C],

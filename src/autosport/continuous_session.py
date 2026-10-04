@@ -2067,7 +2067,14 @@ class _ContinuousSessionState:
 
     @staticmethod
     def _quote_outcomes_sha256(evidence: SettlementResolution) -> str:
-        evidence.validate(as_of=evidence.available_at)
+        if type(evidence) is not SettlementResolution:
+            raise TypeError(
+                "settlement evidence must contain exact SettlementResolution values"
+            )
+        SettlementResolution.validate(
+            evidence,
+            as_of=evidence.available_at,
+        )
         return _settlement_quote_outcomes_sha256(evidence.quote_outcomes)
 
     @staticmethod
@@ -2093,6 +2100,12 @@ class _ContinuousSessionState:
         *,
         settlement_evidence: tuple[SettlementResolution, ...],
     ) -> None:
+        if type(settlement_evidence) is not tuple:
+            raise TypeError("settlement_evidence must be an exact tuple")
+        if any(type(item) is not SettlementResolution for item in settlement_evidence):
+            raise TypeError(
+                "settlement_evidence must contain exact SettlementResolution values"
+            )
         if not settlement_evidence:
             # This pre-effect trust boundary must still verify the bounded
             # checkpoint and committed journal tip. It deliberately avoids
@@ -2201,6 +2214,12 @@ class _ContinuousSessionState:
         full_refresh: bool,
         settlement_evidence: tuple[SettlementResolution, ...],
     ) -> None:
+        if type(settlement_evidence) is not tuple:
+            raise TypeError("settlement_evidence must be an exact tuple")
+        if any(type(item) is not SettlementResolution for item in settlement_evidence):
+            raise TypeError(
+                "settlement_evidence must contain exact SettlementResolution values"
+            )
         timestamp = _instant(at, "at").isoformat()
         if type(full_refresh) is not bool:
             raise TypeError("full_refresh must be boolean")

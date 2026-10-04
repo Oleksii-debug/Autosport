@@ -241,6 +241,61 @@ class SettlementReceiptIdentityTests(unittest.TestCase):
             ):
                 _state(path)
 
+    def test_state_rejects_non_tuple_settlement_batch_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "continuous_session.json"
+            state = _state(path)
+            before = path.read_bytes()
+
+            with self.assertRaisesRegex(TypeError, "exact tuple"):
+                state.validate_settlement_evidence(
+                    settlement_evidence=[_resolution()]  # type: ignore[arg-type]
+                )
+            with self.assertRaisesRegex(TypeError, "exact tuple"):
+                state.record_success(
+                    at=_AT,
+                    full_refresh=False,
+                    settlement_evidence=[_resolution()],  # type: ignore[arg-type]
+                )
+
+            self.assertEqual(path.read_bytes(), before)
+            self.assertFalse(
+                path.with_name(f"{path.stem}.settlement-evidence").exists()
+            )
+
+    def test_state_rejects_settlement_resolution_subclass_before_mutation(self) -> None:
+        class ForgedSettlementResolution(SettlementResolution):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "continuous_session.json"
+            state = _state(path)
+            before = path.read_bytes()
+            forged = ForgedSettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="provider-result:1",
+                quote_outcomes={"receipt-quote-1": "win"},
+                evidence_id="forged-receipt",
+                evidence_sha256="f" * 64,
+                available_at=_AT,
+            )
+
+            with self.assertRaisesRegex(TypeError, "exact SettlementResolution"):
+                state.validate_settlement_evidence(
+                    settlement_evidence=(forged,)
+                )
+            with self.assertRaisesRegex(TypeError, "exact SettlementResolution"):
+                state.record_success(
+                    at=_AT,
+                    full_refresh=False,
+                    settlement_evidence=(forged,),
+                )
+
+            self.assertEqual(path.read_bytes(), before)
+            self.assertFalse(
+                path.with_name(f"{path.stem}.settlement-evidence").exists()
+            )
+
     def test_same_batch_event_reference_cannot_alias_receipt_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state = _state(Path(directory) / "continuous_session.json")

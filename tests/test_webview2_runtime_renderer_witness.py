@@ -114,12 +114,13 @@ def _install_fake_webview(
 
 def test_launch_rejects_initialized_renderer_mismatch_even_when_edgechromium_was_requested(
     monkeypatch,
+    tmp_path: Path,
 ) -> None:
     fake = _install_fake_webview(monkeypatch, "mshtml")
-    bridge = _Bridge()
+    bridge, controller = _canonical_bridge(tmp_path)
 
     with pytest.raises(WindowsWebViewUnavailable):
-        launch_windows_shell(bridge)
+        launch_windows_shell(bridge, storage_path=tmp_path / "webview2")
 
     assert fake.create_calls == 1
     assert fake.requested_gui == "edgechromium"
@@ -128,68 +129,65 @@ def test_launch_rejects_initialized_renderer_mismatch_even_when_edgechromium_was
         "The packaged shell must subscribe to pywebview's initialized event and "
         "observe the renderer that was actually selected."
     )
-    assert bridge.closed is True
+    assert controller._close_complete is True
 
 
 def test_launch_accepts_only_after_initialized_renderer_identity_is_observed(
     monkeypatch,
+    tmp_path: Path,
 ) -> None:
     fake = _install_fake_webview(monkeypatch, "edgechromium")
-    bridge = _Bridge()
+    bridge, controller = _canonical_bridge(tmp_path)
 
-    assert launch_windows_shell(bridge) == 0
+    assert launch_windows_shell(
+        bridge,
+        storage_path=tmp_path / "webview2",
+    ) == 0
 
     assert fake.requested_gui == "edgechromium"
     assert fake.window.events.initialized.handlers, (
         "A successful machine launch without an initialized-stage renderer witness "
         "cannot qualify the exact packaged runtime as EdgeChromium/WebView2."
     )
-    assert bridge.closed is True
+    assert controller._close_complete is True
 
 
 def test_launch_rejects_missing_initialized_renderer_witness(
     monkeypatch,
+    tmp_path: Path,
 ) -> None:
     fake = _install_fake_webview(
         monkeypatch,
         "edgechromium",
         emit_initialized=False,
     )
-    bridge = _Bridge()
+    bridge, controller = _canonical_bridge(tmp_path)
 
     with pytest.raises(
         WindowsWebViewUnavailable,
         match="without an observed EdgeChromium/WebView2 renderer witness",
     ):
-        launch_windows_shell(bridge)
+        launch_windows_shell(bridge, storage_path=tmp_path / "webview2")
 
     assert fake.requested_gui == "edgechromium"
     assert fake.window.events.initialized.handlers
-    assert bridge.closed is True
+    assert controller._close_complete is True
 
 
 @pytest.mark.parametrize("renderer", [None, "", True, "edgeChromium"])
 def test_launch_rejects_noncanonical_renderer_witness(
     monkeypatch,
+    tmp_path: Path,
     renderer: object,
 ) -> None:
     fake = _install_fake_webview(monkeypatch, renderer)
-    bridge = _Bridge()
+    bridge, controller = _canonical_bridge(tmp_path)
 
     with pytest.raises(WindowsWebViewUnavailable):
-        launch_windows_shell(bridge)
+        launch_windows_shell(bridge, storage_path=tmp_path / "webview2")
 
     assert fake.requested_gui == "edgechromium"
-    assert bridge.closed is True
-
-
-class _WitnessController(AutosportWebController):
-    def __init__(self, workspace: Path) -> None:
-        self.workspace = workspace
-        self.closed = False
-
-    def close(self) -> None:
-        self.closed = True
+    assert controller._close_complete is True
 
 
 class _WitnessEvent:

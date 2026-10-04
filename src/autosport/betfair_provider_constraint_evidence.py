@@ -471,6 +471,7 @@ class BetfairProviderConstraintResolution(
         _canonical_sha256_fn=_canonical_sha256,
         _decimal_text_fn=_decimal_text,
         _schema_version=SCHEMA_VERSION,
+        _order_family=ORDER_FAMILY,
         _error_type=BetfairProviderConstraintError,
     ):
         if type(state) is not _state_type:
@@ -491,6 +492,22 @@ class BetfairProviderConstraintResolution(
         for value in candidate_generation_sha256s:
             _sha256_fn(value, "candidate_generation_sha256")
         _sha256_fn(resolution_sha256, "resolution_sha256")
+
+        candidate_count = len(candidate_generation_sha256s)
+        if state is _state_type.NO_EVIDENCE:
+            if candidate_count != 0:
+                raise _error_type(
+                    "NO_EVIDENCE cannot carry candidate generations"
+                )
+        elif state is _state_type.CONFLICTING_UNVERIFIED:
+            if candidate_count < 2:
+                raise _error_type(
+                    "CONFLICTING_UNVERIFIED requires at least two candidate generations"
+                )
+        elif candidate_count == 0:
+            raise _error_type(
+                f"{state.value} requires candidate evidence"
+            )
 
         consistent = state is _state_type.CONSISTENT_UNVERIFIED
         if consistent:
@@ -517,6 +534,28 @@ class BetfairProviderConstraintResolution(
             elif min_payout is not None:
                 raise _error_type(
                     "disabled lower-minimum rule must not carry min_payout"
+                )
+
+            expected_semantic_sha256 = _canonical_sha256_fn(
+                {
+                    "schema": "autosport.betfair_standard_limit_constraint_semantics",
+                    "schema_version": _schema_version,
+                    "provider_id": provider_id,
+                    "jurisdiction_scope": jurisdiction_scope,
+                    "currency_code": currency_code,
+                    "order_family": _order_family,
+                    "min_standard_size": _decimal_text_fn(min_standard_size),
+                    "min_payout": (
+                        None
+                        if min_payout is None
+                        else _decimal_text_fn(min_payout)
+                    ),
+                    "lower_minimum_payout_enabled": lower_minimum_payout_enabled,
+                }
+            )
+            if semantic_sha256 != expected_semantic_sha256:
+                raise _error_type(
+                    "semantic_sha256 does not match threshold semantics"
                 )
         elif any(
             value is not None

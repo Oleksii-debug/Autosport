@@ -4084,6 +4084,58 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_cutoff_chain_verifier_uses_one_append_prefix_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                second = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:02+00:00",
+                )
+                self.assertTrue(store.append(first))
+                self.assertEqual(len(self.replay(store).events), 1)
+                self.assertTrue(store.append(second))
+                self.assertEqual(
+                    len(
+                        self.replay(
+                            store,
+                            as_of=self.CUTOFF + timedelta(seconds=2),
+                        ).events
+                    ),
+                    1,
+                )
+                rows = store._validated_replay_cutoff_rows()
+                self.assertEqual(
+                    sorted(row[2] for row in rows),
+                    [1, 2],
+                )
+
+                original = store._require_committed_append_authority_through
+                with patch.object(
+                    store,
+                    "_require_committed_append_authority_through",
+                    wraps=original,
+                ) as append_proof:
+                    store._require_canonical_cutoff_authority_bindings(
+                        store._replay_cutoff_authority(),
+                        store._market_append_authority(),
+                        rows,
+                    )
+
+                self.assertEqual(append_proof.call_count, 1)
+                self.assertEqual(
+                    original(store._market_append_authority(), 2),
+                    frozenset({0, 1, 2}),
+                )
+            finally:
+                store.close()
+
     def test_cutoff_chain_verifier_caches_corpus_by_generation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

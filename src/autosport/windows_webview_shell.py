@@ -2424,7 +2424,7 @@ class AutosportWebBridge:
                         "The WebView bridge refused a rebound canonical controller method"
                     )
 
-        return controller, controller_type, operations
+        return controller, controller_type, operations, workspace_witness
 
     def _registered_controller_locked(self) -> object:
         controller, _controller_type, _operations, _workspace_witness = (

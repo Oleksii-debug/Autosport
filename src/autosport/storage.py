@@ -2277,6 +2277,10 @@ class SQLiteMarketStore:
         product issuance. The independent state digest seals both the cutoff table and
         the exact corpus through the highest issued generation, so coherent same-DB
         DDL rewrites cannot be silently blessed by issuing a later cutoff.
+
+        Generation-zero rows remain part of that tamper-evident sealed corpus, but they
+        are never emitted as causal decision history: their baseline authority proves
+        exact membership at authority activation, not historical product receipt order.
         """
 
         canonical_as_of = _canonical_replay_cutoff(as_of)
@@ -2513,12 +2517,19 @@ class SQLiteMarketStore:
                     qualified_columns = ",".join(
                         f"m.{column}" for column in _HISTORY_COLUMNS
                     )
+                    # Generation zero is a sealed migration baseline, not
+                    # historical receipt chronology. Keep it inside every corpus
+                    # digest so post-activation rewrites fail closed, but do not let
+                    # it escape as decision-visible causal replay evidence. Only
+                    # positive append generations were product-issued in temporal
+                    # order relative to this authority.
                     rows = self.connection.execute(
                         f"""SELECT {qualified_columns}
                             FROM market_events AS m
                             JOIN market_event_commit_order AS c
                               ON c.dedupe_key = m.dedupe_key
-                            WHERE c.append_generation <= ?""",
+                            WHERE c.append_generation > 0
+                              AND c.append_generation <= ?""",
                         (max_generation,),
                     ).fetchall()
                     self._commit_stable_database_path()

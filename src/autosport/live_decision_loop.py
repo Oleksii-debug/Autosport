@@ -1627,6 +1627,7 @@ class PersistentLiveDecisionLoop:
         require_eligible: bool,
         require_healthy: bool = False,
         require_failed: bool = False,
+        required_failed_source_ids: tuple[str, ...] = (),
     ) -> None:
         if (
             type(require_eligible) is not bool
@@ -1637,6 +1638,23 @@ class PersistentLiveDecisionLoop:
         if sum((require_eligible, require_healthy, require_failed)) > 1:
             raise ValueError(
                 "provider health replay cannot require multiple semantic states"
+            )
+        if type(required_failed_source_ids) is not tuple:
+            raise TypeError("required_failed_source_ids must be a tuple")
+        normalized_required_failed = tuple(
+            _canonical_text("required failed provider source_id", source_id)
+            for source_id in required_failed_source_ids
+        )
+        if (
+            normalized_required_failed != tuple(sorted(normalized_required_failed))
+            or len(set(normalized_required_failed)) != len(normalized_required_failed)
+        ):
+            raise ValueError(
+                "required failed provider source ids must be unique and sorted"
+            )
+        if normalized_required_failed and not require_failed:
+            raise ValueError(
+                "required failed provider source ids require failed-health verification"
             )
         store = self._health_store_for_boundaries(boundaries)
         if store is None:
@@ -1667,16 +1685,21 @@ class PersistentLiveDecisionLoop:
                 raise LiveDecisionProgressError(
                     "bound provider health was not historically healthy"
                 )
-        if (
-            require_failed
-            and not any(
-                decision.source_status == "failed"
+        if require_failed:
+            failed_sources = {
+                decision.source_id
                 for decision in replayed_decisions
-            )
-        ):
-            raise LiveDecisionProgressError(
-                "bound provider health does not contain durable failed evidence"
-            )
+                if decision.source_status == "failed"
+            }
+            if normalized_required_failed:
+                if not set(normalized_required_failed).issubset(failed_sources):
+                    raise LiveDecisionProgressError(
+                        "bound provider health does not prove the failed canonical provider"
+                    )
+            elif not failed_sources:
+                raise LiveDecisionProgressError(
+                    "bound provider health does not contain durable failed evidence"
+                )
 
     def _recover_unfinished_progress(self) -> LiveCycleResult:
         progress = self._progress
@@ -2218,12 +2241,26 @@ class PersistentLiveDecisionLoop:
                 now,
                 require_eligible=False,
             )
+            required_failed_source_ids: tuple[str, ...] = ()
+            if self.provider is not None:
+                try:
+                    required_failed_source_ids = (
+                        _canonical_text(
+                            "provider.source_id",
+                            getattr(self.provider, "source_id", None),
+                        ),
+                    )
+                except (TypeError, ValueError) as source_error:
+                    raise _ConcurrentDecisionSnapshot(
+                        "provider gap lost canonical provider source identity"
+                    ) from source_error
             try:
                 self._verify_provider_health_boundaries(
                     provider_health_boundaries,
                     now,
                     require_eligible=False,
                     require_failed=True,
+                    required_failed_source_ids=required_failed_source_ids,
                 )
             except LiveDecisionProgressError as health_error:
                 raise _ConcurrentDecisionSnapshot(

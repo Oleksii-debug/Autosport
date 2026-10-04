@@ -67,10 +67,9 @@ def _build_observation_authority():
     credentials_cls = BetfairSessionCredentials
     transport_cls = UrllibBetfairHttpTransport
 
-    # #1496 moved the canonical credential-bearing transport from the mutable
-    # module-global urllib opener to one instance-owned no-redirect opener. Bind
-    # exactly that executable graph here; do not resurrect the obsolete urlopen
-    # or urllib.request._opener authority boundary.
+    # Current #1496 builds an isolated no-redirect opener inside each authenticated
+    # request instead of retaining mutable process-global or instance opener state.
+    # Bind that exact executable graph; do not resurrect urlopen/_opener authority.
     client_init = client_cls.__dict__["__init__"]
     client_new = client_cls.__dict__.get("__new__")
     transport_init = transport_cls.__dict__["__init__"]
@@ -80,7 +79,7 @@ def _build_observation_authority():
     readonly_transport_export = _readonly.__dict__["UrllibBetfairHttpTransport"]
     request_ctor = _readonly.__dict__["Request"]
     readonly_build_opener = _readonly.__dict__["build_opener"]
-    redirect_handler_cls = _readonly.__dict__["_RejectAuthenticatedRedirects"]
+    redirect_handler_cls = _readonly.__dict__["_RejectBetfairRedirects"]
     redirect_request = redirect_handler_cls.__dict__["redirect_request"]
 
     stdlib_opener_cls = _urllib_request.__dict__["OpenerDirector"]
@@ -197,115 +196,29 @@ def _build_observation_authority():
         records.sort(key=lambda item: (item[0], type(item[1]).__name__, str(item[1])))
         return tuple(records)
 
-    def transport_snapshot(
-        transport: object,
-    ) -> tuple[object, tuple[object, ...], tuple[tuple[str, object, tuple[object, ...]], ...]]:
+    def transport_snapshot(transport: object) -> int:
+        """Validate current #1496 transport state and return its bounded size."""
+
         assert_static_executable_authority()
         if type(transport) is not transport_cls:
             raise error_cls("provider billing production transport is not canonical")
         state = vars(transport)
-        if set(state) != {"_max_response_bytes", "_opener"}:
+        if set(state) != {"_max_response_bytes"}:
             raise error_cls("provider billing production transport state drifted")
         max_response_bytes = state.get("_max_response_bytes")
         if type(max_response_bytes) is not int or max_response_bytes <= 0:
             raise error_cls("provider billing production transport size limit drifted")
-
-        opener = state.get("_opener")
-        if type(opener) is not stdlib_opener_cls or any(
-            name in vars(opener) for name in ("open", "_open", "_call_chain", "error")
-        ):
-            raise error_cls("provider billing private network opener drifted")
-        handlers = getattr(opener, "handlers", None)
-        if type(handlers) is not list:
-            raise error_cls("provider billing private opener handlers drifted")
-        handler_tuple = tuple(handlers)
-
-        redirect_handlers = tuple(
-            handler
-            for handler in handler_tuple
-            if isinstance(handler, stdlib_redirect_handler_cls)
-        )
-        if (
-            len(redirect_handlers) != 1
-            or type(redirect_handlers[0]) is not redirect_handler_cls
-            or "redirect_request" in vars(redirect_handlers[0])
-        ):
-            raise error_cls("provider billing no-redirect policy drifted")
-
-        https_handlers = tuple(
-            handler for handler in handler_tuple if isinstance(handler, stdlib_https_handler_cls)
-        )
-        if len(https_handlers) != 1 or type(https_handlers[0]) is not stdlib_https_handler_cls:
-            raise error_cls("provider billing canonical HTTPS handler is invalid")
-        https_handler = https_handlers[0]
-        if any(name in vars(https_handler) for name in ("https_open", "https_request", "do_open")):
-            raise error_cls("provider billing canonical HTTPS handler is shadowed")
-
-        dispatch = opener_dispatch_snapshot(opener)
-        if dispatch is None:
-            raise error_cls("provider billing private opener dispatch is invalid")
-        https_open_handlers = tuple(
-            values
-            for map_name, key, values in dispatch
-            if map_name == "handle_open" and key == "https"
-        )
-        https_request_handlers = tuple(
-            values
-            for map_name, key, values in dispatch
-            if map_name == "process_request" and key == "https"
-        )
-        https_response_handlers = tuple(
-            values
-            for map_name, key, values in dispatch
-            if map_name == "process_response" and key == "https"
-        )
-        if (
-            len(https_open_handlers) != 1
-            or len(https_open_handlers[0]) != 1
-            or https_open_handlers[0][0] is not https_handler
-            or len(https_request_handlers) != 1
-            or len(https_request_handlers[0]) != 1
-            or https_request_handlers[0][0] is not https_handler
-            or len(https_response_handlers) != 1
-            or len(https_response_handlers[0]) != 1
-            or type(https_response_handlers[0][0]) is not stdlib_http_error_processor_cls
-            or "https_response" in vars(https_response_handlers[0][0])
-            or any(
-                not any(handler is registered for registered in handler_tuple)
-                for _map_name, _key, values in dispatch
-                for handler in values
-            )
-        ):
-            raise error_cls("provider billing private opener dispatch drifted")
-        return opener, handler_tuple, dispatch
+        if "post" in state or "__init__" in state:
+            raise error_cls("provider billing transport dispatch is shadowed")
+        return max_response_bytes
 
     def assert_transport_unchanged(
         transport: object,
-        expected: tuple[
-            object,
-            tuple[object, ...],
-            tuple[tuple[str, object, tuple[object, ...]], ...],
-        ],
+        expected_max_response_bytes: int,
     ) -> None:
-        current_opener, current_handlers, current_dispatch = transport_snapshot(transport)
-        expected_opener, expected_handlers, expected_dispatch = expected
-        if current_opener is not expected_opener or len(current_handlers) != len(expected_handlers):
-            raise error_cls("provider billing private opener identity drifted")
-        if any(
-            current is not wanted
-            for current, wanted in zip(current_handlers, expected_handlers)
-        ):
-            raise error_cls("provider billing private opener handlers drifted")
-        if len(current_dispatch) != len(expected_dispatch):
-            raise error_cls("provider billing private opener dispatch drifted")
-        for current, wanted in zip(current_dispatch, expected_dispatch):
-            if current[0] != wanted[0] or current[1] != wanted[1]:
-                raise error_cls("provider billing private opener dispatch drifted")
-            if len(current[2]) != len(wanted[2]) or any(
-                handler is not expected_handler
-                for handler, expected_handler in zip(current[2], wanted[2])
-            ):
-                raise error_cls("provider billing private opener dispatch drifted")
+        current = transport_snapshot(transport)
+        if current != expected_max_response_bytes:
+            raise error_cls("provider billing transport state drifted")
 
     def projection(source: object) -> tuple[object, ...]:
         entitlement = get_attr(source, "entitlement")
@@ -387,8 +300,8 @@ def _build_observation_authority():
             statement_from=statement_from,
             statement_to=statement_to,
         )
-        # Persistent executable or private-opener mutation during provider I/O
-        # cannot be legitimized merely because returned JSON is structurally valid.
+        # Persistent executable/transport mutation during provider I/O cannot be
+        # legitimized merely because returned JSON is structurally valid.
         assert_transport_unchanged(transport, transport_origin)
         return register(source)
 

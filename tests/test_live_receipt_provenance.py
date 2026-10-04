@@ -1242,6 +1242,93 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
 
             store.close()
 
+    def test_trusted_replay_ignores_market_mirror_runtime_descriptors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store)
+
+            with (
+                patch.object(
+                    MarketMirror,
+                    "__init__",
+                    side_effect=AssertionError("trusted replay must not construct through mutable __init__"),
+                ),
+                patch.object(
+                    MarketMirror,
+                    "apply",
+                    side_effect=AssertionError("trusted replay must not dispatch through mutable apply"),
+                ),
+                patch.object(
+                    MarketMirror,
+                    "active_view",
+                    side_effect=AssertionError("trusted replay must not dispatch through mutable active_view"),
+                ),
+                patch.object(
+                    MarketMirror,
+                    "_decision_boundary",
+                    side_effect=AssertionError("trusted replay must not dispatch through mutable boundary parser"),
+                ),
+                patch.object(
+                    MarketMirror,
+                    "_utc_timestamp",
+                    side_effect=AssertionError("trusted replay must not dispatch through mutable timestamp parser"),
+                ),
+            ):
+                replay = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(2026, 10, 4, 3, 0, 3, tzinfo=timezone.utc),
+                    max_age=timedelta(seconds=30),
+                    require_live_receipt_authority=True,
+                )
+
+            self.assertEqual(len(replay.events), 1)
+            self.assertEqual(replay.revision, 1)
+            store.close()
+
+    def test_trusted_replay_uses_sealed_reconstruction_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store)
+
+            with patch.object(
+                market_mirror_module,
+                "_trusted_replay_view",
+                side_effect=AssertionError("mutable trusted replay helper must not be consulted"),
+            ):
+                replay = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(2026, 10, 4, 3, 0, 3, tzinfo=timezone.utc),
+                    max_age=timedelta(seconds=30),
+                    require_live_receipt_authority=True,
+                )
+
+            self.assertEqual(len(replay.events), 1)
+            self.assertEqual(replay.revision, 1)
+            store.close()
+
+    def test_trusted_replay_matches_generic_replay_for_same_trusted_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store, sequence=1)
+            self._ingest(store, sequence=2)
+            cutoff = datetime(2026, 10, 4, 3, 0, 3, tzinfo=timezone.utc)
+            max_age = timedelta(seconds=30)
+
+            generic = MarketMirror.replay_view_from_store(
+                store,
+                as_of=cutoff,
+                max_age=max_age,
+            )
+            trusted = MarketMirror.replay_view_from_store(
+                store,
+                as_of=cutoff,
+                max_age=max_age,
+                require_live_receipt_authority=True,
+            )
+
+            self.assertEqual(trusted, generic)
+            store.close()
+
     def test_live_mirror_event_type_survives_module_rebind(self) -> None:
         class PoisonMarketEvent(MarketEvent):
             @classmethod

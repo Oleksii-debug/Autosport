@@ -156,7 +156,7 @@ def test_windows_shell_passes_exact_canonical_storage_path_to_pywebview(
 
     calls: dict[str, object] = {}
     monkeypatch.setitem(sys.modules, "webview", _fake_webview(calls))
-    bridge = _Bridge()
+    bridge, controller = _canonical_bridge(tmp_path)
 
     assert launch_windows_shell(bridge) == 0
 
@@ -167,7 +167,7 @@ def test_windows_shell_passes_exact_canonical_storage_path_to_pywebview(
         local_app_data / "Autosport" / "webview2"
     )
     assert Path(start["storage_path"]).is_absolute()
-    assert bridge.closed is True
+    assert controller._close_complete is True
 
 
 def test_prevalidated_webview_storage_path_is_not_reresolved(
@@ -186,13 +186,15 @@ def test_prevalidated_webview_storage_path_is_not_reresolved(
     )
     calls: dict[str, object] = {}
     monkeypatch.setitem(sys.modules, "webview", _fake_webview(calls))
+    bridge, controller = _canonical_bridge(tmp_path)
 
-    assert launch_windows_shell(_Bridge(), storage_path=prevalidated) == 0
+    assert launch_windows_shell(bridge, storage_path=prevalidated) == 0
 
     start = calls["start"]
     assert isinstance(start, dict)
     assert start["storage_path"] == str(prevalidated)
     assert Path(start["storage_path"]).is_absolute()
+    assert controller._close_complete is True
 
 
 @pytest.mark.parametrize(
@@ -267,13 +269,15 @@ def test_empty_webview_environment_overrides_do_not_retarget_release(
 
     calls: dict[str, object] = {}
     monkeypatch.setitem(sys.modules, "webview", _fake_webview(calls))
+    bridge, controller = _canonical_bridge(tmp_path)
 
-    assert launch_windows_shell(_Bridge()) == 0
+    assert launch_windows_shell(bridge) == 0
     assert "create_window" in calls
     assert calls["start"] == {
         "gui": "edgechromium",
         "storage_path": str(tmp_path / "Local" / "Autosport" / "webview2"),
     }
+    assert controller._close_complete is True
 
 
 def test_pywebview_userdict_settings_shape_allows_canonical_release(
@@ -292,13 +296,15 @@ def test_pywebview_userdict_settings_shape_allows_canonical_release(
         }
     )
     monkeypatch.setitem(sys.modules, "webview", fake)
+    bridge, controller = _canonical_bridge(tmp_path)
 
-    assert launch_windows_shell(_Bridge()) == 0
+    assert launch_windows_shell(bridge) == 0
     assert "create_window" in calls
     assert calls["start"] == {
         "gui": "edgechromium",
         "storage_path": str(tmp_path / "Local" / "Autosport" / "webview2"),
     }
+    assert controller._close_complete is True
 
 
 def test_pywebview_settings_missing_controlled_key_fails_closed(

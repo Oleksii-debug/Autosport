@@ -297,6 +297,46 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 restored.close()
 
+    def test_runtime_restart_rejects_receipt_without_durable_health_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            applied = _event()
+            delta = _delta(applied)
+            source = _Source(resolved_event=applied)
+
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            health_path = root / "source_health.json"
+            pristine_health = health_path.read_text(encoding="utf-8")
+            try:
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                self.assertEqual(
+                    runtime.coordinator.desktop_consumer.drain(as_of=clock.value),
+                    (delta.delta_id,),
+                )
+                self.assertEqual(runtime.mirror.snapshot(), (applied,))
+            finally:
+                runtime.close()
+
+            health_path.write_text(pristine_health, encoding="utf-8")
+            with self.assertRaisesRegex(
+                ProductCompositionError,
+                "cannot verify desktop application receipts for product runtime restart",
+            ):
+                build_autonomous_product_runtime(
+                    workspace=root,
+                    source=source,
+                    clock=clock,
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+
     def test_restart_reader_module_rebind_cannot_authorize_generic_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

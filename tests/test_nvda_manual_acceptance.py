@@ -1045,6 +1045,51 @@ def test_unterminated_final_ledger_record_fails_closed(tmp_path):
         ledger.events()
 
 
+def test_unterminated_anchor_file_fails_closed(tmp_path):
+    ledger = _ledger(tmp_path)
+    _record(ledger, _transcript())
+
+    raw = ledger._anchor_path.read_bytes()
+    assert raw.endswith(b"\n")
+    ledger._anchor_path.write_bytes(raw[:-1])
+
+    with pytest.raises(
+        NvdaManualAcceptanceIntegrityError,
+        match="anchor lacks canonical trailing newline",
+    ):
+        ledger.events()
+
+
+def test_unterminated_pending_file_fails_closed_before_recovery(tmp_path):
+    ledger = _ledger(tmp_path)
+    _record(ledger, _transcript())
+    event = json.loads(ledger.path.read_text(encoding="utf-8"))
+    pending = ledger._pending_record(
+        prior_event_count=0,
+        prior_root=None,
+        event=event,
+    )
+    ledger._pending_path.write_text(
+        json.dumps(
+            pending,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    raw = ledger._pending_path.read_bytes()
+    assert raw.endswith(b"\n")
+    ledger._pending_path.write_bytes(raw[:-1])
+
+    with pytest.raises(
+        NvdaManualAcceptanceIntegrityError,
+        match="pending manual NVDA decision lacks canonical trailing newline",
+    ):
+        ledger.events()
+
+
 def test_tail_deletion_is_detected_by_anchor(tmp_path):
     transcript = _transcript()
     ledger = _ledger(tmp_path)

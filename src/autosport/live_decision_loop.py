@@ -2833,14 +2833,16 @@ class PersistentLiveDecisionLoop:
         if not has_positive_stake:
             if execution_payload is not None:
                 raise DecisionLedgerIntegrityError(
-                    "zero-stake committed live decision carries unexpected execution evidence"
+                    "zero-stake committed live decision carries unexpected "
+                    "execution evidence"
                 )
             return
 
         runtime = self.paper_execution
         if runtime is None:
             raise DecisionLedgerIntegrityError(
-                "positive committed live decision requires canonical #623 execution runtime"
+                "positive committed live decision requires canonical #623 "
+                "execution runtime"
             )
         expected_keys = {
             "schema",
@@ -2986,10 +2988,14 @@ class PersistentLiveDecisionLoop:
             or type(action_ids) is not list
             or len(action_ids) != positive_count
             or len(action_ids) != len(set(action_ids))
-            or any(type(action_id) is not str or not action_id for action_id in action_ids)
+            or any(
+                type(action_id) is not str or not action_id
+                for action_id in action_ids
+            )
         ):
             raise DecisionLedgerIntegrityError(
-                "committed live decision #623 reservation conflicts with decision evidence"
+                "committed live decision #623 reservation conflicts with "
+                "decision evidence"
             )
 
         scope = scopes[0].get("payload")
@@ -3023,7 +3029,8 @@ class PersistentLiveDecisionLoop:
             for binding in bindings
         ) != tuple(action_ids):
             raise DecisionLedgerIntegrityError(
-                "committed live decision #623 exposure bindings conflict with reservation"
+                "committed live decision #623 exposure bindings conflict with "
+                "reservation"
             )
         scope_body = dict(scope)
         binding_sha256 = scope_body.pop("binding_sha256")

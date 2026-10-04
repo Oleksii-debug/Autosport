@@ -3422,7 +3422,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 1,
             )
 
-    def test_committed_positive_decision_requires_execution_runtime_on_restart(self) -> None:
+    def test_committed_positive_requires_execution_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             event = self._event(selection="selection-a", sequence=1)
@@ -3491,7 +3491,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 )
             self.assertEqual(resumed_observer.calls, 0)
 
-    def test_committed_positive_decision_rejects_rehashed_execution_evidence_loss(self) -> None:
+    def test_committed_positive_rejects_rehashed_execution_loss(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             event = self._event(selection="selection-a", sequence=1)

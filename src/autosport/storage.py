@@ -539,6 +539,22 @@ def _validate_table_shape(
     expected_xinfo: tuple[tuple[object, ...], ...],
     expected_primary_key: tuple[str, ...],
 ) -> None:
+    # SQLite resolves TEMP objects before main for unqualified names. Reject both
+    # exact-name shadows (TEMP TABLE/VIEW) and TEMP triggers/indexes attached to a
+    # canonical table before any PRAGMA or data statement can resolve through the
+    # wrong schema.
+    temp_objects = connection.execute(
+        """SELECT type, name, tbl_name
+           FROM sqlite_temp_master
+           WHERE name=? OR tbl_name=?
+           ORDER BY type, name""",
+        (table_name, table_name),
+    ).fetchall()
+    if temp_objects:
+        raise ValueError(
+            f"{table_name} schema is not canonical: temporary schema objects are not allowed"
+        )
+
     schema_object = _schema_object(connection, table_name)
     if schema_object is None or schema_object[0] != "table":
         raise ValueError(f"{table_name} schema is not canonical: expected table")

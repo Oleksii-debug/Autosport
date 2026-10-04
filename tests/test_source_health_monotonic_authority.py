@@ -7,6 +7,10 @@ from pathlib import Path
 import pytest
 
 import autosport.ingestion_health as health_module
+from autosport.continuous_observation import (
+    ContinuousObservationConfig,
+    run_continuous_observation,
+)
 from autosport.ingestion_health import SourceHealthStore
 from autosport.monotonic_workspace_authority import (
     AuthorityPhase,
@@ -323,3 +327,55 @@ def test_recovery_does_not_commit_published_prefix_until_reflush_succeeds(
     history = authority.read_history()
     assert history[-1].phase is AuthorityPhase.COMMIT
     assert history[-1].intended_state_sha256 == intended
+
+
+def test_continuous_observation_rejects_health_rollback_before_provider_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str((tmp_path / "machine-authority").resolve()),
+    )
+    workspace = tmp_path / "live-workspace"
+    health = SourceHealthStore(workspace / "source_health.json")
+    _record_success(health)
+    valid_old = health.path.read_bytes()
+    _record_provider_failure(health)
+    health.path.write_bytes(valid_old)
+
+    class _NoIoProvider:
+        source_id = "provider-a"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read_batch(self, max_items: int = 1000):
+            self.calls += 1
+            raise AssertionError("provider I/O must not run after source-health rollback")
+
+    provider = _NoIoProvider()
+    config = ContinuousObservationConfig(
+        workspace=workspace,
+        max_cycles=1,
+        max_runtime_seconds=30,
+        interval_seconds=1,
+        max_backoff_seconds=8,
+        max_items=10,
+    )
+
+    with pytest.raises(
+        MonotonicAuthorityRollbackError,
+        match="rolled back|unproven|authority|match",
+    ):
+        run_continuous_observation(
+            provider,
+            config,
+            monotonic=lambda: 0.0,
+            wall_clock=lambda: T2,
+            waiter=lambda _seconds: False,
+            reporter=None,
+            run_id="rollback-must-stop-before-provider-io",
+        )
+
+    assert provider.calls == 0

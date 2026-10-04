@@ -8,6 +8,7 @@ import pickle
 
 import pytest
 
+import autosport.nvda_human_acceptance as nvda_module
 from autosport.nvda_human_acceptance import (
     HUMAN_NVDA_ORIGIN,
     REQUIRED_JOURNEY_IDS,
@@ -228,6 +229,64 @@ def test_unregistered_object_new_forgery_is_not_structural_authority() -> None:
         match="not a live validator-issued authority",
     ):
         _verify(forged)
+
+
+def test_module_global_registry_rebinding_cannot_mint_structural_authority(
+    monkeypatch,
+) -> None:
+    issued = _validate(_valid_transcript())
+    forged = object.__new__(NvdaHumanAcceptanceStructuralResult)
+    for field_name in (
+        "transcript_sha256",
+        "artifact_sha256",
+        "source_sha",
+        "windows_version",
+        "nvda_version",
+        "webview2_runtime_browser_version",
+        "webview2_runtime_witness_sha256",
+        "evidence_origin",
+        "human_tester_attestation_sha256",
+        "journey_content_sha256",
+        "status",
+        "human_tested",
+        "nvda_verified",
+        "manual_truth_promotion_required",
+        "real_money_execution",
+        "whole_product_complete",
+    ):
+        object.__setattr__(forged, field_name, getattr(issued, field_name))
+
+    monkeypatch.setattr(
+        nvda_module,
+        "_ISSUED_STRUCTURAL_RESULTS",
+        {
+            id(forged): (
+                forged,
+                nvda_module._structural_result_fingerprint(forged),
+            )
+        },
+        raising=False,
+    )
+
+    with pytest.raises(
+        NvdaHumanAcceptanceError,
+        match="not a live validator-issued authority",
+    ):
+        _verify(forged)
+
+
+def test_module_global_registry_rebinding_cannot_revoke_real_issuance(
+    monkeypatch,
+) -> None:
+    issued = _validate(_valid_transcript())
+    monkeypatch.setattr(
+        nvda_module,
+        "_ISSUED_STRUCTURAL_RESULTS",
+        {},
+        raising=False,
+    )
+
+    assert _verify(issued) is issued
 
 
 def test_generated_template_is_intentionally_invalid() -> None:

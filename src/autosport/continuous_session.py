@@ -229,6 +229,7 @@ class _ContinuousSessionCoordinatorMeta(type):
         protected = {
             "_settle",
             "_settlement_resolutions",
+            "_pending_settlement_resolutions",
             "_recovered_settlement_resolutions",
             "__setattr__",
             "__delattr__",
@@ -256,6 +257,7 @@ class _ContinuousSessionCoordinatorMeta(type):
         if sealed and name in {
             "_settle",
             "_settlement_resolutions",
+            "_pending_settlement_resolutions",
             "_recovered_settlement_resolutions",
             "__setattr__",
             "__delattr__",
@@ -272,6 +274,7 @@ class _ContinuousSessionCoordinatorMeta(type):
         if sealed and name in {
             "_settle",
             "_settlement_resolutions",
+            "_pending_settlement_resolutions",
             "_recovered_settlement_resolutions",
             "__setattr__",
             "__delattr__",
@@ -1738,6 +1741,63 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
     @_seal_settlement_consumer_entry
     @_bind_canonical_settlement_resolution_collection
+    def _pending_settlement_resolutions(
+        self,
+        *,
+        as_of: str,
+        _settlement_resolution_type: type[SettlementResolution],
+        _settlement_resolution_validate: Callable[..., None],
+        _lifecycle_records: Callable[[ContinuousEventLifecycle], tuple[EventLifecycleRecord, ...]],
+        _collector_source_id_get: Callable[[HeadlessCollectorService], str],
+        _settlement_instant: Callable[[object, str], datetime],
+    ) -> tuple[SettlementResolution, ...]:
+        if _collector_source_id_get(self.collector) != self._settlement_source_id:
+            raise ContinuousSessionError(
+                "collector source identity changed after settlement authority binding"
+            )
+        cutoff = _settlement_instant(as_of, "as_of")
+        pending = self._state.pending_settlement_resolutions()
+        if type(pending) is not tuple:
+            raise ContinuousSessionError(
+                "pending settlement recovery must return a tuple"
+            )
+        records = {
+            record.identity: record
+            for record in _lifecycle_records(self.lifecycle)
+            if record.source_id == self._settlement_source_id
+        }
+        for resolution in pending:
+            if type(resolution) is not _settlement_resolution_type:
+                raise ContinuousSessionError(
+                    "pending settlement recovery returned non-canonical evidence"
+                )
+            try:
+                _settlement_resolution_validate(resolution, as_of=as_of)
+            except (TypeError, ValueError) as exc:
+                raise ContinuousSessionError(
+                    "pending settlement recovery failed canonical validation"
+                ) from exc
+            record = records.get(resolution.event_identity)
+            if (
+                record is None
+                or record.phase is not EventPhase.COMPLETED
+                or record.settlement_ref != resolution.settlement_ref
+                or record.settlement_discovered_at is None
+            ):
+                raise ContinuousSessionError(
+                    "pending settlement recovery conflicts with durable lifecycle"
+                )
+            if _settlement_instant(
+                record.settlement_discovered_at,
+                "settlement_discovered_at",
+            ) > cutoff:
+                raise ContinuousSessionError(
+                    "pending settlement lifecycle was discovered after the evidence cutoff"
+                )
+        return pending
+
+    @_seal_settlement_consumer_entry
+    @_bind_canonical_settlement_resolution_collection
     def _recovered_settlement_resolutions(
         self,
         *,
@@ -1969,23 +2029,25 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     newly_registered.append(input_id)
 
             current_resolutions = self._settlement_resolutions(as_of=now)
-            # Settlement identity and quote-outcome interpretation are part of the
-            # economic commit protocol. Persist newly observed truth before any learner
-            # side effect or PaperBook mutation. A later recovery handoff may replay
-            # only evidence already proven by this durable pre-P&L checkpoint.
+            # Settlement identity, exact quote outcomes and their digest are one
+            # pre-P&L commit record.  The pending journal survives a crash before
+            # learning preparation, PaperBook mutation or post-settlement ACK.
             self._state.record_settlement_evidence(
                 settlement_evidence=current_resolutions
+            )
+            pending_resolutions = self._pending_settlement_resolutions(
+                as_of=now,
             )
             if self._settlement_prepare is not None:
                 self._settlement_prepare(
                     paper_book_path=self.paper_book_path,
-                    resolutions=current_resolutions,
+                    resolutions=pending_resolutions,
                     at=now,
                 )
             recovered_resolutions = self._recovered_settlement_resolutions(
                 as_of=now,
             )
-            resolutions = current_resolutions + recovered_resolutions
+            resolutions = pending_resolutions + recovered_resolutions
             settled, evidence_ids = self._settle(
                 resolutions=resolutions,
                 settled_at=now,
@@ -2044,6 +2106,9 @@ _ContinuousSessionCoordinatorMeta._settle = _build_settlement_consumer_class_gua
 )
 _ContinuousSessionCoordinatorMeta._settlement_resolutions = (
     _build_settlement_consumer_class_guard("_settlement_resolutions")
+)
+_ContinuousSessionCoordinatorMeta._pending_settlement_resolutions = (
+    _build_settlement_consumer_class_guard("_pending_settlement_resolutions")
 )
 _ContinuousSessionCoordinatorMeta._recovered_settlement_resolutions = (
     _build_settlement_consumer_class_guard("_recovered_settlement_resolutions")

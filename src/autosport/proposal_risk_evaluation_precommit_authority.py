@@ -182,10 +182,10 @@ class ProductProposalRiskEvaluationPrecommit:
     membership_outcome_reveal_after: str
     confidence_level: Decimal
     ruin_threshold: Decimal
-    risk_target_scope: str
+    scientific_risk_target_scope: str
     proposal_evaluation_scope: str
-    initial_capital_state_sha256: str
-    stake_policy_sha256: str
+    scientific_initial_capital_state_sha256: str
+    scientific_stake_policy_sha256: str
     scientific_precommit_sha256: str
     binding_sha256: str
     _proposal_risk_evaluation_precommit_capability: object = field(
@@ -275,10 +275,10 @@ _BINDING_FIELDS = (
     "membership_outcome_reveal_after",
     "confidence_level",
     "ruin_threshold",
-    "risk_target_scope",
+    "scientific_risk_target_scope",
     "proposal_evaluation_scope",
-    "initial_capital_state_sha256",
-    "stake_policy_sha256",
+    "scientific_initial_capital_state_sha256",
+    "scientific_stake_policy_sha256",
     "scientific_precommit_sha256",
     "binding_sha256",
 )
@@ -404,8 +404,7 @@ def _require_dispatch() -> None:
         or _AGENT != _PROTOCOL_CONSTANTS_EXPECTED[2]
         or _ACTION_PREFIX != _PROTOCOL_CONSTANTS_EXPECTED[3]
         or _PROPOSAL_EVALUATION_SCOPE != _PROTOCOL_CONSTANTS_EXPECTED[4]
-        or
-        ProductProposalRiskTarget is not _TARGET_TYPE
+        or ProductProposalRiskTarget is not _TARGET_TYPE
         or resolve_product_proposal_risk_target is not _TARGET_RESOLVER
         or getattr(_TARGET_RESOLVER, "__code__", None) is not _TARGET_RESOLVER_CODE
         or ProductFixedNRiskEvaluationPrecommitAuthority is not _SCIENCE_TYPE
@@ -663,13 +662,16 @@ def _material(
             science.confidence_level, "confidence_level"
         ),
         "ruin_threshold": _decimal_text(science.ruin_threshold, "ruin_threshold"),
-        "risk_target_scope": _text(science.risk_target_scope, "risk_target_scope"),
-        "proposal_evaluation_scope": _PROPOSAL_EVALUATION_SCOPE,
-        "initial_capital_state_sha256": _sha(
-            science.initial_capital_state_sha256, "initial_capital_state_sha256"
+        "scientific_risk_target_scope": _text(
+            science.risk_target_scope, "scientific_risk_target_scope"
         ),
-        "stake_policy_sha256": _sha(
-            science.stake_policy_sha256, "stake_policy_sha256"
+        "proposal_evaluation_scope": _PROPOSAL_EVALUATION_SCOPE,
+        "scientific_initial_capital_state_sha256": _sha(
+            science.initial_capital_state_sha256,
+            "scientific_initial_capital_state_sha256",
+        ),
+        "scientific_stake_policy_sha256": _sha(
+            science.stake_policy_sha256, "scientific_stake_policy_sha256"
         ),
         "scientific_precommit_sha256": _sha(
             science.authority_sha256, "scientific_precommit_sha256"
@@ -765,10 +767,12 @@ def _build(
         "membership_outcome_reveal_after": membership.outcome_reveal_after,
         "confidence_level": science.confidence_level,
         "ruin_threshold": science.ruin_threshold,
-        "risk_target_scope": science.risk_target_scope,
+        "scientific_risk_target_scope": science.risk_target_scope,
         "proposal_evaluation_scope": _PROPOSAL_EVALUATION_SCOPE,
-        "initial_capital_state_sha256": science.initial_capital_state_sha256,
-        "stake_policy_sha256": science.stake_policy_sha256,
+        "scientific_initial_capital_state_sha256": (
+            science.initial_capital_state_sha256
+        ),
+        "scientific_stake_policy_sha256": science.stake_policy_sha256,
         "scientific_precommit_sha256": science.authority_sha256,
         "binding_sha256": binding_sha256,
     }

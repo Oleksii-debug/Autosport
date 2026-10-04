@@ -378,9 +378,7 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
             # Recover the exact checksum-bound schema-v2 outcome chain and reject a
             # previously accepted restart/fork before PaperBook/ledger mutation.
             # The same binding is then persisted on the canonical RunRegistry item.
-            outcome_lineage = outcome_lineage_binding_from_dataset(
-                canonical_dataset
-            )
+            outcome_lineage = outcome_lineage_binding_from_dataset(dataset)
             if outcome_lineage is not None:
                 self.registry.assert_outcome_lineage_compatible(outcome_lineage)
             # Load and validate the exact causal market bytes, including schema-v3

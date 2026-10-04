@@ -1079,3 +1079,43 @@ def test_read_side_lower_dispatch_shadow_cannot_forge_empty_history(tmp_path) ->
         store.latest_snapshot()
 
     assert path.exists()
+
+
+@pytest.mark.parametrize(
+    "binding_name",
+    ("Decimal", "BookmakerCapability", "BookmakerCapabilityState"),
+)
+def test_semantic_constructor_binding_rebind_fails_before_durable_decode(
+    monkeypatch,
+    tmp_path,
+    binding_name: str,
+) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=_authority_root(tmp_path, "authority"),
+    )
+    expected = _snapshot(Decimal("10"))
+    assert store.append_snapshot(expected)
+
+    canonical_binding = getattr(reconciliation_module, binding_name)
+    callback_reached = False
+
+    def hostile_binding(*args, **kwargs):
+        nonlocal callback_reached
+        callback_reached = True
+        return canonical_binding(*args, **kwargs)
+
+    monkeypatch.setattr(
+        reconciliation_module,
+        binding_name,
+        hostile_binding,
+    )
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="transitive module dispatch graph changed",
+    ):
+        store.latest_snapshot()
+
+    assert callback_reached is False

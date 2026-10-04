@@ -1068,11 +1068,37 @@ def _write_github_output(result: CancellationResult) -> None:
 def _build_main(*, module_globals, admit_impl, cancel_impl, output_writer, api_type):
     """Freeze controller orchestration roots in closure-owned composition state."""
 
+    def freeze_default_metadata(function):
+        positional = getattr(function, "__defaults__", None)
+        keyword = getattr(function, "__kwdefaults__", None)
+        keyword_items = tuple(keyword.items()) if keyword is not None else ()
+        return positional, keyword, keyword_items
+
+    def default_metadata_current(function, snapshot) -> bool:
+        positional, keyword, keyword_items = snapshot
+        if getattr(function, "__defaults__", None) is not positional:
+            return False
+        current_keyword = getattr(function, "__kwdefaults__", None)
+        if current_keyword is not keyword:
+            return False
+        if keyword is None:
+            return True
+        if len(current_keyword) != len(keyword_items):
+            return False
+        return all(
+            key in current_keyword and current_keyword[key] is value
+            for key, value in keyword_items
+        )
+
     admit_code = getattr(admit_impl, "__code__", None)
     cancel_code = getattr(cancel_impl, "__code__", None)
     output_writer_code = getattr(output_writer, "__code__", None)
     api_init = api_type.__dict__.get("__init__")
     api_init_code = getattr(api_init, "__code__", None)
+    admit_defaults = freeze_default_metadata(admit_impl)
+    cancel_defaults = freeze_default_metadata(cancel_impl)
+    output_writer_defaults = freeze_default_metadata(output_writer)
+    api_init_defaults = freeze_default_metadata(api_init)
 
     def main(argv: list[str] | None) -> int:
         parser = argparse.ArgumentParser()
@@ -1087,13 +1113,17 @@ def _build_main(*, module_globals, admit_impl, cancel_impl, output_writer, api_t
             return (
                 module_globals.get("admit_current_head") is admit_impl
                 and getattr(admit_impl, "__code__", None) is admit_code
+                and default_metadata_current(admit_impl, admit_defaults)
                 and module_globals.get("cancel_superseded") is cancel_impl
                 and getattr(cancel_impl, "__code__", None) is cancel_code
+                and default_metadata_current(cancel_impl, cancel_defaults)
                 and module_globals.get("_write_github_output") is output_writer
                 and getattr(output_writer, "__code__", None) is output_writer_code
+                and default_metadata_current(output_writer, output_writer_defaults)
                 and module_globals.get("GitHubApi") is api_type
                 and api_type.__dict__.get("__init__") is api_init
                 and getattr(api_init, "__code__", None) is api_init_code
+                and default_metadata_current(api_init, api_init_defaults)
             )
 
         try:

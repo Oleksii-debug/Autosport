@@ -349,6 +349,18 @@ jobs:
             throw 'External UIA evidence did not prove ordinary packaged close/teardown'
           }
           if (
+            $external.emergency_stop_activation_status -ne 'PASS' -or
+            [string]::IsNullOrWhiteSpace([string]$external.emergency_stop_status_text) -or
+            -not [string]::Equals(
+              [string]$external.emergency_stop_journal_path,
+              (Join-Path $expectedWorkspace 'execution-stop.jsonl'),
+              [System.StringComparison]::OrdinalIgnoreCase
+            ) -or
+            -not (Test-Path -LiteralPath (Join-Path $expectedWorkspace 'execution-stop.jsonl') -PathType Leaf)
+          ) {
+            throw 'External UIA evidence did not prove packaged durable emergency STOP activation'
+          }
+          if (
             $external.keyboard_shortcuts_status -ne 'PASS' -or
             [string]$external.f2_focus_automation_id -ne '301' -or
             [string]$external.f8_focus_automation_id -ne '204'
@@ -376,6 +388,8 @@ jobs:
           $verification | Add-Member -NotePropertyName extracted_external_uia_read_only_package_status -NotePropertyValue 'PASS' -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_duplicate_launch_status -NotePropertyValue $external.duplicate_launch_status -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_normal_close_status -NotePropertyValue $external.normal_close_status -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_emergency_stop_activation_status -NotePropertyValue $external.emergency_stop_activation_status -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_emergency_stop_status_text -NotePropertyValue $external.emergency_stop_status_text -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_keyboard_shortcuts_status -NotePropertyValue $external.keyboard_shortcuts_status -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_f2_focus_automation_id -NotePropertyValue $external.f2_focus_automation_id -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_f8_focus_automation_id -NotePropertyValue $external.f8_focus_automation_id -Force

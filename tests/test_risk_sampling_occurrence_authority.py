@@ -23,6 +23,7 @@ from autosport.risk_sampling_occurrence_authority import (
     resolve_product_iid_expected_draw_plan,
     resolve_product_iid_run_execution,
     verify_product_iid_expected_draw_plan,
+    verify_product_iid_run_admission,
     verify_product_iid_run_execution,
 )
 from autosport.run_registry import RunRegistry
@@ -1286,6 +1287,178 @@ def test_iid_run_execution_truth_cannot_be_caller_constructed_or_subclassed() ->
     with pytest.raises(TypeError, match="must not be subclassed"):
         class ForgedExecution(ProductIidRunExecutionReceipt):
             pass
+
+
+def test_iid_run_admission_verifier_reresolves_completed_binding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values, _replay, _summary = _completed_iid_execution(
+        tmp_path,
+        monkeypatch,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    receipt = draw_authority.resolve_product_iid_run_admission(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        member_index=0,
+        authority_root=authority_root,
+    )
+
+    verified = verify_product_iid_run_admission(
+        receipt,
+        membership=membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        member_index=0,
+        authority_root=authority_root,
+    )
+
+    assert type(verified) is ProductIidRunAdmissionReceipt
+    assert verified.receipt_sha256 == receipt.receipt_sha256
+    assert verified.run_admission_bound is True
+
+
+def test_iid_run_admission_verifier_rejects_object_new_forgery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values, _replay, _summary = _completed_iid_execution(
+        tmp_path,
+        monkeypatch,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    canonical = draw_authority.resolve_product_iid_run_admission(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        member_index=0,
+        authority_root=authority_root,
+    )
+    forged = object.__new__(ProductIidRunAdmissionReceipt)
+    field_names = (
+        "experiment_id",
+        "member_id",
+        "member_index",
+        "stream_sha256",
+        "expected_draw_plan_sha256",
+        "expected_draw_transcript_sha256",
+        "sampling_manifest_sha256",
+        "sampling_frame_sha256",
+        "horizon_sha256",
+        "workspace_instance_id",
+        "state_sha256",
+        "authority_generation",
+        "authority_record_sha256",
+        "receipt_sha256",
+        "run_admission_bound",
+    )
+    for field_name in field_names:
+        object.__setattr__(
+            forged,
+            field_name,
+            object.__getattribute__(canonical, field_name),
+        )
+    object.__setattr__(forged, "receipt_sha256", "0" * 64)
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="differs from canonical completed evidence",
+    ):
+        verify_product_iid_run_admission(
+            forged,
+            membership=membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=frame_json,
+            horizon_json=horizon_json,
+            member_index=0,
+            authority_root=authority_root,
+        )
+
+
+def test_iid_run_admission_verifier_rejects_resolver_rebinding_before_dispatch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values, _replay, _summary = _completed_iid_execution(
+        tmp_path,
+        monkeypatch,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    receipt = draw_authority.resolve_product_iid_run_admission(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        member_index=0,
+        authority_root=authority_root,
+    )
+    forged_calls: list[str] = []
+
+    def forged_resolver(*_args, **_kwargs):
+        forged_calls.append("resolver")
+        return receipt
+
+    monkeypatch.setattr(
+        draw_authority,
+        "resolve_product_iid_run_admission",
+        forged_resolver,
+    )
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="verifier authority dispatch changed",
+    ):
+        verify_product_iid_run_admission(
+            receipt,
+            membership=membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=frame_json,
+            horizon_json=horizon_json,
+            member_index=0,
+            authority_root=authority_root,
+        )
+    assert forged_calls == []
 
 
 def test_run_admission_truth_cannot_be_caller_constructed_or_subclassed() -> None:

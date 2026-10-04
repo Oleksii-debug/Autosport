@@ -477,6 +477,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
         _request_code=GitHubApi._request.__code__,
         _encode_branch=quote,
         _encode_branch_code=quote.__code__,
+        _encode_branch_defaults=quote.__defaults__,
+        _encode_branch_kwdefaults=quote.__kwdefaults__,
         _allowed_http_error_type=_AllowedHttpError,
         _error_type=CancellationError,
     ) -> str | None:
@@ -489,6 +491,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 and getattr(bound, "__self__", None) is self
                 and getattr(bound, "__func__", None) is _request_impl
                 and getattr(_encode_branch, "__code__", None) is _encode_branch_code
+                and getattr(_encode_branch, "__defaults__", None)
+                is _encode_branch_defaults
+                and getattr(_encode_branch, "__kwdefaults__", None)
+                is _encode_branch_kwdefaults
             )
 
         if (
@@ -496,6 +502,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
             or not branch
             or not callable(_encode_branch)
             or getattr(_encode_branch, "__code__", None) is not _encode_branch_code
+            or getattr(_encode_branch, "__defaults__", None)
+            is not _encode_branch_defaults
+            or getattr(_encode_branch, "__kwdefaults__", None)
+            is not _encode_branch_kwdefaults
         ):
             raise _error_type("invalid canonical head branch")
         if not request_dispatch_current():

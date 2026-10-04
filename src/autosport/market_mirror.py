@@ -517,15 +517,28 @@ class MarketMirror:
 
         mirror = cls()
         replay_events = store.replay_events_at_frozen_cutoff(
-            as_of=boundary.isoformat()
+            as_of=boundary.isoformat(),
+            _with_append_generation=True,
         )
-        for event in replay_events:
+        for event, append_generation in replay_events:
+            if append_generation == 0:
+                # Legacy baseline is immutable audit/order state. It participates in
+                # source-local sequence fencing but never becomes decision-causal.
+                mirror._apply_with_causal_authority(
+                    event,
+                    decision_causal=False,
+                )
+                continue
+
             observed = cls._utc_timestamp(event.observed_ts)
             ingested = cls._utc_timestamp(event.ingest_ts)
             if observed is None or ingested is None:
                 continue
             if observed <= boundary and ingested <= boundary:
-                mirror.apply(event)
+                mirror._apply_with_causal_authority(
+                    event,
+                    decision_causal=True,
+                )
         return mirror.active_view(
             as_of=boundary,
             max_age=age_limit,

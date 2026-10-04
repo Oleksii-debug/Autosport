@@ -129,6 +129,12 @@ _EXPECTED_TABLE_XINFO = {
         (1, "ingest_ts", "TEXT", 1, None, 0, 0),
         (2, "authority", "TEXT", 1, None, 0, 0),
     ),
+    "trusted_live_current_quotes": (
+        (0, "source_id", "TEXT", 1, None, 1, 0),
+        (1, "quote_key", "TEXT", 1, None, 2, 0),
+        (2, "sequence", "INTEGER", 1, None, 0, 0),
+        (3, "dedupe_key", "TEXT", 1, None, 0, 0),
+    ),
 }
 _LEGACY_CURRENT_XINFO = (
     (0, "quote_key", "TEXT", 0, None, 1, 0),
@@ -140,6 +146,7 @@ _EXPECTED_PRIMARY_KEYS = {
     "market_events": ("dedupe_key",),
     "current_quotes": ("source_id", "quote_key"),
     "market_event_live_receipts": ("dedupe_key",),
+    "trusted_live_current_quotes": ("source_id", "quote_key"),
 }
 _LEGACY_CURRENT_PRIMARY_KEYS = ("quote_key",)
 _CANONICAL_SECONDARY_INDEXES = {
@@ -779,6 +786,63 @@ def _trusted_live_events_from_connection(
     return sorted(events, key=_order_key)
 
 
+def _trusted_live_current_from_connection(
+    connection: sqlite3.Connection,
+    *,
+    _authority: str = _LIVE_RECEIPT_AUTHORITY,
+    _decode_history=_event_from_history_row,
+    _quote_key=_market_event_quote_key,
+    _dedupe_key=_market_event_dedupe_key,
+) -> dict[tuple[str, str], MarketEvent]:
+    """Read the bounded derived trusted-current projection and verify every pointer."""
+
+    rows = connection.execute(
+        f"""SELECT p.source_id,p.quote_key,p.sequence,p.dedupe_key,
+                   {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)},
+                   r.ingest_ts,r.authority
+            FROM trusted_live_current_quotes AS p
+            LEFT JOIN market_events AS m
+            ON m.dedupe_key=p.dedupe_key
+            LEFT JOIN market_event_live_receipts AS r
+            ON r.dedupe_key=p.dedupe_key
+            ORDER BY p.source_id,p.quote_key"""
+    ).fetchall()
+
+    current: dict[tuple[str, str], MarketEvent] = {}
+    prefix_size = 4
+    for row in rows:
+        source_id, quote_key, sequence, dedupe_key = row[:prefix_size]
+        history_row = row[prefix_size : prefix_size + len(_HISTORY_COLUMNS)]
+        receipt_ingest_ts, authority = row[-2:]
+        if not history_row or history_row[0] is None:
+            raise ValueError(
+                "trusted live current projection references missing market history"
+            )
+        if receipt_ingest_ts is None or authority is None:
+            raise ValueError(
+                "trusted live current projection references missing receipt authority"
+            )
+        event = _decode_history(history_row)
+        expected = (
+            ("source_id", source_id, event.source_id),
+            ("quote_key", quote_key, _quote_key(event)),
+            ("sequence", sequence, event.sequence),
+            ("dedupe_key", dedupe_key, _dedupe_key(event)),
+        )
+        for field_name, persisted, canonical in expected:
+            if not _typed_equal(persisted, canonical):
+                raise ValueError(
+                    "trusted live current projection identity mismatch: "
+                    f"{field_name}"
+                )
+        if receipt_ingest_ts != event.ingest_ts or authority != _authority:
+            raise ValueError("live receipt authority conflicts with market history")
+        key = (event.source_id, _quote_key(event))
+        if key in current:
+            raise ValueError("trusted live current projection is ambiguous")
+        current[key] = event
+    return current
+
 class SQLiteMarketStore:
     """Crash-safe append-only normalized market history plus current quote projection.
 
@@ -796,6 +860,7 @@ class SQLiteMarketStore:
             self.connection.execute("PRAGMA synchronous=FULL")
             self._init_schema()
             self._rebuild_current_quotes()
+            self._rebuild_trusted_live_current_quotes()
         except Exception:
             self.connection.close()
             raise
@@ -883,6 +948,15 @@ class SQLiteMarketStore:
                 authority TEXT NOT NULL
             )"""
         )
+        self.connection.execute(
+            """CREATE TABLE IF NOT EXISTS trusted_live_current_quotes (
+                source_id TEXT NOT NULL,
+                quote_key TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                PRIMARY KEY (source_id, quote_key)
+            )"""
+        )
 
         for table_name in _EXPECTED_TABLE_XINFO:
             _validate_canonical_table(self.connection, table_name)
@@ -949,6 +1023,47 @@ class SQLiteMarketStore:
             raise
         else:
             self.connection.commit()
+
+    def _rebuild_trusted_live_current_quotes(
+        self,
+        *,
+        _trusted_events=_trusted_live_events_from_connection,
+        _quote_key=_market_event_quote_key,
+        _dedupe_key=_market_event_dedupe_key,
+        _projection_key=_projection_order_key,
+    ) -> None:
+        """Repair the bounded trusted-current projection from validated receipt history."""
+
+        with self._connection_lock:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                latest: dict[tuple[str, str], tuple[tuple[int, str], MarketEvent]] = {}
+                for event in _trusted_events(self.connection):
+                    key = (event.source_id, _quote_key(event))
+                    order_key = _projection_key(event)
+                    previous = latest.get(key)
+                    if previous is None or order_key > previous[0]:
+                        latest[key] = (order_key, event)
+
+                self.connection.execute("DELETE FROM trusted_live_current_quotes")
+                for key in sorted(latest):
+                    event = latest[key][1]
+                    self.connection.execute(
+                        """INSERT INTO trusted_live_current_quotes
+                           (source_id,quote_key,sequence,dedupe_key)
+                           VALUES (?,?,?,?)""",
+                        (
+                            event.source_id,
+                            _quote_key(event),
+                            event.sequence,
+                            _dedupe_key(event),
+                        ),
+                    )
+            except Exception:
+                self.connection.rollback()
+                raise
+            else:
+                self.connection.commit()
 
     def _insert_one(
         self,
@@ -1028,20 +1143,42 @@ class SQLiteMarketStore:
         event: MarketEvent,
         *,
         _dedupe_key=_market_event_dedupe_key,
-        _authority=_LIVE_RECEIPT_AUTHORITY,
+        _quote_key=_market_event_quote_key,
+        _authority: str = _LIVE_RECEIPT_AUTHORITY,
     ) -> None:
+        dedupe_key = _dedupe_key(event)
+        quote_key = _quote_key(event)
         cursor = self.connection.execute(
             """INSERT INTO market_event_live_receipts
                (dedupe_key,ingest_ts,authority)
                VALUES (?,?,?)""",
             (
-                _dedupe_key(event),
+                dedupe_key,
                 event.ingest_ts,
                 _authority,
             ),
         )
         if cursor.rowcount != 1:
             raise RuntimeError("live receipt authority insert did not persist exactly one row")
+        self.connection.execute(
+            """INSERT INTO trusted_live_current_quotes
+               (source_id,quote_key,sequence,dedupe_key)
+               VALUES (?,?,?,?)
+               ON CONFLICT(source_id,quote_key) DO UPDATE SET
+               sequence=excluded.sequence,
+               dedupe_key=excluded.dedupe_key
+               WHERE excluded.sequence>trusted_live_current_quotes.sequence
+                  OR (
+                      excluded.sequence=trusted_live_current_quotes.sequence
+                      AND excluded.dedupe_key>trusted_live_current_quotes.dedupe_key
+                  )""",
+            (
+                event.source_id,
+                quote_key,
+                event.sequence,
+                dedupe_key,
+            ),
+        )
 
     def _append_batch_accepted_canonical(
         self,
@@ -1209,6 +1346,28 @@ class SQLiteMarketStore:
                         "live append hook returned events outside the canonical inserted set"
                     )
 
+                trusted_projection_state: dict[
+                    tuple[str, str], tuple[int, str] | None
+                ] = {}
+                expected_trusted_projection_changes = 0
+                for event in expected:
+                    projection_identity = (event.source_id, _quote_key(event))
+                    if projection_identity not in trusted_projection_state:
+                        row = self.connection.execute(
+                            """SELECT sequence,dedupe_key
+                               FROM trusted_live_current_quotes
+                               WHERE source_id=? AND quote_key=?""",
+                            projection_identity,
+                        ).fetchone()
+                        trusted_projection_state[projection_identity] = (
+                            (row[0], row[1]) if row is not None else None
+                        )
+                    candidate = (event.sequence, _dedupe_key(event))
+                    previous = trusted_projection_state[projection_identity]
+                    if previous is None or candidate > previous:
+                        trusted_projection_state[projection_identity] = candidate
+                        expected_trusted_projection_changes += 1
+
                 receipt_changes_before = self.connection.total_changes
                 for event in expected:
                     _receipt_writer(self, event)
@@ -1216,9 +1375,12 @@ class SQLiteMarketStore:
                     raise RuntimeError(
                         "live receipt writer relinquished transaction ownership"
                     )
+                expected_receipt_changes = (
+                    len(expected) + expected_trusted_projection_changes
+                )
                 if (
                     self.connection.total_changes - receipt_changes_before
-                    != len(expected)
+                    != expected_receipt_changes
                 ):
                     raise RuntimeError(
                         "live receipt writer changed authority outside the canonical batch"
@@ -1233,6 +1395,17 @@ class SQLiteMarketStore:
                     if receipt != (event.ingest_ts, _authority):
                         raise RuntimeError(
                             "live receipt writer did not persist canonical authority"
+                        )
+                for projection_identity, projected in trusted_projection_state.items():
+                    row = self.connection.execute(
+                        """SELECT sequence,dedupe_key
+                           FROM trusted_live_current_quotes
+                           WHERE source_id=? AND quote_key=?""",
+                        projection_identity,
+                    ).fetchone()
+                    if row != projected:
+                        raise RuntimeError(
+                            "live receipt writer did not persist canonical trusted projection"
                         )
             except Exception:
                 self.connection.rollback()
@@ -1325,22 +1498,11 @@ class SQLiteMarketStore:
     def trusted_live_current_by_source(
         self,
         *,
-        _read=_trusted_live_events_from_connection,
-        _quote_key=_market_event_quote_key,
-        _projection_key=_projection_order_key,
+        _read=_trusted_live_current_from_connection,
     ) -> dict[tuple[str, str], MarketEvent]:
-        """Project latest source-local live state without retroactively trusting imports."""
+        """Project latest source-local live state without materializing trusted history."""
         with self._connection_lock:
-            events = _read(self.connection)
-        current: dict[tuple[str, str], MarketEvent] = {}
-        for event in events:
-            key = (event.source_id, _quote_key(event))
-            previous = current.get(key)
-            if previous is None or _projection_key(event) > _projection_key(
-                previous
-            ):
-                current[key] = event
-        return current
+            return _read(self.connection)
 
     def current_by_source(self) -> dict[tuple[str, str], MarketEvent]:
         with self._connection_lock:
@@ -1366,4 +1528,47 @@ class SQLiteMarketStore:
 
     def close(self) -> None:
         with self._connection_lock:
-            self.connection.close()
+            self.connection.close()def _seal_live_receipt_authority_call_surfaces() -> None:
+    """Hide canonical dependency bindings from callers of receipt-authority APIs."""
+
+    live_append_impl = SQLiteMarketStore._append_live_batch_accepted
+    append_impl = SQLiteMarketStore.append_batch_accepted
+    has_receipt_impl = SQLiteMarketStore.has_trusted_live_receipt
+    trusted_events_impl = SQLiteMarketStore.trusted_live_events
+    trusted_current_impl = SQLiteMarketStore.trusted_live_current_by_source
+
+    def _append_live_batch_accepted(
+        self: SQLiteMarketStore,
+        events: Iterable[MarketEvent],
+    ) -> list[MarketEvent]:
+        return live_append_impl(self, events)
+
+    def append_batch_accepted(
+        self: SQLiteMarketStore,
+        events: Iterable[MarketEvent],
+    ) -> list[MarketEvent]:
+        return append_impl(self, events)
+
+    def has_trusted_live_receipt(
+        self: SQLiteMarketStore,
+        event: MarketEvent,
+    ) -> bool:
+        return has_receipt_impl(self, event)
+
+    def trusted_live_events(self: SQLiteMarketStore) -> list[MarketEvent]:
+        return trusted_events_impl(self)
+
+    def trusted_live_current_by_source(
+        self: SQLiteMarketStore,
+    ) -> dict[tuple[str, str], MarketEvent]:
+        return trusted_current_impl(self)
+
+    SQLiteMarketStore._append_live_batch_accepted = _append_live_batch_accepted
+    SQLiteMarketStore.append_batch_accepted = append_batch_accepted
+    SQLiteMarketStore.has_trusted_live_receipt = has_trusted_live_receipt
+    SQLiteMarketStore.trusted_live_events = trusted_live_events
+    SQLiteMarketStore.trusted_live_current_by_source = trusted_live_current_by_source
+
+
+_seal_live_receipt_authority_call_surfaces()
+del _seal_live_receipt_authority_call_surfaces

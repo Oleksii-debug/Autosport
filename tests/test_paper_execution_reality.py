@@ -951,6 +951,32 @@ class PaperExecutionRealityTests(unittest.TestCase):
                     started_at=STARTED_AT,
                 )
 
+    def test_rehashed_noncanonical_crypto_identity_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            execute_paper_plan(
+                plan=plan(action("a1")),
+                trigger_id="trigger-bad-crypto-id",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            reservation = next(
+                item
+                for item in events
+                if item["event_type"] == "RUN_RESERVED"
+            )
+            reservation["payload"]["model_fingerprint"] = "not-a-sha256"
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reservation identity fields are invalid",
+            ):
+                PaperExecutionLedger(path).events()
+
     def test_writer_lock_fails_closed_instead_of_creating_parallel_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-execution.jsonl"

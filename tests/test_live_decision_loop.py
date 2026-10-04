@@ -3857,6 +3857,149 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 execution_events[-1]["event_type"],
                 "RUN_COMPLETED",
             )
+
+            canonical_observer = _DurableObserver(workspace, [()])
+            canonical_resume = self._loop(
+                workspace,
+                observer=canonical_observer,
+                factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+                book=resumed_book,
+                authority=authority,
+                paper_execution=resumed_execution,
+            )
+            self.assertEqual(canonical_observer.calls, 0)
+            canonical_resume.close()
+
+            def rewrite_execution_events(
+                source_events: list[dict[str, object]],
+            ) -> list[dict[str, object]]:
+                rewritten = json.loads(json.dumps(source_events))
+                previous_sha256 = None
+                for sequence, item in enumerate(rewritten):
+                    item["sequence"] = sequence
+                    item["previous_sha256"] = previous_sha256
+                    event_body = {
+                        key: value
+                        for key, value in item.items()
+                        if key != "event_sha256"
+                    }
+                    item["event_sha256"] = hashlib.sha256(
+                        json.dumps(
+                            event_body,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            allow_nan=False,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    previous_sha256 = item["event_sha256"]
+                execution_ledger.path.write_text(
+                    "".join(
+                        json.dumps(
+                            item,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                        for item in rewritten
+                    ),
+                    encoding="utf-8",
+                )
+                execution_ledger._write_anchor_unlocked(rewritten)
+                execution_ledger.events()
+                return rewritten
+
+            observation_events = json.loads(json.dumps(execution_events))
+            reservation_index = next(
+                index
+                for index, item in enumerate(observation_events)
+                if item["event_type"] == "RUN_RESERVED"
+            )
+            observation_events[reservation_index]["payload"][
+                "observation_evidence_ids"
+            ] = {"forged-action": "forged-evidence"}
+            rewrite_execution_events(observation_events)
+
+            reservation_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "reservation conflicts with decision evidence",
+            ):
+                self._loop(
+                    workspace,
+                    observer=reservation_observer,
+                    factory=_PositiveIntentFactory(
+                        self.INTENT_CONFIG_SHA256
+                    ),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                    book=resumed_book,
+                    authority=authority,
+                    paper_execution=resumed_execution,
+                )
+            self.assertEqual(reservation_observer.calls, 0)
+
+            attempt_events = json.loads(json.dumps(execution_events))
+            attempt_index = next(
+                index
+                for index, item in enumerate(attempt_events)
+                if item["event_type"] == "ATTEMPT_RECORDED"
+            )
+            attempt_events[attempt_index]["payload"]["reason"] = (
+                "forged synthetic execution reason"
+            )
+            rewrite_execution_events(attempt_events)
+
+            synthetic_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "attempt conflicts with canonical synthetic execution",
+            ):
+                self._loop(
+                    workspace,
+                    observer=synthetic_observer,
+                    factory=_PositiveIntentFactory(
+                        self.INTENT_CONFIG_SHA256
+                    ),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                    book=resumed_book,
+                    authority=authority,
+                    paper_execution=resumed_execution,
+                )
+            self.assertEqual(synthetic_observer.calls, 0)
+
+            event_key_events = json.loads(json.dumps(execution_events))
+            completion_index = next(
+                index
+                for index, item in enumerate(event_key_events)
+                if item["event_type"] == "RUN_COMPLETED"
+            )
+            event_key_events[completion_index]["event_key"] = (
+                event_key_events[completion_index]["run_id"]
+                + ":forged-complete"
+            )
+            rewrite_execution_events(event_key_events)
+
+            identity_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "event identity is invalid",
+            ):
+                self._loop(
+                    workspace,
+                    observer=identity_observer,
+                    factory=_PositiveIntentFactory(
+                        self.INTENT_CONFIG_SHA256
+                    ),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                    book=resumed_book,
+                    authority=authority,
+                    paper_execution=resumed_execution,
+                )
+            self.assertEqual(identity_observer.calls, 0)
+
+            rewrite_execution_events(execution_events)
             truncated_execution = execution_events[:-1]
             execution_ledger.path.write_text(
                 "".join(

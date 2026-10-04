@@ -593,11 +593,12 @@ class _ContinuousSessionState:
             or operational["history_mtime_ns"] != mtime_ns
         ):
             # The full checkpoint was validated immediately before this method.
-            # Preserve bounded operational authority while refreshing only the
-            # binding to that validated history image after an interrupted sync.
-            operational["history_size"] = size
-            operational["history_mtime_ns"] = mtime_ns
-            atomic_write_json(self.operational_path, operational)
+            # A signature change can be the crash boundary after canonical
+            # settlement-history publication but before operational sync. Rebuild
+            # bounded state from that verified full image rather than retaining
+            # potentially older cycle/source projection fields.
+            self._write_operational_from_full(full)
+            return
         self._read_operational()
 
     def _overlay_operational(

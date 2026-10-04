@@ -307,6 +307,9 @@ def _expected_ticket_economics(
 class PaperSettlementLearningBridge:
     """Durable identity bridge from settled PAPER economics to one AgentLoop resolution."""
 
+    settlement_learning_handoff_implementation_id = (
+        "autosport.paper-settlement-learning-bridge-v1"
+    )
     _AUTHORITY_FIELDS = frozenset(
         {
             "_authority_fields_sealed",
@@ -316,6 +319,7 @@ class PaperSettlementLearningBridge:
             "agent_loop",
             "economic_goal",
             "risk_policy",
+            "settlement_learning_configuration_sha256",
         }
     )
 
@@ -359,6 +363,21 @@ class PaperSettlementLearningBridge:
         self.agent_loop = agent_loop
         self.economic_goal = economic_goal
         self.risk_policy = risk_policy
+        self.settlement_learning_configuration_sha256 = _digest(
+            {
+                "implementation_id": self.settlement_learning_handoff_implementation_id,
+                "state_path": str(self.state_path.resolve(strict=False)),
+                "paper_book_path": str(self.paper_book_path.resolve(strict=False)),
+                "decision_ledger_path": str(
+                    self.decision_ledger.path.resolve(strict=False)
+                ),
+                "agent_loop_path": str(self.agent_loop.path.resolve(strict=False)),
+                "economic_goal_fingerprint": provenance_for(
+                    self.economic_goal
+                ).contract_sha256,
+                "risk_fingerprint": self.risk_policy.provenance_sha256,
+            }
+        )
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         with WorkspaceEconomicLock(self.state_path.parent):
             if self.state_path.exists():

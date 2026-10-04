@@ -207,22 +207,58 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             ("refresh-only", "material-only", "mixed"),
         )
 
-    def test_refresh_only_routing_rejects_non_subset_metadata(self) -> None:
-        mirror = MarketMirror()
-        dependencies = FocusedMirrorDependencyIndex(mirror)
-        dependencies.register("decision")
-        invalid = MirrorInvalidationBatch(
-            changed_keys=(("provider-a", "quote-a"),),
-            full_refresh_required=False,
-            has_more=False,
-            semantic_refresh_keys=(("provider-b", "quote-b"),),
-        )
-
+    def test_invalidation_batch_rejects_non_subset_refresh_metadata(self) -> None:
         with self.assertRaisesRegex(
             ValueError,
             "semantic refresh keys must be a subset",
         ):
-            dependencies.semantic_refresh_only_inputs(invalid)
+            MirrorInvalidationBatch(
+                changed_keys=(("provider-a", "quote-a"),),
+                full_refresh_required=False,
+                has_more=False,
+                semantic_refresh_keys=(("provider-b", "quote-b"),),
+            )
+
+    def test_full_refresh_batch_rejects_bounded_key_state(self) -> None:
+        contradictory = (
+            {
+                "changed_keys": (("provider-a", "quote-a"),),
+                "semantic_refresh_keys": (),
+                "has_more": False,
+            },
+            {
+                "changed_keys": (),
+                "semantic_refresh_keys": (("provider-a", "quote-a"),),
+                "has_more": False,
+            },
+            {
+                "changed_keys": (),
+                "semantic_refresh_keys": (),
+                "has_more": True,
+            },
+        )
+        for state in contradictory:
+            with self.subTest(state=state):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "full-refresh invalidation must not carry bounded key state",
+                ):
+                    MirrorInvalidationBatch(
+                        changed_keys=state["changed_keys"],
+                        full_refresh_required=True,
+                        has_more=state["has_more"],
+                        semantic_refresh_keys=state["semantic_refresh_keys"],
+                    )
+
+    def test_full_refresh_batch_accepts_only_unbounded_fence(self) -> None:
+        batch = MirrorInvalidationBatch(
+            changed_keys=(),
+            full_refresh_required=True,
+            has_more=False,
+        )
+        self.assertEqual(batch.changed_keys, ())
+        self.assertEqual(batch.semantic_refresh_keys, ())
+        self.assertFalse(batch.has_more)
 
     def test_market_bus_persists_before_mirror_subscriber_runs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

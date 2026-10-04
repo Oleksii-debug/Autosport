@@ -2407,24 +2407,24 @@ def _verify_terminal_economics(
             StrategyClass.HEDGE_REBALANCE,
         }
     )
-    if not market_outcome_authorities:
-        for intent in outcome_independent:
-            if (
-                intent.evidence.terminal_state_space_sha256
-                != evidence.terminal_state_space_sha256
-            ):
-                return (
-                    None,
-                    "outcome-independent evidence terminal-state identity does not match verified completeness",
-                )
-            if (
-                intent.evidence.execution_assumptions_sha256
-                != evidence.execution_assumptions_sha256
-            ):
-                return (
-                    None,
-                    "outcome-independent execution assumptions do not match verified completeness",
-                )
+    for intent in outcome_independent:
+        if (
+            not market_outcome_authorities
+            and intent.evidence.terminal_state_space_sha256
+            != evidence.terminal_state_space_sha256
+        ):
+            return (
+                None,
+                "outcome-independent evidence terminal-state identity does not match verified completeness",
+            )
+        if (
+            intent.evidence.execution_assumptions_sha256
+            != evidence.execution_assumptions_sha256
+        ):
+            return (
+                None,
+                "outcome-independent execution assumptions do not match verified completeness",
+            )
 
     current_portfolio_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
     if current_portfolio_sha256 != portfolio_sha256:

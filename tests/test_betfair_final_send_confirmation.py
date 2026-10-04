@@ -24,6 +24,7 @@ from autosport.betfair_supervised_execution import (
 from autosport.real_execution_ledger import (
     AttemptState,
     ExecutionLedgerBusyError,
+    ExecutionStateError,
     RealExecutionLedger,
 )
 from autosport.supervised_execution import SupervisedExecutionError
@@ -1008,7 +1009,10 @@ def test_trusted_quote_expiry_at_final_boundary_stays_reserved_and_unconsumed(
             lambda: next(trusted_times, provider_tests.QUOTE_EXPIRES_AT),
         )
 
-        with pytest.raises(Exception):
+        with pytest.raises(
+            ExecutionStateError,
+            match="cannot submit attempt at or after persisted quote expiry",
+        ):
             execute_betfair_supervised_action(
                 ledger,
                 bound,

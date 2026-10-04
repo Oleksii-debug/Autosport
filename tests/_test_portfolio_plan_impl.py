@@ -1374,6 +1374,33 @@ class PortfolioPlanTests(unittest.TestCase):
             rebound_plan.reason,
         )
 
+        class ReboundScenarioSearchEngine:
+            def __init__(self):
+                raise AssertionError("rebound scenario engine must not be instantiated")
+
+        with patch.object(
+            portfolio_plan_module,
+            "ScenarioSearchEngine",
+            ReboundScenarioSearchEngine,
+        ):
+            type_rebound_plan = build_portfolio_plan(
+                book,
+                intents,
+                self._policy(goal),
+                self.DECISION_TS,
+                dependency_graph=graph,
+                terminal_state_evidence=witness,
+                market_outcome_authorities=(authority,),
+            )
+
+        self.assertEqual(type_rebound_plan.action, PortfolioAction.WAIT)
+        self.assertEqual(type_rebound_plan.stakes, (Decimal("0"),))
+        self.assertIsNone(type_rebound_plan.terminal_economics)
+        self.assertIn(
+            "canonical authoritative scenario-search authority changed",
+            type_rebound_plan.reason,
+        )
+
         def settle_during_analysis(engine, tickets, authorities, *, decision_as_of):
             book.settle(
                 existing.ticket_id,

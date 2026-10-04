@@ -249,6 +249,33 @@ def test_persisted_generation_zero_duplicate_stays_noncausal() -> None:
             store.close()
 
 
+def test_noncanonical_durable_clock_is_terminal_and_does_not_poison_provider_head() -> None:
+    for field_name in ("observed_ts", "ingest_ts"):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            mirror = MarketMirror()
+            buffer = MarketMirrorUpdateBuffer(mirror, store=store)
+            raw = _event("provider-a", 1, "2.00").to_dict()
+            raw[field_name] = "2026-09-17T02:00:00.0000001+00:00"
+            event = MarketEvent.from_dict(raw)
+            try:
+                assert buffer.submit(event).status is BufferSubmit.ACCEPTED
+                drained = buffer.drain_provider("provider-a")
+
+                assert not drained.applied
+                assert len(drained.quarantined) == 1
+                assert drained.quarantined[0].error_type == "ValueError"
+                assert "precision finer than microseconds is unsupported" in (
+                    drained.quarantined[0].error_message
+                )
+                assert drained.remaining == 0
+                assert buffer.queued("provider-a") == 0
+                assert store.events() == []
+                assert mirror.snapshot() == ()
+            finally:
+                store.close()
+
+
 def test_persisted_same_sequence_conflict_is_terminal_and_quarantined() -> None:
     with tempfile.TemporaryDirectory() as directory:
         store = SQLiteMarketStore(Path(directory) / "market.db")

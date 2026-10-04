@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -889,6 +890,98 @@ class PaperExecutionRealityTests(unittest.TestCase):
                     },
                 )
             self.assertFalse(path.exists())
+
+    def test_invalid_exposure_scope_inputs_leave_no_durable_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = plan(action("a1"))
+            body = {
+                "schema": (
+                    "autosport.paper_execution.exposure_scope_binding"
+                ),
+                "schema_version": 1,
+                "plan_id": current.plan_id,
+                "plan_fingerprint": current.fingerprint,
+                "intent_evidence_sha256": "a" * 64,
+                "bindings": [
+                    {
+                        "action_id": "a1",
+                        "sport": None,
+                        "bankroll_id": None,
+                        "currency": None,
+                    }
+                ],
+            }
+            canonical = json.dumps(
+                body,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            payload = {
+                **body,
+                "binding_sha256": hashlib.sha256(
+                    canonical.encode("utf-8")
+                ).hexdigest(),
+            }
+            run_id = "paper-exec-v2-" + "1" * 64
+
+            invalid_cases = (
+                (
+                    "not-a-run-id",
+                    payload,
+                    "exposure scope run_id is invalid",
+                ),
+                (
+                    run_id,
+                    {key: value for key, value in payload.items()
+                     if key != "binding_sha256"},
+                    "exposure scope payload schema is invalid",
+                ),
+                (
+                    run_id,
+                    {**payload, "binding_sha256": "b" * 64},
+                    "exposure scope binding digest is invalid",
+                ),
+                (
+                    run_id,
+                    {
+                        **payload,
+                        "bindings": [
+                            {
+                                "action_id": "a1",
+                                "sport": None,
+                                "bankroll_id": "bankroll-1",
+                                "currency": "usd",
+                            }
+                        ],
+                    },
+                    "exposure scope bindings are invalid",
+                ),
+            )
+            for invalid_run_id, invalid_payload, message in invalid_cases:
+                with self.subTest(message=message), self.assertRaisesRegex(
+                    PaperExecutionStateError,
+                    message,
+                ):
+                    ledger.publish_exposure_scope(
+                        run_id=invalid_run_id,
+                        payload=invalid_payload,
+                    )
+                self.assertFalse(path.exists())
+
+            ledger.publish_exposure_scope(
+                run_id=run_id,
+                payload=payload,
+            )
+            events = ledger.events(run_id)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(
+                events[0]["event_type"],
+                "PAPER_EXPOSURE_SCOPE_BOUND",
+            )
 
     def test_direct_reservation_rejects_invalid_observed_timing(self):
         with tempfile.TemporaryDirectory() as tmp:

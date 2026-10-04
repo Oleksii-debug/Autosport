@@ -860,7 +860,8 @@ class SQLiteMarketStore:
             opened_identity = reader._current_database_path_identity()
             if not os.path.samestat(pre_open_identity, opened_identity):
                 raise ValueError(
-                    "market database pathname changed while opening frozen-prefix reader"
+                    "market database pathname changed while opening "
+                    "frozen-prefix reader"
                 )
             reader._database_identity = opened_identity
             connection.execute("PRAGMA query_only=ON")

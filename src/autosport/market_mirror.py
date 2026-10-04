@@ -685,7 +685,8 @@ class MarketMirror:
         for item in events_with_generation:
             if type(item) is not tuple or len(item) != 2:
                 raise TypeError(
-                    "proven market history must contain (MarketEvent, generation) tuples"
+                    "proven market history must contain "
+                    "(MarketEvent, generation) tuples"
                 )
             event, append_generation = item
             if not isinstance(event, MarketEvent):

@@ -244,15 +244,20 @@ class RewardComponentAttribution:
                 "OBSERVED attribution cannot carry counterfactual_ref"
             )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(
+        self,
+        _ref_to_dict=AttributionAuthorityRef.to_dict,
+    ) -> dict[str, Any]:
         return {
             "component": self.component.value,
             "truth": self.truth.value,
-            "authority_refs": [item.to_dict() for item in self.authority_refs],
+            "authority_refs": [
+                _ref_to_dict(item) for item in self.authority_refs
+            ],
             "counterfactual_ref": (
                 None
                 if self.counterfactual_ref is None
-                else self.counterfactual_ref.to_dict()
+                else _ref_to_dict(self.counterfactual_ref)
             ),
         }
 
@@ -294,6 +299,34 @@ class RewardComponentAttribution:
                 else _ref_parser(counterfactual_raw)
             ),
         )
+
+
+def _reward_attribution_semantic_payload(evidence: Any) -> dict[str, Any]:
+    return {
+        "schema": evidence.schema,
+        "schema_version": evidence.schema_version,
+        "environment_id": evidence.environment_id,
+        "episode_id": evidence.episode_id,
+        "action_id": evidence.action_id,
+        "outcome_id": evidence.outcome_id,
+        "reward_id": evidence.reward_id,
+        "transition_id": evidence.transition_id,
+    }
+
+
+def _reward_attribution_payload(
+    evidence: Any,
+    *,
+    _component_to_dict=RewardComponentAttribution.to_dict,
+) -> dict[str, Any]:
+    return {
+        **_reward_attribution_semantic_payload(evidence),
+        "components": [
+            _component_to_dict(item) for item in evidence.components
+        ],
+        "source_resolved": False,
+        "policy_update_eligible": False,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,23 +411,20 @@ class RewardAttributionEvidence:
         return False
 
     @property
-    def semantic_key(self, _digest_impl=_digest) -> str:
-        return _digest_impl(
-            {
-                "schema": self.schema,
-                "schema_version": self.schema_version,
-                "environment_id": self.environment_id,
-                "episode_id": self.episode_id,
-                "action_id": self.action_id,
-                "outcome_id": self.outcome_id,
-                "reward_id": self.reward_id,
-                "transition_id": self.transition_id,
-            }
-        )
+    def semantic_key(
+        self,
+        _digest_impl=_digest,
+        _payload_impl=_reward_attribution_semantic_payload,
+    ) -> str:
+        return _digest_impl(_payload_impl(self))
 
     @property
-    def evidence_id(self, _digest_impl=_digest) -> str:
-        return _digest_impl(self.payload())
+    def evidence_id(
+        self,
+        _digest_impl=_digest,
+        _payload_impl=_reward_attribution_payload,
+    ) -> str:
+        return _digest_impl(_payload_impl(self))
 
     def require_policy_update_eligible(
         self,
@@ -418,25 +448,23 @@ class RewardAttributionEvidence:
             )
         return self.components[_required_components.index(component)]
 
-    def payload(self) -> dict[str, Any]:
-        return {
-            "schema": self.schema,
-            "schema_version": self.schema_version,
-            "environment_id": self.environment_id,
-            "episode_id": self.episode_id,
-            "action_id": self.action_id,
-            "outcome_id": self.outcome_id,
-            "reward_id": self.reward_id,
-            "transition_id": self.transition_id,
-            "components": [item.to_dict() for item in self.components],
-            "source_resolved": False,
-            "policy_update_eligible": False,
-        }
+    def payload(
+        self,
+        _payload_impl=_reward_attribution_payload,
+    ) -> dict[str, Any]:
+        return _payload_impl(self)
 
-    def to_dict(self) -> dict[str, Any]:
-        raw = self.payload()
-        raw["semantic_key"] = self.semantic_key
-        raw["evidence_id"] = self.evidence_id
+    def to_dict(
+        self,
+        _payload_impl=_reward_attribution_payload,
+        _semantic_payload_impl=_reward_attribution_semantic_payload,
+        _digest_impl=_digest,
+        _dict_type=dict,
+    ) -> dict[str, Any]:
+        payload = _payload_impl(self)
+        raw = _dict_type(payload)
+        raw["semantic_key"] = _digest_impl(_semantic_payload_impl(self))
+        raw["evidence_id"] = _digest_impl(payload)
         return raw
 
     @classmethod
@@ -454,6 +482,9 @@ class RewardAttributionEvidence:
         _list_type=list,
         _tuple_type=tuple,
         _type=type,
+        _semantic_payload_impl=_reward_attribution_semantic_payload,
+        _payload_impl=_reward_attribution_payload,
+        _digest_impl=_digest,
     ) -> "RewardAttributionEvidence":
         expected = {
             "schema",
@@ -499,14 +530,18 @@ class RewardAttributionEvidence:
                 _component_parser(item) for item in components_raw
             ),
         )
+        expected_semantic_key = _digest_impl(
+            _semantic_payload_impl(evidence)
+        )
+        expected_evidence_id = _digest_impl(_payload_impl(evidence))
         if (
             _sha256_impl(raw["semantic_key"], "semantic_key")
-            != evidence.semantic_key
+            != expected_semantic_key
         ):
             raise _error_type("reward attribution semantic key mismatch")
         if (
             _sha256_impl(raw["evidence_id"], "evidence_id")
-            != evidence.evidence_id
+            != expected_evidence_id
         ):
             raise _error_type("reward attribution evidence digest mismatch")
         return evidence

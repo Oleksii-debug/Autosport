@@ -496,3 +496,30 @@ def test_product_tick_uses_bounded_coherent_status_path() -> None:
 
     assert runtime.tick() == "bounded-tick-result"
 
+def test_public_settlement_evidence_order_matches_v2_contract_after_append() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        state = _state_with_history(Path(directory), _SMALL_HISTORY)
+        state.record_success(
+            at=_AT,
+            full_refresh=False,
+            settlement_evidence=(
+                continuous_session.SettlementResolution(
+                    event_identity="provider-a:event-lexical-first",
+                    settlement_ref="provider-result:lexical-first",
+                    quote_outcomes={
+                        "provider-a:event-lexical-first:winner:home": "win"
+                    },
+                    evidence_id="aaa-receipt-new",
+                    evidence_sha256="d" * 64,
+                    available_at=_AT,
+                ),
+            ),
+        )
+
+        evidence_ids = tuple(
+            item["evidence_id"]
+            for item in state.snapshot().settlement_evidence
+        )
+        assert evidence_ids == tuple(sorted(evidence_ids))
+        assert evidence_ids[0] == "aaa-receipt-new"
+

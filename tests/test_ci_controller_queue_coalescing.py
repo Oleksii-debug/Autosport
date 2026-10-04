@@ -3332,6 +3332,52 @@ def test_controller_event_head_validation_is_primitive_not_global() -> None:
     assert '_require_sha(event_head_sha, field="event head sha")' not in trigger
     assert '_require_sha(args.event_head_sha, field="event head sha")' not in main_source
 
+def test_scoped_active_run_scan_rejects_inflight_request_kwdefault_rebase(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_request = scoped_controller.GitHubApi._request
+    defaults = canonical_request.__kwdefaults__
+    assert defaults is not None
+
+    class MutatingResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            # The current request already owns its bound parser arguments. The
+            # mutation is aimed at a later page/status request and must therefore
+            # be detected by the active-snapshot post-read authority witness.
+            monkeypatch.setitem(defaults, "_json_parse_int", str)
+            return b'{"total_count":0,"workflow_runs":[]}'
+
+    def mutating_urlopen(_request, *, timeout: int):
+        assert timeout == 20
+        return MutatingResponse()
+
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        mutating_urlopen,
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="active workflow snapshot authority changed",
+    ):
+        api._active_runs_for_status("queued")
+
+
 def test_scoped_active_run_scan_rejects_inflight_request_dispatch_rebind(
     monkeypatch,
 ) -> None:

@@ -272,3 +272,45 @@ def test_authority_method_code_drift_fails_before_ingest(
         match="execution identity dispatch changed",
     ):
         _guarded_ingest(action=_action(), capture=capture, ledger=ledger)
+
+
+@pytest.mark.parametrize("method_name", ["_reload", "_append"])
+def test_secure_journal_io_rebind_fails_before_ingest(
+    tmp_path,
+    monkeypatch,
+    method_name,
+) -> None:
+    ledger = RealExecutionLedger(tmp_path / "execution.jsonl")
+    monkeypatch.setattr(
+        settlement.BetfairSettlementRevisionStore,
+        method_name,
+        lambda self, *args, **kwargs: None,
+    )
+
+    with pytest.raises(
+        settlement.BetfairSettlementRevisionError,
+        match="execution identity dispatch changed",
+    ):
+        _guarded_ingest(action=_action(), capture=object(), ledger=ledger)
+
+
+@pytest.mark.parametrize("method_name", ["_reload", "_append"])
+def test_secure_journal_io_code_drift_fails_before_ingest(
+    tmp_path,
+    monkeypatch,
+    method_name,
+) -> None:
+    method = vars(settlement.BetfairSettlementRevisionStore)[method_name]
+    original_code = method.__code__
+    monkeypatch.setattr(
+        method,
+        "__code__",
+        original_code.replace(co_name=f"drifted_{method_name}"),
+    )
+    ledger = RealExecutionLedger(tmp_path / "execution.jsonl")
+
+    with pytest.raises(
+        settlement.BetfairSettlementRevisionError,
+        match="execution identity dispatch changed",
+    ):
+        _guarded_ingest(action=_action(), capture=object(), ledger=ledger)

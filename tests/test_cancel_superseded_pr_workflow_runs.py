@@ -1075,6 +1075,45 @@ def test_base_active_run_queue_shrink_uses_short_page_as_safe_terminal_snapshot(
     ]
 
 
+def test_base_active_run_reader_stops_after_full_duplicate_page(
+    monkeypatch,
+) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    requested: list[str] = []
+
+    def run_payload(run_id: int) -> dict[str, object]:
+        return {
+            "id": run_id,
+            "head_sha": HEAD_A,
+            "name": "CI",
+            "status": "queued",
+            "pull_requests": [{"number": 2008}],
+        }
+
+    first_page = [run_payload(run_id) for run_id in range(1, 101)]
+
+    def fake_request(path: str, **_kwargs):
+        requested.append(path)
+        if "page=1" in path:
+            return {"total_count": 200, "workflow_runs": first_page}
+        if "page=2" in path:
+            return {"total_count": 200, "workflow_runs": list(first_page)}
+        raise AssertionError("duplicate full page must terminate moving snapshot")
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    runs = api._active_runs_for_status("queued")
+
+    assert {run.run_id for run in runs} == set(range(1, 101))
+    assert requested == [
+        "/actions/runs?event=pull_request&status=queued&per_page=100&page=1",
+        "/actions/runs?event=pull_request&status=queued&per_page=100&page=2",
+    ]
+
+
 def test_base_active_run_reader_rejects_oversized_provider_page(monkeypatch) -> None:
     api = controller_module.GitHubApi(
         repository="owner/repo",

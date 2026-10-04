@@ -3108,6 +3108,96 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed_observer.calls, 1)
             self.assertEqual(len(ledger.verified_records()), 2)
 
+    def test_default_pending_restart_uses_committed_market_frontier_after_late_backdated_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many(
+                    (self._event(selection="selection-a", sequence=1),)
+                )
+            finally:
+                seed_store.close()
+
+            def fail_after_pending(input_id, snapshot):
+                del input_id, snapshot
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            strategy = self._strategy_version()
+            registry = self._scientific_registry(workspace, strategy)
+            first_provider = _EmptyProvider()
+            first = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=fail_after_pending,
+                scientific_registry=registry,
+                provider=first_provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+
+            pending = json.loads(first.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(pending["schema_version"], 2)
+            self.assertEqual(pending["phase"], "pending")
+            self.assertEqual(pending["market_append_generation"], 1)
+            first.close()
+
+            peer_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                peer_store.append(
+                    self._event(
+                        selection="selection-a",
+                        sequence=2,
+                        odds="2.10",
+                        observed=self.START + timedelta(milliseconds=500),
+                    )
+                )
+            finally:
+                peer_store.close()
+
+            resumed_provider = _EmptyProvider()
+            resumed_factory = _EmptyIntentFactory()
+            resumed = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=resumed_factory,
+                scientific_registry=registry,
+                provider=resumed_provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            recovered = resumed.run_cycle()
+
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(resumed_provider.calls, 0)
+            self.assertEqual(
+                resumed_factory.calls[-1],
+                ("input-a", (("selection-a", 1, "open"),)),
+            )
+            ledger = JsonlDecisionLedger(workspace / "decisions.jsonl")
+            records = ledger.verified_records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].payload["market_append_generation"], 1)
+
+            advanced = resumed.run_cycle()
+            self.assertEqual(advanced.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(resumed_provider.calls, 1)
+            self.assertEqual(
+                resumed_factory.calls[-1],
+                ("input-a", (("selection-a", 2, "open"),)),
+            )
+            resumed.close()
+
     def test_pending_restart_rejects_replayed_market_state_mismatch_before_poll(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -364,7 +364,10 @@ def run_continuous_observation(
                 0.0,
                 earned_backoff - causally_elapsed,
             )
-        mirror = MarketMirror.from_store(store)
+        # Continuous live decisions may only restart from rows carrying the
+        # product-owned live receipt. Generic/import history remains auditable but
+        # cannot self-promote into the in-memory live authority on process restart.
+        mirror = MarketMirror.from_live_store(store)
         mirror_updates = BoundedMirrorInvalidationBuffer(mirror)
         publish("running")
 

@@ -104,6 +104,66 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(store.trusted_live_events(), [live_event])
             store.close()
 
+    def test_market_bus_subclass_cannot_override_live_receipt_payload(self) -> None:
+        class ForgingBus(MarketEventBus):
+            def _publish_many_live_ingestion(self, events):
+                forged = tuple(
+                    replace(event, ingest_ts="2000-01-01T00:00:00+00:00")
+                    for event in events
+                )
+                return self.store._append_live_batch_accepted(forged)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            engine = IngestionEngine(
+                ForgingBus(store),
+                clock=lambda: self.RECEIVE_TIME,
+            )
+
+            stats = engine.poll_once(
+                InMemoryProvider("provider-a", [self._quote(sequence=1)]),
+                max_items=10,
+            )
+
+            self.assertEqual(stats.accepted, 1)
+            trusted = store.trusted_live_events()
+            self.assertEqual(len(trusted), 1)
+            self.assertEqual(trusted[0].ingest_ts, self.RECEIVE_TIME)
+            store.close()
+
+    def test_store_subclass_cannot_forge_live_bootstrap_or_replay_authority(self) -> None:
+        class ForgingStore(SQLiteMarketStore):
+            def trusted_live_events(self):
+                return self.events()
+
+            def trusted_live_current_by_source(self):
+                return self.current_by_source()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = ForgingStore(path)
+            event = self._direct_event(sequence=1)
+            self.assertTrue(store.append(event))
+
+            live = MarketMirror.from_live_store(store)
+            trusted_replay = MarketMirror.replay_view_from_store(
+                store,
+                as_of=datetime(2026, 10, 4, 3, 0, 3, tzinfo=timezone.utc),
+                max_age=timedelta(seconds=30),
+                require_live_receipt_authority=True,
+            )
+            generic_replay = MarketMirror.replay_view_from_store(
+                store,
+                as_of=datetime(2026, 10, 4, 3, 0, 3, tzinfo=timezone.utc),
+                max_age=timedelta(seconds=30),
+            )
+
+            self.assertEqual(live.snapshot(), ())
+            self.assertEqual(trusted_replay.events, ())
+            self.assertEqual(generic_replay.events, (event,))
+            store.close()
+
     def test_live_ingestion_persists_market_row_and_receipt_authority_together(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

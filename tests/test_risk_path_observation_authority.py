@@ -470,6 +470,11 @@ def test_product_run_capital_path_re_resolves_completed_settlement(
     assert len(evidence.expected_draw_transcript_sha256) == 64
     assert len(evidence.run_admission_receipt_sha256) == 64
     assert len(evidence.run_execution_receipt_sha256) == 64
+    assert (
+        evidence.executed_initial_capital_state_sha256
+        == evidence.base_snapshot_sha256
+    )
+    assert evidence.executed_stake_policy_sha256 == bridge.risk_fingerprint
     assert evidence.run_admission_bound is True
     assert evidence.execution_consumption_proven is True
     assert evidence.sampling_occurrence_ancestry_proven is True

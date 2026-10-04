@@ -19,6 +19,7 @@ from .economic_goal_store import EconomicGoalContractError, EconomicGoalStore
 from .integrity import ensure_durable_file
 from .market_implied_baseline import (
     MarketImpliedBaselineError,
+    MarketImpliedBaselineEvidence,
     build_market_implied_baseline_evidence,
 )
 from .market_outcomes import MarketSettlementOutcomeAuthority
@@ -44,7 +45,12 @@ _TARGET_RESOLVER = resolve_product_proposal_risk_target
 _TARGET_RESOLVER_CODE = getattr(_TARGET_RESOLVER, "__code__", None)
 _BASELINE_BUILD = build_market_implied_baseline_evidence
 _BASELINE_BUILD_CODE = getattr(_BASELINE_BUILD, "__code__", None)
+_BASELINE_TYPE = MarketImpliedBaselineEvidence
+_BASELINE_TO_DICT = MarketImpliedBaselineEvidence.to_dict
+_BASELINE_TO_DICT_CODE = getattr(_BASELINE_TO_DICT, "__code__", None)
+_BASELINE_EVIDENCE_SHA256 = MarketImpliedBaselineEvidence.__dict__["evidence_sha256"]
 _OUTCOME_TYPE = MarketSettlementOutcomeAuthority
+_OUTCOME_AUTHORITY_SHA256 = MarketSettlementOutcomeAuthority.__dict__["authority_sha256"]
 _STORE_TYPE = SQLiteMarketStore
 _GOAL_TYPE = EconomicGoalContract
 _GOAL_STORE_TYPE = EconomicGoalStore
@@ -59,7 +65,15 @@ _LEDGER_RESOLVE_CODE = getattr(_LEDGER_RESOLVE, "__code__", None)
 _LEDGER_VERIFY = JsonlDecisionLedger.verify_integrity
 _LEDGER_VERIFY_CODE = getattr(_LEDGER_VERIFY, "__code__", None)
 _RECORD_TYPE = DecisionRecord
+_RECORD_POST_INIT = DecisionRecord.__post_init__
+_RECORD_POST_INIT_CODE = getattr(_RECORD_POST_INIT, "__code__", None)
+_RECORD_TO_DICT = DecisionRecord.to_dict
+_RECORD_TO_DICT_CODE = getattr(_RECORD_TO_DICT, "__code__", None)
 _LOCK_TYPE = WorkspaceEconomicLock
+_LOCK_ENTER = WorkspaceEconomicLock.__enter__
+_LOCK_ENTER_CODE = getattr(_LOCK_ENTER, "__code__", None)
+_LOCK_EXIT = WorkspaceEconomicLock.__exit__
+_LOCK_EXIT_CODE = getattr(_LOCK_EXIT, "__code__", None)
 _ENSURE_DURABLE_FILE = ensure_durable_file
 _ENSURE_DURABLE_FILE_CODE = getattr(_ENSURE_DURABLE_FILE, "__code__", None)
 _JSON_DUMPS = json.dumps
@@ -307,7 +321,14 @@ def _require_dispatch() -> None:
         or getattr(_TARGET_RESOLVER, "__code__", None) is not _TARGET_RESOLVER_CODE
         or build_market_implied_baseline_evidence is not _BASELINE_BUILD
         or getattr(_BASELINE_BUILD, "__code__", None) is not _BASELINE_BUILD_CODE
+        or MarketImpliedBaselineEvidence is not _BASELINE_TYPE
+        or MarketImpliedBaselineEvidence.to_dict is not _BASELINE_TO_DICT
+        or getattr(_BASELINE_TO_DICT, "__code__", None) is not _BASELINE_TO_DICT_CODE
+        or MarketImpliedBaselineEvidence.__dict__.get("evidence_sha256")
+        is not _BASELINE_EVIDENCE_SHA256
         or MarketSettlementOutcomeAuthority is not _OUTCOME_TYPE
+        or MarketSettlementOutcomeAuthority.__dict__.get("authority_sha256")
+        is not _OUTCOME_AUTHORITY_SHA256
         or SQLiteMarketStore is not _STORE_TYPE
         or EconomicGoalContract is not _GOAL_TYPE
         or EconomicGoalStore is not _GOAL_STORE_TYPE
@@ -323,7 +344,15 @@ def _require_dispatch() -> None:
         or JsonlDecisionLedger.verify_integrity is not _LEDGER_VERIFY
         or getattr(_LEDGER_VERIFY, "__code__", None) is not _LEDGER_VERIFY_CODE
         or DecisionRecord is not _RECORD_TYPE
+        or DecisionRecord.__post_init__ is not _RECORD_POST_INIT
+        or getattr(_RECORD_POST_INIT, "__code__", None) is not _RECORD_POST_INIT_CODE
+        or DecisionRecord.to_dict is not _RECORD_TO_DICT
+        or getattr(_RECORD_TO_DICT, "__code__", None) is not _RECORD_TO_DICT_CODE
         or WorkspaceEconomicLock is not _LOCK_TYPE
+        or WorkspaceEconomicLock.__enter__ is not _LOCK_ENTER
+        or getattr(_LOCK_ENTER, "__code__", None) is not _LOCK_ENTER_CODE
+        or WorkspaceEconomicLock.__exit__ is not _LOCK_EXIT
+        or getattr(_LOCK_EXIT, "__code__", None) is not _LOCK_EXIT_CODE
         or ensure_durable_file is not _ENSURE_DURABLE_FILE
         or getattr(_ENSURE_DURABLE_FILE, "__code__", None)
         is not _ENSURE_DURABLE_FILE_CODE
@@ -331,6 +360,12 @@ def _require_dispatch() -> None:
         or json.loads is not _JSON_LOADS
         or hashlib.sha256 is not _HASHLIB_SHA256
         or _RESULT_FIELDS is not _RESULT_FIELDS_EXPECTED
+        or _HELPER_WITNESSES is not _HELPER_WITNESSES_EXPECTED
+        or any(
+            globals().get(name) is not function
+            or getattr(function, "__code__", None) is not code
+            for name, function, code in _HELPER_WITNESSES_EXPECTED
+        )
     ):
         raise ProductProposalRiskOutcomeInputMappingError(
             "proposal risk outcome-input mapping dispatch authority changed"
@@ -508,6 +543,8 @@ def _market_rows(
             + ":"
             + str(ordinal)
         )
+        authority_sha256_before = authority.authority_sha256
+        selection_ids_before = tuple(authority.selection_ids)
         try:
             evidence = _BASELINE_BUILD(
                 cohort_key=cohort_key,
@@ -520,6 +557,20 @@ def _market_rows(
             raise ProductProposalRiskOutcomeInputMappingError(
                 "decision-time market-implied evidence cannot be rebuilt"
             ) from exc
+        _require_dispatch()
+        if type(evidence) is not _BASELINE_TYPE:
+            raise ProductProposalRiskOutcomeInputMappingError(
+                "market-implied builder returned non-canonical evidence"
+            )
+        if (
+            authority.identity.identity_key != key
+            or authority.authority_sha256 != authority_sha256_before
+            or tuple(authority.selection_ids) != selection_ids_before
+            or evidence.outcome_authority_sha256 != authority_sha256_before
+        ):
+            raise ProductProposalRiskOutcomeInputMappingError(
+                "terminal-outcome authority changed during market evidence rebuild"
+            )
         evidence_key = (
             evidence.sport,
             evidence.event_id,
@@ -557,7 +608,7 @@ def _market_rows(
                 },
                 "target_selection_ids": list(selected),
                 "outcome_authority_sha256": _sha(
-                    authority.authority_sha256,
+                    authority_sha256_before,
                     "outcome_authority_sha256",
                 ),
                 "terminal_space_exact": authority.terminal_space_exact,
@@ -713,6 +764,9 @@ def _build(
     return instance
 
 
+_REQUIRE_DISPATCH_ORIGINAL = _require_dispatch
+
+
 def issue_product_proposal_risk_outcome_input_mapping(
     workspace: Path,
     *,
@@ -721,7 +775,11 @@ def issue_product_proposal_risk_outcome_input_mapping(
 ) -> ProductProposalRiskOutcomeInputMapping:
     """Persist exact target-to-market input mapping without widening risk authority."""
 
-    _require_dispatch()
+    if _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL:
+        raise ProductProposalRiskOutcomeInputMappingError(
+            "proposal risk outcome-input dispatch guard root changed"
+        )
+    _REQUIRE_DISPATCH_ORIGINAL()
     workspace = _workspace_path(workspace)
     target_sha256 = _sha(target_sha256, "target_sha256")
     target = _resolve_target(workspace, target_sha256)
@@ -821,7 +879,11 @@ def resolve_product_proposal_risk_outcome_input_mapping(
 ) -> ProductProposalRiskOutcomeInputMapping:
     """Rebuild all decision-time inputs and re-resolve the durable mapping."""
 
-    _require_dispatch()
+    if _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL:
+        raise ProductProposalRiskOutcomeInputMappingError(
+            "proposal risk outcome-input dispatch guard root changed"
+        )
+    _REQUIRE_DISPATCH_ORIGINAL()
     workspace = _workspace_path(workspace)
     mapping_sha256 = _sha(mapping_sha256, "mapping_sha256")
     target_sha256 = _sha(target_sha256, "target_sha256")

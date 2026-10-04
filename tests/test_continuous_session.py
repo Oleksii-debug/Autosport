@@ -122,6 +122,18 @@ class _MappedOutcomeAuthority:
         return self.resolutions.get(record.identity)
 
 
+class _OneShotOutcomeAuthority:
+    def __init__(self, resolution: SettlementResolution) -> None:
+        self.resolution = resolution
+        self.calls = 0
+
+    def resolve(self, record, *, as_of: str):
+        self.calls += 1
+        if self.calls == 1:
+            return self.resolution
+        return None
+
+
 def _event(
     *,
     phase: EventPhase,
@@ -3090,6 +3102,234 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     Decimal("110"),
                 )
                 self.assertEqual(restarted.status().cycles_completed, 2)
+            finally:
+                restarted_store.close()
+
+    def test_prepared_learning_settlement_recovers_when_outcome_authority_is_one_shot(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:prepared-crash",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-prepared-crash",
+                    position=1,
+                    events=(event,),
+                )
+            )
+
+            goal = EconomicGoalContract(
+                goal_id="prepared-crash-goal",
+                revision=1,
+                bankroll_id="prepared-crash-bankroll",
+                currency="USD",
+            )
+            risk = PaperRiskPolicy(economic_goal=goal)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:10+00:00",
+                provider_source_ids=("provider-a",),
+                bankroll_id=goal.bankroll_id,
+                currency=goal.currency,
+            )
+            book.save(root / "paper_book.json")
+
+            identity = EnvironmentIdentity(
+                source_id="prepared-crash-source",
+                config_id="prepared-crash-config",
+                data_id="prepared-crash-data",
+                protocol_id="prepared-crash-protocol",
+                cutoff_ts="2026-09-19T21:20:00+00:00",
+                seed=23,
+            )
+            environment = CausalLearningEnvironment(
+                identity,
+                episode_key="prepared-crash-episode",
+                policy_id="prepared-crash-policy",
+                admissible_actions=frozenset({"PAPER_PROPOSAL"}),
+            )
+            baseline = environment.checkpoint()
+            runtime = AgentLoopRuntime.initialize_pristine(
+                root / "agent-loop.json",
+                loop_id="prepared-crash-loop",
+                environment_checkpoint=baseline,
+                policy_id=environment.episode.policy_id,
+                economic_goal_fingerprint=provenance_for(goal).contract_sha256,
+                risk_fingerprint=risk.provenance_sha256,
+                source_sha256="a" * 64,
+                config_sha256="b" * 64,
+                at="2026-09-19T21:18:59+00:00",
+            )
+            observation = Observation(
+                environment_id=environment.environment_id,
+                observed_at="2026-09-19T21:19:00+00:00",
+                available_at="2026-09-19T21:19:01+00:00",
+                evidence=(("market_state", "prepared-crash-snapshot"),),
+            )
+            ledger = JsonlDecisionLedger(root / "decisions.jsonl")
+            decision = DecisionRecord(
+                replay_run_id="prepared-crash-run",
+                agent="prepared-crash-fixture",
+                observed_ts=observation.observed_at,
+                action="OPEN_PAPER_VALUE_TICKET",
+                payload={
+                    "ticket_id": ticket.ticket_id,
+                    "quote_key": leg.quote_key,
+                    "stake": str(ticket.stake),
+                },
+                context_hash=observation.observation_id,
+                decision_id="prepared-crash-decision",
+                decision_kind=ECONOMIC_DECISION_KIND,
+            )
+            ledger.append_economic(
+                decision,
+                EconomicDecisionAuthority(goal, risk),
+            )
+            runtime.begin_observation(
+                observation,
+                environment_identity=environment.identity,
+                at="2026-09-19T21:19:01+00:00",
+            )
+            for phase in (
+                AgentLoopPhase.OBSERVE,
+                AgentLoopPhase.ASSESS,
+                AgentLoopPhase.PLAN,
+                AgentLoopPhase.DECIDE,
+            ):
+                runtime.advance(expected=phase, at="2026-09-19T21:19:02+00:00")
+            action = environment.act(
+                observation,
+                action_type="PAPER_PROPOSAL",
+                decision_at="2026-09-19T21:19:05+00:00",
+                parameters=(
+                    ("economic_decision_id", decision.decision_id),
+                    ("paper_ticket_id", ticket.ticket_id),
+                ),
+            )
+            runtime.commit_action(
+                action,
+                episode=environment.episode,
+                observation=observation,
+                effect_state=ExternalEffectState.PAPER_ONLY,
+                at="2026-09-19T21:19:05+00:00",
+            )
+            bridge = PaperSettlementLearningBridge(
+                root / "paper_learning_bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=ledger,
+                agent_loop=runtime,
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="provider-result:prepared-crash",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="prepared-crash-evidence",
+                evidence_sha256="f" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            authority = _OneShotOutcomeAuthority(resolution)
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+                settlement_learning_handoff=bridge,
+            )
+            try:
+                coordinator.collector.run_cycle()
+                first_seen = coordinator._settlement_resolutions(as_of=clock())
+                self.assertEqual(first_seen, (resolution,))
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=first_seen,
+                )
+                self.assertEqual(
+                    bridge.prepare_settlement(
+                        paper_book_path=root / "paper_book.json",
+                        resolutions=first_seen,
+                        at=clock(),
+                    ),
+                    (ticket.ticket_id,),
+                )
+                self.assertEqual(
+                    PaperBook.load(root / "paper_book.json").tickets[
+                        ticket.ticket_id
+                    ].status.value,
+                    "open",
+                )
+                self.assertEqual(authority.calls, 1)
+            finally:
+                store.close()
+
+            restarted_runtime = AgentLoopRuntime(root / "agent-loop.json")
+            restarted_bridge = PaperSettlementLearningBridge(
+                root / "paper_learning_bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=restarted_runtime,
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            restarted, restarted_store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+                settlement_learning_handoff=restarted_bridge,
+            )
+            try:
+                result = restarted.tick()
+                self.assertGreaterEqual(authority.calls, 2)
+                self.assertEqual(result.settled_ticket_ids, (ticket.ticket_id,))
+                self.assertIn(
+                    resolution.evidence_id,
+                    result.settlement_evidence_ids,
+                )
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("110"))
+                self.assertEqual(
+                    durable.tickets[ticket.ticket_id].status.value,
+                    "won",
+                )
+                self.assertIs(
+                    restarted_runtime.snapshot().phase,
+                    AgentLoopPhase.EVALUATE,
+                )
+                bridge_state = json.loads(
+                    (root / "paper_learning_bridge.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.assertEqual(
+                    bridge_state["bindings"][ticket.ticket_id]["status"],
+                    "ACKED",
+                )
             finally:
                 restarted_store.close()
 

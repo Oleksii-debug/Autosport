@@ -3126,7 +3126,10 @@ class RealExecutionLedger:
                 payload,
             )
 
-        self._mutate(operation)
+        if self._serialization_owner_thread_id == threading.get_ident():
+            operation()
+        else:
+            self._mutate(operation)
 
     def mark_unknown(
         self,

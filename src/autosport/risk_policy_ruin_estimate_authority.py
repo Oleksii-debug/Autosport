@@ -194,6 +194,14 @@ class ProductFixedNRiskPolicyEstimate:
 
 
 _ESTIMATE_TYPE = ProductFixedNRiskPolicyEstimate
+_SHA_HELPER = _sha
+_SHA_HELPER_CODE = getattr(_SHA_HELPER, "__code__", None)
+_DECIMAL_TEXT_HELPER = _decimal_text
+_DECIMAL_TEXT_HELPER_CODE = getattr(_DECIMAL_TEXT_HELPER, "__code__", None)
+_INSTANT_HELPER = _instant
+_INSTANT_HELPER_CODE = getattr(_INSTANT_HELPER, "__code__", None)
+_CANONICAL_JSON_HELPER = _canonical_json
+_CANONICAL_JSON_HELPER_CODE = getattr(_CANONICAL_JSON_HELPER, "__code__", None)
 
 
 def _require_dispatch() -> None:
@@ -214,6 +222,20 @@ def _require_dispatch() -> None:
         or evaluator_source_sha256 is not _SOURCE_DIGEST
         or getattr(_SOURCE_DIGEST, "__code__", None) is not _SOURCE_DIGEST_CODE
         or ProductFixedNRiskPolicyEstimate is not _ESTIMATE_TYPE
+        or _sha is not _SHA_HELPER
+        or getattr(_SHA_HELPER, "__code__", None) is not _SHA_HELPER_CODE
+        or _decimal_text is not _DECIMAL_TEXT_HELPER
+        or getattr(_DECIMAL_TEXT_HELPER, "__code__", None)
+        is not _DECIMAL_TEXT_HELPER_CODE
+        or _instant is not _INSTANT_HELPER
+        or getattr(_INSTANT_HELPER, "__code__", None) is not _INSTANT_HELPER_CODE
+        or _canonical_json is not _CANONICAL_JSON_HELPER
+        or getattr(_CANONICAL_JSON_HELPER, "__code__", None)
+        is not _CANONICAL_JSON_HELPER_CODE
+        or _derive_policy_estimate_material
+        is not _DERIVE_POLICY_ESTIMATE_MATERIAL
+        or getattr(_DERIVE_POLICY_ESTIMATE_MATERIAL, "__code__", None)
+        is not _DERIVE_POLICY_ESTIMATE_MATERIAL_CODE
     ):
         raise ProductFixedNRiskPolicyEstimateError(
             "risk policy estimate authority dispatch changed"
@@ -226,6 +248,7 @@ def _derive_policy_estimate_material(
 ) -> dict[str, object]:
     """Derive neutral deterministic material from exact already-resolved authorities."""
 
+    _require_dispatch()
     if type(precommit) is not _PRECOMMIT_TYPE:
         raise TypeError(
             "precommit must be exact ProductFixedNRiskEvaluationPrecommitAuthority"
@@ -401,7 +424,16 @@ def _derive_policy_estimate_material(
         "upper_bound": upper_bound,
         "estimate_sha256": hashlib.sha256(_canonical_json(payload)).hexdigest(),
     }
+    _require_dispatch()
     return material
+
+
+_DERIVE_POLICY_ESTIMATE_MATERIAL = _derive_policy_estimate_material
+_DERIVE_POLICY_ESTIMATE_MATERIAL_CODE = getattr(
+    _DERIVE_POLICY_ESTIMATE_MATERIAL,
+    "__code__",
+    None,
+)
 
 
 def resolve_product_fixed_n_risk_policy_estimate(
@@ -455,7 +487,7 @@ def resolve_product_fixed_n_risk_policy_estimate(
             "product risk policy authorities cannot be re-resolved"
         ) from exc
     _require_dispatch()
-    material = _derive_policy_estimate_material(precommit, observation_set)
+    material = _DERIVE_POLICY_ESTIMATE_MATERIAL(precommit, observation_set)
     _require_dispatch()
     result = object.__new__(_ESTIMATE_TYPE)
     for field_name in _ESTIMATE_FIELDS:

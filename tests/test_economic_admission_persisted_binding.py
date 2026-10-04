@@ -60,9 +60,14 @@ def test_post_save_readback_must_match_exact_admitted_semantic_state(
             placed_at="2026-09-25T00:00:00Z",
         )
 
-    # The caller must not accept the substituted readback as its canonical view.
-    assert caller_view.balance == Decimal("1000")
-    assert caller_view.tickets == {}
+    # The caller is the exact generation-bound working view, so once its
+    # mutation is durably published it must remain aligned with those durable bytes.
+    # The forged post-save readback must not overwrite that already-admitted state.
+    assert caller_view.balance == Decimal("950")
+    assert len(caller_view.tickets) == 1
+    caller_ticket = next(iter(caller_view.tickets.values()))
+    assert caller_ticket.strategy_reason == "risk-reviewed-admission"
+    assert caller_ticket.stake == Decimal("50")
 
     # The actual durable write remains the exact admitted state. The injected
     # substitution existed only in the post-save readback boundary.

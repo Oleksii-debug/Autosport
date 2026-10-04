@@ -879,6 +879,16 @@ class ProphetXSessionLifecycle:
             / ".provider-session-lifecycle"
             / scope_snapshot.pool_id
         )
+        try:
+            resolved_scope_dir = self._scope_dir.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise ProphetXSessionLifecycleError(
+                "session scope directory cannot be resolved"
+            ) from exc
+        if resolved_scope_dir != self._scope_dir:
+            raise ProphetXSessionLifecycleError(
+                "session scope directory cannot be redirected"
+            )
         self._state_path = self._scope_dir / self._STATE_NAME
         self._thread_lock = RLock()
         self._owned_attempts: set[str] = set()

@@ -165,6 +165,38 @@ def test_timezone_normalization_overflow_fails_before_state_write(tmp_path):
     assert not lifecycle.state_path.exists()
 
 
+@pytest.mark.parametrize("alias_level", ["root", "pool"])
+def test_scope_directory_alias_is_rejected_before_pool_use(
+    tmp_path,
+    alias_level,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    scope = _scope()
+    root = workspace / ".provider-session-lifecycle"
+    try:
+        if alias_level == "root":
+            root.symlink_to(outside, target_is_directory=True)
+        else:
+            root.mkdir()
+            (root / scope.pool_id).symlink_to(
+                outside,
+                target_is_directory=True,
+            )
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"directory symlink is unavailable: {exc}")
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="session scope directory cannot be redirected",
+    ):
+        ProphetXSessionLifecycle(workspace, scope=scope)
+
+    assert list(outside.iterdir()) == []
+
+
 def test_relative_workspace_is_frozen_against_cwd_change(tmp_path, monkeypatch):
     first_cwd = tmp_path / "first"
     second_cwd = tmp_path / "second"

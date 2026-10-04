@@ -851,6 +851,9 @@ class SQLiteMarketStore:
         if cursor.rowcount != 1:
             raise RuntimeError("live receipt authority insert did not persist exactly one row")
 
+    def _before_live_append_attempt(self, events: Iterable[MarketEvent]) -> None:
+        """Non-authoritative pre-transaction retry/fault-injection seam."""
+
     def _append_live_batch_accepted(
         self,
         events: Iterable[MarketEvent],
@@ -860,10 +863,11 @@ class SQLiteMarketStore:
         """Persist one live-ingestion batch and its receipt witnesses atomically.
 
         Lazy caller iterables are fully materialized before any transaction begins.
-        The public append_batch_accepted path remains the retry/fault-injection choke
-        point, but it is never receipt-authoritative by itself. Live authority is
-        derived only after this method proves, inside one transaction, which exact
-        canonical batch rows were newly inserted.
+        The replaceable retry/fault-injection seam runs before the authority
+        transaction. The transaction itself uses the exact canonical append
+        implementation, so overridden public append behavior cannot commit or mint
+        authority from inside the live transaction. Live authority is derived only
+        after this method proves which exact canonical batch rows were newly inserted.
         """
         if type(self) is not __class__:
             raise TypeError(
@@ -878,6 +882,12 @@ class SQLiteMarketStore:
             if self.connection.in_transaction:
                 raise RuntimeError(
                     "live receipt authority requires transaction ownership"
+                )
+            self._before_live_append_attempt(batch)
+            if self.connection.in_transaction:
+                self.connection.rollback()
+                raise RuntimeError(
+                    "live append attempt seam must not leave an active transaction"
                 )
             self.connection.execute("BEGIN IMMEDIATE")
             try:
@@ -925,7 +935,10 @@ class SQLiteMarketStore:
                         projection_state[projection_key] = event
 
                 changes_before = self.connection.total_changes
-                accepted = self.append_batch_accepted(batch)
+                accepted = __class__._append_batch_accepted_canonical(
+                    self,
+                    batch,
+                )
                 if not self.connection.in_transaction:
                     raise RuntimeError(
                         "live append hook relinquished transaction ownership"
@@ -993,14 +1006,10 @@ class SQLiteMarketStore:
             with self.connection:
                 return self._insert_one(event)
 
-    def append_batch_accepted(self, events: Iterable[MarketEvent]) -> list[MarketEvent]:
-        """Insert one normalized batch and return newly accepted events.
-
-        When called inside an existing transaction, transaction ownership stays with
-        the outer caller. This lets the live-ingestion path compose the canonical
-        append choke point with receipt witnesses without exposing receipt authority
-        through public mutable state or a caller-forgeable wrapper.
-        """
+    def _append_batch_accepted_canonical(
+        self,
+        events: Iterable[MarketEvent],
+    ) -> list[MarketEvent]:
         accepted: list[MarketEvent] = []
         with self._connection_lock:
             owns_transaction = not self.connection.in_transaction
@@ -1018,6 +1027,10 @@ class SQLiteMarketStore:
                 if owns_transaction:
                     self.connection.commit()
         return accepted
+
+    def append_batch_accepted(self, events: Iterable[MarketEvent]) -> list[MarketEvent]:
+        """Insert one normalized batch and return newly accepted events."""
+        return __class__._append_batch_accepted_canonical(self, events)
 
     def append_many(self, events: Iterable[MarketEvent]) -> int:
         return len(self.append_batch_accepted(events))

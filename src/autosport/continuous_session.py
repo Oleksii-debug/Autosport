@@ -432,17 +432,6 @@ def _sha256(value: object, field: str) -> str:
     return value
 
 
-def _settlement_outcomes_sha256(evidence: SettlementResolution) -> str:
-    payload = json.dumps(
-        dict(sorted(evidence.quote_outcomes.items())),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
 def _bind_continuous_state_settlement_integrity(method):
     """Bind durable outcome interpretation to module-load integrity roots."""
 

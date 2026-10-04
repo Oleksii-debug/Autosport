@@ -637,8 +637,11 @@ def _source_resolver_identity_impl(
             for owner in type(source).__mro__:
                 if name in vars(owner):
                     raw = vars(owner)[name]
-                    if type(raw) is str:
-                        value = raw
+                    if type(raw) is not str:
+                        raise _error_type(
+                            f"{name} must be a concrete string authority value"
+                        )
+                    value = raw
                     break
         if value is None:
             return None

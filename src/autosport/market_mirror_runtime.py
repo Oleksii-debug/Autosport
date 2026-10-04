@@ -7,7 +7,6 @@ from threading import RLock
 
 from .domain import MarketEvent
 from .market_mirror import MarketMirror, MirrorApplyResult, MirrorSnapshot, MirrorUpdate
-from .market_state_identity import semantic_market_state_identity
 from .storage import SQLiteMarketStore
 
 
@@ -329,12 +328,7 @@ class FocusedMirrorDependencyIndex:
                 max_age=age_limit,
             ):
                 return None
-            semantic_identity = semantic_market_state_identity(event)
-            return (
-                semantic_identity
-                if semantic_identity is not None
-                else event.dedupe_key
-            )
+            return event.dedupe_key
 
         ordered = sorted(
             future_candidates,

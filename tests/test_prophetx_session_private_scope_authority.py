@@ -184,3 +184,29 @@ def test_replacing_closure_scope_anchor_cannot_reanchor_poisoned_scope(tmp_path)
 
     assert not redirected_dir.exists()
     assert not original_state_path.exists()
+
+
+def test_equal_looking_scope_anchor_replacement_is_not_authority(tmp_path):
+    lifecycle = ProphetXSessionLifecycle(tmp_path, scope=_scope())
+    original_state_path = lifecycle.state_path
+
+    records = _scope_authority_records()
+    original = records[id(lifecycle)]
+    replacement = tuple(list(original))
+    assert replacement == original
+    assert replacement is not original
+    records[id(lifecycle)] = replacement
+
+    try:
+        with pytest.raises(
+            ProphetXSessionLifecycleError,
+            match="session scope authority changed",
+        ):
+            lifecycle.begin_login(
+                now=NOW,
+                access_token_available=False,
+            )
+    finally:
+        records[id(lifecycle)] = original
+
+    assert not original_state_path.exists()

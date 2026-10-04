@@ -456,6 +456,50 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(store.trusted_live_events(), [])
             store.close()
 
+    def test_live_mirror_event_type_survives_module_rebind(self) -> None:
+        class PoisonMarketEvent(MarketEvent):
+            @classmethod
+            def from_dict(cls, raw):
+                raise AssertionError("mutable mirror MarketEvent global must not be consulted")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store)
+
+            with patch.object(market_mirror_module, "MarketEvent", PoisonMarketEvent):
+                live = MarketMirror.from_live_store(store)
+                snapshot = live.snapshot()
+                replay = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(2026, 10, 4, 3, 0, 3, tzinfo=timezone.utc),
+                    max_age=timedelta(seconds=30),
+                    require_live_receipt_authority=True,
+                )
+
+            self.assertEqual(len(snapshot), 1)
+            self.assertEqual(len(replay.events), 1)
+            self.assertIs(type(snapshot[0]), MarketEvent)
+            self.assertIs(type(replay.events[0]), MarketEvent)
+            store.close()
+
+    def test_canonical_mirror_rejects_market_event_subclass(self) -> None:
+        class ForgingEvent(MarketEvent):
+            pass
+
+        event = self._direct_event(sequence=1)
+        forged = ForgingEvent.from_dict(event.to_dict())
+        mirror = MarketMirror()
+
+        with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+            mirror.apply(forged)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+                mirror.persist_and_apply(store, forged)
+            self.assertEqual(store.events(), [])
+            store.close()
+
     def test_trusted_replay_survives_store_module_rebind(self) -> None:
         class PoisonStore(SQLiteMarketStore):
             pass

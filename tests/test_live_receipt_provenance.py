@@ -136,6 +136,63 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertFalse(store.connection.in_transaction)
             store.close()
 
+    def test_live_append_hook_must_return_exact_list(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+
+            def insert_then_tuple(events):
+                return tuple(SQLiteMarketStore.append_batch_accepted(store, events))
+
+            with patch.object(
+                store,
+                "append_batch_accepted",
+                side_effect=insert_then_tuple,
+            ):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "must return an exact list",
+                ):
+                    store._append_live_batch_accepted([event])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertFalse(store.connection.in_transaction)
+            store.close()
+
+    def test_live_append_hook_cannot_inject_extra_market_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+            extra = self._direct_event(sequence=2, odds="2.20")
+
+            def insert_extra(events):
+                accepted = SQLiteMarketStore.append_batch_accepted(store, events)
+                self.assertEqual(
+                    SQLiteMarketStore.append_batch_accepted(store, [extra]),
+                    [extra],
+                )
+                return accepted
+
+            with patch.object(
+                store,
+                "append_batch_accepted",
+                side_effect=insert_extra,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "changed market history outside the canonical batch",
+                ):
+                    store._append_live_batch_accepted([event])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.current_by_source(), {})
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertFalse(store.connection.in_transaction)
+            store.close()
+
     def test_live_append_hook_subclass_return_is_rejected_before_serialization(self) -> None:
         class ForgingAcceptedEvent(MarketEvent):
             def to_dict(self):
@@ -512,6 +569,48 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
                 tuple(event.sequence for event in trusted_after.events),
                 (2,),
             )
+            store.close()
+
+    def test_silent_receipt_writer_noop_rolls_back_market_insert(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+
+            with patch.object(
+                store,
+                "_insert_live_receipt_authority",
+                return_value=None,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "did not persist canonical authority",
+                ):
+                    self._ingest(store)
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.current_by_source(), {})
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertFalse(store.connection.in_transaction)
+            store.close()
+
+    def test_receipt_query_rejects_market_event_subclass(self) -> None:
+        class ReceiptQuerySubclass(MarketEvent):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            self._ingest(store)
+            trusted = store.trusted_live_events()[0]
+            forged = ReceiptQuerySubclass.from_dict(trusted.to_dict())
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "event must be an exact MarketEvent",
+            ):
+                store.has_trusted_live_receipt(forged)
+
+            self.assertTrue(store.has_trusted_live_receipt(trusted))
             store.close()
 
     def test_receipt_persistence_failure_rolls_back_market_insert_atomically(self) -> None:

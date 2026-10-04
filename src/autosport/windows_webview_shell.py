@@ -2270,17 +2270,28 @@ class AutosportWebBridge:
         return value
 
     def _runtime_witness_path(self) -> Path | None:
-        """Return the product-owned witness path only for the canonical controller."""
+        """Return a witness path only from the immutable controller authority."""
 
-        controller = self._controller
-        if not isinstance(controller, AutosportWebController):
-            return None
-        workspace = getattr(controller, "workspace", None)
-        if not isinstance(workspace, Path) or not workspace.is_absolute():
-            raise WindowsWebBridgeTrustError(
-                "The canonical WebView controller has no absolute workspace identity"
-            )
-        return workspace / _WEBVIEW2_RUNTIME_WITNESS_FILENAME
+        with self._trust_lock:
+            controller = self._controller_witness
+            if self._controller is not controller:
+                self._trust_revoked = True
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge controller authority changed before runtime witness binding"
+                )
+            if not isinstance(controller, AutosportWebController):
+                return None
+            workspace = getattr(controller, "workspace", None)
+            if self._controller is not controller:
+                self._trust_revoked = True
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge controller authority changed during runtime witness binding"
+                )
+            if not isinstance(workspace, Path) or not workspace.is_absolute():
+                raise WindowsWebBridgeTrustError(
+                    "The canonical WebView controller has no absolute workspace identity"
+                )
+            return workspace / _WEBVIEW2_RUNTIME_WITNESS_FILENAME
 
     def _revoke_trust(self) -> None:
         with self._trust_lock:

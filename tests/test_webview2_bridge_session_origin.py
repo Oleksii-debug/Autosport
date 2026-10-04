@@ -8,6 +8,7 @@ import pytest
 
 from autosport.windows_webview_shell import (
     AutosportWebBridge,
+    AutosportWebController,
     WindowsWebBridgeTrustError,
     WindowsWebViewUnavailable,
     launch_windows_shell,
@@ -126,6 +127,23 @@ def test_bridge_controller_authority_is_immutable_after_construction() -> None:
 
     assert bridge._controller is original
     assert replacement.events == []
+
+
+def test_runtime_witness_path_rejects_prelaunch_controller_rebind(tmp_path) -> None:
+    original = AutosportWebController(tmp_path / "original")
+    replacement = AutosportWebController(tmp_path / "replacement")
+    bridge = AutosportWebBridge(original)
+
+    bridge.__dict__["_controller"] = replacement
+    with pytest.raises(
+        WindowsWebBridgeTrustError,
+        match="changed before runtime witness binding",
+    ):
+        bridge._runtime_witness_path()
+
+    assert bridge._trust_revoked is True
+    bridge.__dict__["_controller"] = original
+    bridge._close_from_host()
 
 
 def test_bridge_detects_controller_rebind_during_document_trust_proof() -> None:

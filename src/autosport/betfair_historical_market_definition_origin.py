@@ -1,0 +1,719 @@
+"""Bind one Betfair historical marketDefinition revision to authenticated file origin.
+
+This is a composition boundary only.  It consumes the process-local provider-origin
+capability issued by ``betfair_historical_entitlement`` and the causal replay boundary
+from ``betfair_historical_causal_replay``.  It does not create a second downloader,
+parser, outcome authority, settlement authority, or execution path.
+
+Betfair historical ``pt`` is provider publication time inside an archive record.  It is
+not rewritten into a product observation/acquisition timestamp: the later authenticated
+download time remains separate and explicit.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import weakref
+from dataclasses import dataclass, field
+from typing import Any, Mapping
+
+from .betfair_historical_causal_replay import (
+    BetfairHistoricalReplayRecord,
+    BetfairHistoricalReplaySource,
+    HistoricalCompression,
+    HistoricalPackageTier,
+    HistoricalRepresentation,
+    replay_betfair_historical_until,
+)
+from .betfair_historical_entitlement import HistoricalProviderOriginWitness
+
+
+class BetfairHistoricalMarketDefinitionOriginError(ValueError):
+    """Historical market-definition origin could not be proven at this boundary."""
+
+
+_PARSER_REVISION = "autosport.betfair-historical-market-definition-origin.v1"
+_TOKEN = object()
+_HEX = frozenset("0123456789abcdef")
+
+
+def _build_issued_origin_registry():
+    """Keep positive issuance membership outside mutable module-global containers."""
+
+    issued_objects: weakref.WeakValueDictionary[int, object] = (
+        weakref.WeakValueDictionary()
+    )
+    issued_digests: dict[int, str] = {}
+
+    def register(origin: object, digest: str) -> None:
+        identity = id(origin)
+        issued_objects[identity] = origin
+        issued_digests[identity] = digest
+        weakref.finalize(origin, issued_digests.pop, identity, None)
+
+    def issued_digest(origin: object) -> str | None:
+        identity = id(origin)
+        if issued_objects.get(identity) is not origin:
+            return None
+        return issued_digests.get(identity)
+
+    return register, issued_digest
+
+
+_register_issued_origin, _issued_origin_digest = (
+    _build_issued_origin_registry()
+)
+del _build_issued_origin_registry
+
+_CANONICAL_REGISTER_ISSUED_ORIGIN = _register_issued_origin
+_CANONICAL_REGISTER_ISSUED_ORIGIN_CODE = getattr(
+    _CANONICAL_REGISTER_ISSUED_ORIGIN,
+    "__code__",
+    None,
+)
+_CANONICAL_ISSUED_ORIGIN_DIGEST = _issued_origin_digest
+_CANONICAL_ISSUED_ORIGIN_DIGEST_CODE = getattr(
+    _CANONICAL_ISSUED_ORIGIN_DIGEST,
+    "__code__",
+    None,
+)
+
+
+def _assert_canonical_issued_registry_dispatch() -> None:
+    checks = (
+        (
+            _register_issued_origin,
+            _CANONICAL_REGISTER_ISSUED_ORIGIN,
+            _CANONICAL_REGISTER_ISSUED_ORIGIN_CODE,
+        ),
+        (
+            _issued_origin_digest,
+            _CANONICAL_ISSUED_ORIGIN_DIGEST,
+            _CANONICAL_ISSUED_ORIGIN_DIGEST_CODE,
+        ),
+    )
+    for current, expected, expected_code in checks:
+        if (
+            current is not expected
+            or getattr(expected, "__code__", None) is not expected_code
+        ):
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "historical marketDefinition issuance registry dispatch was replaced"
+            )
+
+
+_CANONICAL_ISSUED_REGISTRY_GUARD = _assert_canonical_issued_registry_dispatch
+_CANONICAL_ISSUED_REGISTRY_GUARD_CODE = (
+    _assert_canonical_issued_registry_dispatch.__code__
+)
+_CANONICAL_UPSTREAM_WITNESS_ASSERT = (
+    HistoricalProviderOriginWitness.assert_authoritative
+)
+_CANONICAL_UPSTREAM_WITNESS_ASSERT_CODE = getattr(
+    _CANONICAL_UPSTREAM_WITNESS_ASSERT,
+    "__code__",
+    None,
+)
+
+
+def _assert_canonical_upstream_witness_authority() -> None:
+    if (
+        getattr(_CANONICAL_UPSTREAM_WITNESS_ASSERT, "__code__", None)
+        is not _CANONICAL_UPSTREAM_WITNESS_ASSERT_CODE
+    ):
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "canonical historical provider-origin witness authority was replaced"
+        )
+
+
+def _text(value: object, name: str) -> str:
+    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            f"{name} must be a non-empty canonical string"
+        )
+    value.encode("utf-8")
+    return value
+
+
+def _sha(value: object, name: str) -> str:
+    text = _text(value, name)
+    if len(text) != 64 or text != text.lower() or any(ch not in _HEX for ch in text):
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            f"{name} must be canonical SHA-256 hex"
+        )
+    return text
+
+
+def _digest(payload: Mapping[str, Any]) -> str:
+    raw = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _canonical_market_definition(value: object) -> tuple[str, str]:
+    if type(value) is not dict:
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "marketDefinition must be an exact JSON object"
+        )
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "marketDefinition is not canonical finite JSON"
+        ) from exc
+    return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+_PROVIDER_PATH_PREFIX = "/data/xds/historic/"
+
+
+def _provider_path_package_tier(provider_path: object) -> HistoricalPackageTier:
+    path = _text(provider_path, "provider_path")
+    if not path.startswith(_PROVIDER_PATH_PREFIX):
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "provider_path must use the canonical /data/xds/historic/<TIER>/... namespace"
+        )
+    remainder = path[len(_PROVIDER_PATH_PREFIX) :]
+    parts = remainder.split("/")
+    if len(parts) < 2 or any(part in ("", ".", "..") for part in parts):
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "provider_path must encode a canonical historical package tier and file path"
+        )
+    try:
+        return HistoricalPackageTier(parts[0])
+    except ValueError as exc:
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "provider_path contains an unknown historical package tier"
+        ) from exc
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class BetfairHistoricalMarketDefinitionOrigin:
+    """One archive revision bound to an authenticated exact historical file."""
+
+    provider_origin_witness_sha256: str
+    transport_contract_sha256: str
+    download_file_identity_sha256: str
+    provider_path: str
+    raw_file_sha256: str
+    entitlement_snapshot_sha256: str
+    download_retrieved_at: str
+    replay_source_identity: str
+    source_ordinal: int
+    provider_pt_ms: int
+    line_sha256: str
+    record_payload_sha256: str
+    market_id: str
+    market_definition_sha256: str
+    market_definition_json: str
+    package_tier: HistoricalPackageTier
+    representation: HistoricalRepresentation
+    _witness: HistoricalProviderOriginWitness = field(repr=False, compare=False)
+    _token: object = field(repr=False, compare=False)
+
+    def __getattribute__(self, name: str) -> object:
+        _assert_canonical_market_definition_origin_dispatch()
+        return object.__getattribute__(self, name)
+
+    def __post_init__(self) -> None:
+        if self._token is not _TOKEN:
+            raise TypeError(
+                "BetfairHistoricalMarketDefinitionOrigin must be issued by the origin binder"
+            )
+        for name in (
+            "provider_origin_witness_sha256",
+            "transport_contract_sha256",
+            "download_file_identity_sha256",
+            "raw_file_sha256",
+            "entitlement_snapshot_sha256",
+            "replay_source_identity",
+            "line_sha256",
+            "record_payload_sha256",
+            "market_definition_sha256",
+        ):
+            _sha(getattr(self, name), name)
+        _text(self.provider_path, "provider_path")
+        if type(self.package_tier) is not HistoricalPackageTier:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "package_tier must be exact HistoricalPackageTier"
+            )
+        if (
+            _CANONICAL_PROVIDER_PATH_PACKAGE_TIER(self.provider_path)
+            is not self.package_tier
+        ):
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "package_tier does not match authoritative provider_path package tier"
+            )
+        _text(self.download_retrieved_at, "download_retrieved_at")
+        _text(self.market_id, "market_id")
+        if type(self.source_ordinal) is not int or self.source_ordinal < 1:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "source_ordinal must be a positive exact integer"
+            )
+        if type(self.provider_pt_ms) is not int or self.provider_pt_ms < 0:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "provider_pt_ms must be a non-negative exact integer"
+            )
+        if type(self._witness) is not HistoricalProviderOriginWitness:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "origin evidence must retain the exact upstream provider witness"
+            )
+        if self.provider_origin_witness_sha256 != self._witness.witness_sha256:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "retained provider witness identity changed"
+            )
+        try:
+            decoded = json.loads(self.market_definition_json)
+        except json.JSONDecodeError as exc:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "market_definition_json is invalid"
+            ) from exc
+        canonical, digest = _CANONICAL_MARKET_DEFINITION(decoded)
+        if canonical != self.market_definition_json or digest != self.market_definition_sha256:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "marketDefinition canonical identity mismatch"
+            )
+
+    def _calculated_evidence_sha256(self) -> str:
+        return _digest(self._identity_payload())
+
+    def assert_issued_integrity(self) -> None:
+        """Require the exact unchanged origin object issued by the canonical binder."""
+
+        if type(self) is not BetfairHistoricalMarketDefinitionOrigin:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "historical marketDefinition origin was not issued by the canonical binder"
+            )
+        if (
+            _assert_canonical_issued_registry_dispatch
+            is not _CANONICAL_ISSUED_REGISTRY_GUARD
+            or getattr(_CANONICAL_ISSUED_REGISTRY_GUARD, "__code__", None)
+            is not _CANONICAL_ISSUED_REGISTRY_GUARD_CODE
+        ):
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "historical marketDefinition issuance registry guard was replaced"
+            )
+        _CANONICAL_ISSUED_REGISTRY_GUARD()
+        try:
+            current_digest = self._calculated_evidence_sha256()
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "historical marketDefinition origin mutated after canonical issuance"
+            ) from exc
+        issued_digest = _CANONICAL_ISSUED_ORIGIN_DIGEST(self)
+        if issued_digest is None:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "historical marketDefinition origin was not issued by the canonical binder"
+            )
+        if current_digest != issued_digest:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "historical marketDefinition origin mutated after canonical issuance"
+            )
+
+    @property
+    def provider_origin_verified(self) -> bool:
+        try:
+            self.assert_issued_integrity()
+            _assert_canonical_upstream_witness_authority()
+            _CANONICAL_UPSTREAM_WITNESS_ASSERT(self._witness)
+        except Exception:
+            return False
+        return self._witness.witness_sha256 == self.provider_origin_witness_sha256
+
+    @property
+    def evidence_sha256(self) -> str:
+        self.assert_issued_integrity()
+        return self._calculated_evidence_sha256()
+
+    def _identity_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "kind": "autosport.betfair-historical-market-definition-origin.v1",
+            "provider_origin_witness_sha256": self.provider_origin_witness_sha256,
+            "transport_contract_sha256": self.transport_contract_sha256,
+            "download_file_identity_sha256": self.download_file_identity_sha256,
+            "provider_path": self.provider_path,
+            "raw_file_sha256": self.raw_file_sha256,
+            "entitlement_snapshot_sha256": self.entitlement_snapshot_sha256,
+            "download_retrieved_at": self.download_retrieved_at,
+            "replay_source_identity": self.replay_source_identity,
+            "source_ordinal": self.source_ordinal,
+            "provider_pt_ms": self.provider_pt_ms,
+            "line_sha256": self.line_sha256,
+            "record_payload_sha256": self.record_payload_sha256,
+            "market_id": self.market_id,
+            "market_definition_sha256": self.market_definition_sha256,
+            "market_definition_json": self.market_definition_json,
+            "package_tier": self.package_tier.value,
+            "representation": self.representation.value,
+            "parser_revision": _PARSER_REVISION,
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            **self._identity_payload(),
+            "evidence_sha256": self.evidence_sha256,
+            "truth": {
+                "provider_origin_verified": self.provider_origin_verified,
+                "market_definition_record_bound": True,
+                "historical_provider_publish_time_bound": True,
+                "product_observation_time_backdated_from_provider_pt": False,
+                "download_acquisition_time_kept_separate": True,
+                "usage_rights_verified": False,
+                "rights_revalidation_required": True,
+                "source_stream_continuity_proven": False,
+                "outcome_roster_completeness_proven": False,
+                "live_quote_proven": False,
+                "execution_authority": False,
+                "promotion_authority": False,
+                "real_money_execution": False,
+            },
+        }
+
+    def market_definition(self) -> dict[str, object]:
+        self.assert_issued_integrity()
+        value = json.loads(self.market_definition_json)
+        if type(value) is not dict:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "bound marketDefinition is no longer an object"
+            )
+        return value
+
+    def assert_provider_origin(self) -> None:
+        if not self.provider_origin_verified:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "upstream provider-origin capability is no longer authoritative"
+            )
+
+    def assert_published_by(self, cutoff_pt_ms: int) -> None:
+        self.assert_issued_integrity()
+        if type(cutoff_pt_ms) is not int or cutoff_pt_ms < 0:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "cutoff_pt_ms must be a non-negative exact integer"
+            )
+        if self.provider_pt_ms > cutoff_pt_ms:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "marketDefinition revision was published after the requested provider cutoff"
+            )
+
+
+
+
+_MISSING_ORIGIN_CLASS_SLOT = object()
+_CANONICAL_MARKET_DEFINITION_ORIGIN_TYPE = BetfairHistoricalMarketDefinitionOrigin
+
+
+def _origin_descriptor_code_identity(member: object) -> tuple[object, ...]:
+    if isinstance(member, property):
+        return tuple(
+            None if accessor is None else getattr(accessor, "__code__", None)
+            for accessor in (member.fget, member.fset, member.fdel)
+        )
+    if isinstance(member, (classmethod, staticmethod)):
+        return (getattr(member.__func__, "__code__", None),)
+    return (getattr(member, "__code__", None),)
+
+
+_CANONICAL_MARKET_DEFINITION_ORIGIN_CLASS_SURFACE = tuple(
+    (
+        name,
+        member,
+        _origin_descriptor_code_identity(member),
+    )
+    for name in (
+        "provider_origin_witness_sha256",
+        "transport_contract_sha256",
+        "download_file_identity_sha256",
+        "provider_path",
+        "raw_file_sha256",
+        "entitlement_snapshot_sha256",
+        "download_retrieved_at",
+        "replay_source_identity",
+        "source_ordinal",
+        "provider_pt_ms",
+        "line_sha256",
+        "record_payload_sha256",
+        "market_id",
+        "market_definition_sha256",
+        "market_definition_json",
+        "package_tier",
+        "representation",
+        "_witness",
+        "_token",
+        "__post_init__",
+        "__getattribute__",
+        "__setattr__",
+        "__delattr__",
+        "_calculated_evidence_sha256",
+        "assert_issued_integrity",
+        "provider_origin_verified",
+        "evidence_sha256",
+        "_identity_payload",
+        "to_dict",
+        "market_definition",
+        "assert_provider_origin",
+        "assert_published_by",
+    )
+    for member in (
+        vars(BetfairHistoricalMarketDefinitionOrigin).get(
+            name,
+            _MISSING_ORIGIN_CLASS_SLOT,
+        ),
+    )
+)
+
+
+def _assert_canonical_market_definition_origin_dispatch() -> None:
+    class_dict = vars(_CANONICAL_MARKET_DEFINITION_ORIGIN_TYPE)
+    for name, expected, expected_code in (
+        _CANONICAL_MARKET_DEFINITION_ORIGIN_CLASS_SURFACE
+    ):
+        current = class_dict.get(name, _MISSING_ORIGIN_CLASS_SLOT)
+        if current is not expected:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "canonical historical marketDefinition origin class dispatch was replaced"
+            )
+        if isinstance(current, property):
+            current_code = tuple(
+                None if accessor is None else getattr(accessor, "__code__", None)
+                for accessor in (current.fget, current.fset, current.fdel)
+            )
+        elif isinstance(current, (classmethod, staticmethod)):
+            current_code = (getattr(current.__func__, "__code__", None),)
+        else:
+            current_code = (getattr(current, "__code__", None),)
+        if current_code != expected_code:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "canonical historical marketDefinition origin class dispatch was replaced"
+            )
+
+
+def _definition_in_record(
+    record: BetfairHistoricalReplayRecord,
+    *,
+    market_id: str,
+) -> object | None:
+    payload = record.payload()
+    market_changes = payload.get("mc")
+    if market_changes is None:
+        return None
+    if type(market_changes) is not list:
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "historical mcm.mc must be an exact JSON array"
+        )
+    matches: list[object] = []
+    for item in market_changes:
+        if type(item) is not dict:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "historical mcm.mc entries must be exact JSON objects"
+            )
+        raw_id = item.get("id")
+        if raw_id != market_id:
+            continue
+        if "marketDefinition" in item:
+            matches.append(item["marketDefinition"])
+    if len(matches) > 1:
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "one historical record contains duplicate marketDefinition revisions for market"
+        )
+    return matches[0] if matches else None
+
+
+_CANONICAL_REPLAY_HISTORICAL_UNTIL = replay_betfair_historical_until
+_CANONICAL_REPLAY_HISTORICAL_UNTIL_CODE = getattr(
+    replay_betfair_historical_until,
+    "__code__",
+    None,
+)
+_CANONICAL_DEFINITION_IN_RECORD = _definition_in_record
+_CANONICAL_DEFINITION_IN_RECORD_CODE = _definition_in_record.__code__
+_CANONICAL_MARKET_DEFINITION = _canonical_market_definition
+_CANONICAL_MARKET_DEFINITION_CODE = _canonical_market_definition.__code__
+_CANONICAL_PROVIDER_PATH_PACKAGE_TIER = _provider_path_package_tier
+_CANONICAL_PROVIDER_PATH_PACKAGE_TIER_CODE = _provider_path_package_tier.__code__
+
+
+def _assert_canonical_origin_derivation_dispatch() -> None:
+    checks = (
+        (
+            replay_betfair_historical_until,
+            _CANONICAL_REPLAY_HISTORICAL_UNTIL,
+            _CANONICAL_REPLAY_HISTORICAL_UNTIL_CODE,
+        ),
+        (
+            _definition_in_record,
+            _CANONICAL_DEFINITION_IN_RECORD,
+            _CANONICAL_DEFINITION_IN_RECORD_CODE,
+        ),
+        (
+            _canonical_market_definition,
+            _CANONICAL_MARKET_DEFINITION,
+            _CANONICAL_MARKET_DEFINITION_CODE,
+        ),
+        (
+            _provider_path_package_tier,
+            _CANONICAL_PROVIDER_PATH_PACKAGE_TIER,
+            _CANONICAL_PROVIDER_PATH_PACKAGE_TIER_CODE,
+        ),
+    )
+    for current, expected, expected_code in checks:
+        if (
+            current is not expected
+            or getattr(expected, "__code__", None) is not expected_code
+        ):
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "canonical historical marketDefinition derivation dispatch was replaced"
+            )
+
+
+_CANONICAL_ORIGIN_DERIVATION_GUARD = _assert_canonical_origin_derivation_dispatch
+_CANONICAL_ORIGIN_DERIVATION_GUARD_CODE = (
+    _assert_canonical_origin_derivation_dispatch.__code__
+)
+
+
+def bind_betfair_historical_market_definition_origin(
+    *,
+    witness: HistoricalProviderOriginWitness,
+    raw_bytes: bytes,
+    market_id: str,
+    cutoff_pt_ms: int,
+    package_tier: HistoricalPackageTier,
+    representation: HistoricalRepresentation = HistoricalRepresentation.MARKET,
+) -> BetfairHistoricalMarketDefinitionOrigin:
+    """Bind the latest exact marketDefinition revision visible by provider ``pt`` cutoff.
+
+    ``provider_pt_ms`` remains historical provider publication time.  Positive origin
+    requires the live process-local #1345 provider capability for the exact bytes;
+    the witness's real download ``retrieved_at`` remains the product acquisition time.
+    """
+
+    if (
+        _assert_canonical_origin_derivation_dispatch
+        is not _CANONICAL_ORIGIN_DERIVATION_GUARD
+        or _CANONICAL_ORIGIN_DERIVATION_GUARD.__code__
+        is not _CANONICAL_ORIGIN_DERIVATION_GUARD_CODE
+    ):
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "canonical historical marketDefinition derivation guard was replaced"
+        )
+    _CANONICAL_ORIGIN_DERIVATION_GUARD()
+
+    if type(witness) is not HistoricalProviderOriginWitness:
+        raise TypeError("witness must be exact HistoricalProviderOriginWitness")
+    try:
+        _assert_canonical_upstream_witness_authority()
+        _CANONICAL_UPSTREAM_WITNESS_ASSERT(witness)
+    except Exception as exc:
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "historical file lacks live canonical provider-origin authority"
+        ) from exc
+    if not isinstance(raw_bytes, bytes):
+        raise TypeError("raw_bytes must be bytes")
+    if len(raw_bytes) != witness.byte_length or hashlib.sha256(raw_bytes).hexdigest() != witness.raw_sha256:
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "raw bytes do not match the authoritative downloaded file"
+        )
+    market = _text(market_id, "market_id")
+    if type(cutoff_pt_ms) is not int or cutoff_pt_ms < 0:
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "cutoff_pt_ms must be a non-negative exact integer"
+        )
+    if type(package_tier) is not HistoricalPackageTier:
+        raise TypeError("package_tier must be exact HistoricalPackageTier")
+    provider_path_tier = _CANONICAL_PROVIDER_PATH_PACKAGE_TIER(
+        witness.provider_path
+    )
+    if provider_path_tier is not package_tier:
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "package_tier does not match authoritative provider_path package tier"
+        )
+    if type(representation) is not HistoricalRepresentation:
+        raise TypeError("representation must be exact HistoricalRepresentation")
+
+    source = BetfairHistoricalReplaySource(
+        provider_file_identity=witness.provider_path,
+        raw_file_sha256=witness.raw_sha256,
+        entitlement_snapshot_sha256=witness.entitlement_snapshot_sha256,
+        package_tier=package_tier,
+        representation=representation,
+        parser_revision=_PARSER_REVISION,
+        compression=HistoricalCompression.BZ2,
+    )
+    window = _CANONICAL_REPLAY_HISTORICAL_UNTIL(
+        raw_bytes,
+        source,
+        cutoff_pt_ms=cutoff_pt_ms,
+    )
+    selected: tuple[BetfairHistoricalReplayRecord, object] | None = None
+    for record in window.records:
+        definition = _CANONICAL_DEFINITION_IN_RECORD(
+            record,
+            market_id=market,
+        )
+        if definition is not None:
+            selected = (record, definition)
+    if selected is None:
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "no marketDefinition revision for market is visible by provider cutoff"
+        )
+
+    record, definition = selected
+    canonical_definition, definition_sha = _CANONICAL_MARKET_DEFINITION(
+        definition
+    )
+    origin = BetfairHistoricalMarketDefinitionOrigin(
+        provider_origin_witness_sha256=witness.witness_sha256,
+        transport_contract_sha256=witness.transport_contract_sha256,
+        download_file_identity_sha256=witness.download_file_identity_sha256,
+        provider_path=witness.provider_path,
+        raw_file_sha256=witness.raw_sha256,
+        entitlement_snapshot_sha256=witness.entitlement_snapshot_sha256,
+        download_retrieved_at=witness.retrieved_at,
+        replay_source_identity=source.source_identity,
+        source_ordinal=record.source_ordinal,
+        provider_pt_ms=record.provider_pt_ms,
+        line_sha256=record.line_sha256,
+        record_payload_sha256=record.payload_sha256,
+        market_id=market,
+        market_definition_sha256=definition_sha,
+        market_definition_json=canonical_definition,
+        package_tier=package_tier,
+        representation=representation,
+        _witness=witness,
+        _token=_TOKEN,
+    )
+    if (
+        _assert_canonical_issued_registry_dispatch
+        is not _CANONICAL_ISSUED_REGISTRY_GUARD
+        or getattr(_CANONICAL_ISSUED_REGISTRY_GUARD, "__code__", None)
+        is not _CANONICAL_ISSUED_REGISTRY_GUARD_CODE
+    ):
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "historical marketDefinition issuance registry guard was replaced"
+        )
+    _CANONICAL_ISSUED_REGISTRY_GUARD()
+    _CANONICAL_REGISTER_ISSUED_ORIGIN(
+        origin,
+        origin._calculated_evidence_sha256(),
+    )
+    return origin
+
+
+__all__ = [
+    "BetfairHistoricalMarketDefinitionOrigin",
+    "BetfairHistoricalMarketDefinitionOriginError",
+    "bind_betfair_historical_market_definition_origin",
+]

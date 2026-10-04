@@ -2336,6 +2336,28 @@ class ProductProposalRiskTerminalPayoffEvaluationTests(unittest.TestCase):
         finally:
             method.__code__ = original_code
 
+    def test_paperbook_leg_validator_code_mutation_is_rejected(self) -> None:
+        bindings = self._bindings()
+        self._issue_mapping_parent(bindings)
+        descriptor = terminal_payoff_authority.PaperBook.__dict__[
+            "_validate_ticket_leg"
+        ]
+        method = descriptor.__func__
+        original_code = method.__code__
+
+        def forged_validate(_cls, leg, *, ticket_id=None):
+            return leg
+
+        try:
+            method.__code__ = forged_validate.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalPayoffEvaluationError,
+                "dispatch root changed",
+            ):
+                self._resolve(bindings)
+        finally:
+            method.__code__ = original_code
+
     def test_portfolio_decimal_context_mutation_is_rejected(self) -> None:
         bindings = self._bindings()
         self._issue_mapping_parent(bindings)

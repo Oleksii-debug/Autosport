@@ -1086,8 +1086,12 @@ class PersistentLiveDecisionLoop:
                 store,
                 self.mirror_updates,
             )
+            # Sample only a cheap, explicitly untrusted generation hint inside the
+            # same token interval as the decision clock.  A material cycle proves this
+            # exact boundary immediately before PENDING publication; idle cycles never
+            # pay the full append-history authority proof.
+            append_generation = store.append_generation_hint()
             decision_time = self._sample_clock()
-            append_generation = store.committed_append_generation_head()
             frozen_history: tuple[tuple[MarketEvent, int], ...] | None = None
             if self._decision_refresh_may_need_history(decision_time) and any(
                 self.dependencies.requires_current_history_fallback(
@@ -2487,6 +2491,17 @@ class PersistentLiveDecisionLoop:
             if self._decision_market_frontier_as_of == decision_time
             else None
         )
+        if market_append_generation is not None:
+            store = self._default_market_store
+            if store is None:
+                raise LiveDecisionProgressError(
+                    "decision market frontier lost its canonical store before publication"
+                )
+            # append_generation_hint() is intentionally not authority.  Prove the
+            # exact boundary only for a cycle that is about to publish economics.
+            # A later append may already exist; proving this immutable prefix still
+            # binds recovery to the corpus that existed at the selected cutoff.
+            store.require_committed_append_generation(market_append_generation)
         with WorkspaceEconomicLock(self.workspace):
             durable_control = self._load_control()
             if durable_control is None:

@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -204,6 +205,77 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_reconcile_holds_mirror_cut_against_direct_apply_race(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(sequence=1, odds="2.00")
+                second = self.event(sequence=2, odds="2.20")
+                self.assertEqual(
+                    MarketEventBus(store)._publish_many_live_ingestion([first]),
+                    1,
+                )
+                mirror = MarketMirror.from_live_store(store)
+                runtime = BoundedMirrorInvalidationBuffer(mirror)
+
+                entered_receipt_query = threading.Event()
+                release_receipt_query = threading.Event()
+                paused = False
+
+                def trace(statement: str) -> None:
+                    nonlocal paused
+                    normalized = " ".join(statement.split()).lower()
+                    if (
+                        not paused
+                        and "from market_events as m" in normalized
+                        and "where m.dedupe_key=" in normalized
+                    ):
+                        paused = True
+                        entered_receipt_query.set()
+                        if not release_receipt_query.wait(timeout=2):
+                            raise AssertionError("test did not release receipt query")
+
+                store.connection.set_trace_callback(trace)
+                reconcile_result: list[tuple] = []
+                reconcile_error: list[BaseException] = []
+
+                def reconcile() -> None:
+                    try:
+                        reconcile_result.append(runtime.reconcile_trusted_store(store))
+                    except BaseException as exc:
+                        reconcile_error.append(exc)
+
+                reconcile_thread = threading.Thread(target=reconcile)
+                reconcile_thread.start()
+                self.assertTrue(entered_receipt_query.wait(timeout=2))
+
+                direct_done = threading.Event()
+                direct_result = []
+
+                def direct_apply() -> None:
+                    direct_result.append(mirror.apply(second))
+                    direct_done.set()
+
+                direct_thread = threading.Thread(target=direct_apply)
+                direct_thread.start()
+                self.assertFalse(direct_done.wait(timeout=0.05))
+
+                release_receipt_query.set()
+                reconcile_thread.join(timeout=2)
+                direct_thread.join(timeout=2)
+                self.assertFalse(reconcile_thread.is_alive())
+                self.assertFalse(direct_thread.is_alive())
+                self.assertEqual(reconcile_error, [])
+                self.assertEqual(
+                    tuple(result.status for result in reconcile_result[0]),
+                    (MirrorUpdate.DUPLICATE,),
+                )
+                self.assertEqual(direct_result[0].status, MirrorUpdate.APPLIED)
+                self.assertEqual(mirror.snapshot()[0].sequence, 2)
+            finally:
+                store.connection.set_trace_callback(None)
+                store.close()
+
     def test_reconcile_trusted_store_overflow_requires_full_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
@@ -298,6 +370,46 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
                 )
             finally:
                 store.close()
+
+    def test_reconcile_same_path_authority_rollback_rejects_retained_mirror_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self.event(selection="selection-a", sequence=1)
+            self.assertEqual(
+                MarketEventBus(store)._publish_many_live_ingestion([event]),
+                1,
+            )
+            mirror = MarketMirror.from_live_store(store)
+            runtime = BoundedMirrorInvalidationBuffer(mirror)
+            runtime.reconcile_trusted_store(store)
+            runtime.drain()
+            before = mirror.snapshot()
+            store.close()
+
+            connection = SQLiteMarketStore(path)
+            try:
+                connection.connection.execute("DELETE FROM trusted_live_current_quotes")
+                connection.connection.execute("DELETE FROM market_event_live_receipts")
+                connection.connection.execute("DELETE FROM current_quotes")
+                connection.connection.execute("DELETE FROM market_events")
+                connection.connection.commit()
+            finally:
+                connection.close()
+
+            reopened = SQLiteMarketStore(path)
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "pre-existing mirror state is not trusted",
+                ):
+                    runtime.reconcile_trusted_store(reopened)
+
+                self.assertEqual(mirror.snapshot(), before)
+                self.assertEqual(runtime.pending_count, 0)
+                self.assertFalse(runtime.full_refresh_required)
+            finally:
+                reopened.close()
 
     def test_reconcile_trusted_store_rejects_cross_workspace_reuse_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as first_directory, tempfile.TemporaryDirectory() as second_directory:

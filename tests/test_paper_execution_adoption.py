@@ -208,6 +208,76 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                     decision_id="decision-lay",
                 )
 
+    def test_execute_with_clock_rejects_product_clock_before_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            backwards = datetime.fromisoformat(
+                "2026-09-20T05:59:59.999999+00:00"
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "start clock precedes the authorized plan",
+            ):
+                runtime.execute_with_clock(
+                    prepared=current_prepared,
+                    trigger_id="trigger-backward-clock",
+                    clock=lambda: backwards,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(ledger.events(), ())
+            self.assertEqual(book.tickets, {})
+
+    def test_exposure_scope_only_recovery_uses_new_execution_clock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            trigger_id = "trigger-scope-only-recovery"
+            run_id = runtime.expected_run_id(current_prepared, trigger_id)
+
+            # Simulate a crash after scope publication but before #623 reserves
+            # the run. Scope evidence is authority for exposure identity, not proof
+            # that execution already started.
+            runtime._publish_exposure_scope(
+                prepared=current_prepared,
+                run_id=run_id,
+            )
+            pre_recovery_events = ledger.events(run_id)
+            self.assertEqual(
+                [event["event_type"] for event in pre_recovery_events],
+                [runtime._EXPOSURE_SCOPE_EVENT_TYPE],
+            )
+
+            recovery_time = datetime.fromisoformat(
+                "2026-09-20T06:01:00+00:00"
+            )
+            result = runtime.execute_with_clock(
+                prepared=current_prepared,
+                trigger_id=trigger_id,
+                clock=lambda: recovery_time,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(result.run.started_at, recovery_time.isoformat())
+            self.assertEqual(
+                result.run.attempts[0].outcome,
+                PaperAttemptOutcome.REJECTED,
+            )
+            self.assertIn("expired", result.run.attempts[0].reason)
+            self.assertEqual(book.tickets, {})
+            reservations = [
+                event
+                for event in ledger.events(run_id)
+                if event["event_type"] == "RUN_RESERVED"
+            ]
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(
+                reservations[0]["payload"]["started_at"],
+                recovery_time.isoformat(),
+            )
+
     def test_execute_with_clock_samples_after_execution_lock_entry(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

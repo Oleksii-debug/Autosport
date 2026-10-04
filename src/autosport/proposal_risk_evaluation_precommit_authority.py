@@ -331,6 +331,34 @@ def _require_dispatch() -> None:
             "proposal risk evaluation precommit authority dispatch changed"
         )
 
+    helper_witnesses = globals().get(
+        "_PROPOSAL_RISK_EVALUATION_PRECOMMIT_HELPER_WITNESSES"
+    )
+    expected_helper_witnesses = globals().get(
+        "_PROPOSAL_RISK_EVALUATION_PRECOMMIT_HELPER_WITNESSES_EXPECTED"
+    )
+    if helper_witnesses is not expected_helper_witnesses:
+        raise ProductProposalRiskEvaluationPrecommitError(
+            "proposal risk evaluation precommit internal helper witness root changed"
+        )
+    if type(helper_witnesses) is not tuple:
+        raise ProductProposalRiskEvaluationPrecommitError(
+            "proposal risk evaluation precommit internal helper witness set is unavailable"
+        )
+    for name, expected, code in expected_helper_witnesses:
+        current = globals().get(name)
+        if (
+            current is not expected
+            or getattr(current, "__code__", None) is not code
+        ):
+            raise ProductProposalRiskEvaluationPrecommitError(
+                "proposal risk evaluation precommit internal helper authority "
+                f"changed: {name}"
+            )
+
+
+_REQUIRE_DISPATCH_ORIGINAL = _require_dispatch
+
 
 def _current_economic_state(
     workspace: Path,
@@ -587,7 +615,11 @@ def issue_product_proposal_risk_evaluation_precommit(
 ) -> ProductProposalRiskEvaluationPrecommit:
     """Persist one exact target/science join in the canonical Decision Ledger."""
 
-    _require_dispatch()
+    if _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL:
+        raise ProductProposalRiskEvaluationPrecommitError(
+            "proposal risk evaluation precommit dispatch guard root changed"
+        )
+    _REQUIRE_DISPATCH_ORIGINAL()
     workspace = _workspace_path(workspace)
     target_sha256 = _sha(target_sha256, "target_sha256")
     target, science = _resolve_inputs(
@@ -707,7 +739,11 @@ def resolve_product_proposal_risk_evaluation_precommit(
 ) -> ProductProposalRiskEvaluationPrecommit:
     """Re-resolve one durable target/science join from current canonical roots."""
 
-    _require_dispatch()
+    if _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL:
+        raise ProductProposalRiskEvaluationPrecommitError(
+            "proposal risk evaluation precommit dispatch guard root changed"
+        )
+    _REQUIRE_DISPATCH_ORIGINAL()
     workspace = _workspace_path(workspace)
     binding_sha256 = _sha(binding_sha256, "binding_sha256")
     target_sha256 = _sha(target_sha256, "target_sha256")
@@ -749,6 +785,29 @@ def resolve_product_proposal_risk_evaluation_precommit(
             expected_binding_sha256=binding_sha256,
         )
 
+
+_PROPOSAL_RISK_EVALUATION_PRECOMMIT_HELPER_WITNESSES = tuple(
+    (
+        name,
+        globals()[name],
+        getattr(globals()[name], "__code__", None),
+    )
+    for name in (
+        "_workspace_path",
+        "_current_economic_state",
+        "_resolve_inputs",
+        "_material",
+        "_build",
+        "_text",
+        "_sha",
+        "_decimal_text",
+        "_canonical_json",
+        "_digest",
+    )
+)
+_PROPOSAL_RISK_EVALUATION_PRECOMMIT_HELPER_WITNESSES_EXPECTED = (
+    _PROPOSAL_RISK_EVALUATION_PRECOMMIT_HELPER_WITNESSES
+)
 
 # Keep the issuance token out of the mutable module namespace. Public truth
 # properties and the canonical builder retain only closure/default references.

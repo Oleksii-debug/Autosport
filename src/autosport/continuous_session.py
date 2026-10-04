@@ -942,7 +942,15 @@ class _ContinuousSessionState:
     def _verify_evidence_tip(self, state: dict[str, Any]) -> None:
         count = state["settlement_evidence_count"]
         if count == 0:
+            if self.evidence_dir.is_symlink() or self.evidence_dir.exists():
+                raise ContinuousSessionError(
+                    "empty settlement evidence checkpoint has an orphan journal"
+                )
             return
+        if self.evidence_dir.is_symlink() or not self.evidence_dir.is_dir():
+            raise ContinuousSessionError(
+                "settlement evidence journal path is not a canonical directory"
+            )
         path = self._evidence_path(
             state["settlement_evidence_tip_key_sha256"]
         )

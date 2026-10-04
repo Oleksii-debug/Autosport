@@ -754,7 +754,10 @@ class CanonicalDesktopApplication:
         _state_receipt,
         _state_health_after,
     ) -> DesktopApplicationReceipt | None:
-        if type(self._state) is not _application_store_type:
+        state = self._state
+        market_bus = self.market_bus
+        health_store = self.health_store
+        if type(state) is not _application_store_type:
             raise ApplicationReceiptError(
                 "completed canonical application lacks canonical journal authority"
             )
@@ -762,7 +765,7 @@ class CanonicalDesktopApplication:
         if receipt is None:
             return None
 
-        if type(self.market_bus) is not _market_bus_type:
+        if type(market_bus) is not _market_bus_type:
             raise ApplicationReceiptError(
                 "completed canonical application lacks canonical market bus authority"
             )
@@ -802,13 +805,13 @@ class CanonicalDesktopApplication:
                 "application receipt does not resolve to exactly one durable canonical market effect"
             )
 
-        if type(self.health_store) is not _health_store_type:
+        if type(health_store) is not _health_store_type:
             raise ApplicationReceiptError(
                 "completed canonical application lacks canonical health authority"
             )
         expected_health = _state_health_after(state, delta)
         try:
-            actual_health = _health_get(self.health_store, delta.source_id)
+            actual_health = _health_get(health_store, delta.source_id)
         except Exception as exc:
             raise ApplicationReceiptError(
                 "cannot verify durable canonical health effect for application receipt"

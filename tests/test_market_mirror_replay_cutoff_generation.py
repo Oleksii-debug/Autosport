@@ -475,6 +475,93 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 reopened.close()
 
+    def test_append_rejects_temp_table_shadow_before_history_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T18:59:59+00:00",
+                )
+                self.assertTrue(store.append(first))
+                before = store._market_append_authority().read_history()
+
+                store.connection.execute(
+                    """CREATE TEMP TABLE current_quotes (
+                        source_id TEXT NOT NULL,
+                        quote_key TEXT NOT NULL,
+                        observed_ts TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        PRIMARY KEY (source_id, quote_key)
+                    )"""
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "current_quotes schema is not canonical: temporary schema objects are not allowed",
+                ):
+                    store.append(
+                        self.event(
+                            sequence=2,
+                            odds="2.10",
+                            observed_ts="2026-09-16T19:00:00+00:00",
+                        )
+                    )
+
+                self.assertEqual(store._market_append_authority().read_history(), before)
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM main.market_events"
+                    ).fetchone(),
+                    (1,),
+                )
+            finally:
+                store.close()
+
+    def test_append_rejects_temp_history_trigger_before_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T18:59:59+00:00",
+                )
+                self.assertTrue(store.append(first))
+                before = store._market_append_authority().read_history()
+
+                store.connection.execute(
+                    """CREATE TEMP TRIGGER temp_history_side_effect
+                       AFTER INSERT ON main.market_events
+                       BEGIN
+                           DELETE FROM current_quotes;
+                       END"""
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "market_events schema is not canonical: temporary schema objects are not allowed",
+                ):
+                    store.append(
+                        self.event(
+                            sequence=2,
+                            odds="2.10",
+                            observed_ts="2026-09-16T19:00:00+00:00",
+                        )
+                    )
+
+                self.assertEqual(store._market_append_authority().read_history(), before)
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM main.market_events"
+                    ).fetchone(),
+                    (1,),
+                )
+            finally:
+                store.close()
+
     def test_late_backdated_append_cannot_rewrite_frozen_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

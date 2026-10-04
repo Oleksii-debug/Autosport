@@ -11,6 +11,8 @@ from typing import Iterable
 from .domain import MarketEvent
 
 
+_SEALED_MARKET_EVENT_TYPE = MarketEvent
+
 _HISTORY_COLUMNS = (
     "dedupe_key",
     "quote_key",
@@ -873,8 +875,10 @@ class SQLiteMarketStore:
             raise TypeError(
                 "live receipt authority requires an exact SQLiteMarketStore"
             )
+        if _market_event_type is not _SEALED_MARKET_EVENT_TYPE:
+            raise TypeError("live receipt authority type override is not allowed")
         materialized = tuple(events)
-        if any(type(event) is not _market_event_type for event in materialized):
+        if any(type(event) is not _SEALED_MARKET_EVENT_TYPE for event in materialized):
             raise TypeError("live receipt authority requires exact MarketEvent values")
         batch = _LiveReceiptBatch(materialized)
         canonical_events = tuple(batch)
@@ -970,7 +974,10 @@ class SQLiteMarketStore:
                         "live append hook changed storage outside the canonical batch"
                     )
 
-                if any(type(event) is not _market_event_type for event in accepted):
+                if any(
+                    type(event) is not _SEALED_MARKET_EVENT_TYPE
+                    for event in accepted
+                ):
                     raise TypeError(
                         "live append hook must return exact MarketEvent instances"
                     )
@@ -1055,7 +1062,9 @@ class SQLiteMarketStore:
         *,
         _market_event_type: type[MarketEvent] = MarketEvent,
     ) -> bool:
-        if type(event) is not _market_event_type:
+        if _market_event_type is not _SEALED_MARKET_EVENT_TYPE:
+            raise TypeError("trusted receipt type override is not allowed")
+        if type(event) is not _SEALED_MARKET_EVENT_TYPE:
             raise TypeError("event must be an exact MarketEvent")
         with self._connection_lock:
             row = self.connection.execute(

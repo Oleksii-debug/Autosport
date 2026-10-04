@@ -1917,7 +1917,7 @@ class SQLiteMarketStore:
         with self._market_append_issuance_lock(authority):
             with self._connection_lock:
                 self.connection.execute("BEGIN IMMEDIATE")
-                prepared: tuple[str, str, str | None] | None = None
+                prepared: tuple[str, str] | None = None
                 accepted: list[MarketEvent] = []
                 try:
                     # Re-prove the mutable live-storage schema at the write
@@ -2002,32 +2002,20 @@ class SQLiteMarketStore:
                         intended_state_sha256=intended_state_sha256,
                         semantic_binding_sha256=binding_sha256,
                     )
-                    prepared = (
-                        tx_id,
-                        binding_sha256,
-                        committed_state_sha256,
-                    )
+                    prepared = (tx_id, binding_sha256)
                     self._commit_stable_database_path()
-                except Exception as exc:
+                except Exception:
+                    # Once PREPARE exists, do not guess whether SQLite publication
+                    # is durable. A commit can succeed before a post-commit pathname
+                    # check fails, and rollback cannot undo that durable state. Leave
+                    # the PREPARE as a crash prefix: the next append/trusted read
+                    # recomputes canonical SQLite state and lets independent recovery
+                    # either ABORT previous-state or COMMIT exact intended-state.
                     self.connection.rollback()
-                    if prepared is not None:
-                        tx_id, binding_sha256, previous_state_sha256 = prepared
-                        try:
-                            authority.abort(
-                                tx_id=tx_id,
-                                observed_state_sha256=previous_state_sha256,
-                                semantic_binding_sha256=binding_sha256,
-                            )
-                        except Exception as abort_error:
-                            exc.add_note(
-                                "independent append-authority PREPARE could not be "
-                                f"aborted cleanly: {type(abort_error).__name__}: "
-                                f"{abort_error}"
-                            )
                     raise
 
                 assert prepared is not None
-                tx_id, binding_sha256, _previous_state_sha256 = prepared
+                tx_id, binding_sha256 = prepared
                 self._require_database_path_identity()
                 authority.recover(
                     observed_state_sha256=intended_state_sha256,
@@ -2145,11 +2133,6 @@ class SQLiteMarketStore:
                     # write transaction commits. The outer resolver lock stays held
                     # until the independent authority has recovered/committed the exact
                     # published cutoff state, preventing false abandonment of PREPARE.
-                    prepared: tuple[
-                        str,
-                        str,
-                        str | None,
-                    ] | None = None
                     self.connection.execute("BEGIN IMMEDIATE")
                     try:
                         self._validate_causal_replay_state()
@@ -2229,11 +2212,6 @@ class SQLiteMarketStore:
                                 intended_state_sha256=intended_state_sha256,
                                 semantic_binding_sha256=binding_sha256,
                             )
-                            prepared = (
-                                tx_id,
-                                binding_sha256,
-                                observed_state_sha256,
-                            )
                             self.connection.execute(
                                 """INSERT INTO market_replay_cutoffs
                                    (cutoff_id, as_of, max_append_generation)
@@ -2241,22 +2219,13 @@ class SQLiteMarketStore:
                                 (cutoff_id, canonical_as_of, max_generation),
                             )
                         self._commit_stable_database_path()
-                    except Exception as exc:
+                    except Exception:
+                        # PREPARE is intentionally retained on every post-prepare
+                        # failure. SQLite commit outcome and the final pathname
+                        # identity can diverge across an exception boundary; durable
+                        # recovery must decide from the actual cutoff row-set instead
+                        # of an eager caller-supplied ABORT claim.
                         self.connection.rollback()
-                        if prepared is not None:
-                            tx_id, binding_sha256, previous_state_sha256 = prepared
-                            try:
-                                authority.abort(
-                                    tx_id=tx_id,
-                                    observed_state_sha256=previous_state_sha256,
-                                    semantic_binding_sha256=binding_sha256,
-                                )
-                            except Exception as abort_error:
-                                exc.add_note(
-                                    "independent cutoff-authority PREPARE could not be "
-                                    f"aborted cleanly: {type(abort_error).__name__}: "
-                                    f"{abort_error}"
-                                )
                         raise
 
                     # Use the actual committed SQLite state rather than trusting the

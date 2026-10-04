@@ -679,8 +679,11 @@ class _ContinuousSessionState:
                 raise ContinuousSessionError(
                     "durable settlement event/reference evidence is conflicting"
                 )
-            if normalized not in values:
-                values.append(normalized)
+            if normalized in values:
+                raise ContinuousSessionError(
+                    "durable settlement evidence entry is duplicated"
+                )
+            values.append(normalized)
         return tuple(values)
 
     @staticmethod
@@ -760,8 +763,11 @@ class _ContinuousSessionState:
                 raise ContinuousSessionError(
                     "pending settlement event/reference is conflicting"
                 )
-            if normalized not in values:
-                values.append(normalized)
+            if normalized in values:
+                raise ContinuousSessionError(
+                    "pending settlement resolution entry is duplicated"
+                )
+            values.append(normalized)
         return tuple(values)
 
     def _read(self) -> dict[str, Any]:
@@ -848,6 +854,22 @@ class _ContinuousSessionState:
             ):
                 raise ContinuousSessionError(
                     "pending settlement resolution is not bound to durable evidence"
+                )
+            pending_resolution = SettlementResolution(
+                event_identity=item["event_identity"],
+                settlement_ref=item["settlement_ref"],
+                quote_outcomes=dict(item["quote_outcomes"]),
+                evidence_id=item["evidence_id"],
+                evidence_sha256=item["evidence_sha256"],
+                available_at=item["available_at"],
+            )
+            if (
+                outcome_digests.get(item["evidence_id"]) is None
+                or outcome_digests[item["evidence_id"]]
+                != _settlement_outcomes_sha256(pending_resolution)
+            ):
+                raise ContinuousSessionError(
+                    "pending settlement outcome digest conflicts with durable evidence"
                 )
         gap_state = raw["source_gap_state"]
         sync_state = raw["source_sync_state"]

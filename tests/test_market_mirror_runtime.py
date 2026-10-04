@@ -310,6 +310,81 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertEqual(batch.semantic_refresh_keys, (key,))
         self.assertEqual(batch.semantic_refresh_identities, ((key, 3),))
 
+    def test_noncausal_semantic_refresh_is_material_for_decision_routing(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="prophetx:sandbox")
+        first = self.prophetx_refresh_event(sequence=1)
+        noncausal_refresh = self.prophetx_refresh_event(sequence=2)
+
+        runtime.reconcile_persisted(first, append_generation=1)
+        runtime.drain()
+        result = runtime.reconcile_persisted(
+            noncausal_refresh,
+            append_generation=0,
+        )
+        self.assertEqual(result.status, MirrorUpdate.SEMANTIC_REFRESH)
+
+        batch = runtime.drain()
+        self.assertEqual(
+            batch.changed_keys,
+            (("prophetx:sandbox", noncausal_refresh.quote_key),),
+        )
+        self.assertEqual(batch.semantic_refresh_keys, ())
+        self.assertEqual(batch.semantic_refresh_identities, ())
+        self.assertEqual(
+            dependencies.semantic_refresh_only_inputs(batch),
+            (),
+        )
+        self.assertEqual(dependencies.affected_inputs(batch), ("decision",))
+        decision = dependencies.decision_view(
+            "decision",
+            as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=5),
+        )
+        self.assertEqual(decision.events, ())
+
+    def test_noncausal_refresh_dominates_coalesced_causal_refresh(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        first = self.prophetx_refresh_event(sequence=1)
+        causal_refresh = self.prophetx_refresh_event(sequence=2)
+        noncausal_refresh = self.prophetx_refresh_event(sequence=3)
+        later_causal_refresh = self.prophetx_refresh_event(sequence=4)
+
+        runtime.reconcile_persisted(first, append_generation=1)
+        runtime.drain()
+        self.assertEqual(
+            runtime.reconcile_persisted(
+                causal_refresh,
+                append_generation=2,
+            ).status,
+            MirrorUpdate.SEMANTIC_REFRESH,
+        )
+        self.assertEqual(
+            runtime.reconcile_persisted(
+                noncausal_refresh,
+                append_generation=0,
+            ).status,
+            MirrorUpdate.SEMANTIC_REFRESH,
+        )
+        self.assertEqual(
+            runtime.reconcile_persisted(
+                later_causal_refresh,
+                append_generation=3,
+            ).status,
+            MirrorUpdate.SEMANTIC_REFRESH,
+        )
+
+        batch = runtime.drain()
+        self.assertEqual(
+            batch.changed_keys,
+            (("prophetx:sandbox", later_causal_refresh.quote_key),),
+        )
+        self.assertEqual(batch.semantic_refresh_keys, ())
+        self.assertEqual(batch.semantic_refresh_identities, ())
+
     def test_stale_refresh_batch_cannot_classify_newer_material_state(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror)

@@ -139,11 +139,14 @@ class ProductProposalRiskExecutionEvidenceDispatchGuardTests(unittest.TestCase):
         finally:
             result_type.product_execution_provenance_proven = original
 
-    def test_malformed_row_is_domain_error_not_attribute_error(self) -> None:
+    def test_malformed_row_fails_before_attribute_dispatch(self) -> None:
         forged_precommit = object.__new__(
             evidence_authority.ProductProposalRiskEvaluationPrecommit
         )
-        with self.assertRaises(ProductProposalRiskExecutionEvidenceError):
+        with self.assertRaisesRegex(
+            ProductProposalRiskExecutionEvidenceError,
+            r"rows\[0\] must be exact CounterfactualMemberExecutionEvidence",
+        ):
             evidence_authority.derive_product_proposal_risk_execution_evidence(
                 forged_precommit,
                 (object(),),

@@ -1600,7 +1600,7 @@ def test_login_failure_state_rejects_contradictory_failure_class(
 
     with pytest.raises(
         ProphetXSessionLifecycleError,
-        match="login failure class does not match durable state",
+        match="failure evidence does not match durable state",
     ):
         ProphetXSessionSnapshot(**kwargs)
 
@@ -1643,7 +1643,7 @@ def test_login_failure_state_rejects_renewal_failure_evidence(state, failure):
 
     with pytest.raises(
         ProphetXSessionLifecycleError,
-        match="login failure state cannot carry renewal failure evidence",
+        match="failure evidence does not match durable state",
     ):
         ProphetXSessionSnapshot(**kwargs)
 
@@ -1667,6 +1667,38 @@ def test_login_failure_state_rejects_renewal_failure_evidence(state, failure):
         ),
     ],
 )
+@pytest.mark.parametrize(
+    "state,renewal_failure",
+    [
+        (
+            ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
+            ProphetXRenewalFailureClass.RETRYABLE,
+        ),
+        (
+            ProphetXSessionState.PROVIDER_UNAVAILABLE,
+            ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE,
+        ),
+    ],
+)
+def test_retryable_durable_state_accepts_matching_renewal_origin(
+    state,
+    renewal_failure,
+):
+    snapshot = ProphetXSessionSnapshot(
+        state=state,
+        generation=5,
+        credential_revision="rev-1",
+        integration_role="market-maker-primary",
+        last_transition_at=NOW,
+        retry_not_before=NOW + timedelta(seconds=5),
+        last_renewal_failure_class=renewal_failure,
+    )
+
+    assert snapshot.state is state
+    assert snapshot.last_failure_class is None
+    assert snapshot.last_renewal_failure_class is renewal_failure
+
+
 def test_credential_rejected_state_requires_exact_single_rejection_cause(
     last_login_failure,
     last_renewal_failure,

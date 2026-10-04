@@ -254,25 +254,42 @@ class ProphetXSessionSnapshot:
                 "last_renewal_failure_class must be an exact ProphetXRenewalFailureClass"
             )
 
-        login_failure_for_state = {
-            ProphetXSessionState.AUTH_RETRYABLE_FAILURE: (
-                ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE
-            ),
-            ProphetXSessionState.PROVIDER_UNAVAILABLE: (
-                ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION
-            ),
-            ProphetXSessionState.SESSION_POOL_EXHAUSTED: (
-                ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED
-            ),
-        }.get(self.state)
-        if login_failure_for_state is not None:
-            if self.last_failure_class is not login_failure_for_state:
+        if self.state is ProphetXSessionState.AUTH_RETRYABLE_FAILURE:
+            valid_failure_evidence = (
+                self.last_failure_class
+                is ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE
+                and self.last_renewal_failure_class is None
+            ) or (
+                self.last_failure_class is None
+                and self.last_renewal_failure_class
+                is ProphetXRenewalFailureClass.RETRYABLE
+            )
+            if not valid_failure_evidence:
                 raise ProphetXSessionLifecycleError(
-                    "login failure class does not match durable state"
+                    "failure evidence does not match durable state"
                 )
-            if self.last_renewal_failure_class is not None:
+        elif self.state is ProphetXSessionState.PROVIDER_UNAVAILABLE:
+            valid_failure_evidence = (
+                self.last_failure_class
+                is ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION
+                and self.last_renewal_failure_class is None
+            ) or (
+                self.last_failure_class is None
+                and self.last_renewal_failure_class
+                is ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE
+            )
+            if not valid_failure_evidence:
                 raise ProphetXSessionLifecycleError(
-                    "login failure state cannot carry renewal failure evidence"
+                    "failure evidence does not match durable state"
+                )
+        elif self.state is ProphetXSessionState.SESSION_POOL_EXHAUSTED:
+            if (
+                self.last_failure_class
+                is not ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED
+                or self.last_renewal_failure_class is not None
+            ):
+                raise ProphetXSessionLifecycleError(
+                    "failure evidence does not match durable state"
                 )
 
         if self.state is ProphetXSessionState.CREDENTIAL_REJECTED:

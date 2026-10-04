@@ -215,10 +215,13 @@ class _WitnessWindow:
                 )
             )
         )
+        self.original_url: str | None = None
+        self.real_url = "http://127.0.0.1:42000/index.html"
+        self.current_url = self.real_url
         self.destroyed = False
 
     def get_current_url(self) -> str:
-        return "file:///autosport/windows_web/index.html"
+        return self.current_url
 
     def destroy(self) -> None:
         self.destroyed = True
@@ -236,6 +239,7 @@ class _WitnessWebview:
         }
 
     def create_window(self, *args, **kwargs):
+        self.window.original_url = args[1]
         return self.window
 
     def start(self, *, gui: str, **kwargs) -> None:
@@ -267,7 +271,7 @@ def test_actual_runtime_witness_is_durable_before_webview_start_returns(
     workspace.mkdir()
     witness_path = workspace / "webview2-runtime-witness.json"
     fake = _install_witness_webview(monkeypatch, "154.0.2847.51", witness_path)
-    controller = _WitnessController(workspace)
+    controller = AutosportWebController(workspace)
     bridge = AutosportWebBridge(controller)
 
     assert launch_windows_shell(
@@ -281,7 +285,7 @@ def test_actual_runtime_witness_is_durable_before_webview_start_returns(
         "Publishing only after webview.start() returns loses crash/kill and physical "
         "NVDA-session binding evidence."
     )
-    assert controller.closed is True
+    assert controller._close_complete is True
     payload = json.loads(witness_path.read_text(encoding="utf-8"))
     assert payload == {
         "browser_version_string": "154.0.2847.51",
@@ -304,7 +308,8 @@ def test_actual_runtime_witness_replaces_stale_prior_launch_before_bridge_inject
     witness_path = workspace / "webview2-runtime-witness.json"
     witness_path.write_text('{"browser_version_string":"stale"}\n', encoding="utf-8")
     fake = _install_witness_webview(monkeypatch, "154.0.2847.99", witness_path)
-    bridge = AutosportWebBridge(_WitnessController(workspace))
+    controller = AutosportWebController(workspace)
+    bridge = AutosportWebBridge(controller)
 
     assert launch_windows_shell(
         bridge,
@@ -312,6 +317,7 @@ def test_actual_runtime_witness_replaces_stale_prior_launch_before_bridge_inject
     ) == 0
 
     assert fake.witness_seen_before_start_return is True
+    assert controller._close_complete is True
     payload = json.loads(witness_path.read_text(encoding="utf-8"))
     assert payload["browser_version_string"] == "154.0.2847.99"
     assert payload["observation_source"] == "native_core_webview2_environment"
@@ -327,7 +333,8 @@ def test_invalid_actual_runtime_identity_never_publishes_witness(
     workspace.mkdir()
     witness_path = workspace / "webview2-runtime-witness.json"
     _install_witness_webview(monkeypatch, browser_version, witness_path)
-    bridge = AutosportWebBridge(_WitnessController(workspace))
+    controller = AutosportWebController(workspace)
+    bridge = AutosportWebBridge(controller)
 
     with pytest.raises(WindowsWebViewUnavailable):
         launch_windows_shell(
@@ -336,6 +343,7 @@ def test_invalid_actual_runtime_identity_never_publishes_witness(
         )
 
     assert witness_path.exists() is False
+    assert controller._close_complete is True
 
 
 def test_runtime_witness_publication_failure_rejects_privileged_document(
@@ -346,7 +354,8 @@ def test_runtime_witness_publication_failure_rejects_privileged_document(
     workspace.mkdir()
     witness_path = workspace / "webview2-runtime-witness.json"
     _install_witness_webview(monkeypatch, "154.0.2847.51", witness_path)
-    bridge = AutosportWebBridge(_WitnessController(workspace))
+    controller = AutosportWebController(workspace)
+    bridge = AutosportWebBridge(controller)
 
     def fail_publication(path: Path, browser_version: str) -> None:
         del path, browser_version
@@ -365,4 +374,5 @@ def test_runtime_witness_publication_failure_rejects_privileged_document(
         )
 
     assert witness_path.exists() is False
+    assert controller._close_complete is True
 

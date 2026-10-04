@@ -278,3 +278,37 @@ def test_currency_lookup_alias_rebind_is_rejected_before_rebound_execution(
         origin_guard._currency_for_capture(capture)
 
     assert calls == []
+
+
+def test_k07_verifier_closure_drift_is_rejected_before_permissive_execution() -> None:
+    client, _provider = _client(pytest.MonkeyPatch())
+    capture = _qualified_capture(client)
+    assert origin_guard._currency_for_capture(capture) == "USD"
+
+    verifier = origin_guard._REQUIRE_IDENTITY
+    closure = verifier.__closure__
+    assert closure is not None
+    freevars = verifier.__code__.co_freevars
+    assert "is_authoritative" in freevars
+    cell = closure[freevars.index("is_authoritative")]
+    original = cell.cell_contents
+    calls: list[object] = []
+
+    def permissive_authority(value, *, client=None):
+        calls.append((value, client))
+        return True
+
+    client._credentials = BetfairSessionCredentials(
+        "app-key-rotated",
+        "session-token-rotated",
+    )
+    cell.cell_contents = permissive_authority
+    try:
+        with pytest.raises(
+            BetfairSettlementRevisionError,
+            match="authenticated identity verifier authority changed",
+        ):
+            origin_guard._currency_for_capture(capture)
+        assert calls == []
+    finally:
+        cell.cell_contents = original

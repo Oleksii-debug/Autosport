@@ -341,6 +341,27 @@ function Wait-ForUiaElement {
     return $null
 }
 
+function Wait-ForFocusedAutomationId {
+    param(
+        [string]$AutomationId,
+        [DateTime]$Deadline
+    )
+
+    while ([DateTime]::UtcNow -lt $Deadline) {
+        try {
+            $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+            if (
+                $null -ne $focused -and
+                [string]$focused.Current.AutomationId -eq $AutomationId
+            ) {
+                return $focused
+            }
+        } catch {}
+        Start-Sleep -Milliseconds 50
+    }
+    return $null
+}
+
 $report = [ordered]@{
     status = 'FAIL'
     source = 'external_windows_uia_client'
@@ -562,21 +583,21 @@ try {
     try {
         $uiaRoot.SetFocus()
         [System.Windows.Forms.SendKeys]::SendWait('{F2}')
-        Start-Sleep -Milliseconds 150
-        $focusedF2 = [System.Windows.Automation.AutomationElement]::FocusedElement
-        $report.f2_focus_automation_id = [string]$focusedF2.Current.AutomationId
-        if ($report.f2_focus_automation_id -ne '301') {
+        $shortcutDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(2, $TimeoutSeconds))
+        $focusedF2 = Wait-ForFocusedAutomationId -AutomationId '301' -Deadline $shortcutDeadline
+        if ($null -eq $focusedF2) {
             throw "F2 did not move packaged keyboard focus to semantic screen navigation"
         }
+        $report.f2_focus_automation_id = [string]$focusedF2.Current.AutomationId
 
         $uiaRoot.SetFocus()
         [System.Windows.Forms.SendKeys]::SendWait('{F8}')
-        Start-Sleep -Milliseconds 150
-        $focusedF8 = [System.Windows.Automation.AutomationElement]::FocusedElement
-        $report.f8_focus_automation_id = [string]$focusedF8.Current.AutomationId
-        if ($report.f8_focus_automation_id -ne '204') {
+        $shortcutDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(2, $TimeoutSeconds))
+        $focusedF8 = Wait-ForFocusedAutomationId -AutomationId '204' -Deadline $shortcutDeadline
+        if ($null -eq $focusedF8) {
             throw "F8 did not move packaged keyboard focus to evaluation evidence"
         }
+        $report.f8_focus_automation_id = [string]$focusedF8.Current.AutomationId
         $report.keyboard_shortcuts_status = 'PASS'
     } catch {
         $report.failures += "packaged keyboard shortcut audit failed: $($_.Exception.Message)"

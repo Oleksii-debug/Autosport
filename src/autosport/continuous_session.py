@@ -1111,12 +1111,29 @@ class _ContinuousSessionState:
             )
         if gap_state is not None:
             try:
-                GapState(gap_state)
-                SyncState(sync_state)
+                gap_state_value = GapState(gap_state)
+                sync_state_value = SyncState(sync_state)
             except ValueError as exc:
                 raise ContinuousSessionError(
                     "source gap/sync projection contains an unsupported state"
                 ) from exc
+            expected_sync_states = {
+                GapState.NONE: {
+                    SyncState.READY,
+                    SyncState.EPOCH_CHANGED,
+                    SyncState.RETRY_REQUIRED,
+                },
+                GapState.DETECTED: {SyncState.GAP_DETECTED},
+                GapState.RECOVERED: {SyncState.RECOVERED},
+                GapState.CURSOR_RESET: {
+                    SyncState.CURSOR_RESET,
+                    SyncState.EPOCH_CHANGED,
+                },
+            }[gap_state_value]
+            if sync_state_value not in expected_sync_states:
+                raise ContinuousSessionError(
+                    "source sync projection does not match gap state"
+                )
         if raw["source_state_delta_id"] is not None:
             _text(raw["source_state_delta_id"], "source_state_delta_id")
         if raw["source_projection_stream_epoch"] is not None:
@@ -1145,13 +1162,18 @@ class _ContinuousSessionState:
                 for item in unresolved
             )
             or len(set(unresolved)) != len(unresolved)
+            or unresolved != sorted(unresolved)
         ):
             raise ContinuousSessionError(
-                "source_unresolved_gap_delta_ids must contain unique non-empty strings"
+                "source_unresolved_gap_delta_ids must contain sorted unique non-empty strings"
             )
         if type(raw["source_state_projection_backlog"]) is not bool:
             raise ContinuousSessionError(
                 "source_state_projection_backlog must be boolean"
+            )
+        if raw["source_state_projection_backlog"] and not projection_present:
+            raise ContinuousSessionError(
+                "source projection backlog requires a canonical delta identity"
             )
         if unresolved and (
             gap_state != GapState.DETECTED.value

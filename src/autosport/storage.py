@@ -926,10 +926,9 @@ class SQLiteMarketStore:
         """Fail closed if durable append-generation/cutoff evidence is inconsistent."""
 
         # Cutoff immutability is part of the durable authority, not an optional
-        # optimization. Revalidate the exact table/trigger contract on every
-        # cutoff resolution so a caller with direct SQLite access cannot drop the
-        # guards, rewrite an already-issued cutoff, and have the running process
-        # silently consume the rolled-back decision corpus.
+        # optimization. Revalidate every table read below so SQLite TEMP namespace
+        # shadows cannot redirect causal validation away from canonical main history.
+        _validate_canonical_table(self.connection, "market_events")
         _validate_canonical_table(self.connection, "market_event_commit_order")
         _validate_canonical_table(self.connection, "market_replay_cutoffs")
 

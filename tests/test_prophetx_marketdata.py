@@ -513,6 +513,34 @@ class ProphetXMarketDataTests(unittest.TestCase):
         self.assertNotIn("PROVIDER_ORIGIN_VERIFIED", batch.quality_flags)
         self.assertIn("BOUNDED_PROVIDER_DEPTH", batch.quality_flags)
 
+    def test_verified_empty_event_preserves_exact_requested_event_scope(self):
+        provider = self._make_provider("token", (1001,))
+        response = _response({"data": {"markets": []}})
+        with patch.object(provider, "_fetch_event", return_value=(response, True)):
+            batch = provider.read_batch()
+        self.assertEqual(batch.quotes, ())
+        self.assertIn("PROVIDER_DECLARED_EMPTY_MARKET", batch.quality_flags)
+        self.assertIn(
+            'PROVIDER_DECLARED_EMPTY_SCOPE:{"event_id":"1001","market_id":null}',
+            batch.quality_flags,
+        )
+        self.assertIn("PROVIDER_ORIGIN_VERIFIED", batch.quality_flags)
+
+    def test_verified_empty_market_preserves_event_and_market_scope(self):
+        payload = _market_payload()
+        payload["data"]["markets"][0]["selections"] = []
+        provider = self._make_provider("token", (1001,))
+        response = _response(payload)
+        with patch.object(provider, "_fetch_event", return_value=(response, True)):
+            batch = provider.read_batch()
+        self.assertEqual(batch.quotes, ())
+        self.assertIn("PROVIDER_DECLARED_EMPTY_MARKET", batch.quality_flags)
+        self.assertIn(
+            'PROVIDER_DECLARED_EMPTY_SCOPE:{"event_id":"1001","market_id":"market-1"}',
+            batch.quality_flags,
+        )
+        self.assertIn("PROVIDER_ORIGIN_VERIFIED", batch.quality_flags)
+
     def test_unsupported_payload_shape_fails_closed(self):
         provider, _ = self._provider({"data": {"unexpected": []}})
         with self.assertRaisesRegex(ProphetXPayloadError, "unsupported shape"):

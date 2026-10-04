@@ -780,6 +780,49 @@ class PaperExecutionRealityTests(unittest.TestCase):
             ledger.record_attempt(result.attempts[0])
             self.assertEqual(len(ledger.events()), event_count)
 
+    def test_attempt_write_cannot_switch_reserved_evidence_class(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            current = plan(action("a1"))
+            model = config()
+            source = PaperExecutionLedger(
+                Path(tmp) / "source-observed.jsonl"
+            )
+            observation, registry = registered_observation(
+                source,
+                current.actions[0],
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.40",
+                stake="10.00",
+            )
+            observed = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-evidence-class",
+                config=model,
+                ledger=source,
+                started_at=STARTED_AT,
+                observations={"a1": observation},
+                evidence_registry=registry,
+            )
+
+            target = PaperExecutionLedger(
+                Path(tmp) / "target-synthetic.jsonl"
+            )
+            target.reserve_run(
+                run_id=observed.run_id,
+                trigger_id="trigger-evidence-class",
+                plan=current,
+                config=model,
+                started_at=STARTED_AT,
+                observation_evidence_ids={},
+            )
+            event_count = len(target.events())
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "reserved synthetic authority",
+            ):
+                target.record_attempt(observed.attempts[0])
+            self.assertEqual(len(target.events()), event_count)
+
     def test_writer_lock_fails_closed_instead_of_creating_parallel_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-execution.jsonl"

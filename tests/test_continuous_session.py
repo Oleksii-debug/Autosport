@@ -5284,6 +5284,141 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 continuous_session_module.hashlib = original_hashlib
                 store.close()
 
+    def test_pending_digest_ignores_settlement_quote_descriptor_rebinding(self) -> None:
+        class _ForgedQuoteOutcomesDescriptor:
+            def __get__(self, instance, owner=None):
+                if instance is None:
+                    return self
+                return {"event-1|winner|home": "win"}
+
+            def __set__(self, _instance, _value):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-pending-descriptor-rebind",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:pending-descriptor-rebind",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="pending-descriptor-rebind-evidence",
+                evidence_sha256="a" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            original_descriptor = SettlementResolution.__dict__["quote_outcomes"]
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                state_path = root / "continuous_session.json"
+                raw = json.loads(state_path.read_text(encoding="utf-8"))
+                raw["pending_settlement_resolutions"][0]["quote_outcomes"][
+                    "event-1|winner|home"
+                ] = "loss"
+                state_path.write_text(
+                    json.dumps(raw, sort_keys=True, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+
+                SettlementResolution.quote_outcomes = _ForgedQuoteOutcomesDescriptor()
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "pending settlement outcome digest conflicts with durable evidence",
+                ):
+                    coordinator.status()
+            finally:
+                SettlementResolution.quote_outcomes = original_descriptor
+                store.close()
+
+    def test_settlement_digest_rejects_in_place_json_dumps_code_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-json-code-mutation",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            first = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:json-code-write",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="json-code-write-evidence",
+                evidence_sha256="b" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            original_code = continuous_session_module.json.dumps.__code__
+
+            def forged_dumps(*_args, **_kwargs):
+                return "{}"
+
+            try:
+                state_path = root / "continuous_session.json"
+                before = state_path.read_text(encoding="utf-8")
+                continuous_session_module.json.dumps.__code__ = forged_dumps.__code__
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "settlement JSON digest authority changed",
+                ):
+                    coordinator._state.record_settlement_evidence(
+                        settlement_evidence=(first,),
+                    )
+                self.assertEqual(state_path.read_text(encoding="utf-8"), before)
+            finally:
+                continuous_session_module.json.dumps.__code__ = original_code
+
+            second = SettlementResolution(
+                event_identity="provider-a:event-2",
+                settlement_ref="result:json-code-read",
+                quote_outcomes={"event-2|winner|away": "win"},
+                evidence_id="json-code-read-evidence",
+                evidence_sha256="c" * 64,
+                available_at="2026-09-19T21:19:31+00:00",
+            )
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(second,),
+                )
+                raw = json.loads(state_path.read_text(encoding="utf-8"))
+                raw["pending_settlement_resolutions"][0]["quote_outcomes"] = {
+                    "event-2|winner|away": "loss"
+                }
+                state_path.write_text(
+                    json.dumps(raw, sort_keys=True, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+
+                continuous_session_module.json.dumps.__code__ = forged_dumps.__code__
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "pending settlement JSON digest authority changed",
+                ):
+                    coordinator.status()
+            finally:
+                continuous_session_module.json.dumps.__code__ = original_code
+                store.close()
+
     def test_pending_settlement_outcomes_tamper_fails_digest_reproof(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

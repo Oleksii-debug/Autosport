@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import threading
 import unittest
+from unittest.mock import patch
 
 from autosport.domain import MarketEvent
 from autosport.market_mirror import MarketMirror, MirrorUpdate
@@ -161,6 +162,99 @@ class MarketMirrorConcurrencyTests(unittest.TestCase):
                 max_age=timedelta(seconds=-1),
                 source_ids="provider-a",
             )
+
+    def test_view_for_keys_holds_one_revision_across_all_requested_keys(self) -> None:
+        mirror = MarketMirror()
+        first = self.event(
+            source="provider-a",
+            selection_id="selection-a",
+            sequence=1,
+        )
+        second = self.event(
+            source="provider-b",
+            selection_id="selection-b",
+            sequence=1,
+        )
+        mirror.apply(first)
+        mirror.apply(second)
+
+        entered = threading.Event()
+        release = threading.Event()
+        writer_done = threading.Event()
+        reader_result = []
+        errors: list[BaseException] = []
+        original_snapshot = mirror._snapshot_event
+        blocked = False
+
+        def snapshot_event(event):
+            nonlocal blocked
+            if threading.current_thread().name == "bounded-reader" and not blocked:
+                blocked = True
+                entered.set()
+                if not release.wait(timeout=5):
+                    raise AssertionError("reader snapshot release timed out")
+            return original_snapshot(event)
+
+        def reader() -> None:
+            try:
+                reader_result.append(
+                    mirror.view_for_keys(
+                        (
+                            ("provider-a", first.quote_key),
+                            ("provider-b", second.quote_key),
+                        )
+                    )
+                )
+            except BaseException as exc:  # pragma: no cover - reported below
+                errors.append(exc)
+
+        def writer() -> None:
+            try:
+                mirror.apply(
+                    self.event(
+                        source="provider-a",
+                        selection_id="selection-a",
+                        sequence=2,
+                        odds="2.10",
+                    )
+                )
+            except BaseException as exc:  # pragma: no cover - reported below
+                errors.append(exc)
+            finally:
+                writer_done.set()
+
+        with patch.object(mirror, "_snapshot_event", side_effect=snapshot_event):
+            reader_thread = threading.Thread(target=reader, name="bounded-reader")
+            writer_thread = threading.Thread(target=writer, name="bounded-writer")
+            reader_thread.start()
+            self.assertTrue(entered.wait(timeout=5))
+            writer_thread.start()
+            self.assertFalse(writer_done.wait(timeout=0.05))
+            release.set()
+            reader_thread.join(timeout=5)
+            writer_thread.join(timeout=5)
+
+        self.assertFalse(reader_thread.is_alive())
+        self.assertFalse(writer_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(reader_result), 1)
+        captured = reader_result[0]
+        self.assertEqual(captured.revision, 2)
+        self.assertEqual(
+            tuple(event.sequence for event in captured.events),
+            (1, 1),
+        )
+        final = mirror.view_for_keys(
+            (
+                ("provider-a", first.quote_key),
+                ("provider-b", second.quote_key),
+            )
+        )
+        self.assertEqual(final.revision, 3)
+        self.assertEqual(
+            tuple(event.sequence for event in final.events),
+            (2, 1),
+        )
 
     def test_concurrent_updaters_and_focused_decision_readers_observe_coherent_views(self) -> None:
         mirror = MarketMirror()

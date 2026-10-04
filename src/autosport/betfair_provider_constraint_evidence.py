@@ -14,13 +14,12 @@ wrap a consistent structural result; this module does not create that authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 import hashlib
 import json
-from operator import attrgetter
+from operator import attrgetter, itemgetter
 from typing import Iterable
 
 PROVIDER_ID = "betfair"
@@ -143,6 +142,31 @@ def _build_constraint_evidence_meta():
     sealed_classes: set[type] = set()
     protected_names = frozenset(
         {
+            "__new__",
+            "__getnewargs__",
+            "provider_id",
+            "jurisdiction_scope",
+            "currency_code",
+            "min_standard_size",
+            "min_payout",
+            "lower_minimum_payout_enabled",
+            "source_ref",
+            "source_revision",
+            "source_sha256",
+            "retrieved_at",
+            "reviewed_at",
+            "available_at",
+            "effective_from",
+            "effective_until",
+            "review_expires_at",
+            "order_family",
+            "schema_version",
+            "semantic_sha256",
+            "generation_sha256",
+            "state",
+            "as_of",
+            "candidate_generation_sha256s",
+            "resolution_sha256",
             "provider_origin_proven",
             "current_constraint_authority",
             "execution_authorized",
@@ -180,96 +204,137 @@ _BetfairConstraintEvidenceMeta = _build_constraint_evidence_meta()
 del _build_constraint_evidence_meta
 
 
-@dataclass(frozen=True, slots=True)
-class BetfairProviderConstraintObservation(metaclass=_BetfairConstraintEvidenceMeta):
-    """One immutable provider-rule observation.
+class BetfairProviderConstraintObservation(
+    tuple,
+    metaclass=_BetfairConstraintEvidenceMeta,
+):
+    """One immutable, public, structurally unverified rule observation."""
 
-    Construction is public and therefore never proves provider origin. The
-    record preserves enough identity/timing data for a future authenticated
-    acquisition/review layer to re-resolve the exact generation.
-    """
+    __slots__ = ()
 
-    provider_id: str
-    jurisdiction_scope: str
-    currency_code: str
-    min_standard_size: Decimal
-    min_payout: Decimal | None
-    lower_minimum_payout_enabled: bool
-    source_ref: str
-    source_revision: str
-    source_sha256: str
-    retrieved_at: datetime
-    reviewed_at: datetime
-    available_at: datetime
-    effective_from: datetime
-    effective_until: datetime | None
-    review_expires_at: datetime
-    order_family: str = ORDER_FAMILY
-    schema_version: int = SCHEMA_VERSION
-
-    def __post_init__(self) -> None:
-        if self.provider_id != PROVIDER_ID:
-            raise BetfairProviderConstraintError(
-                "provider_id must be canonical betfair"
-            )
-        _scope(self.jurisdiction_scope)
-        _currency(self.currency_code)
-        _positive_decimal(self.min_standard_size, "min_standard_size")
-        if type(self.lower_minimum_payout_enabled) is not bool:
-            raise BetfairProviderConstraintError(
-                "lower_minimum_payout_enabled must be bool"
-            )
-        if self.lower_minimum_payout_enabled:
-            if self.min_payout is None:
-                raise BetfairProviderConstraintError(
+    def __new__(
+        cls,
+        provider_id: str,
+        jurisdiction_scope: str,
+        currency_code: str,
+        min_standard_size: Decimal,
+        min_payout: Decimal | None,
+        lower_minimum_payout_enabled: bool,
+        source_ref: str,
+        source_revision: str,
+        source_sha256: str,
+        retrieved_at: datetime,
+        reviewed_at: datetime,
+        available_at: datetime,
+        effective_from: datetime,
+        effective_until: datetime | None,
+        review_expires_at: datetime,
+        order_family: str = ORDER_FAMILY,
+        schema_version: int = SCHEMA_VERSION,
+        _provider_id=PROVIDER_ID,
+        _order_family=ORDER_FAMILY,
+        _schema_version=SCHEMA_VERSION,
+        _scope_fn=_scope,
+        _currency_fn=_currency,
+        _positive_decimal_fn=_positive_decimal,
+        _canonical_text_fn=_canonical_text,
+        _sha256_fn=_sha256,
+        _utc_fn=_utc,
+        _error_type=BetfairProviderConstraintError,
+    ):
+        if provider_id != _provider_id:
+            raise _error_type("provider_id must be canonical betfair")
+        _scope_fn(jurisdiction_scope)
+        _currency_fn(currency_code)
+        _positive_decimal_fn(min_standard_size, "min_standard_size")
+        if type(lower_minimum_payout_enabled) is not bool:
+            raise _error_type("lower_minimum_payout_enabled must be bool")
+        if lower_minimum_payout_enabled:
+            if min_payout is None:
+                raise _error_type(
                     "enabled lower-minimum rule requires min_payout"
                 )
-            _positive_decimal(self.min_payout, "min_payout")
-        elif self.min_payout is not None:
-            raise BetfairProviderConstraintError(
+            _positive_decimal_fn(min_payout, "min_payout")
+        elif min_payout is not None:
+            raise _error_type(
                 "disabled lower-minimum rule must not carry min_payout"
             )
-        _canonical_text(self.source_ref, "source_ref")
-        _canonical_text(self.source_revision, "source_revision")
-        _sha256(self.source_sha256, "source_sha256")
-        retrieved = _utc(self.retrieved_at, "retrieved_at")
-        reviewed = _utc(self.reviewed_at, "reviewed_at")
-        available = _utc(self.available_at, "available_at")
-        effective_from = _utc(self.effective_from, "effective_from")
-        review_expires = _utc(self.review_expires_at, "review_expires_at")
+        _canonical_text_fn(source_ref, "source_ref")
+        _canonical_text_fn(source_revision, "source_revision")
+        _sha256_fn(source_sha256, "source_sha256")
+
+        retrieved = _utc_fn(retrieved_at, "retrieved_at")
+        reviewed = _utc_fn(reviewed_at, "reviewed_at")
+        available = _utc_fn(available_at, "available_at")
+        effective_start = _utc_fn(effective_from, "effective_from")
+        review_expiry = _utc_fn(review_expires_at, "review_expires_at")
         if reviewed < retrieved:
-            raise BetfairProviderConstraintError(
-                "reviewed_at cannot precede retrieved_at"
-            )
+            raise _error_type("reviewed_at cannot precede retrieved_at")
         if available < reviewed:
-            raise BetfairProviderConstraintError(
-                "available_at cannot precede reviewed_at"
-            )
-        if review_expires <= available:
-            raise BetfairProviderConstraintError(
-                "review_expires_at must be after available_at"
-            )
-        if self.effective_until is not None:
-            effective_until = _utc(self.effective_until, "effective_until")
-            if effective_until <= effective_from:
-                raise BetfairProviderConstraintError(
+            raise _error_type("available_at cannot precede reviewed_at")
+        if review_expiry <= available:
+            raise _error_type("review_expires_at must be after available_at")
+        if effective_until is not None:
+            effective_end = _utc_fn(effective_until, "effective_until")
+            if effective_end <= effective_start:
+                raise _error_type(
                     "effective_until must be after effective_from"
                 )
-        if self.order_family != ORDER_FAMILY:
-            raise BetfairProviderConstraintError(
-                "order_family must be LIMIT_STANDARD_SIZE"
-            )
-        if (
-            type(self.schema_version) is not int
-            or self.schema_version != SCHEMA_VERSION
-        ):
-            raise BetfairProviderConstraintError(
+        if order_family != _order_family:
+            raise _error_type("order_family must be LIMIT_STANDARD_SIZE")
+        if type(schema_version) is not int or schema_version != _schema_version:
+            raise _error_type(
                 "schema_version must be the product-owned current version"
             )
 
+        return tuple.__new__(
+            cls,
+            (
+                provider_id,
+                jurisdiction_scope,
+                currency_code,
+                min_standard_size,
+                min_payout,
+                lower_minimum_payout_enabled,
+                source_ref,
+                source_revision,
+                source_sha256,
+                retrieved_at,
+                reviewed_at,
+                available_at,
+                effective_from,
+                effective_until,
+                review_expires_at,
+                order_family,
+                schema_version,
+            ),
+        )
+
+    provider_id = property(itemgetter(0))
+    jurisdiction_scope = property(itemgetter(1))
+    currency_code = property(itemgetter(2))
+    min_standard_size = property(itemgetter(3))
+    min_payout = property(itemgetter(4))
+    lower_minimum_payout_enabled = property(itemgetter(5))
+    source_ref = property(itemgetter(6))
+    source_revision = property(itemgetter(7))
+    source_sha256 = property(itemgetter(8))
+    retrieved_at = property(itemgetter(9))
+    reviewed_at = property(itemgetter(10))
+    available_at = property(itemgetter(11))
+    effective_from = property(itemgetter(12))
+    effective_until = property(itemgetter(13))
+    review_expires_at = property(itemgetter(14))
+    order_family = property(itemgetter(15))
+    schema_version = property(itemgetter(16))
+
     @property
-    def semantic_sha256(self) -> str:
-        return _canonical_sha256(
+    def semantic_sha256(
+        self,
+        _canonical_sha256_fn=_canonical_sha256,
+        _decimal_text_fn=_decimal_text,
+    ) -> str:
+        return _canonical_sha256_fn(
             {
                 "schema": "autosport.betfair_standard_limit_constraint_semantics",
                 "schema_version": self.schema_version,
@@ -277,19 +342,23 @@ class BetfairProviderConstraintObservation(metaclass=_BetfairConstraintEvidenceM
                 "jurisdiction_scope": self.jurisdiction_scope,
                 "currency_code": self.currency_code,
                 "order_family": self.order_family,
-                "min_standard_size": _decimal_text(self.min_standard_size),
+                "min_standard_size": _decimal_text_fn(self.min_standard_size),
                 "min_payout": (
                     None
                     if self.min_payout is None
-                    else _decimal_text(self.min_payout)
+                    else _decimal_text_fn(self.min_payout)
                 ),
                 "lower_minimum_payout_enabled": self.lower_minimum_payout_enabled,
             }
         )
 
     @property
-    def generation_sha256(self) -> str:
-        return _canonical_sha256(
+    def generation_sha256(
+        self,
+        _canonical_sha256_fn=_canonical_sha256,
+        _utc_fn=_utc,
+    ) -> str:
+        return _canonical_sha256_fn(
             {
                 "schema": "autosport.betfair_standard_limit_constraint_generation",
                 "schema_version": self.schema_version,
@@ -297,26 +366,20 @@ class BetfairProviderConstraintObservation(metaclass=_BetfairConstraintEvidenceM
                 "source_ref": self.source_ref,
                 "source_revision": self.source_revision,
                 "source_sha256": self.source_sha256,
-                "retrieved_at": _utc(
-                    self.retrieved_at, "retrieved_at"
-                ).isoformat(),
-                "reviewed_at": _utc(
-                    self.reviewed_at, "reviewed_at"
-                ).isoformat(),
-                "available_at": _utc(
-                    self.available_at, "available_at"
-                ).isoformat(),
-                "effective_from": _utc(
+                "retrieved_at": _utc_fn(self.retrieved_at, "retrieved_at").isoformat(),
+                "reviewed_at": _utc_fn(self.reviewed_at, "reviewed_at").isoformat(),
+                "available_at": _utc_fn(self.available_at, "available_at").isoformat(),
+                "effective_from": _utc_fn(
                     self.effective_from, "effective_from"
                 ).isoformat(),
                 "effective_until": (
                     None
                     if self.effective_until is None
-                    else _utc(
+                    else _utc_fn(
                         self.effective_until, "effective_until"
                     ).isoformat()
                 ),
-                "review_expires_at": _utc(
+                "review_expires_at": _utc_fn(
                     self.review_expires_at, "review_expires_at"
                 ).isoformat(),
             }
@@ -334,92 +397,127 @@ class BetfairProviderConstraintObservation(metaclass=_BetfairConstraintEvidenceM
     execution_authorized = property(attrgetter("_execution_authorized_constant"))
     real_money_execution = property(attrgetter("_real_money_execution_constant"))
 
+    def __getnewargs__(self):
+        return tuple(self)
+
 
 _BetfairConstraintEvidenceMeta.seal(BetfairProviderConstraintObservation)
 
 
-@dataclass(frozen=True, slots=True)
-class BetfairProviderConstraintResolution(metaclass=_BetfairConstraintEvidenceMeta):
-    state: BetfairConstraintResolutionState
-    provider_id: str
-    jurisdiction_scope: str
-    currency_code: str
-    as_of: datetime
-    candidate_generation_sha256s: tuple[str, ...]
-    semantic_sha256: str | None
-    min_standard_size: Decimal | None
-    min_payout: Decimal | None
-    lower_minimum_payout_enabled: bool | None
-    resolution_sha256: str
+class BetfairProviderConstraintResolution(
+    tuple,
+    metaclass=_BetfairConstraintEvidenceMeta,
+):
+    """Immutable structural resolution; never provider/execution authority."""
 
-    def __post_init__(self) -> None:
-        if type(self.state) is not BetfairConstraintResolutionState:
-            raise BetfairProviderConstraintError(
+    __slots__ = ()
+
+    def __new__(
+        cls,
+        state: BetfairConstraintResolutionState,
+        provider_id: str,
+        jurisdiction_scope: str,
+        currency_code: str,
+        as_of: datetime,
+        candidate_generation_sha256s: tuple[str, ...],
+        semantic_sha256: str | None,
+        min_standard_size: Decimal | None,
+        min_payout: Decimal | None,
+        lower_minimum_payout_enabled: bool | None,
+        resolution_sha256: str,
+        _state_type=BetfairConstraintResolutionState,
+        _provider_id=PROVIDER_ID,
+        _scope_fn=_scope,
+        _currency_fn=_currency,
+        _utc_fn=_utc,
+        _sha256_fn=_sha256,
+        _positive_decimal_fn=_positive_decimal,
+        _error_type=BetfairProviderConstraintError,
+    ):
+        if type(state) is not _state_type:
+            raise _error_type(
                 "state must be exact BetfairConstraintResolutionState"
             )
-        if self.provider_id != PROVIDER_ID:
-            raise BetfairProviderConstraintError(
-                "provider_id must be canonical betfair"
-            )
-        _scope(self.jurisdiction_scope)
-        _currency(self.currency_code)
-        _utc(self.as_of, "as_of")
-        if type(self.candidate_generation_sha256s) is not tuple:
-            raise BetfairProviderConstraintError(
-                "candidate_generation_sha256s must be tuple"
-            )
-        if (
-            tuple(sorted(self.candidate_generation_sha256s))
-            != self.candidate_generation_sha256s
-        ):
-            raise BetfairProviderConstraintError(
-                "candidate_generation_sha256s must be sorted"
-            )
-        for value in self.candidate_generation_sha256s:
-            _sha256(value, "candidate_generation_sha256")
-        _sha256(self.resolution_sha256, "resolution_sha256")
+        if provider_id != _provider_id:
+            raise _error_type("provider_id must be canonical betfair")
+        _scope_fn(jurisdiction_scope)
+        _currency_fn(currency_code)
+        _utc_fn(as_of, "as_of")
+        if type(candidate_generation_sha256s) is not tuple:
+            raise _error_type("candidate_generation_sha256s must be tuple")
+        if tuple(sorted(candidate_generation_sha256s)) != candidate_generation_sha256s:
+            raise _error_type("candidate_generation_sha256s must be sorted")
+        for value in candidate_generation_sha256s:
+            _sha256_fn(value, "candidate_generation_sha256")
+        _sha256_fn(resolution_sha256, "resolution_sha256")
 
-        consistent = (
-            self.state
-            is BetfairConstraintResolutionState.CONSISTENT_UNVERIFIED
-        )
+        consistent = state is _state_type.CONSISTENT_UNVERIFIED
         if consistent:
-            if self.semantic_sha256 is None:
-                raise BetfairProviderConstraintError(
+            if semantic_sha256 is None:
+                raise _error_type(
                     "consistent result requires semantic_sha256"
                 )
-            _sha256(self.semantic_sha256, "semantic_sha256")
-            if self.min_standard_size is None:
-                raise BetfairProviderConstraintError(
+            _sha256_fn(semantic_sha256, "semantic_sha256")
+            if min_standard_size is None:
+                raise _error_type(
                     "consistent result requires min_standard_size"
                 )
-            _positive_decimal(self.min_standard_size, "min_standard_size")
-            if type(self.lower_minimum_payout_enabled) is not bool:
-                raise BetfairProviderConstraintError(
+            _positive_decimal_fn(min_standard_size, "min_standard_size")
+            if type(lower_minimum_payout_enabled) is not bool:
+                raise _error_type(
                     "consistent result requires lower-minimum flag"
                 )
-            if self.lower_minimum_payout_enabled:
-                if self.min_payout is None:
-                    raise BetfairProviderConstraintError(
+            if lower_minimum_payout_enabled:
+                if min_payout is None:
+                    raise _error_type(
                         "enabled lower-minimum rule requires min_payout"
                     )
-                _positive_decimal(self.min_payout, "min_payout")
-            elif self.min_payout is not None:
-                raise BetfairProviderConstraintError(
+                _positive_decimal_fn(min_payout, "min_payout")
+            elif min_payout is not None:
+                raise _error_type(
                     "disabled lower-minimum rule must not carry min_payout"
                 )
         elif any(
             value is not None
             for value in (
-                self.semantic_sha256,
-                self.min_standard_size,
-                self.min_payout,
-                self.lower_minimum_payout_enabled,
+                semantic_sha256,
+                min_standard_size,
+                min_payout,
+                lower_minimum_payout_enabled,
             )
         ):
-            raise BetfairProviderConstraintError(
+            raise _error_type(
                 "non-consistent result cannot expose provider thresholds"
             )
+
+        return tuple.__new__(
+            cls,
+            (
+                state,
+                provider_id,
+                jurisdiction_scope,
+                currency_code,
+                as_of,
+                candidate_generation_sha256s,
+                semantic_sha256,
+                min_standard_size,
+                min_payout,
+                lower_minimum_payout_enabled,
+                resolution_sha256,
+            ),
+        )
+
+    state = property(itemgetter(0))
+    provider_id = property(itemgetter(1))
+    jurisdiction_scope = property(itemgetter(2))
+    currency_code = property(itemgetter(3))
+    as_of = property(itemgetter(4))
+    candidate_generation_sha256s = property(itemgetter(5))
+    semantic_sha256 = property(itemgetter(6))
+    min_standard_size = property(itemgetter(7))
+    min_payout = property(itemgetter(8))
+    lower_minimum_payout_enabled = property(itemgetter(9))
+    resolution_sha256 = property(itemgetter(10))
 
     _provider_origin_proven_constant = False
     _current_constraint_authority_constant = False
@@ -432,6 +530,9 @@ class BetfairProviderConstraintResolution(metaclass=_BetfairConstraintEvidenceMe
     )
     execution_authorized = property(attrgetter("_execution_authorized_constant"))
     real_money_execution = property(attrgetter("_real_money_execution_constant"))
+
+    def __getnewargs__(self):
+        return tuple(self)
 
 
 _BetfairConstraintEvidenceMeta.seal(BetfairProviderConstraintResolution)

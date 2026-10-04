@@ -773,9 +773,13 @@ class SQLiteMarketStore:
             self.connection.execute("PRAGMA journal_mode=WAL")
             self.connection.execute("PRAGMA synchronous=FULL")
             self._init_schema()
-            self._ensure_market_append_baseline_authority()
             append_authority = self._market_append_authority()
+            # Baseline PREPARE/COMMIT is part of the same product-owned append
+            # authority lifecycle as positive generations. Keep it under the sibling
+            # issuance lock so a concurrent constructor cannot mistake a live
+            # generation-zero PREPARE for abandoned crash state.
             with self._market_append_issuance_lock(append_authority):
+                self._ensure_market_append_baseline_authority()
                 self._rebuild_current_quotes(
                     append_authority=append_authority,
                 )

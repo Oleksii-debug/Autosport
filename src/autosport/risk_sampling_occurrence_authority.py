@@ -1458,3 +1458,273 @@ __all__.extend(
         "resolve_product_iid_run_admission",
     ]
 )
+
+@dataclass(frozen=True, slots=True, init=False)
+class ProductIidRunExecutionReceipt:
+    """Post-run proof that one exact IID draw transcript reached strategy replay.
+
+    Positive execution requires the exact expected payload sequence to match all
+    three product-owned replay views: constructor input, causally consumed order,
+    and strategy-visible applied order. The multiset digest and event count are
+    checked independently so omitted/duplicated occurrences cannot hide behind an
+    ordered-digest mistake.
+
+    This proves one member's sampling occurrence ancestry. It does not by itself
+    prove that every member in the fixed-N experiment completed, so iid_qualified
+    remains false until a downstream fixed-N composition resolves all members.
+    """
+
+    experiment_id: str
+    member_id: str
+    member_index: int
+    expected_draw_plan_sha256: str
+    expected_draw_transcript_sha256: str
+    run_admission_receipt_sha256: str
+    replay_execution_receipt_sha256: str
+    replay_dataset_hash: str
+    event_count: int
+    expected_event_payload_sequence_sha256: str
+    expected_event_payload_multiset_sha256: str
+    completed_summary_sha256: str
+    receipt_sha256: str
+
+    def __new__(
+        cls,
+        *args: object,
+        **kwargs: object,
+    ) -> "ProductIidRunExecutionReceipt":
+        raise TypeError(
+            "ProductIidRunExecutionReceipt is product-resolved; "
+            "use resolve_product_iid_run_execution"
+        )
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError("ProductIidRunExecutionReceipt must not be subclassed")
+
+    @property
+    def product_precommit_bound(self) -> bool:
+        return True
+
+    @property
+    def run_admission_bound(self) -> bool:
+        return True
+
+    @property
+    def execution_consumption_proven(self) -> bool:
+        return True
+
+    @property
+    def occurrence_ancestry_proven(self) -> bool:
+        return True
+
+    @property
+    def iid_qualified(self) -> bool:
+        return False
+
+    @property
+    def grants_real_money_authority(self) -> bool:
+        return False
+
+
+_RUN_EXECUTION_TYPE = ProductIidRunExecutionReceipt
+_RUN_EXECUTION_PLAN = resolve_product_iid_expected_draw_plan
+_RUN_EXECUTION_PLAN_CODE = getattr(_RUN_EXECUTION_PLAN, "__code__", None)
+_RUN_EXECUTION_ADMISSION = resolve_product_iid_run_admission
+_RUN_EXECUTION_ADMISSION_CODE = getattr(
+    _RUN_EXECUTION_ADMISSION,
+    "__code__",
+    None,
+)
+_RUN_EXECUTION_REGISTRY_TYPE = RunRegistry
+_RUN_EXECUTION_COMPLETED_SUMMARY = RunRegistry.verified_completed_summary_for_run
+_RUN_EXECUTION_COMPLETED_SUMMARY_CODE = getattr(
+    _RUN_EXECUTION_COMPLETED_SUMMARY,
+    "__code__",
+    None,
+)
+_RUN_EXECUTION_SEQUENCE = market_event_payload_sequence_sha256
+_RUN_EXECUTION_SEQUENCE_CODE = getattr(_RUN_EXECUTION_SEQUENCE, "__code__", None)
+_RUN_EXECUTION_MULTISET = market_event_payload_multiset_sha256
+_RUN_EXECUTION_MULTISET_CODE = getattr(_RUN_EXECUTION_MULTISET, "__code__", None)
+
+
+def _require_run_execution_dispatch() -> None:
+    if (
+        ProductIidRunExecutionReceipt is not _RUN_EXECUTION_TYPE
+        or resolve_product_iid_expected_draw_plan is not _RUN_EXECUTION_PLAN
+        or getattr(_RUN_EXECUTION_PLAN, "__code__", None)
+        is not _RUN_EXECUTION_PLAN_CODE
+        or resolve_product_iid_run_admission is not _RUN_EXECUTION_ADMISSION
+        or getattr(_RUN_EXECUTION_ADMISSION, "__code__", None)
+        is not _RUN_EXECUTION_ADMISSION_CODE
+        or RunRegistry is not _RUN_EXECUTION_REGISTRY_TYPE
+        or _RUN_EXECUTION_REGISTRY_TYPE.verified_completed_summary_for_run
+        is not _RUN_EXECUTION_COMPLETED_SUMMARY
+        or getattr(_RUN_EXECUTION_COMPLETED_SUMMARY, "__code__", None)
+        is not _RUN_EXECUTION_COMPLETED_SUMMARY_CODE
+        or market_event_payload_sequence_sha256 is not _RUN_EXECUTION_SEQUENCE
+        or getattr(_RUN_EXECUTION_SEQUENCE, "__code__", None)
+        is not _RUN_EXECUTION_SEQUENCE_CODE
+        or market_event_payload_multiset_sha256 is not _RUN_EXECUTION_MULTISET
+        or getattr(_RUN_EXECUTION_MULTISET, "__code__", None)
+        is not _RUN_EXECUTION_MULTISET_CODE
+    ):
+        raise ProductIidDrawPlanError(
+            "IID run-execution authority dispatch changed"
+        )
+
+
+def resolve_product_iid_run_execution(
+    membership: ResolvedFixedNRiskMembership,
+    *,
+    registry_path: str | Path,
+    workspace: str | Path,
+    sampling_manifest_json: str,
+    sampling_frame_json: str,
+    horizon_json: str,
+    member_index: int,
+    authority_root: str | Path | None = None,
+) -> ProductIidRunExecutionReceipt:
+    """Resolve one completed member's exact draw-to-strategy execution ancestry."""
+
+    _require_run_execution_dispatch()
+    if type(membership) is not _MEMBERSHIP_TYPE:
+        raise TypeError(
+            "membership must be an exact ResolvedFixedNRiskMembership"
+        )
+    if type(member_index) is not int or member_index < 0:
+        raise ProductIidDrawPlanError(
+            "member_index must be a non-negative exact integer"
+        )
+    root = Path(workspace).expanduser().resolve(strict=True)
+    plan = _RUN_EXECUTION_PLAN(
+        membership,
+        registry_path=registry_path,
+        workspace=root,
+        sampling_manifest_json=sampling_manifest_json,
+        sampling_frame_json=sampling_frame_json,
+        horizon_json=horizon_json,
+        authority_root=authority_root,
+    )
+    admission = _RUN_EXECUTION_ADMISSION(
+        membership,
+        registry_path=registry_path,
+        workspace=root,
+        sampling_manifest_json=sampling_manifest_json,
+        sampling_frame_json=sampling_frame_json,
+        horizon_json=horizon_json,
+        member_index=member_index,
+        authority_root=authority_root,
+    )
+    _require_run_execution_dispatch()
+
+    if (
+        type(plan) is not _PLAN_TYPE
+        or type(admission) is not _RUN_ADMISSION_TYPE
+        or admission.run_admission_bound is not True
+        or admission.execution_consumption_proven is not False
+        or admission.occurrence_ancestry_proven is not False
+        or member_index >= len(plan.member_draws)
+    ):
+        raise ProductIidDrawPlanError(
+            "IID run-execution prerequisite authority is inconsistent"
+        )
+    draw = plan.member_draws[member_index]
+    if (
+        type(draw) is not _MEMBER_DRAW_TYPE
+        or draw.member_id != admission.member_id
+        or draw.member_index != member_index
+        or draw.draw_transcript_sha256
+        != admission.expected_draw_transcript_sha256
+        or plan.plan_sha256 != admission.expected_draw_plan_sha256
+    ):
+        raise ProductIidDrawPlanError(
+            "IID run-execution draw/admission identity mismatch"
+        )
+
+    registry = _RUN_EXECUTION_REGISTRY_TYPE(root / "run_registry.json")
+    try:
+        summary, summary_sha256 = _RUN_EXECUTION_COMPLETED_SUMMARY(
+            registry,
+            admission.member_id,
+        )
+    except (OSError, KeyError, RuntimeError, ValueError) as exc:
+        raise ProductIidDrawPlanError(
+            "IID run-execution completed summary cannot be re-resolved"
+        ) from exc
+    _require_run_execution_dispatch()
+
+    expected_sequence = _RUN_EXECUTION_SEQUENCE(
+        draw.draw_payload_sha256
+    )
+    expected_multiset = _RUN_EXECUTION_MULTISET(
+        draw.draw_payload_sha256
+    )
+    replay_execution_receipt_sha256 = _sha(
+        summary.get("replay_execution_receipt_sha256"),
+        "replay_execution_receipt_sha256",
+    )
+    replay_dataset_hash = _sha(
+        summary.get("replay_dataset_hash"),
+        "replay_dataset_hash",
+    )
+    event_count = summary.get("event_count")
+    if type(event_count) is not int or event_count != draw.draw_count:
+        raise ProductIidDrawPlanError(
+            "completed replay event_count differs from expected IID draw count"
+        )
+    if (
+        summary.get("sampling_draw_admission_receipt_sha256")
+        != admission.receipt_sha256
+        or summary.get("replay_input_event_payload_sequence_sha256")
+        != expected_sequence
+        or summary.get("replay_consumed_event_payload_sequence_sha256")
+        != expected_sequence
+        or summary.get("replay_applied_event_payload_sequence_sha256")
+        != expected_sequence
+        or summary.get("replay_consumed_event_payload_multiset_sha256")
+        != expected_multiset
+    ):
+        raise ProductIidDrawPlanError(
+            "completed replay did not consume and apply the exact IID draw transcript"
+        )
+    summary_sha256 = _sha(
+        summary_sha256,
+        "completed_summary_sha256",
+    )
+
+    receipt_payload = {
+        "schema": "AUTOSPORT_PRODUCT_IID_RUN_EXECUTION_V1",
+        "experiment_id": plan.experiment_id,
+        "member_id": draw.member_id,
+        "member_index": member_index,
+        "expected_draw_plan_sha256": plan.plan_sha256,
+        "expected_draw_transcript_sha256": draw.draw_transcript_sha256,
+        "run_admission_receipt_sha256": admission.receipt_sha256,
+        "replay_execution_receipt_sha256": replay_execution_receipt_sha256,
+        "replay_dataset_hash": replay_dataset_hash,
+        "event_count": event_count,
+        "expected_event_payload_sequence_sha256": expected_sequence,
+        "expected_event_payload_multiset_sha256": expected_multiset,
+        "completed_summary_sha256": summary_sha256,
+    }
+    result = object.__new__(_RUN_EXECUTION_TYPE)
+    for field_name, value in receipt_payload.items():
+        if field_name != "schema":
+            object.__setattr__(result, field_name, value)
+    object.__setattr__(
+        result,
+        "receipt_sha256",
+        _sha_bytes(_canonical_json(receipt_payload)),
+    )
+    _require_run_execution_dispatch()
+    return result
+
+
+__all__.extend(
+    [
+        "ProductIidRunExecutionReceipt",
+        "resolve_product_iid_run_execution",
+    ]
+)
+

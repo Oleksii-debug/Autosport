@@ -1798,6 +1798,7 @@ class SQLiteMarketStore:
     def _require_independent_cutoff_issuance(
         authority: MonotonicWorkspaceAuthority,
         *,
+        cutoff_id: str,
         expected_binding_sha256: str,
     ) -> None:
         matches = tuple(
@@ -1809,6 +1810,21 @@ class SQLiteMarketStore:
         if len(matches) != 1:
             raise MonotonicAuthorityRollbackError(
                 "causal replay cutoff lacks unique independent product issuance authority"
+            )
+
+        issued = matches[0]
+        tx_prefix = f"{cutoff_id[:32]}-"
+        tx_suffix = (
+            issued.tx_id[len(tx_prefix) :]
+            if issued.tx_id.startswith(tx_prefix)
+            else ""
+        )
+        if (
+            len(tx_suffix) != 32
+            or re.fullmatch(r"[0-9a-f]{32}", tx_suffix) is None
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "causal replay cutoff committed transaction identity is invalid"
             )
 
     def _rebuild_current_quotes(
@@ -2375,6 +2391,7 @@ class SQLiteMarketStore:
                     )
                     self._require_independent_cutoff_issuance(
                         authority,
+                        cutoff_id=cutoff_id,
                         expected_binding_sha256=expected_binding_sha256,
                     )
 

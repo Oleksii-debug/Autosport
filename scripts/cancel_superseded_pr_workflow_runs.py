@@ -1243,6 +1243,29 @@ def _build_main(*, module_globals, admit_impl, cancel_impl, output_writer, api_t
     output_writer_code = getattr(output_writer, "__code__", None)
     api_init = api_type.__dict__.get("__init__")
     api_init_code = getattr(api_init, "__code__", None)
+    api_method_snapshots = tuple(
+        (name, api_type.__dict__.get(name))
+        for name in (
+            "_request",
+            "_pull_request",
+            "live_pr_qualification",
+            "associated_pr_number",
+        )
+    )
+    api_method_witnesses = tuple(
+        (
+            name,
+            method,
+            getattr(method, "__code__", None),
+            freeze_default_metadata(method),
+        )
+        for name, method in api_method_snapshots
+    )
+    request_type = module_globals.get("Request")
+    request_init = request_type.__dict__.get("__init__")
+    request_init_code = getattr(request_init, "__code__", None)
+    urlopen_impl = module_globals.get("urlopen")
+    urlopen_code = getattr(urlopen_impl, "__code__", None)
     admit_defaults = freeze_default_metadata(admit_impl)
     cancel_defaults = freeze_default_metadata(cancel_impl)
     output_writer_defaults = freeze_default_metadata(output_writer)
@@ -1272,6 +1295,17 @@ def _build_main(*, module_globals, admit_impl, cancel_impl, output_writer, api_t
                 and api_type.__dict__.get("__init__") is api_init
                 and getattr(api_init, "__code__", None) is api_init_code
                 and default_metadata_current(api_init, api_init_defaults)
+                and all(
+                    api_type.__dict__.get(name) is method
+                    and getattr(method, "__code__", None) is code
+                    and default_metadata_current(method, defaults)
+                    for name, method, code, defaults in api_method_witnesses
+                )
+                and module_globals.get("Request") is request_type
+                and request_type.__dict__.get("__init__") is request_init
+                and getattr(request_init, "__code__", None) is request_init_code
+                and module_globals.get("urlopen") is urlopen_impl
+                and getattr(urlopen_impl, "__code__", None) is urlopen_code
             )
 
         try:

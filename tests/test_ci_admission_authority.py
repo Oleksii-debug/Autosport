@@ -515,6 +515,74 @@ def test_main_rejects_preentry_api_type_rebind(monkeypatch) -> None:
     assert forged_calls == []
 
 
+def test_main_rejects_preentry_live_qualification_rebind(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    forged_calls: list[int] = []
+
+    def forged_live_qualification(_self, pr_number: int) -> tuple[str, bool]:
+        forged_calls.append(pr_number)
+        return HEAD_B, True
+
+    output = tmp_path / "github-output.txt"
+    monkeypatch.setattr(
+        controller_module.GitHubApi,
+        "live_pr_qualification",
+        forged_live_qualification,
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+
+    assert controller_module.main(_main_admission_args()) == 2
+    assert forged_calls == []
+    assert not output.exists()
+
+
+def test_main_rejects_preentry_request_method_rebind(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    forged_calls: list[str] = []
+
+    def forged_request(_self, path: str, **_kwargs) -> object:
+        forged_calls.append(path)
+        return _canonical_pr_payload(HEAD_B)
+
+    output = tmp_path / "github-output.txt"
+    monkeypatch.setattr(
+        controller_module.GitHubApi,
+        "_request",
+        forged_request,
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+
+    assert controller_module.main(_main_admission_args()) == 2
+    assert forged_calls == []
+    assert not output.exists()
+
+
+def test_main_rejects_preentry_urlopen_rebind(monkeypatch, tmp_path) -> None:
+    forged_calls: list[object] = []
+
+    def forged_urlopen(request: object, *, timeout: int) -> object:
+        forged_calls.extend((request, timeout))
+        raise AssertionError("forged transport must not execute")
+
+    output = tmp_path / "github-output.txt"
+    monkeypatch.setattr(controller_module, "urlopen", forged_urlopen)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+
+    assert controller_module.main(_main_admission_args()) == 2
+    assert forged_calls == []
+    assert not output.exists()
+
+
 def test_main_rejects_preentry_admission_code_mutation(monkeypatch) -> None:
     target = controller_module.admit_current_head
 

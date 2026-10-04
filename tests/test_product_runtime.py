@@ -122,11 +122,15 @@ class _MutatingDeltaEpochSource(_Source):
 
 
 class _LearningHandoff:
-    _AUTHORITY_FIELDS = frozenset({"target"})
+    settlement_learning_handoff_implementation_id = "test-learning-handoff-v1"
+    _AUTHORITY_FIELDS = frozenset(
+        {"target", "settlement_learning_configuration_sha256"}
+    )
 
-    def __init__(self) -> None:
+    def __init__(self, configuration_sha256: str = "c" * 64) -> None:
         self.target = []
         self.calls = []
+        self.settlement_learning_configuration_sha256 = configuration_sha256
 
     def prepare_settlement(self, *, paper_book_path, resolutions, at):
         self.calls.append(("prepare", paper_book_path, resolutions, at))

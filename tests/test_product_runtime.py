@@ -1393,6 +1393,9 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 product_runtime_module.SQLiteMarketStore.append_batch_accepted
             )
             original_get = product_runtime_module.SourceHealthStore.get
+            original_record_success_if_current = (
+                product_runtime_module.SourceHealthStore.record_success_if_current
+            )
             forged_calls = []
 
             def forged(*_args, **_kwargs):
@@ -1406,6 +1409,9 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 product_runtime_module.MarketEventBus._notify = forged
                 product_runtime_module.SQLiteMarketStore.append_batch_accepted = forged
                 product_runtime_module.SourceHealthStore.get = forged
+                product_runtime_module.SourceHealthStore.record_success_if_current = (
+                    forged
+                )
                 self.assertTrue(runtime.collector.delta_store.append(delta))
                 self.assertEqual(
                     runtime.coordinator.desktop_consumer.drain(as_of=clock.value),
@@ -1425,6 +1431,9 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     original_append
                 )
                 product_runtime_module.SourceHealthStore.get = original_get
+                product_runtime_module.SourceHealthStore.record_success_if_current = (
+                    original_record_success_if_current
+                )
                 runtime.close()
 
     def test_product_desktop_authority_graph_rejects_post_build_rebind(self) -> None:

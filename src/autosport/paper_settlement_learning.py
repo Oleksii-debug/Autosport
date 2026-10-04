@@ -1778,7 +1778,18 @@ class PaperSettlementLearningBridge:
                     intent = binding.get("settlement_intent")
                     evidence = resolutions
                     if intent is not None:
-                        evidence = self._intent_resolutions(intent) + resolutions
+                        prepared_evidence = self._intent_resolutions(intent)
+                        # Validate current truth together with the durable intent so
+                        # conflicting quote/evidence authority still fails closed.
+                        # Derive the learner transition from the prepared bundle only:
+                        # evidence arriving after the pre-P&L intent must not move the
+                        # learner's causal reveal time or change its settlement witness.
+                        self._collect_evidence(
+                            ticket,
+                            prepared_evidence + resolutions,
+                            at=at,
+                        )
+                        evidence = prepared_evidence
                     if ticket_id not in settled_ids:
                         if intent is None or ticket.status is TicketStatus.OPEN:
                             continue

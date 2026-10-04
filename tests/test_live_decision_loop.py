@@ -1432,6 +1432,43 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
             self.assertEqual([item[0] for item in factory.calls], ["input-a"])
 
+    def test_identical_same_time_provider_gap_reuses_last_durable_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace,
+                [
+                    ProviderUnavailableError("provider unavailable"),
+                    ProviderUnavailableError("provider unavailable"),
+                ],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+            second = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.PROVIDER_GAP)
+            self.assertEqual(second.status, LiveCycleStatus.PROVIDER_GAP)
+            records = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()
+            self.assertEqual(len(records), 1)
+            progress = json.loads(
+                (
+                    workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(progress["phase"], "committed")
+            self.assertEqual(progress["decision_id"], records[0].decision_id)
+            loop.close()
+
     def test_catalog_provider_gap_preserves_checkpoint_and_recovers_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -195,3 +195,41 @@ def test_generic_confirmation_projection_surface_rebinding_fails_closed(
 
     assert not boundary._confirmation_graph_unchanged()
 
+@pytest.mark.parametrize(
+    "member_name",
+    (
+        "ledger",
+        "bound",
+        "approval",
+        "action_id",
+        "attempt_id",
+        "client",
+        "workspace",
+        "receipt_id",
+        "review_sha256",
+    ),
+)
+def test_execution_confirmation_context_slot_rebinding_fails_closed(
+    monkeypatch,
+    member_name: str,
+) -> None:
+    assert boundary._confirmation_graph_unchanged()
+    monkeypatch.setattr(
+        boundary._ExecutionConfirmationContext,
+        member_name,
+        property(lambda self: None),
+    )
+    assert not boundary._confirmation_graph_unchanged()
+
+
+def test_execution_confirmation_context_constructor_rebinding_fails_closed(
+    monkeypatch,
+) -> None:
+    assert boundary._confirmation_graph_unchanged()
+    monkeypatch.setattr(
+        boundary._ExecutionConfirmationContext,
+        "__init__",
+        lambda self, *args, **kwargs: None,
+    )
+    assert not boundary._confirmation_graph_unchanged()
+

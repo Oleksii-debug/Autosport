@@ -291,6 +291,21 @@ class _ExecutionConfirmationContext:
     review_sha256: str | None
 
 
+_EXECUTION_CONFIRMATION_CONTEXT_INIT = _ExecutionConfirmationContext.__init__
+_EXECUTION_CONFIRMATION_CONTEXT_INIT_CODE = getattr(
+    _EXECUTION_CONFIRMATION_CONTEXT_INIT,
+    "__code__",
+    None,
+)
+_EXECUTION_CONFIRMATION_CONTEXT_SLOT_DESCRIPTOR_GRAPH = tuple(
+    (
+        slot_name,
+        getattr(_ExecutionConfirmationContext, slot_name),
+    )
+    for slot_name in _ExecutionConfirmationContext.__slots__
+)
+
+
 _CONFIRMATION_CONTEXT: ContextVar[_ExecutionConfirmationContext | None] = ContextVar(
     "autosport_betfair_execution_confirmation_context",
     default=None,
@@ -464,6 +479,16 @@ def _confirmation_graph_unchanged() -> bool:
             for name, value, code in _WORKSPACE_LOCK_METHOD_GRAPH
         )
         and _impl.AttemptState.SUBMITTED is _SUBMITTED_STATE
+        and _ExecutionConfirmationContext.__init__
+        is _EXECUTION_CONFIRMATION_CONTEXT_INIT
+        and getattr(_EXECUTION_CONFIRMATION_CONTEXT_INIT, "__code__", None)
+        is _EXECUTION_CONFIRMATION_CONTEXT_INIT_CODE
+        and all(
+            getattr(_ExecutionConfirmationContext, slot_name, None) is descriptor
+            for slot_name, descriptor in (
+                _EXECUTION_CONFIRMATION_CONTEXT_SLOT_DESCRIPTOR_GRAPH
+            )
+        )
     )
 
 

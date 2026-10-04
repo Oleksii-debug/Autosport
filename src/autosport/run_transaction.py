@@ -89,6 +89,7 @@ class TransactionIdentity:
     strategy_id: str
     base_paper_book_sha256: str | None
     base_decision_ledger_sha256: str | None
+    sampling_draw_admission_receipt_sha256: str | None
 
 
 class RunTransaction:
@@ -122,8 +123,14 @@ class RunTransaction:
         strategy_id: str,
         base_paper_book_sha256: str,
         base_decision_ledger_sha256: str,
+        sampling_draw_admission_receipt_sha256: str | None = None,
     ) -> "RunTransaction":
         tx = cls(workspace, run_id)
+        if sampling_draw_admission_receipt_sha256 is not None:
+            tx._require_identity_hash(
+                sampling_draw_admission_receipt_sha256,
+                "sampling_draw_admission_receipt_sha256",
+            )
         base_book_snapshot = tx._verified_canonical_paper_book_snapshot(
             tx.workspace / "paper_book.json",
             "base PaperBook",
@@ -143,6 +150,9 @@ class RunTransaction:
             "sealed_results_sha256": results_sha256,
             "strategy_id": strategy_id,
             "real_money_execution": False,
+            "sampling_draw_admission_receipt_sha256": (
+                sampling_draw_admission_receipt_sha256
+            ),
             "base": {
                 "paper_book_sha256": base_paper_book_sha256,
                 "decision_ledger_sha256": base_decision_ledger_sha256,
@@ -201,6 +211,9 @@ class RunTransaction:
             strategy_id=strategy_id,
             base_paper_book_sha256=base_paper_book_sha256,
             base_decision_ledger_sha256=base_decision_ledger_sha256,
+            sampling_draw_admission_receipt_sha256=(
+                sampling_draw_admission_receipt_sha256
+            ),
         )
         tx._require_complete_identity_anchor()
         return tx
@@ -670,6 +683,9 @@ class RunTransaction:
         summary["decision_ledger_sha256"] = ledger_hash
         summary["transaction_schema_version"] = self.SCHEMA_VERSION
         summary["transaction_run_id"] = self.run_id
+        summary["sampling_draw_admission_receipt_sha256"] = manifest.get(
+            "sampling_draw_admission_receipt_sha256"
+        )
         summary_snapshot = self._canonical_json_snapshot(
             summary,
             label="staged run summary",
@@ -905,6 +921,15 @@ class RunTransaction:
             if base_ledger_value is None
             else self._require_identity_hash(base_ledger_value, "base_decision_ledger_sha256")
         )
+        admission_value = item.get("sampling_draw_admission_receipt_sha256")
+        admission = (
+            None
+            if admission_value is None
+            else self._require_identity_hash(
+                admission_value,
+                "sampling_draw_admission_receipt_sha256",
+            )
+        )
         return TransactionIdentity(
             run_id=run_id,
             experiment_key=experiment,
@@ -913,6 +938,7 @@ class RunTransaction:
             strategy_id=strategy,
             base_paper_book_sha256=base_book,
             base_decision_ledger_sha256=base_ledger,
+            sampling_draw_admission_receipt_sha256=admission,
         )
 
     @staticmethod
@@ -1037,6 +1063,9 @@ class RunTransaction:
             "market_sha256": identity.market_sha256,
             "sealed_results_sha256": identity.sealed_results_sha256,
             "strategy_id": identity.strategy_id,
+            "sampling_draw_admission_receipt_sha256": (
+                identity.sampling_draw_admission_receipt_sha256
+            ),
         }
         mismatches = [
             field
@@ -1467,6 +1496,9 @@ class RunTransaction:
             "market_sha256": manifest.get("market_sha256"),
             "sealed_results_sha256": manifest.get("sealed_results_sha256"),
             "strategy_id": manifest.get("strategy_id"),
+            "sampling_draw_admission_receipt_sha256": manifest.get(
+                "sampling_draw_admission_receipt_sha256"
+            ),
         }
         mismatches = [
             field_name

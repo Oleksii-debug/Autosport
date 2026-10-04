@@ -323,6 +323,16 @@ class _Snapshot:
     quality_flags: tuple[str, ...]
 
 
+def _provider_empty_scope_flag(*, event_id: str, market_id: str | None) -> str:
+    scope = json.dumps(
+        {"event_id": event_id, "market_id": market_id},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return f"PROVIDER_DECLARED_EMPTY_SCOPE:{scope}"
+
+
 class ProphetXRestMarketProvider:
     """Strictly read-only ProphetX sandbox REST market-data adapter.
 
@@ -399,7 +409,7 @@ class ProphetXRestMarketProvider:
         observed_ts = _observed_timestamp(self.clock())
         all_quotes: list[ProviderQuote] = []
         response_bindings: list[tuple[int, str]] = []
-        empty_markets = False
+        empty_scope_flags: list[str] = []
         seen_quote_keys: set[tuple[str, str, str]] = set()
 
         responses: list[tuple[int, ProphetXJsonResponse, bool]] = []
@@ -416,8 +426,13 @@ class ProphetXRestMarketProvider:
             response_bindings.append((event_id, response.body_sha256))
             markets = _extract_markets(response.payload, event_id=event_id)
             if not markets:
-                empty_markets = True
-            quotes, had_empty = self._project_event_markets(
+                empty_scope_flags.append(
+                    _provider_empty_scope_flag(
+                        event_id=_identity(event_id, field="event_id", allow_colon=False),
+                        market_id=None,
+                    )
+                )
+            quotes, event_empty_scope_flags = self._project_event_markets(
                 event_id=event_id,
                 markets=markets,
                 observed_ts=observed_ts,
@@ -425,7 +440,7 @@ class ProphetXRestMarketProvider:
                 response_sha256=response.body_sha256,
                 provider_origin_verified=provider_origin_verified,
             )
-            empty_markets = empty_markets or had_empty
+            empty_scope_flags.extend(event_empty_scope_flags)
             for quote in quotes:
                 key = (
                     quote.provider_event_id,
@@ -499,8 +514,9 @@ class ProphetXRestMarketProvider:
             flags.append("PROVIDER_ORIGIN_VERIFIED")
         else:
             flags.append("UNVERIFIED_PROVIDER_ORIGIN")
-        if empty_markets and all_origins_verified:
+        if empty_scope_flags and all_origins_verified:
             flags.append("PROVIDER_DECLARED_EMPTY_MARKET")
+            flags.extend(empty_scope_flags)
         return _Snapshot(
             quotes=published_quotes,
             cursor=(
@@ -550,11 +566,11 @@ class ProphetXRestMarketProvider:
         sequence: int,
         response_sha256: str,
         provider_origin_verified: bool,
-    ) -> tuple[list[ProviderQuote], bool]:
+    ) -> tuple[list[ProviderQuote], tuple[str, ...]]:
         provider_event_id = _identity(event_id, field="event_id", allow_colon=False)
         quotes: list[ProviderQuote] = []
         seen_markets: set[str] = set()
-        had_empty = False
+        empty_scope_flags: list[str] = []
 
         for market in markets:
             if "event_id" in market:
@@ -579,7 +595,12 @@ class ProphetXRestMarketProvider:
             if not isinstance(selections, list):
                 raise ProphetXPayloadError("market selections must be a list")
             if not selections:
-                had_empty = True
+                empty_scope_flags.append(
+                    _provider_empty_scope_flag(
+                        event_id=provider_event_id,
+                        market_id=market_id,
+                    )
+                )
                 continue
 
             seen_strikes: set[str] = set()
@@ -659,4 +680,4 @@ class ProphetXRestMarketProvider:
                         },
                     )
                 )
-        return quotes, had_empty
+        return quotes, tuple(empty_scope_flags)

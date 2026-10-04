@@ -62,26 +62,28 @@ class ParlayApiProductSource:
     _STREAM_EPOCH = "parlayapi-table-tennis-product-v1"
     _READ_BATCH_ITEMS = 1000
     _MAX_SNAPSHOT_ITEMS = 50_000
-    _STATE_FIELDS = {
-        "schema",
-        "schema_version",
-        "source_id",
-        "stream_epoch",
-        "workspace_instance_id",
-        "generation",
-        "authority_tx_id",
-        "last_catalog_position",
-        "last_catalog_cursor",
-        "last_catalog_page_sha256",
-        "last_confirmed_delta_position",
-        "last_confirmed_delta_cursor",
-        "last_confirmed_delta_id",
-        "last_committed_quote_digests",
-        "last_committed_dedupe_digests",
-        "pending",
-        "event_cache",
-        "state_sha256",
-    }
+    _STATE_FIELDS = frozenset(
+        {
+            "schema",
+            "schema_version",
+            "source_id",
+            "stream_epoch",
+            "workspace_instance_id",
+            "generation",
+            "authority_tx_id",
+            "last_catalog_position",
+            "last_catalog_cursor",
+            "last_catalog_page_sha256",
+            "last_confirmed_delta_position",
+            "last_confirmed_delta_cursor",
+            "last_confirmed_delta_id",
+            "last_committed_quote_digests",
+            "last_committed_dedupe_digests",
+            "pending",
+            "event_cache",
+            "state_sha256",
+        }
+    )
 
     def __init__(
         self,

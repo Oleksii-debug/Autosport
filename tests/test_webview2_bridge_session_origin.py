@@ -113,6 +113,49 @@ def test_bridge_rejects_public_calls_before_trusted_document_binding() -> None:
     assert controller.events == [("close", None)]
 
 
+def test_bridge_controller_authority_is_immutable_after_construction() -> None:
+    original = _Controller()
+    replacement = _Controller()
+    bridge = AutosportWebBridge(original)
+
+    with pytest.raises(
+        WindowsWebBridgeTrustError,
+        match="controller authority is immutable",
+    ):
+        bridge._controller = replacement  # type: ignore[attr-defined]
+
+    assert bridge._controller is original
+    assert replacement.events == []
+
+
+def test_bridge_detects_controller_rebind_during_document_trust_proof() -> None:
+    original = _Controller()
+    replacement = _Controller()
+    bridge = AutosportWebBridge(original)
+    window = _Window()
+    bridge._bind_trusted_window(window)
+    original_get_current_url = window.get_current_url
+
+    def mutating_get_current_url():
+        bridge.__dict__["_controller"] = replacement
+        return original_get_current_url()
+
+    window.get_current_url = mutating_get_current_url  # type: ignore[method-assign]
+    with pytest.raises(
+        WindowsWebBridgeTrustError,
+        match="changed during trust proof",
+    ):
+        bridge.dispatch(
+            {"request_id": "r-controller", "action_id": "noop", "payload": {}}
+        )
+
+    assert original.events == []
+    assert replacement.events == []
+    assert bridge._trust_revoked is True
+    bridge.__dict__["_controller"] = original
+    bridge._close_from_host()
+    assert original.events == [("close", None)]
+
 def test_bridge_accepts_only_the_exact_bound_window_and_url() -> None:
     controller = _Controller()
     bridge = AutosportWebBridge(controller)

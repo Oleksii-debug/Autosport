@@ -283,6 +283,31 @@ def _sha256(value: object, field: str) -> str:
 class _ContinuousSessionState:
     _SCHEMA = "autosport.continuous_session"
     _VERSION = 2
+    _OPERATIONAL_SCHEMA = "autosport.continuous_session.operational"
+    _OPERATIONAL_VERSION = 1
+    _OPERATIONAL_STATE_FIELDS = (
+        "session_id",
+        "source_id",
+        "state",
+        "started_at",
+        "cycles_completed",
+        "last_success_at",
+        "last_error_code",
+        "last_full_refresh_at",
+        "source_gap_state",
+        "source_sync_state",
+        "source_state_delta_id",
+        "source_unresolved_gap_delta_ids",
+        "source_projection_stream_epoch",
+        "source_state_projection_backlog",
+    )
+    _OPERATIONAL_FIELDS = {
+        "schema",
+        "schema_version",
+        "history_size",
+        "history_mtime_ns",
+        *_OPERATIONAL_STATE_FIELDS,
+    }
     _FIELDS = {
         "schema",
         "schema_version",
@@ -313,6 +338,9 @@ class _ContinuousSessionState:
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.operational_path = self.path.with_name(
+            f"{self.path.stem}.operational.json"
+        )
         self.source_id = _text(source_id, "source_id")
         self._clock = clock
 
@@ -358,7 +386,9 @@ class _ContinuousSessionState:
                     "source_state_projection_backlog": False,
                 },
             )
-            self._read()
+            raw = self._read()
+
+        self._ensure_operational(raw)
 
     @staticmethod
     def _validate_settlement_evidence(raw: object) -> tuple[dict[str, str], ...]:
@@ -395,6 +425,194 @@ class _ContinuousSessionState:
                 }
             )
         return tuple(values)
+
+    def _history_signature(self) -> tuple[int, int]:
+        try:
+            stat = self.path.stat()
+        except OSError as exc:
+            raise ContinuousSessionError(
+                "cannot verify continuous session history checkpoint"
+            ) from exc
+        return stat.st_size, stat.st_mtime_ns
+
+    def _operational_from_full(self, raw: dict[str, Any]) -> dict[str, Any]:
+        size, mtime_ns = self._history_signature()
+        operational = {
+            "schema": self._OPERATIONAL_SCHEMA,
+            "schema_version": self._OPERATIONAL_VERSION,
+            "history_size": size,
+            "history_mtime_ns": mtime_ns,
+        }
+        for name in self._OPERATIONAL_STATE_FIELDS:
+            value = raw[name]
+            operational[name] = (
+                list(value)
+                if name == "source_unresolved_gap_delta_ids"
+                else value
+            )
+        return operational
+
+    def _validate_operational(
+        self,
+        raw: object,
+        *,
+        require_history_match: bool,
+    ) -> dict[str, Any]:
+        if (
+            type(raw) is not dict
+            or set(raw) != self._OPERATIONAL_FIELDS
+            or raw["schema"] != self._OPERATIONAL_SCHEMA
+            or raw["schema_version"] != self._OPERATIONAL_VERSION
+            or raw["source_id"] != self.source_id
+        ):
+            raise ContinuousSessionError(
+                "continuous session operational state schema/identity mismatch"
+            )
+        _text(raw["session_id"], "session_id")
+        _instant(raw["started_at"], "started_at")
+        try:
+            raw["state"] = SessionState(raw["state"]).value
+        except ValueError as exc:
+            raise ContinuousSessionError(
+                "unsupported continuous session operational state"
+            ) from exc
+        cycles = raw["cycles_completed"]
+        if isinstance(cycles, bool) or not isinstance(cycles, int) or cycles < 0:
+            raise ContinuousSessionError(
+                "operational cycles_completed must be a non-negative integer"
+            )
+        for name in ("last_success_at", "last_full_refresh_at"):
+            if raw[name] is not None:
+                _instant(raw[name], name)
+        if raw["last_error_code"] is not None:
+            _text(raw["last_error_code"], "last_error_code")
+
+        gap_state = raw["source_gap_state"]
+        sync_state = raw["source_sync_state"]
+        if (gap_state is None) != (sync_state is None):
+            raise ContinuousSessionError(
+                "source gap/sync projection must be present or absent together"
+            )
+        if gap_state is not None:
+            try:
+                GapState(gap_state)
+                SyncState(sync_state)
+            except ValueError as exc:
+                raise ContinuousSessionError(
+                    "source gap/sync projection contains an unsupported state"
+                ) from exc
+        if raw["source_state_delta_id"] is not None:
+            _text(raw["source_state_delta_id"], "source_state_delta_id")
+        if raw["source_projection_stream_epoch"] is not None:
+            _text(
+                raw["source_projection_stream_epoch"],
+                "source_projection_stream_epoch",
+            )
+        if (raw["source_state_delta_id"] is None) != (
+            raw["source_projection_stream_epoch"] is None
+        ):
+            raise ContinuousSessionError("source projection identity is incomplete")
+        if raw["source_state_delta_id"] is None and gap_state is not None:
+            raise ContinuousSessionError(
+                "source projection state requires a canonical delta identity"
+            )
+        unresolved = raw["source_unresolved_gap_delta_ids"]
+        if (
+            type(unresolved) is not list
+            or any(type(item) is not str or not item.strip() for item in unresolved)
+            or len(set(unresolved)) != len(unresolved)
+        ):
+            raise ContinuousSessionError(
+                "source_unresolved_gap_delta_ids must contain unique non-empty strings"
+            )
+        if type(raw["source_state_projection_backlog"]) is not bool:
+            raise ContinuousSessionError(
+                "source_state_projection_backlog must be boolean"
+            )
+        if unresolved and (
+            gap_state != GapState.DETECTED.value
+            or sync_state != SyncState.GAP_DETECTED.value
+        ):
+            raise ContinuousSessionError(
+                "unresolved source gaps require DETECTED/GAP_DETECTED projection"
+            )
+        for name in ("history_size", "history_mtime_ns"):
+            value = raw[name]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ContinuousSessionError(
+                    f"{name} must be a non-negative integer"
+                )
+        if require_history_match:
+            size, mtime_ns = self._history_signature()
+            if (
+                raw["history_size"] != size
+                or raw["history_mtime_ns"] != mtime_ns
+            ):
+                raise ContinuousSessionError(
+                    "continuous session history changed outside canonical state authority"
+                )
+        return raw
+
+    def _read_operational(
+        self,
+        *,
+        require_history_match: bool = True,
+    ) -> dict[str, Any]:
+        try:
+            raw = strict_json_loads(
+                self.operational_path.read_text(encoding="utf-8")
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise ContinuousSessionError(
+                "cannot verify continuous session operational state"
+            ) from exc
+        return self._validate_operational(
+            raw,
+            require_history_match=require_history_match,
+        )
+
+    def _write_operational_from_full(self, raw: dict[str, Any]) -> None:
+        atomic_write_json(self.operational_path, self._operational_from_full(raw))
+        self._read_operational()
+
+    def _ensure_operational(self, full: dict[str, Any]) -> None:
+        if not self.operational_path.exists():
+            self._write_operational_from_full(full)
+            return
+        operational = self._read_operational(require_history_match=False)
+        if (
+            operational["session_id"] != full["session_id"]
+            or operational["started_at"] != full["started_at"]
+        ):
+            raise ContinuousSessionError(
+                "continuous session operational identity does not match history"
+            )
+        size, mtime_ns = self._history_signature()
+        if (
+            operational["history_size"] != size
+            or operational["history_mtime_ns"] != mtime_ns
+        ):
+            # The full checkpoint was validated immediately before this method.
+            # Preserve bounded operational authority while refreshing only the
+            # binding to that validated history image after an interrupted sync.
+            operational["history_size"] = size
+            operational["history_mtime_ns"] = mtime_ns
+            atomic_write_json(self.operational_path, operational)
+        self._read_operational()
+
+    def _overlay_operational(
+        self,
+        full: dict[str, Any],
+        operational: dict[str, Any],
+    ) -> dict[str, Any]:
+        for name in self._OPERATIONAL_STATE_FIELDS:
+            value = operational[name]
+            full[name] = (
+                list(value)
+                if name == "source_unresolved_gap_delta_ids"
+                else value
+            )
+        return full
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -479,7 +697,10 @@ class _ContinuousSessionState:
         return raw
 
     def snapshot(self) -> ContinuousSessionStatus:
-        raw = self._read()
+        raw = self._overlay_operational(
+            self._read(),
+            self._read_operational(),
+        )
         return ContinuousSessionStatus(
             session_id=raw["session_id"],
             source_id=raw["source_id"],
@@ -501,15 +722,53 @@ class _ContinuousSessionState:
             ],
         )
 
+    def operational_snapshot(self) -> ContinuousSessionStatus:
+        raw = self._read_operational()
+        return ContinuousSessionStatus(
+            session_id=raw["session_id"],
+            source_id=raw["source_id"],
+            state=SessionState(raw["state"]),
+            cycles_completed=raw["cycles_completed"],
+            last_success_at=raw["last_success_at"],
+            last_error_code=raw["last_error_code"],
+            last_full_refresh_at=raw["last_full_refresh_at"],
+            settlement_evidence=(),
+            source_gap_state=raw["source_gap_state"],
+            source_sync_state=raw["source_sync_state"],
+            source_state_delta_id=raw["source_state_delta_id"],
+            source_unresolved_gap_delta_ids=tuple(
+                raw["source_unresolved_gap_delta_ids"]
+            ),
+            source_projection_stream_epoch=raw[
+                "source_projection_stream_epoch"
+            ],
+            source_state_projection_backlog=raw[
+                "source_state_projection_backlog"
+            ],
+        )
+
     @property
     def session_id(self) -> str:
-        return self._read()["session_id"]
+        return self._read_operational()["session_id"]
+
+    def _update_operational(
+        self,
+        mutate: Callable[[dict[str, Any]], None],
+    ) -> None:
+        raw = self._read_operational()
+        mutate(raw)
+        atomic_write_json(self.operational_path, raw)
+        self._read_operational()
 
     def _update(self, mutate: Callable[[dict[str, Any]], None]) -> None:
-        raw = self._read()
+        raw = self._overlay_operational(
+            self._read(),
+            self._read_operational(),
+        )
         mutate(raw)
         atomic_write_json(self.path, raw)
         self._read()
+        self._write_operational_from_full(raw)
 
     def set_state(self, state: SessionState, *, reason: str | None = None) -> None:
         if not isinstance(state, SessionState):
@@ -520,7 +779,7 @@ class _ContinuousSessionState:
             if reason is not None:
                 raw["last_error_code"] = _text(reason, "reason")
 
-        self._update(mutate)
+        self._update_operational(mutate)
 
     @staticmethod
     def _normalized_settlement_evidence(
@@ -542,6 +801,8 @@ class _ContinuousSessionState:
         *,
         settlement_evidence: tuple[SettlementResolution, ...],
     ) -> None:
+        if not settlement_evidence:
+            return
         raw = self._read()
         known = {
             item["evidence_id"]: item
@@ -603,7 +864,7 @@ class _ContinuousSessionState:
             raw["source_unresolved_gap_delta_ids"] = sorted(unresolved)
             raw["source_state_projection_backlog"] = backlog
 
-        self._update(mutate)
+        self._update_operational(mutate)
 
     def record_success(
         self,
@@ -614,13 +875,19 @@ class _ContinuousSessionState:
     ) -> None:
         timestamp = _instant(at, "at")
 
-        def mutate(raw: dict[str, Any]) -> None:
+        def mutate_operational(raw: dict[str, Any]) -> None:
             raw["cycles_completed"] = int(raw["cycles_completed"]) + 1
             raw["last_success_at"] = timestamp.isoformat()
             raw["last_error_code"] = None
             if full_refresh:
                 raw["last_full_refresh_at"] = timestamp.isoformat()
 
+        if not settlement_evidence:
+            self._update_operational(mutate_operational)
+            return
+
+        def mutate(raw: dict[str, Any]) -> None:
+            mutate_operational(raw)
             known = {
                 item["evidence_id"]: item
                 for item in raw["settlement_evidence"]
@@ -643,7 +910,9 @@ class _ContinuousSessionState:
 
     def record_failure(self, *, code: str) -> None:
         code = _text(code, "code")
-        self._update(lambda raw: raw.__setitem__("last_error_code", code))
+        self._update_operational(
+            lambda raw: raw.__setitem__("last_error_code", code)
+        )
 
 
 class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
@@ -797,13 +1066,13 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         self._state.set_state(SessionState.STOPPED, reason=reason)
 
     def resume(self) -> None:
-        current = self._state.snapshot().state
+        current = self._state.operational_snapshot().state
         if current not in {SessionState.PAUSED, SessionState.STOPPED}:
             return
         self._state.set_state(SessionState.RUNNING)
 
     def _require_running(self) -> None:
-        state = self._state.snapshot().state
+        state = self._state.operational_snapshot().state
         if state is SessionState.PAUSED:
             raise SessionPausedError("continuous session is durably PAUSED")
         if state is SessionState.STOPPED:
@@ -846,7 +1115,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         return tuple(dict.fromkeys(affected)), full_refresh_required, backlog
 
     def _refresh_source_state_projection(self) -> ContinuousSessionStatus:
-        snapshot = self._state.snapshot()
+        snapshot = self._state.operational_snapshot()
         deltas = self.collector.delta_store.deltas_after_commit(
             source_id=self.collector.source_id,
             after_delta_id=snapshot.source_state_delta_id,
@@ -858,7 +1127,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             deltas=selected,
             backlog=backlog,
         )
-        return self._state.snapshot()
+        return self._state.operational_snapshot()
 
     def _settlement_resolutions(
         self,
@@ -960,7 +1229,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             source_snapshot = self._refresh_source_state_projection()
             if cycle.provider_unavailable:
                 self._state.record_failure(code="ProviderUnavailableError")
-                snapshot = self._state.snapshot()
+                snapshot = self._state.operational_snapshot()
                 return ContinuousTickResult(
                     session_id=self.session_id,
                     cycle_index=snapshot.cycles_completed,
@@ -1062,7 +1331,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     at=now,
                 )
 
-            cycle_index = self._state.snapshot().cycles_completed + 1
+            cycle_index = self._state.operational_snapshot().cycles_completed + 1
             self._state.record_success(
                 at=now,
                 full_refresh=full_refresh,
@@ -1084,7 +1353,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 invalidation_backlog=backlog,
                 settled_ticket_ids=settled,
                 settlement_evidence_ids=evidence_ids,
-                last_success_at=self._state.snapshot().last_success_at or now,
+                last_success_at=self._state.operational_snapshot().last_success_at or now,
             )
         except Exception as exc:
             self._state.record_failure(code=type(exc).__name__)

@@ -1422,7 +1422,7 @@ del _bind_desktop_delta_consumer_acknowledged_at
 
 
 def _bind_desktop_delta_consumer_drain(implementation):
-    """Seal receipt identity and digest dependencies outside mutable module dispatch."""
+    """Seal receipt, digest, ACK and default causal-view authority."""
 
     receipt_type = DesktopApplicationReceipt
     validate_receipt = DesktopApplicationReceipt.validate
@@ -1431,6 +1431,7 @@ def _bind_desktop_delta_consumer_drain(implementation):
     acknowledged_at = DesktopDeltaConsumer._acknowledged_at
     instant_parser = _instant
     validated_ack_receipt = DesktopDeltaCheckpointStore.validated_ack_receipt
+    default_view = CausalView.AS_KNOWN_AT_DECISION
 
     def drain(
         self,
@@ -1438,6 +1439,10 @@ def _bind_desktop_delta_consumer_drain(implementation):
         as_of: str,
         view: CausalView = CausalView.AS_KNOWN_AT_DECISION,
     ) -> tuple[str, ...]:
+        if drain.__kwdefaults__ != {"view": default_view}:
+            raise ApplicationReceiptError(
+                "desktop consumer default causal-view metadata changed"
+            )
         return implementation(
             self,
             as_of=as_of,

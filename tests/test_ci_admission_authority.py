@@ -397,6 +397,50 @@ def test_pull_request_reader_rejects_inflight_request_transport_shadow() -> None
     assert forged_calls == []
 
 
+def test_pull_request_reader_rejects_inflight_request_default_rebase(
+    monkeypatch,
+) -> None:
+    api = controller_module.GitHubApi(repository="owner/repo", token="token")
+    request_impl = controller_module.GitHubApi._request
+    defaults = request_impl.__kwdefaults__
+    assert defaults is not None
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'{"state":"open","draft":false,'
+                b'"head":{"sha":"' + HEAD_B.encode("ascii")
+                + b'","repo":{"full_name":"owner/repo"}},'
+                b'"base":{"repo":{"full_name":"owner/repo"}}}'
+            )
+
+    def mutating_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        assert request.full_url.endswith("/pulls/2008")
+        monkeypatch.setitem(defaults, "_json_parse_int", str)
+        return FakeResponse()
+
+    monkeypatch.setitem(
+        request_impl.__globals__,
+        "urlopen",
+        mutating_urlopen,
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="pull request transport authority changed",
+    ):
+        api.live_pr_qualification(2008)
+
+
 def test_legacy_live_head_rejects_inflight_pull_request_reader_shadow() -> None:
     api = controller_module.GitHubApi(repository="owner/repo", token="token")
     forged_calls: list[int] = []

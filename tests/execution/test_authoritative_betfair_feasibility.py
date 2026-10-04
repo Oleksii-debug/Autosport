@@ -4,6 +4,7 @@ from decimal import Decimal
 import json
 from pathlib import Path
 import tempfile
+import time
 import urllib.request as urllib_request
 
 import pytest
@@ -788,26 +789,58 @@ def test_assessment_helper_rebind_cannot_mint_authoritative_result(
             )
 
 
-def test_authoritative_decision_time_is_issued_by_product_clock() -> None:
+def test_authoritative_decision_epoch_is_durable_plan_reservation() -> None:
     receipt, canonical_source = _synthetic_authoritative_receipt(
         MarketBookTransport()
     )
-    before = datetime.now(timezone.utc)
-    bound = _bound(before)
+    bound = _bound(datetime.now(timezone.utc))
 
     with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        plan_view = ledger.verified_execution_view(bound.execution_plan.plan_id)
         result = assess_authoritative_betfair_execution_feasibility(
-            _reserved_ledger(tmp, bound),
+            ledger,
             bound,
             receipt,
             action_id=ACTION_ID,
             max_snapshot_age=timedelta(seconds=2),
         )
-    after = datetime.now(timezone.utc)
 
-    assert before <= result.decision_at <= after
+    expected_decision_at = datetime.fromisoformat(plan_view.plan_reserved_at)
+    assert result.decision_at == expected_decision_at
+    assert result.received_at <= result.decision_at
+    assert "RECEIVED_AFTER_DECISION" not in result.reasons
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
     assert "LIMIT_AUTHORITY_REJECTED" in result.reasons
+
+
+def test_receipt_after_plan_reservation_cannot_be_decision_evidence() -> None:
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        plan_view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        # Keep the order deterministic even on clocks with coarse scheduling.
+        time.sleep(0.002)
+        receipt, canonical_source = _synthetic_authoritative_receipt(
+            MarketBookTransport()
+        )
+        result = assess_authoritative_betfair_execution_feasibility(
+            ledger,
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+        )
+
+    expected_decision_at = datetime.fromisoformat(plan_view.plan_reserved_at)
+    assert result.decision_at == expected_decision_at
+    assert result.observed_at > result.decision_at
+    assert result.received_at > result.decision_at
+    assert "FUTURE_SNAPSHOT" in result.reasons
+    assert "RECEIVED_AFTER_DECISION" in result.reasons
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+    assert result.sufficient is False
 
 
 def test_caller_cannot_supply_backdated_authoritative_decision_time() -> None:

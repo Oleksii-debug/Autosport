@@ -11,6 +11,7 @@ from autosport.windows_webview_shell import (
     AutosportWebController,
     WindowsWebBridgeTrustError,
     WindowsWebViewUnavailable,
+    _default_web_bridge,
     launch_windows_shell,
 )
 
@@ -646,6 +647,27 @@ def test_launch_rejects_instance_shadow_of_host_bridge_method(
 
     assert fake.api is None
     assert controller.events == []
+
+
+def test_default_web_bridge_is_emergency_stop_capable(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    workspace = (tmp_path / "workspace").resolve()
+    monkeypatch.setattr(
+        "autosport.windows_webview_shell.default_workspace",
+        lambda: workspace,
+    )
+    from autosport.windows_webview_emergency_stop import EmergencyStopWebController
+
+    bridge = _default_web_bridge()
+    try:
+        assert type(bridge._controller) is EmergencyStopWebController
+        assert bridge._runtime_witness_path() == (
+            workspace / "webview2-runtime-witness.json"
+        )
+    finally:
+        bridge._close_from_host()
 
 
 def test_launch_rejects_noncanonical_controller_authority(

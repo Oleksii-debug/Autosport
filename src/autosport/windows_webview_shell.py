@@ -2766,6 +2766,14 @@ def _require_canonical_web_bridge_controller(
     return api
 
 
+def _default_web_bridge() -> AutosportWebBridge:
+    """Build the same emergency-STOP-capable bridge used by the packaged entry."""
+
+    from .windows_webview_emergency_stop import EmergencyStopWebController
+
+    return AutosportWebBridge(EmergencyStopWebController())
+
+
 def launch_windows_shell(
     bridge: AutosportWebBridge | None = None,
     *,
@@ -2805,7 +2813,7 @@ def launch_windows_shell(
         )
 
     api = _require_canonical_web_bridge_surface(
-        AutosportWebBridge() if bridge is None else bridge
+        _default_web_bridge() if bridge is None else bridge
     )
     api = _require_canonical_web_bridge_controller(api)
     bind_trusted_window = api._bind_trusted_window

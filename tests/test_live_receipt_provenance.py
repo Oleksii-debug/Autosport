@@ -1109,6 +1109,50 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_trusted_current_projection_keeps_same_quote_isolated_by_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                provider_a = self._direct_event(sequence=1, odds="2.00")
+                provider_b = replace(
+                    self._direct_event(sequence=1, odds="2.20"),
+                    source_id="provider-b",
+                )
+                self.assertEqual(
+                    store._append_live_batch_accepted([provider_a, provider_b]),
+                    [provider_a, provider_b],
+                )
+
+                current = store.trusted_live_current_by_source()
+                self.assertEqual(
+                    set(current),
+                    {
+                        (provider_a.source_id, provider_a.quote_key),
+                        (provider_b.source_id, provider_b.quote_key),
+                    },
+                )
+                self.assertEqual(
+                    store.connection.execute(
+                        """SELECT source_id,quote_key,sequence
+                           FROM trusted_live_current_quotes
+                           ORDER BY source_id,quote_key"""
+                    ).fetchall(),
+                    [
+                        (
+                            provider_a.source_id,
+                            provider_a.quote_key,
+                            provider_a.sequence,
+                        ),
+                        (
+                            provider_b.source_id,
+                            provider_b.quote_key,
+                            provider_b.sequence,
+                        ),
+                    ],
+                )
+            finally:
+                store.close()
+
     def test_late_stale_trusted_receipt_does_not_regress_trusted_current_projection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 from autosport.risk_sampling_membership import (
@@ -37,6 +38,28 @@ class RiskSamplingMembershipTests(unittest.TestCase):
             "risk_method": "CLOPPER_PEARSON_ONE_SIDED",
             "dependence_qualification": "SEPARATE_REQUIRED",
         }
+        payload.update(overrides)
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def _design_v2(self, **overrides):
+        payload = json.loads(self._design())
+        payload.update(
+            {
+                "kind": "autosport-risk-fixed-n-run-membership-v2",
+                "bankroll_id": "risk-bankroll",
+                "currency": "USD",
+                "target_kind": "single",
+                "target_sha256": "7" * 64,
+                "evaluated_stakes": ["10"],
+                "confidence_level": "0.95",
+                "ruin_threshold": "0",
+            }
+        )
         payload.update(overrides)
         return json.dumps(
             payload,
@@ -124,8 +147,192 @@ class RiskSamplingMembershipTests(unittest.TestCase):
             self.assertEqual(first.planned_run_ids, ("run-001", "run-002", "run-003"))
             self.assertEqual(first.planned_n, 3)
             self.assertFalse(first.iid_qualified)
+            self.assertFalse(first.risk_estimand_structurally_precommitted)
+            self.assertEqual(
+                first.design_kind,
+                "autosport-risk-fixed-n-run-membership-v1",
+            )
+            self.assertIsNone(first.bankroll_id)
+            self.assertEqual(first.evaluated_stakes, ())
+            self.assertIsNone(first.confidence_level)
+            self.assertIsNone(first.ruin_threshold)
             self.assertEqual(first.dataset_manifest_sha256, self.MANIFEST_SHA)
             self.assertEqual(len(first.design_sha256), 64)
+
+    def test_v2_resolves_exact_frozen_risk_estimand_and_restarts_identically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._registry(Path(tmp), design=self._design_v2())
+            first = inspect_fixed_n_risk_membership_structure(
+                path,
+                research_protocol_id=self.PROTOCOL_ID,
+                dataset_snapshot_id=self.DATASET_ID,
+            )
+            second = inspect_fixed_n_risk_membership_structure(
+                path,
+                research_protocol_id=self.PROTOCOL_ID,
+                dataset_snapshot_id=self.DATASET_ID,
+            )
+
+            self.assertEqual(first, second)
+            self.assertTrue(first.risk_estimand_structurally_precommitted)
+            self.assertEqual(
+                first.design_kind,
+                "autosport-risk-fixed-n-run-membership-v2",
+            )
+            self.assertEqual(first.bankroll_id, "risk-bankroll")
+            self.assertEqual(first.currency, "USD")
+            self.assertEqual(first.target_kind, "single")
+            self.assertEqual(first.target_sha256, "7" * 64)
+            self.assertEqual(first.evaluated_stakes, (Decimal("10"),))
+            self.assertEqual(first.confidence_level, Decimal("0.95"))
+            self.assertEqual(first.ruin_threshold, Decimal("0"))
+
+    def test_v2_estimand_values_are_part_of_protocol_and_design_identity(self):
+        with tempfile.TemporaryDirectory() as left_tmp, tempfile.TemporaryDirectory() as right_tmp:
+            left_path = self._registry(
+                Path(left_tmp),
+                design=self._design_v2(confidence_level="0.95"),
+            )
+            right_path = self._registry(
+                Path(right_tmp),
+                design=self._design_v2(confidence_level="0.99"),
+            )
+            left = inspect_fixed_n_risk_membership_structure(
+                left_path,
+                research_protocol_id=self.PROTOCOL_ID,
+                dataset_snapshot_id=self.DATASET_ID,
+            )
+            right = inspect_fixed_n_risk_membership_structure(
+                right_path,
+                research_protocol_id=self.PROTOCOL_ID,
+                dataset_snapshot_id=self.DATASET_ID,
+            )
+
+            self.assertNotEqual(left.design_sha256, right.design_sha256)
+            self.assertNotEqual(left.protocol_sha256, right.protocol_sha256)
+
+    def test_v2_rejects_missing_or_extra_estimand_fields(self):
+        payload = json.loads(self._design_v2())
+        missing = dict(payload)
+        del missing["confidence_level"]
+        extra = dict(payload)
+        extra["caller_upper_bound"] = "0"
+        cases = (missing, extra)
+
+        for index, design_payload in enumerate(cases):
+            with self.subTest(case=index), tempfile.TemporaryDirectory() as tmp:
+                design = json.dumps(
+                    design_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                path = self._registry(Path(tmp), design=design)
+                with self.assertRaisesRegex(
+                    RiskSamplingMembershipError,
+                    "fields do not match the supported schema",
+                ):
+                    inspect_fixed_n_risk_membership_structure(
+                        path,
+                        research_protocol_id=self.PROTOCOL_ID,
+                        dataset_snapshot_id=self.DATASET_ID,
+                    )
+
+    def test_v2_rejects_noncanonical_or_out_of_range_confidence(self):
+        cases = ("0", "1", "0.950", "1e-2")
+        for confidence in cases:
+            with self.subTest(confidence=confidence), tempfile.TemporaryDirectory() as tmp:
+                path = self._registry(
+                    Path(tmp),
+                    design=self._design_v2(confidence_level=confidence),
+                )
+                with self.assertRaises(RiskSamplingMembershipError):
+                    inspect_fixed_n_risk_membership_structure(
+                        path,
+                        research_protocol_id=self.PROTOCOL_ID,
+                        dataset_snapshot_id=self.DATASET_ID,
+                    )
+
+    def test_v2_rejects_noncanonical_ruin_threshold(self):
+        for threshold in ("0.0", "-0", "1e-3"):
+            with self.subTest(threshold=threshold), tempfile.TemporaryDirectory() as tmp:
+                path = self._registry(
+                    Path(tmp),
+                    design=self._design_v2(ruin_threshold=threshold),
+                )
+                with self.assertRaisesRegex(
+                    RiskSamplingMembershipError,
+                    "canonical fixed-point decimal",
+                ):
+                    inspect_fixed_n_risk_membership_structure(
+                        path,
+                        research_protocol_id=self.PROTOCOL_ID,
+                        dataset_snapshot_id=self.DATASET_ID,
+                    )
+
+    def test_v2_rejects_target_currency_and_stake_vector_drift(self):
+        cases = (
+            (
+                {"target_kind": "caller-selected"},
+                "target_kind is unsupported",
+            ),
+            (
+                {"target_sha256": "not-a-sha"},
+                "target_sha256",
+            ),
+            (
+                {"currency": "usd"},
+                "three-letter uppercase ASCII",
+            ),
+            (
+                {"evaluated_stakes": ["10", "20"]},
+                "single target requires exactly one",
+            ),
+            (
+                {"evaluated_stakes": ["0"]},
+                "evaluated_stakes must be positive",
+            ),
+            (
+                {"evaluated_stakes": ["10.0"]},
+                "canonical fixed-point decimal",
+            ),
+        )
+        for overrides, message in cases:
+            with self.subTest(overrides=overrides), tempfile.TemporaryDirectory() as tmp:
+                path = self._registry(
+                    Path(tmp),
+                    design=self._design_v2(**overrides),
+                )
+                with self.assertRaisesRegex(RiskSamplingMembershipError, message):
+                    inspect_fixed_n_risk_membership_structure(
+                        path,
+                        research_protocol_id=self.PROTOCOL_ID,
+                        dataset_snapshot_id=self.DATASET_ID,
+                    )
+
+    def test_v2_accepts_vector_target_with_exact_positive_stake_vector(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._registry(
+                Path(tmp),
+                design=self._design_v2(
+                    target_kind="vector",
+                    evaluated_stakes=["2.5", "4"],
+                    ruin_threshold="-10",
+                ),
+            )
+            resolved = inspect_fixed_n_risk_membership_structure(
+                path,
+                research_protocol_id=self.PROTOCOL_ID,
+                dataset_snapshot_id=self.DATASET_ID,
+            )
+
+            self.assertTrue(resolved.risk_estimand_structurally_precommitted)
+            self.assertEqual(resolved.target_kind, "vector")
+            self.assertEqual(
+                resolved.evaluated_stakes,
+                (Decimal("2.5"), Decimal("4")),
+            )
+            self.assertEqual(resolved.ruin_threshold, Decimal("-10"))
 
     def test_unknown_protocol_cannot_be_replaced_by_caller_assertion(self):
         with tempfile.TemporaryDirectory() as tmp:

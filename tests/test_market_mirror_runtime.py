@@ -219,6 +219,52 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
                 semantic_refresh_keys=(("provider-b", "quote-b"),),
             )
 
+    def test_invalidation_batch_rejects_malformed_key_collections(self) -> None:
+        malformed = (
+            {
+                "changed_keys": [("provider-a", "quote-a")],
+                "semantic_refresh_keys": (),
+            },
+            {
+                "changed_keys": (),
+                "semantic_refresh_keys": [("provider-a", "quote-a")],
+            },
+        )
+        for state in malformed:
+            with self.subTest(state=state):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "invalidation key collections must be tuples",
+                ):
+                    MirrorInvalidationBatch(
+                        changed_keys=state["changed_keys"],
+                        full_refresh_required=False,
+                        has_more=False,
+                        semantic_refresh_keys=state["semantic_refresh_keys"],
+                    )
+
+    def test_invalidation_batch_rejects_malformed_quote_keys(self) -> None:
+        malformed = (
+            ((),),
+            (("provider-a",),),
+            (("provider-a", "quote-a", "extra"),),
+            (("", "quote-a"),),
+            (("provider-a", ""),),
+            ((1, "quote-a"),),
+            (("provider-a", 1),),
+        )
+        for keys in malformed:
+            with self.subTest(keys=keys):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "invalidation keys must be non-empty",
+                ):
+                    MirrorInvalidationBatch(
+                        changed_keys=keys,
+                        full_refresh_required=False,
+                        has_more=False,
+                    )
+
     def test_invalidation_batch_rejects_duplicate_key_metadata(self) -> None:
         duplicate = ("provider-a", "quote-a")
         with self.assertRaisesRegex(

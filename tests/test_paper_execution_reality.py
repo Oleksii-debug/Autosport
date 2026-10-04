@@ -591,6 +591,64 @@ class PaperExecutionRealityTests(unittest.TestCase):
                     evidence_registry=registry,
                 )
 
+    def test_rehashed_evidence_event_identity_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = action("a1")
+            observation, _registry = registered_observation(
+                ledger,
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.40",
+                stake="10.00",
+            )
+            events = list(ledger.events())
+            evidence_event = next(
+                item
+                for item in events
+                if item["event_type"]
+                == "OBSERVATION_EVIDENCE_REGISTERED"
+            )
+            evidence_event["event_key"] = (
+                "evidence:forged-" + observation.evidence_id
+            )
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "evidence event identity is invalid",
+            ):
+                PaperExecutionLedger(path).events()
+
+    def test_rehashed_reservation_event_identity_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            execute_paper_plan(
+                plan=plan(action("a1")),
+                trigger_id="trigger-reservation-key",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            reservation = next(
+                item
+                for item in events
+                if item["event_type"] == "RUN_RESERVED"
+            )
+            reservation["event_key"] = (
+                reservation["run_id"] + ":forged-reserve"
+            )
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reservation event identity is invalid",
+            ):
+                PaperExecutionLedger(path).events()
+
     def test_writer_lock_fails_closed_instead_of_creating_parallel_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-execution.jsonl"

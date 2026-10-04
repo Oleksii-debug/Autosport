@@ -2934,6 +2934,10 @@ class PersistentLiveDecisionLoop:
         existing: DecisionRecord,
         durable_plan: PortfolioPlan,
         progress: _Progress,
+        committed_market_history: tuple[
+            tuple[MarketEvent, int], ...
+        ]
+        | None = None,
     ) -> None:
         has_positive_stake = any(stake > 0 for stake in durable_plan.stakes)
         execution_payload = existing.payload.get("paper_execution")
@@ -3787,6 +3791,7 @@ class PersistentLiveDecisionLoop:
             existing=existing,
             durable_plan=durable_plan,
             progress=progress,
+            committed_market_history=committed_market_history,
         )
         payload_version = existing.payload.get("schema_version")
         if payload_version not in {1, 2}:

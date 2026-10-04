@@ -2778,5 +2778,118 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 )
 
 
+    def test_resolution_witness_revalidates_current_paperbook(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                _runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(root, outcomes={leg.quote_key: "win"})
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket.ticket_id,),
+                at="2026-09-19T21:20:00+00:00",
+            )
+            self.assertEqual(
+                bridge.resolution_witness(ticket.ticket_id).ticket_id,
+                ticket.ticket_id,
+            )
+
+            book_path = root / "paper_book.json"
+            raw = json.loads(book_path.read_text(encoding="utf-8"))
+            raw["tickets"][0]["strategy_reason"] = "witness-stale-book"
+            book_path.write_text(
+                json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            PaperBook.load(book_path)
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "economics changed after binding",
+            ):
+                bridge.resolution_witness(ticket.ticket_id)
+
+    def test_campaign_anchor_binding_revalidates_current_paperbook(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                _runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(root, outcomes={leg.quote_key: "win"})
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket.ticket_id,),
+                at="2026-09-19T21:20:00+00:00",
+            )
+
+            book_path = root / "paper_book.json"
+            raw = json.loads(book_path.read_text(encoding="utf-8"))
+            raw["tickets"][0]["strategy_reason"] = "anchor-stale-book"
+            book_path.write_text(
+                json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            PaperBook.load(book_path)
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "economics changed after binding",
+            ):
+                bridge.bind_campaign_plan_anchor(
+                    ticket_id=ticket.ticket_id,
+                    plan_id="c" * 64,
+                    reflection_available_at="2026-09-19T21:20:01+00:00",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

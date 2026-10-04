@@ -23,6 +23,7 @@ from autosport.risk_sampling_occurrence_authority import (
     resolve_product_iid_expected_draw_plan,
     resolve_product_iid_run_execution,
     verify_product_iid_expected_draw_plan,
+    verify_product_iid_run_execution,
 )
 from autosport.run_registry import RunRegistry
 from autosport.run_transaction import RunTransaction
@@ -1018,6 +1019,176 @@ def test_iid_run_execution_proves_exact_draw_reached_strategy_replay(
     assert receipt.occurrence_ancestry_proven is True
     assert receipt.iid_qualified is False
     assert receipt.grants_real_money_authority is False
+
+
+def test_iid_run_execution_verifier_reresolves_canonical_completed_evidence(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values, _replay, _summary = _completed_iid_execution(
+        tmp_path,
+        monkeypatch,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    receipt = resolve_product_iid_run_execution(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        member_index=0,
+        authority_root=authority_root,
+    )
+
+    verified = verify_product_iid_run_execution(
+        receipt,
+        membership=membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        member_index=0,
+        authority_root=authority_root,
+    )
+
+    assert type(verified) is ProductIidRunExecutionReceipt
+    assert verified.receipt_sha256 == receipt.receipt_sha256
+    assert verified.completed_summary_sha256 == receipt.completed_summary_sha256
+
+
+def test_iid_run_execution_verifier_rejects_object_new_forgery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values, _replay, _summary = _completed_iid_execution(
+        tmp_path,
+        monkeypatch,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    canonical = resolve_product_iid_run_execution(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        member_index=0,
+        authority_root=authority_root,
+    )
+    forged = object.__new__(ProductIidRunExecutionReceipt)
+    field_names = (
+        "experiment_id",
+        "member_id",
+        "member_index",
+        "expected_draw_plan_sha256",
+        "expected_draw_transcript_sha256",
+        "run_admission_receipt_sha256",
+        "replay_execution_receipt_sha256",
+        "replay_dataset_hash",
+        "event_count",
+        "expected_event_payload_sequence_sha256",
+        "expected_event_payload_multiset_sha256",
+        "completed_summary_sha256",
+        "receipt_sha256",
+    )
+    for field_name in field_names:
+        object.__setattr__(
+            forged,
+            field_name,
+            object.__getattribute__(canonical, field_name),
+        )
+    object.__setattr__(forged, "replay_dataset_hash", "0" * 64)
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="differs from canonical completed evidence",
+    ):
+        verify_product_iid_run_execution(
+            forged,
+            membership=membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=frame_json,
+            horizon_json=horizon_json,
+            member_index=0,
+            authority_root=authority_root,
+        )
+
+
+def test_iid_run_execution_verifier_rejects_resolver_rebinding_before_dispatch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values, _replay, _summary = _completed_iid_execution(
+        tmp_path,
+        monkeypatch,
+    )
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        frame_json,
+        horizon_json,
+    ) = values
+    receipt = resolve_product_iid_run_execution(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=frame_json,
+        horizon_json=horizon_json,
+        member_index=0,
+        authority_root=authority_root,
+    )
+    forged_calls: list[str] = []
+
+    def forged_resolver(*_args, **_kwargs):
+        forged_calls.append("resolver")
+        return receipt
+
+    monkeypatch.setattr(
+        draw_authority,
+        "resolve_product_iid_run_execution",
+        forged_resolver,
+    )
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="verifier authority dispatch changed",
+    ):
+        verify_product_iid_run_execution(
+            receipt,
+            membership=membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=frame_json,
+            horizon_json=horizon_json,
+            member_index=0,
+            authority_root=authority_root,
+        )
+    assert forged_calls == []
 
 
 def test_iid_run_execution_rejects_different_replay_payload(

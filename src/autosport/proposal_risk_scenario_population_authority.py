@@ -71,7 +71,10 @@ _LEDGER_RESOLVE = JsonlDecisionLedger.verified_economic_decision_for_material_ac
 _LEDGER_VERIFY = JsonlDecisionLedger.verify_integrity
 _ENSURE_DURABLE_FILE = ensure_durable_file
 _JSON_DUMPS = json.dumps
+_JSON_DUMPS_EXPECTED = _JSON_DUMPS
+_JSON_DUMPS_CODE = getattr(_JSON_DUMPS, "__code__", None)
 _HASHLIB_SHA256 = hashlib.sha256
+_HASHLIB_SHA256_EXPECTED = _HASHLIB_SHA256
 _UTC_NOW_ISO = utc_now_iso
 _TERMINAL_POPULATION_TYPE = ProductProposalTargetTerminalPopulation
 _TERMINAL_POPULATION_PROPERTY_NAMES = (
@@ -184,6 +187,14 @@ def _decimal_text(value: object, name: str) -> str:
 
 
 def _canonical_json(value: object) -> bytes:
+    if (
+        _JSON_DUMPS is not _JSON_DUMPS_EXPECTED
+        or json.dumps is not _JSON_DUMPS_EXPECTED
+        or getattr(_JSON_DUMPS_EXPECTED, "__code__", None) is not _JSON_DUMPS_CODE
+    ):
+        raise ProductProposalRiskScenarioPopulationError(
+            "scenario population authority dispatch changed"
+        )
     try:
         return _JSON_DUMPS(
             value,
@@ -199,6 +210,13 @@ def _canonical_json(value: object) -> bytes:
 
 
 def _digest(value: object) -> str:
+    if (
+        _HASHLIB_SHA256 is not _HASHLIB_SHA256_EXPECTED
+        or hashlib.sha256 is not _HASHLIB_SHA256_EXPECTED
+    ):
+        raise ProductProposalRiskScenarioPopulationError(
+            "scenario population authority dispatch changed"
+        )
     return _HASHLIB_SHA256(_canonical_json(value)).hexdigest()
 
 
@@ -355,6 +373,37 @@ class ProductProposalRiskScenarioPopulation:
         return False
 
 
+_RESULT_TYPE = ProductProposalRiskScenarioPopulation
+_RESULT_TYPE_EXPECTED = _RESULT_TYPE
+_RESULT_AUTHORITY_PROPERTY_NAMES = (
+    "population_identity_proven",
+    "fixed_n_member_mapping_complete",
+    "provider_terminal_population_proven",
+    "product_scenario_source_provenance_proven",
+    "terminal_mapping_proven",
+    "scenario_execution_proven",
+    "proposal_target_counterfactual_execution_proven",
+    "risk_upper_bound_for_target",
+    "grants_risk_approval_authority",
+    "grants_ticket_authority",
+    "grants_broker_execution_authority",
+    "grants_real_money_authority",
+    "grants_state_mutation_authority",
+)
+_RESULT_AUTHORITY_PROPERTY_WITNESSES = tuple(
+    (
+        name,
+        _RESULT_TYPE.__dict__[name],
+        _RESULT_TYPE.__dict__[name].fget,
+        getattr(_RESULT_TYPE.__dict__[name].fget, "__code__", None),
+    )
+    for name in _RESULT_AUTHORITY_PROPERTY_NAMES
+)
+_RESULT_AUTHORITY_PROPERTY_WITNESSES_EXPECTED = (
+    _RESULT_AUTHORITY_PROPERTY_WITNESSES
+)
+
+
 _RESULT_FIELDS = (
     "workspace_instance_id",
     "decision_id",
@@ -455,10 +504,51 @@ def _require_dispatch(
             for name, descriptor, getter, code
             in _TERMINAL_POPULATION_PROPERTY_WITNESSES_EXPECTED
         )
+        or ProductProposalRiskScenarioPopulation is not _RESULT_TYPE_EXPECTED
+        or _RESULT_TYPE is not _RESULT_TYPE_EXPECTED
+        or _RESULT_AUTHORITY_PROPERTY_WITNESSES
+        is not _RESULT_AUTHORITY_PROPERTY_WITNESSES_EXPECTED
+        or any(
+            ProductProposalRiskScenarioPopulation.__dict__.get(name)
+            is not descriptor
+            or getattr(
+                ProductProposalRiskScenarioPopulation.__dict__.get(name),
+                "fget",
+                None,
+            )
+            is not getter
+            or getattr(getter, "__code__", None) is not code
+            for name, descriptor, getter, code
+            in _RESULT_AUTHORITY_PROPERTY_WITNESSES_EXPECTED
+        )
+        or _JSON_DUMPS is not _JSON_DUMPS_EXPECTED
+        or json.dumps is not _JSON_DUMPS_EXPECTED
+        or getattr(_JSON_DUMPS_EXPECTED, "__code__", None) is not _JSON_DUMPS_CODE
+        or _HASHLIB_SHA256 is not _HASHLIB_SHA256_EXPECTED
+        or hashlib.sha256 is not _HASHLIB_SHA256_EXPECTED
     ):
         raise ProductProposalRiskScenarioPopulationError(
             "scenario population authority dispatch changed"
         )
+
+    helper_witnesses = globals().get("_HELPER_WITNESSES")
+    expected_helper_witnesses = globals().get("_HELPER_WITNESSES_EXPECTED")
+    if (
+        helper_witnesses is not expected_helper_witnesses
+        or type(helper_witnesses) is not tuple
+    ):
+        raise ProductProposalRiskScenarioPopulationError(
+            "scenario population authority dispatch changed"
+        )
+    for name, expected_function, code in expected_helper_witnesses:
+        current_function = globals().get(name)
+        if (
+            current_function is not expected_function
+            or getattr(current_function, "__code__", None) is not code
+        ):
+            raise ProductProposalRiskScenarioPopulationError(
+                "scenario population authority dispatch changed"
+            )
 
 
 _REQUIRE_DISPATCH_ORIGINAL = _require_dispatch
@@ -1128,7 +1218,7 @@ def _mint(
     _bind_identity=_BIND_IDENTITY,
 ) -> ProductProposalRiskScenarioPopulation:
     members = values["members"]
-    instance = object.__new__(ProductProposalRiskScenarioPopulation)
+    instance = object.__new__(_RESULT_TYPE)
     result = {
         "workspace_instance_id": precommit.workspace_instance_id,
         "decision_id": record.decision_id,
@@ -1152,6 +1242,39 @@ def _mint(
         object.__setattr__(instance, name, result[name])
     _bind_identity(instance)
     return instance
+
+
+_HELPER_WITNESSES = tuple(
+    (
+        name,
+        globals()[name],
+        getattr(globals()[name], "__code__", None),
+    )
+    for name in (
+        "_text",
+        "_sha",
+        "_instant",
+        "_decimal_text",
+        "_canonical_json",
+        "_digest",
+        "_workspace_path",
+        "_require_precommit",
+        "_require_terminal_population",
+        "_validate_members",
+        "_population_material",
+        "_current_economic_state",
+        "_require_parent_ledger_roots",
+        "_require_current_precommit_economics",
+        "_require_current_target_authority",
+        "_population_authority",
+        "_authority_tip",
+        "_record_values",
+        "_recover_population_authority",
+        "_require_authority_committed",
+        "_mint",
+    )
+)
+_HELPER_WITNESSES_EXPECTED = _HELPER_WITNESSES
 
 
 def issue_product_proposal_risk_scenario_population(

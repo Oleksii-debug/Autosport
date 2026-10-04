@@ -8,6 +8,7 @@ import hashlib
 
 import pytest
 
+import autosport.policy_update_authority as update_authority_module
 from autosport.learning_environment import (
     CausalLearningEnvironment,
     EnvironmentIdentity,
@@ -227,3 +228,66 @@ def test_utility_gate_rejects_polymorphic_authority_inputs(forged_component: str
 
     with pytest.raises(TypeError, match="exact|canonical"):
         attempt_utility_bound_update(**arguments)
+
+
+def test_utility_gate_rejects_rebound_policy_root_before_hostile_dispatch(
+    monkeypatch,
+) -> None:
+    policy, action, reward, transition = _resolved_step()
+    utility = _utility(policy, action, reward, transition)
+    hostile_calls: list[str] = []
+
+    class ForgedPolicy:
+        def __getattribute__(self, name):
+            hostile_calls.append(name)
+            raise AssertionError("forged policy dispatch executed")
+
+    forged = object.__new__(ForgedPolicy)
+    monkeypatch.setattr(update_authority_module, "BanditPolicyState", ForgedPolicy)
+
+    with pytest.raises(
+        LearningEnvironmentError,
+        match="input type authority changed",
+    ):
+        attempt_utility_bound_update(
+            policy=forged,
+            action=action,
+            reward=reward,
+            transition=transition,
+            utility=utility,
+        )
+
+    assert hostile_calls == []
+
+
+def test_utility_gate_rejects_rebound_utility_root_before_hostile_dispatch(
+    monkeypatch,
+) -> None:
+    policy, action, reward, transition = _resolved_step()
+    hostile_calls: list[str] = []
+
+    class ForgedUtility:
+        def __getattribute__(self, name):
+            hostile_calls.append(name)
+            raise AssertionError("forged utility dispatch executed")
+
+    forged = object.__new__(ForgedUtility)
+    monkeypatch.setattr(
+        update_authority_module,
+        "PolicyUtilityEvidence",
+        ForgedUtility,
+    )
+
+    with pytest.raises(
+        LearningEnvironmentError,
+        match="input type authority changed",
+    ):
+        attempt_utility_bound_update(
+            policy=policy,
+            action=action,
+            reward=reward,
+            transition=transition,
+            utility=forged,
+        )
+
+    assert hostile_calls == []

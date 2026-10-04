@@ -497,6 +497,25 @@ class PolicyUpdateEvidence:
                 raise LearningEnvironmentError("policy update reward witness identity mismatch")
             if self.transition.transition_id != self.transition_id:
                 raise LearningEnvironmentError("policy update transition witness identity mismatch")
+            if (
+                self.reward.action_id != self.action_id
+                or self.transition.action_id != self.action_id
+            ):
+                raise LearningEnvironmentError(
+                    "policy update witnesses do not bind the exact action"
+                )
+            if self.transition.observation_id != self.action.observation_id:
+                raise LearningEnvironmentError(
+                    "policy update witnesses do not bind the exact observation"
+                )
+            if self.transition.outcome_id != self.reward.outcome_id:
+                raise LearningEnvironmentError(
+                    "policy update witnesses do not bind the exact outcome"
+                )
+            if self.transition.reward_id != self.reward_id:
+                raise LearningEnvironmentError(
+                    "policy update witnesses do not bind the exact reward"
+                )
             if self.reward.truth is not self.reward_truth:
                 raise LearningEnvironmentError("policy update reward truth witness mismatch")
             if self.reward.simulation_model_id != self.simulation_model_id:

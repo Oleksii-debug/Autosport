@@ -436,6 +436,93 @@ class CollectorDeltaTests(unittest.TestCase):
                 peer_state,
             )
 
+    def test_completed_receipts_fail_closed_on_corrupted_recovery_evidence(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "canonical-application.json"
+            market_store = SQLiteMarketStore(root / "market.db")
+            try:
+                application = CanonicalDesktopApplication(
+                    MarketEventBus(market_store),
+                    SourceHealthStore(root / "health.json"),
+                    state_path,
+                    clock=lambda: "2026-01-01T00:00:05+00:00",
+                )
+                receipt = application.apply(delta, event)
+                self.assertEqual(
+                    application.completed_receipts_for_source("source-x"),
+                    (receipt,),
+                )
+            finally:
+                market_store.close()
+
+            original = json.loads(state_path.read_text(encoding="utf-8"))
+            for mutation in (
+                "receipt_id",
+                "completed_before_prepared",
+                "health_poll_count",
+                "health_source_id",
+                "health_cursor",
+            ):
+                with self.subTest(mutation=mutation):
+                    corrupted = json.loads(json.dumps(original))
+                    item = corrupted["applications"][delta.delta_id]
+                    if mutation == "receipt_id":
+                        item["receipt_id"] = "forged-receipt"
+                    elif mutation == "completed_before_prepared":
+                        item["completed_at"] = "2026-01-01T00:00:04+00:00"
+                    elif mutation == "health_poll_count":
+                        item["health_after"]["poll_count"] += 1
+                    elif mutation == "health_source_id":
+                        item["health_after"]["source_id"] = "other-source"
+                    elif mutation == "health_cursor":
+                        item["health_after"]["last_cursor"] = "forged-cursor"
+
+                    state_path.write_text(
+                        json.dumps(
+                            corrupted,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            indent=2,
+                            allow_nan=False,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    reopened = CanonicalDesktopApplication(
+                        object(),
+                        object(),
+                        state_path,
+                        clock=lambda: "2026-01-01T00:00:06+00:00",
+                    )
+                    with self.assertRaises(ApplicationReceiptError):
+                        reopened.completed_receipts_for_source("source-x")
+
+            state_path.write_text(
+                json.dumps(
+                    original,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                    allow_nan=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            reopened = CanonicalDesktopApplication(
+                object(),
+                object(),
+                state_path,
+                clock=lambda: "2026-01-01T00:00:06+00:00",
+            )
+            self.assertEqual(
+                reopened.completed_receipts_for_source("source-x"),
+                (receipt,),
+            )
+
     def test_checkpoint_first_open_preserves_peer_state_created_at_lock_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "desktop.json"

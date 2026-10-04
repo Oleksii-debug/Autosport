@@ -622,6 +622,17 @@ def _assess_betfair_historical_market_definition_authority_unsealed(
         raise ValueError("provider_publish_at must not be after observed_at")
     if type(market_definition) is not dict:
         raise ValueError("market_definition must be a JSON object")
+    try:
+        first_definition_json = _canonical_json(market_definition)
+        second_definition_json = _canonical_json(market_definition)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("market_definition must contain canonical JSON data") from exc
+    if first_definition_json != second_definition_json:
+        raise ValueError("market_definition changed during canonical snapshot")
+    detached_definition = json.loads(first_definition_json)
+    if type(detached_definition) is not dict:
+        raise ValueError("market_definition canonical snapshot must be a JSON object")
+    market_definition = detached_definition
 
     event_id = _canonical_text(
         "marketDefinition.eventId",

@@ -258,10 +258,18 @@ def select_superseded_runs(
     current_run_id: int,
     cancel_same_head: bool = False,
 ) -> tuple[int, ...]:
-    pr_number = _require_positive_int(pr_number, field="pull request number")
-    current_run_id = _require_positive_int(current_run_id, field="current run id")
-    live_head_sha = _require_sha(live_head_sha, field="live head sha")
-    if not workflow_name:
+    # These values are cancellation-effect coordinates. Validate the primitives
+    # directly here rather than resolving mutable module-level compatibility helpers.
+    if type(pr_number) is not int or pr_number <= 0:
+        raise CancellationError("invalid pull request number")
+    if type(current_run_id) is not int or current_run_id <= 0:
+        raise CancellationError("invalid current run id")
+    if type(live_head_sha) is not str or len(live_head_sha) != 40:
+        raise CancellationError("invalid live head sha")
+    live_head_sha = live_head_sha.lower()
+    if any(ch not in "0123456789abcdef" for ch in live_head_sha):
+        raise CancellationError("invalid live head sha")
+    if type(workflow_name) is not str or not workflow_name:
         raise CancellationError("workflow name is required")
     if type(cancel_same_head) is not bool:
         raise CancellationError("cancel_same_head must be boolean")
@@ -949,6 +957,11 @@ def admit_current_head(
     _module_globals=globals(),
     _qualification_snapshot_impl=_qualification_snapshot,
     _qualification_snapshot_code=_qualification_snapshot.__code__,
+    _qualification_snapshot_defaults=_qualification_snapshot.__defaults__,
+    _qualification_snapshot_kwdefaults=_qualification_snapshot.__kwdefaults__,
+    _qualification_snapshot_kwdefault_items=tuple(
+        _qualification_snapshot.__kwdefaults__.items()
+    ),
     _result_type=CancellationResult,
     _result_init=CancellationResult.__dict__["__init__"],
     _result_init_code=CancellationResult.__dict__["__init__"].__code__,
@@ -963,12 +976,29 @@ def admit_current_head(
     if any(ch not in "0123456789abcdef" for ch in event_head_sha):
         raise CancellationError("invalid event head sha")
 
+    def qualification_snapshot_metadata_current() -> bool:
+        if (
+            getattr(_qualification_snapshot_impl, "__defaults__", None)
+            is not _qualification_snapshot_defaults
+        ):
+            return False
+        current = getattr(_qualification_snapshot_impl, "__kwdefaults__", None)
+        if current is not _qualification_snapshot_kwdefaults:
+            return False
+        if current is None or len(current) != len(_qualification_snapshot_kwdefault_items):
+            return False
+        return all(
+            key in current and current[key] is value
+            for key, value in _qualification_snapshot_kwdefault_items
+        )
+
     def admission_authority_current() -> bool:
         return (
             _module_globals.get("_qualification_snapshot")
             is _qualification_snapshot_impl
             and getattr(_qualification_snapshot_impl, "__code__", None)
             is _qualification_snapshot_code
+            and qualification_snapshot_metadata_current()
             and _module_globals.get("CancellationResult") is _result_type
             and _result_type.__dict__.get("__init__") is _result_init
             and getattr(_result_init, "__code__", None) is _result_init_code
@@ -1010,47 +1040,165 @@ def cancel_superseded(
     workflow_name: str,
     current_run_id: int,
     cancel_same_head: bool | None = None,
+    _module_globals=globals(),
+    _qualification_snapshot_impl=_qualification_snapshot,
+    _qualification_snapshot_code=_qualification_snapshot.__code__,
+    _qualification_snapshot_defaults=_qualification_snapshot.__defaults__,
+    _qualification_snapshot_kwdefaults=_qualification_snapshot.__kwdefaults__,
+    _qualification_snapshot_kwdefault_items=tuple(
+        _qualification_snapshot.__kwdefaults__.items()
+    ),
+    _selector_impl=select_superseded_runs,
+    _selector_code=select_superseded_runs.__code__,
+    _result_type=CancellationResult,
+    _result_init=CancellationResult.__dict__["__init__"],
+    _result_init_code=CancellationResult.__dict__["__init__"].__code__,
+    _production_api_type=GitHubApi,
+    _production_active_runs=GitHubApi.active_runs,
+    _production_active_runs_code=GitHubApi.active_runs.__code__,
+    _production_cancel=GitHubApi.cancel,
+    _production_cancel_code=GitHubApi.cancel.__code__,
 ) -> CancellationResult:
-    event_head_sha = _require_sha(event_head_sha, field="event head sha")
+    """Cancel only runs selected by the frozen live-PR/candidate authority graph."""
+
+    def qualification_snapshot_metadata_current() -> bool:
+        if (
+            getattr(_qualification_snapshot_impl, "__defaults__", None)
+            is not _qualification_snapshot_defaults
+        ):
+            return False
+        current = getattr(_qualification_snapshot_impl, "__kwdefaults__", None)
+        if current is not _qualification_snapshot_kwdefaults:
+            return False
+        if current is None or len(current) != len(_qualification_snapshot_kwdefault_items):
+            return False
+        return all(
+            key in current and current[key] is value
+            for key, value in _qualification_snapshot_kwdefault_items
+        )
+
+    def cancellation_authority_current() -> bool:
+        if (
+            _module_globals.get("_qualification_snapshot")
+            is not _qualification_snapshot_impl
+            or getattr(_qualification_snapshot_impl, "__code__", None)
+            is not _qualification_snapshot_code
+            or not qualification_snapshot_metadata_current()
+            or _module_globals.get("select_superseded_runs") is not _selector_impl
+            or getattr(_selector_impl, "__code__", None) is not _selector_code
+            or _module_globals.get("CancellationResult") is not _result_type
+            or _result_type.__dict__.get("__init__") is not _result_init
+            or getattr(_result_init, "__code__", None) is not _result_init_code
+        ):
+            return False
+        if type(api) is _production_api_type:
+            return (
+                _production_api_type.__dict__.get("active_runs")
+                is _production_active_runs
+                and getattr(_production_active_runs, "__code__", None)
+                is _production_active_runs_code
+                and _production_api_type.__dict__.get("cancel")
+                is _production_cancel
+                and getattr(_production_cancel, "__code__", None)
+                is _production_cancel_code
+            )
+        return True
+
+    active_runs = getattr(api, "active_runs", None)
+    active_runs_func = getattr(active_runs, "__func__", active_runs)
+    active_runs_self = getattr(active_runs, "__self__", None)
+    active_runs_code = getattr(active_runs_func, "__code__", None)
+    cancel = getattr(api, "cancel", None)
+    cancel_func = getattr(cancel, "__func__", cancel)
+    cancel_self = getattr(cancel, "__self__", None)
+    cancel_code = getattr(cancel_func, "__code__", None)
+
+    def api_dispatch_current() -> bool:
+        rebound_active = getattr(api, "active_runs", None)
+        rebound_cancel = getattr(api, "cancel", None)
+        return (
+            callable(active_runs)
+            and active_runs_code is not None
+            and getattr(rebound_active, "__self__", None) is active_runs_self
+            and getattr(rebound_active, "__func__", rebound_active) is active_runs_func
+            and getattr(active_runs_func, "__code__", None) is active_runs_code
+            and callable(cancel)
+            and cancel_code is not None
+            and getattr(rebound_cancel, "__self__", None) is cancel_self
+            and getattr(rebound_cancel, "__func__", rebound_cancel) is cancel_func
+            and getattr(cancel_func, "__code__", None) is cancel_code
+        )
+
+    if not cancellation_authority_current() or not api_dispatch_current():
+        raise CancellationError("superseded-run cancellation authority changed")
+    if type(pr_number) is not int or pr_number <= 0:
+        raise CancellationError("invalid pull request number")
+    if type(current_run_id) is not int or current_run_id <= 0:
+        raise CancellationError("invalid current run id")
+    if type(event_head_sha) is not str or len(event_head_sha) != 40:
+        raise CancellationError("invalid event head sha")
+    event_head_sha = event_head_sha.lower()
+    if any(ch not in "0123456789abcdef" for ch in event_head_sha):
+        raise CancellationError("invalid event head sha")
+    if type(workflow_name) is not str or not workflow_name:
+        raise CancellationError("workflow name is required")
     if cancel_same_head is not None and type(cancel_same_head) is not bool:
         raise CancellationError("cancel_same_head must be boolean or None")
-    qualification = _qualification_snapshot(
+
+    qualification = _qualification_snapshot_impl(
         api, pr_number, legacy_cancel_same_head=cancel_same_head
     )
+    if not cancellation_authority_current() or not api_dispatch_current():
+        raise CancellationError("superseded-run cancellation authority changed")
     live_head_sha, integration_capable = qualification
     if event_head_sha != live_head_sha:
-        return CancellationResult(current_head=False, cancelled_run_ids=())
+        return _result_type(current_head=False, cancelled_run_ids=())
     derived_cancel_same_head = not integration_capable
     if cancel_same_head is not None and cancel_same_head != derived_cancel_same_head:
         raise CancellationError("cancel_same_head conflicts with live PR qualification")
-    active_runs = api.active_runs()
-    if _qualification_snapshot(
+
+    active_run_snapshot = active_runs()
+    if not cancellation_authority_current() or not api_dispatch_current():
+        raise CancellationError("superseded-run cancellation authority changed")
+    confirmation = _qualification_snapshot_impl(
         api, pr_number, legacy_cancel_same_head=cancel_same_head
-    ) != qualification:
-        return CancellationResult(current_head=False, cancelled_run_ids=())
-    selected = select_superseded_runs(
-        active_runs,
+    )
+    if not cancellation_authority_current() or not api_dispatch_current():
+        raise CancellationError("superseded-run cancellation authority changed")
+    if confirmation != qualification:
+        return _result_type(current_head=False, cancelled_run_ids=())
+
+    selected = _selector_impl(
+        active_run_snapshot,
         pr_number=pr_number,
         live_head_sha=live_head_sha,
         workflow_name=workflow_name,
         current_run_id=current_run_id,
         cancel_same_head=derived_cancel_same_head,
     )
+    if not cancellation_authority_current() or not api_dispatch_current():
+        raise CancellationError("superseded-run cancellation authority changed")
+
     cancelled: list[int] = []
     for run_id in selected:
         # Head and lifecycle eligibility are one authority snapshot. If either changes
         # (including same-head draft/ready transitions), revoke cancellation authority
         # before the next irreversible POST.
-        if _qualification_snapshot(
+        confirmation = _qualification_snapshot_impl(
             api, pr_number, legacy_cancel_same_head=cancel_same_head
-        ) != qualification:
-            return CancellationResult(
+        )
+        if not cancellation_authority_current() or not api_dispatch_current():
+            raise CancellationError("superseded-run cancellation authority changed")
+        if confirmation != qualification:
+            return _result_type(
                 current_head=False,
                 cancelled_run_ids=tuple(cancelled),
             )
-        api.cancel(run_id)
+        cancel(run_id)
+        if not cancellation_authority_current() or not api_dispatch_current():
+            raise CancellationError("superseded-run cancellation authority changed")
         cancelled.append(run_id)
-    return CancellationResult(current_head=True, cancelled_run_ids=tuple(cancelled))
+    return _result_type(current_head=True, cancelled_run_ids=tuple(cancelled))
 
 
 def _write_github_output(result: CancellationResult) -> None:

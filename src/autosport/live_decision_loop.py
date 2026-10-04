@@ -1485,12 +1485,12 @@ class PersistentLiveDecisionLoop:
         ):
             existing_recovery_action = (
                 self.decision_ledger.verified_economic_decision_for_material_action(
-                    self._prospective_decision_id(
+                    self._decision_identity(
                         plan=plan,
                         market_state_sha256=progress.market_state_sha256,
                         gate=progress.gate,
                         decision_context_sha256=progress.decision_context_sha256,
-                    ),
+                    )[1],
                     self.authority.contract,
                     risk_policy=self.authority.risk_policy,
                 )
@@ -1828,14 +1828,14 @@ class PersistentLiveDecisionLoop:
             detail=result.detail,
         )
 
-    def _prospective_decision_id(
+    def _decision_identity(
         self,
         *,
         plan: PortfolioPlan,
         market_state_sha256: str,
         gate: str,
         decision_context_sha256: str,
-    ) -> str:
+    ) -> tuple[str, str]:
         provenance = self.intent_provenance
         context_payload = {
             "schema": "autosport.live_decision_context",
@@ -1850,7 +1850,8 @@ class PersistentLiveDecisionLoop:
             "intent_provenance_sha256": provenance.provenance_sha256,
             "plan_sha256": plan.plan_sha256,
         }
-        return f"live-{_canonical_json_sha256(context_payload)}"
+        context_hash = _canonical_json_sha256(context_payload)
+        return context_hash, f"live-{context_hash}"
 
     def _persist_plan(
         self,
@@ -1871,21 +1872,7 @@ class PersistentLiveDecisionLoop:
                 decision_context_sha256_override,
             )
         provenance = self.intent_provenance
-        context_payload = {
-            "schema": "autosport.live_decision_context",
-            "schema_version": 2,
-            "loop_id": self.loop_id,
-            "mode": self.mode.value,
-            "gate": gate,
-            "market_state_sha256": market_state_sha256,
-            "decision_context_sha256": decision_context_sha256,
-            "intent_strategy_version_id": provenance.strategy_version_id,
-            "intent_model_version_id": provenance.model_version_id,
-            "intent_provenance_sha256": provenance.provenance_sha256,
-            "plan_sha256": plan.plan_sha256,
-        }
-        context_hash = _canonical_json_sha256(context_payload)
-        decision_id = self._prospective_decision_id(
+        context_hash, decision_id = self._decision_identity(
             plan=plan,
             market_state_sha256=market_state_sha256,
             gate=gate,

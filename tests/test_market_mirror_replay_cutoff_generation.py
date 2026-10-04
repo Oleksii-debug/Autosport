@@ -228,6 +228,52 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 reopened.close()
 
+    def test_database_authority_key_folds_win32_case_and_trailing_aliases(self) -> None:
+        with patch.object(storage_module.os, "name", "nt"):
+            self.assertEqual(
+                storage_module._database_authority_key(Path("Odds.DB")),
+                "odds.db",
+            )
+            self.assertEqual(
+                storage_module._database_authority_key(Path("ODDS.DB. ")),
+                "odds.db",
+            )
+
+    def test_database_authority_key_preserves_posix_case_distinction(self) -> None:
+        with patch.object(storage_module.os, "name", "posix"):
+            self.assertEqual(
+                storage_module._database_authority_key(Path("Odds.DB")),
+                "Odds.DB",
+            )
+            self.assertEqual(
+                storage_module._database_authority_key(Path("odds.db")),
+                "odds.db",
+            )
+
+    @unittest.skipUnless(os.name == "nt", "Win32 case alias semantics required")
+    def test_windows_case_alias_reuses_database_machine_authorities(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            primary_path = Path(directory) / "Market.DB"
+            first = SQLiteMarketStore(primary_path)
+            try:
+                append_journal = first._market_append_authority().journal_dir
+                cutoff_journal = first._replay_cutoff_authority().journal_dir
+            finally:
+                first.close()
+
+            reopened = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                self.assertEqual(
+                    reopened._market_append_authority().journal_dir,
+                    append_journal,
+                )
+                self.assertEqual(
+                    reopened._replay_cutoff_authority().journal_dir,
+                    cutoff_journal,
+                )
+            finally:
+                reopened.close()
+
     def test_append_uses_same_global_lock_order_as_trusted_readers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

@@ -399,11 +399,11 @@ def observe_workspace_once(
             if not isinstance(mirror_updates, BoundedMirrorInvalidationBuffer):
                 raise TypeError("mirror_updates must be a BoundedMirrorInvalidationBuffer")
             mirror = mirror_updates.mirror
-            # Reconcile the non-durable mirror from canonical append-only history at
-            # each observation boundary. Re-applying identical/stale events is
-            # idempotent and deliberately does not enqueue downstream invalidations.
-            for persisted_event in store.trusted_live_events():
-                mirror.apply(persisted_event)
+            # Reconcile only receipt-authoritative current state and route every
+            # material missed update through the same bounded invalidation protocol
+            # used by live subscriber delivery. This avoids replaying append-only
+            # history at each short-lived workspace observation boundary.
+            mirror_updates.reconcile_trusted_store(store)
 
         bus = MarketEventBus(store)
         bus.subscribe(mirror_updates.accept_persisted)

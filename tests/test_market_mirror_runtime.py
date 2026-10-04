@@ -105,6 +105,41 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             (("provider-a", "event-1|market-1|selection-1"),),
         )
 
+    def test_live_buffer_seals_canonical_mirror_apply_descriptor(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        event = self.event(sequence=1)
+
+        with patch.object(
+            MarketMirror,
+            "apply",
+            side_effect=AssertionError("mutable apply descriptor must not be consulted"),
+        ):
+            result = runtime.accept_persisted(event)
+
+        self.assertEqual(result.status, MirrorUpdate.APPLIED)
+        self.assertEqual(runtime.pending_recovery_count, 0)
+        self.assertEqual(runtime.pending_count, 1)
+
+    def test_recovery_seals_canonical_mirror_apply_descriptor(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        event = self.event(sequence=1)
+
+        with mirror.hold_revision(0):
+            with self.assertRaises(MarketMirrorRevisionChanged):
+                runtime.accept_persisted(event)
+
+        with patch.object(
+            MarketMirror,
+            "apply",
+            side_effect=AssertionError("mutable apply descriptor must not be consulted"),
+        ):
+            recovered = runtime.reconcile_pending()
+
+        self.assertEqual(recovered[0].status, MirrorUpdate.APPLIED)
+        self.assertEqual(runtime.pending_recovery_count, 0)
+
     def test_failed_reconciliation_keeps_head_until_mirror_can_advance(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror)

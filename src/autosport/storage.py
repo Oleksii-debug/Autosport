@@ -853,6 +853,8 @@ class SQLiteMarketStore:
         if cursor.rowcount != 1:
             raise RuntimeError("live receipt authority insert did not persist exactly one row")
 
+    _sealed_live_receipt_writer = _insert_live_receipt_authority
+
     def _append_batch_accepted_canonical(
         self,
         events: Iterable[MarketEvent],
@@ -875,6 +877,8 @@ class SQLiteMarketStore:
                     self.connection.commit()
         return accepted
 
+    _sealed_canonical_append = _append_batch_accepted_canonical
+
     def _before_live_append_attempt(self, events: Iterable[MarketEvent]) -> None:
         """Non-authoritative pre-transaction retry/fault-injection seam."""
 
@@ -883,7 +887,6 @@ class SQLiteMarketStore:
         events: Iterable[MarketEvent],
         *,
         _market_event_type: type[MarketEvent] = MarketEvent,
-        _canonical_append=_append_batch_accepted_canonical,
     ) -> list[MarketEvent]:
         """Persist one live-ingestion batch and its receipt witnesses atomically.
 
@@ -962,7 +965,10 @@ class SQLiteMarketStore:
                         projection_state[projection_key] = event
 
                 changes_before = self.connection.total_changes
-                accepted = _canonical_append(self, batch)
+                accepted = __class__._sealed_canonical_append(
+                    self,
+                    batch,
+                )
                 if not self.connection.in_transaction:
                     raise RuntimeError(
                         "live append hook relinquished transaction ownership"
@@ -1010,7 +1016,11 @@ class SQLiteMarketStore:
 
                 receipt_changes_before = self.connection.total_changes
                 for event in expected:
-                    self._insert_live_receipt_authority(event)
+                    __class__._sealed_live_receipt_writer(self, event)
+                if not self.connection.in_transaction:
+                    raise RuntimeError(
+                        "live receipt writer relinquished transaction ownership"
+                    )
                 if (
                     self.connection.total_changes - receipt_changes_before
                     != len(expected)

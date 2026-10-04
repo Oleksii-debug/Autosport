@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import autosport.market_outcomes as market_outcomes
+import autosport.scenario_search as scenario_search
 from autosport.domain import MarketType, TicketLeg
 from autosport.market_outcomes import (
     MarketOutcomeIdentity,
@@ -314,6 +315,56 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
             authority.assert_available_as_of(decision)
         self.assertEqual(hooks, 0)
         self.assertNotEqual(authority.source_revision, "tampered-by-time-hook")
+
+    def test_authoritative_search_rejects_authority_collection_change_during_snapshot(self):
+        authority = self._authority(("away", "home"))
+        authorities = [authority]
+        canonical_assert = scenario_search._ASSERT_MARKET_OUTCOME_AUTHORITY
+        calls = 0
+
+        def mutating_assert(value):
+            nonlocal calls
+            canonical_assert(value)
+            calls += 1
+            if calls == 1:
+                authorities.clear()
+
+        with patch(
+            "autosport.scenario_search._ASSERT_MARKET_OUTCOME_AUTHORITY",
+            side_effect=mutating_assert,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "market outcome authority set changed during snapshot",
+            ):
+                ScenarioSearchEngine().analyse_authoritative(
+                    [],
+                    authorities,
+                    decision_as_of=self.DECISION_AS_OF,
+                )
+
+    def test_authoritative_search_rechecks_collection_after_causal_boundary(self):
+        authority = self._authority(("away", "home"))
+        authorities = [authority]
+        canonical_available = scenario_search._OUTCOME_ASSERT_AVAILABLE
+
+        def mutating_available(value, decision_as_of):
+            canonical_available(value, decision_as_of)
+            authorities.clear()
+
+        with patch(
+            "autosport.scenario_search._OUTCOME_ASSERT_AVAILABLE",
+            side_effect=mutating_available,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "market outcome authority set changed during analysis boundary",
+            ):
+                ScenarioSearchEngine().analyse_authoritative(
+                    [],
+                    authorities,
+                    decision_as_of=self.DECISION_AS_OF,
+                )
 
     def test_authoritative_scenario_search_covers_unticketed_real_third_outcome(self):
         authority = self._authority()

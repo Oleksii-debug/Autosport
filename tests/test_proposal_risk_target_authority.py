@@ -286,8 +286,8 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
     def test_product_issues_and_reresolves_target_science_join_without_result_authority(
         self,
     ) -> None:
-        target = self._issue()
         membership, registry_path, manifest = self._science_state()
+        target = self._issue()
 
         joined = issue_product_proposal_risk_evaluation_precommit(
             self.workspace,
@@ -351,6 +351,16 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             authority_root=self.authority_root,
         )
         self.assertEqual(resolved, joined)
+
+        retried = issue_product_proposal_risk_evaluation_precommit(
+            self.workspace,
+            target_sha256=target.target_sha256,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            authority_root=self.authority_root,
+        )
+        self.assertEqual(retried, joined)
 
         records = JsonlDecisionLedger(
             self.workspace / "decisions.jsonl"

@@ -172,6 +172,19 @@ def _bind_live_batch_writer(
 
     active_calls = local()
 
+    class _BoundStoreAuthority:
+        __slots__ = ("connection", "_connection_lock")
+
+    authority_type = _BoundStoreAuthority
+    object_new = object.__new__
+    object_setattr = object.__setattr__
+
+    def authority_view(connection, connection_lock):
+        bound_store = object_new(authority_type)
+        object_setattr(bound_store, "connection", connection)
+        object_setattr(bound_store, "_connection_lock", connection_lock)
+        return bound_store
+
     def bound(self, events):
         active_store_ids = getattr(active_calls, "store_ids", None)
         if active_store_ids is None:
@@ -190,6 +203,7 @@ def _bind_live_batch_writer(
                 _market_event_type=market_event_type,
                 _canonical_append=canonical_append,
                 _receipt_writer=receipt_writer,
+                _authority_view_factory=authority_view,
             )
         finally:
             active_store_ids.remove(store_id)
@@ -1244,6 +1258,7 @@ class SQLiteMarketStore:
         _market_event_type: type[MarketEvent],
         _canonical_append,
         _receipt_writer,
+        _authority_view_factory,
         _batch_type=_LiveReceiptBatch,
         _batch_init=_LiveReceiptBatch.__init__,
         _decode_batch_payload=_decode_market_event,
@@ -1279,6 +1294,7 @@ class SQLiteMarketStore:
         connection_lock = self._connection_lock
         connection = self.connection
         store_path = self.path
+        authority_store = _authority_view_factory(connection, connection_lock)
         with connection_lock:
             if (
                 self._connection_lock is not connection_lock
@@ -1381,7 +1397,7 @@ class SQLiteMarketStore:
                 # canonical_events was reconstructed from the sealed payload tuple
                 # before the replaceable retry seam ran. Persist that exact tuple
                 # directly; the retry-only capability object is never a durable source.
-                accepted = _canonical_append(self, canonical_events)
+                accepted = _canonical_append(authority_store, canonical_events)
                 if not connection.in_transaction:
                     raise RuntimeError(
                         "live append hook relinquished transaction ownership"
@@ -1429,7 +1445,7 @@ class SQLiteMarketStore:
 
                 receipt_changes_before = connection.total_changes
                 for event in expected:
-                    _receipt_writer(self, event)
+                    _receipt_writer(authority_store, event)
                 if not connection.in_transaction:
                     raise RuntimeError(
                         "live receipt writer relinquished transaction ownership"
@@ -1491,6 +1507,14 @@ class SQLiteMarketStore:
                         raise RuntimeError(
                             "trusted live current projection did not retain canonical order"
                         )
+                if (
+                    self._connection_lock is not connection_lock
+                    or self.connection is not connection
+                    or self.path is not store_path
+                ):
+                    raise RuntimeError(
+                        "live receipt store authority changed during authority transaction"
+                    )
             except Exception:
                 connection.rollback()
                 raise

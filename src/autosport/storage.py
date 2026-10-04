@@ -1100,9 +1100,8 @@ class SQLiteMarketStore:
 
     @staticmethod
     def _append_authority_committed_tip(
-        authority: MonotonicWorkspaceAuthority,
+        history: tuple,
     ) -> tuple[int, str]:
-        history = authority.read_history()
         commits = tuple(
             record for record in history if record.phase is AuthorityPhase.COMMIT
         )
@@ -1230,8 +1229,9 @@ class SQLiteMarketStore:
                     tx_id=pending.tx_id,
                     semantic_binding_sha256=pending.semantic_binding_sha256,
                 )
+            history = authority.read_history()
         committed_head, committed_state_sha256 = (
-            self._append_authority_committed_tip(authority)
+            self._append_authority_committed_tip(history)
         )
         database_head = self._positive_append_generation_head()
         if database_head != committed_head:
@@ -1247,14 +1247,13 @@ class SQLiteMarketStore:
         # Cutoff issuance runs this while holding BEGIN IMMEDIATE, so an
         # uncooperating direct SQLite writer cannot change the corpus between this
         # proof and cutoff publication.
-        self._recover_positive_append_authority(authority)
+        committed_head, committed_state_sha256 = (
+            self._recover_positive_append_authority(authority)
+        )
         entries = self._validated_positive_append_entries()
         observed_state_sha256 = self._append_state_from_entries(
             entries,
             baseline_state_sha256=self._generation_zero_baseline_state_sha256(),
-        )
-        committed_head, committed_state_sha256 = (
-            self._append_authority_committed_tip(authority)
         )
         observed_head = entries[-1][0] if entries else 0
         if (

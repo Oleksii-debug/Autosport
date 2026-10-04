@@ -8,6 +8,7 @@ import pytest
 from autosport.real_execution_ledger import (
     ExecutionAction,
     ExecutionLedgerBusyError,
+    ExecutionLedgerIntegrityError,
     ExecutionPlan,
     RealExecutionLedger,
 )
@@ -120,4 +121,27 @@ def test_context_manager_rebind_cannot_bypass_revocation_fence(
             _revoke(ledger, plan)
         assert _is_active(ledger, plan) is True
     finally:
+        owner.release()
+
+
+def test_internal_lock_method_rebind_cannot_bypass_revocation_fence(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, plan = _ledger_with_active_approval(tmp_path)
+    owner = WorkspaceEconomicLock(tmp_path)
+    owner.acquire()
+    try:
+        monkeypatch.setattr(
+            WorkspaceEconomicLock,
+            "_lock_handle",
+            staticmethod(lambda handle: None),
+        )
+        with pytest.raises(
+            ExecutionLedgerIntegrityError,
+            match="serialization authority changed",
+        ):
+            _revoke(ledger, plan)
+        assert _is_active(ledger, plan) is True
+    finally:
+        monkeypatch.undo()
         owner.release()

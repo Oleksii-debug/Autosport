@@ -44,9 +44,41 @@ _LOCK_ACQUIRE = WorkspaceEconomicLock.acquire
 _LOCK_ACQUIRE_CODE = _LOCK_ACQUIRE.__code__
 _LOCK_RELEASE = WorkspaceEconomicLock.release
 _LOCK_RELEASE_CODE = _LOCK_RELEASE.__code__
+_LOCK_METHOD_GRAPH = tuple(
+    (
+        name,
+        getattr(_LOCK_TYPE, name),
+        getattr(getattr(_LOCK_TYPE, name), "__code__", None),
+    )
+    for name in (
+        "__init__",
+        "acquire",
+        "release",
+        "_open_lock_handle",
+        "_open_new_lock_handle",
+        "_validate_existing_lock_path",
+        "_validate_open_handle_identity",
+        "_require_regular_file",
+        "_require_single_link",
+        "_lock_handle",
+        "_unlock_handle",
+    )
+)
 
 
 def _build_fenced_revoke(raw_revoke, raw_revoke_code):
+    lock_type = _LOCK_TYPE
+    lock_method_graph = _LOCK_METHOD_GRAPH
+
+    def lock_method_graph_unchanged() -> bool:
+        return all(
+            getattr(lock_type, name, None) is expected
+            and (
+                expected_code is None
+                or getattr(expected, "__code__", None) is expected_code
+            )
+            for name, expected, expected_code in lock_method_graph
+        )
     def revoke_supervised_approval_with_workspace_fence(
         self: RealExecutionLedger,
         *,
@@ -70,6 +102,7 @@ def _build_fenced_revoke(raw_revoke, raw_revoke_code):
             or getattr(_LOCK_ACQUIRE, "__code__", None) is not _LOCK_ACQUIRE_CODE
             or _LOCK_TYPE.release is not _LOCK_RELEASE
             or getattr(_LOCK_RELEASE, "__code__", None) is not _LOCK_RELEASE_CODE
+            or not lock_method_graph_unchanged()
         ):
             raise ExecutionLedgerIntegrityError(
                 "supervised approval revocation serialization authority changed"
@@ -105,6 +138,7 @@ def _build_fenced_revoke(raw_revoke, raw_revoke_code):
                 or getattr(_LOCK_INIT, "__code__", None) is not _LOCK_INIT_CODE
                 or _LOCK_TYPE.acquire is not _LOCK_ACQUIRE
                 or _LOCK_TYPE.release is not _LOCK_RELEASE
+                or not lock_method_graph_unchanged()
             ):
                 raise ExecutionLedgerIntegrityError(
                     "supervised approval revocation authority changed while fenced"

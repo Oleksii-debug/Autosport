@@ -44,6 +44,8 @@ _CONSUME_CONFIRMATION = _confirmation.consume_betfair_execution_confirmation
 _CONSUME_CONFIRMATION_CODE = getattr(_CONSUME_CONFIRMATION, "__code__", None)
 _VERIFIED_EXECUTION_VIEW = _impl.RealExecutionLedger.verified_execution_view
 _VERIFIED_EXECUTION_VIEW_CODE = getattr(_VERIFIED_EXECUTION_VIEW, "__code__", None)
+_LEDGER_MUTATE = _impl.RealExecutionLedger._mutate
+_LEDGER_MUTATE_CODE = getattr(_LEDGER_MUTATE, "__code__", None)
 _SUBMITTED_STATE = _impl.AttemptState.SUBMITTED
 
 # The outer transport boundary seals not only the public consume function but every
@@ -197,6 +199,8 @@ if (
     or _CONSUME_CONFIRMATION_CODE is None
     or not callable(_VERIFIED_EXECUTION_VIEW)
     or _VERIFIED_EXECUTION_VIEW_CODE is None
+    or not callable(_LEDGER_MUTATE)
+    or _LEDGER_MUTATE_CODE is None
     or type(_TRUSTED_ACTIVE_BY_WORKSPACE) is not dict
     or type(_TRUSTED_ISSUED) is not dict
     or not callable(_REQUIRE_TRUSTED_PROFILE)
@@ -326,6 +330,8 @@ def _confirmation_graph_unchanged() -> bool:
         and _impl.RealExecutionLedger.verified_execution_view is _VERIFIED_EXECUTION_VIEW
         and getattr(_VERIFIED_EXECUTION_VIEW, "__code__", None)
         is _VERIFIED_EXECUTION_VIEW_CODE
+        and _impl.RealExecutionLedger._mutate is _LEDGER_MUTATE
+        and getattr(_LEDGER_MUTATE, "__code__", None) is _LEDGER_MUTATE_CODE
         and _impl.AttemptState.SUBMITTED is _SUBMITTED_STATE
     )
 
@@ -525,17 +531,23 @@ def _build_trusted_private_place_action(private_place_action, private_place_acti
                 raise _impl.BetfairSupervisedExecutionError(
                     "canonical Betfair internal provider-write authority changed"
                 )
-            return private_place_action(
-                self,
-                action,
-                profile=profile,
-                bound=bound,
-                provider_order_ref=provider_order_ref,
-                execution_workspace=execution_workspace,
-                _before_transport=_confirmed_before_transport,
-                _transport_post=_PROVIDER_HTTP_POST,
-                _response_parser=_RESPONSE_PARSER,
-                _observation_clock=_OBSERVATION_CLOCK,
+            def dispatch_under_durable_approval_fence():
+                return private_place_action(
+                    self,
+                    action,
+                    profile=profile,
+                    bound=bound,
+                    provider_order_ref=provider_order_ref,
+                    execution_workspace=execution_workspace,
+                    _before_transport=_confirmed_before_transport,
+                    _transport_post=_PROVIDER_HTTP_POST,
+                    _response_parser=_RESPONSE_PARSER,
+                    _observation_clock=_OBSERVATION_CLOCK,
+                )
+
+            return _LEDGER_MUTATE(
+                confirmation_context.ledger,
+                dispatch_under_durable_approval_fence,
             )
     return _trusted_private_place_action
 

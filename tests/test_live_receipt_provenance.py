@@ -209,21 +209,27 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             event = self._direct_event(sequence=1)
             self.assertTrue(store.append(event))
 
-            live = MarketMirror.from_live_store(store)
-            trusted_replay = MarketMirror.replay_view_from_store(
-                store,
-                as_of=datetime(2026, 10, 4, 3, 0, 3, tzinfo=timezone.utc),
-                max_age=timedelta(seconds=30),
-                require_live_receipt_authority=True,
-            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "live store must be an exact SQLiteMarketStore",
+            ):
+                MarketMirror.from_live_store(store)
+            with self.assertRaisesRegex(
+                TypeError,
+                "trusted live replay requires an exact SQLiteMarketStore",
+            ):
+                MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(2026, 10, 4, 3, 0, 3, tzinfo=timezone.utc),
+                    max_age=timedelta(seconds=30),
+                    require_live_receipt_authority=True,
+                )
             generic_replay = MarketMirror.replay_view_from_store(
                 store,
                 as_of=datetime(2026, 10, 4, 3, 0, 3, tzinfo=timezone.utc),
                 max_age=timedelta(seconds=30),
             )
 
-            self.assertEqual(live.snapshot(), ())
-            self.assertEqual(trusted_replay.events, ())
             self.assertEqual(generic_replay.events, (event,))
             store.close()
 

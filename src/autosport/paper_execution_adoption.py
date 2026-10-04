@@ -588,6 +588,16 @@ class PaperExecutionAdoptionRuntime:
         any substituted sport/bankroll/currency conflicts on the stable event key.
         """
         self._require_minted(prepared)
+        run_events = self.ledger.events(run_id)
+        scope_events = [
+            event
+            for event in run_events
+            if event["event_type"] == self._EXPOSURE_SCOPE_EVENT_TYPE
+        ]
+        if not scope_events and run_events:
+            raise PaperExecutionAdoptionError(
+                "exposure scope cannot be retroactively published after run state"
+            )
         self.ledger._append_event(
             event_type=self._EXPOSURE_SCOPE_EVENT_TYPE,
             run_id=run_id,

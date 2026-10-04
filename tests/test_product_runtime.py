@@ -847,6 +847,69 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_builder_ignores_manifest_method_io_and_type_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_type = product_runtime_module._ManifestStore
+            originals = {
+                "__init__": manifest_type.__init__,
+                "load_or_create": manifest_type.load_or_create,
+                "_read_raw": manifest_type._read_raw,
+                "_text": manifest_type._text,
+                "strict_json_loads": product_runtime_module.strict_json_loads,
+                "atomic_write_json": product_runtime_module.atomic_write_json,
+                "ProductCompositionManifest": (
+                    product_runtime_module.ProductCompositionManifest
+                ),
+            }
+
+            def forged(*_args, **_kwargs):
+                raise AssertionError("rebound manifest authority must not execute")
+
+            try:
+                manifest_type.__init__ = forged
+                manifest_type.load_or_create = forged
+                manifest_type._read_raw = forged
+                manifest_type._text = staticmethod(forged)
+                product_runtime_module.strict_json_loads = forged
+                product_runtime_module.atomic_write_json = forged
+                product_runtime_module.ProductCompositionManifest = type(
+                    "ForgedManifest",
+                    (),
+                    {},
+                )
+
+                runtime = build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+                try:
+                    self.assertEqual(runtime.manifest.source_id, "provider-a")
+                    self.assertEqual(runtime.manifest.initial_bankroll, "100")
+                    self.assertEqual(
+                        type(runtime.manifest).__name__,
+                        "ProductCompositionManifest",
+                    )
+                finally:
+                    runtime.close()
+            finally:
+                manifest_type.__init__ = originals["__init__"]
+                manifest_type.load_or_create = originals["load_or_create"]
+                manifest_type._read_raw = originals["_read_raw"]
+                manifest_type._text = staticmethod(originals["_text"])
+                product_runtime_module.strict_json_loads = originals[
+                    "strict_json_loads"
+                ]
+                product_runtime_module.atomic_write_json = originals[
+                    "atomic_write_json"
+                ]
+                product_runtime_module.ProductCompositionManifest = originals[
+                    "ProductCompositionManifest"
+                ]
+
     def test_builder_ignores_product_desktop_consumer_module_rebind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -2363,7 +2363,11 @@ class AutosportWebBridge:
             )
         return value
 
-    def _runtime_witness_path(self) -> Path | None:
+    def _runtime_witness_path(
+        self,
+        *,
+        _controller_type=_WEB_CONTROLLER_AUTHORITY_CLASS,
+    ) -> Path | None:
         """Return a witness path only from the immutable controller authority."""
 
         with self._trust_lock:
@@ -2374,7 +2378,7 @@ class AutosportWebBridge:
                     "The WebView bridge controller authority changed before runtime witness binding"
                 )
             self._assert_canonical_controller_surface_locked(controller)
-            if not isinstance(controller, AutosportWebController):
+            if not isinstance(controller, _controller_type):
                 return None
             workspace = getattr(controller, "workspace", None)
             if self._controller is not controller:

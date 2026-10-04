@@ -428,7 +428,10 @@ def test_ledger_backed_reconciliation_rejects_receipt_from_wrong_child(
         selection_id=a.quote.selection_id,
         side="BACK",
         requested_odds=a.quote.decimal_odds,
-        requested_stake=initial.legs[0].proposed_stake,
+        # Keep the durable parent amount valid so this fixture isolates the
+        # intended child-identity failure instead of tripping the stronger parent-
+        # amount authority first.
+        requested_stake=Decimal("100.00"),
         quote_id=a.quote.market_event_hash,
         quote_observed_at=a.quote.observed_ts,
         expires_at="2026-09-17T01:50:00+00:00",

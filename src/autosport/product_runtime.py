@@ -2752,6 +2752,11 @@ def _build_autonomous_product_runtime_impl(
                 "prepare_settlement",
                 None,
             )
+            learning_prepared_resolutions = getattr(
+                settlement_learning_handoff,
+                "prepared_settlement_resolutions",
+                None,
+            )
             learning_reconcile = getattr(
                 settlement_learning_handoff,
                 "reconcile_after_settlement",
@@ -2760,6 +2765,13 @@ def _build_autonomous_product_runtime_impl(
             if learning_prepare is not None and not callable(learning_prepare):
                 raise ProductCompositionError(
                     "settlement learning prepare_settlement must be callable or absent"
+                )
+            if (
+                learning_prepared_resolutions is not None
+                and not callable(learning_prepared_resolutions)
+            ):
+                raise ProductCompositionError(
+                    "settlement learning prepared_settlement_resolutions must be callable or absent"
                 )
             if not callable(learning_reconcile):
                 raise ProductCompositionError(
@@ -2831,6 +2843,22 @@ def _build_autonomous_product_runtime_impl(
                     return result
 
                 learning_proxy_methods["prepare_settlement"] = product_learning_prepare
+            if learning_prepared_resolutions is not None:
+                def product_learning_prepared_resolutions(
+                    _proxy,
+                    *,
+                    paper_book_path,
+                ):
+                    require_settlement_learning_authority()
+                    result = learning_prepared_resolutions(
+                        paper_book_path=paper_book_path,
+                    )
+                    require_settlement_learning_authority()
+                    return result
+
+                learning_proxy_methods["prepared_settlement_resolutions"] = (
+                    product_learning_prepared_resolutions
+                )
 
             ProductSettlementLearningHandoffProxy = build_sealed_product_proxy_type(
                 "ProductSettlementLearningHandoffProxy",

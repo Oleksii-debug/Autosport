@@ -107,9 +107,11 @@ def durable_path_lock(path: str | Path) -> Iterator[None]:
             return
 
         lock_path = destination.with_name(f".{destination.name}.lock")
-        handle = lock_path.open("a+b")
+        handle = _open_durable_lock_handle(lock_path)
         try:
+            _validate_durable_lock_handle_identity(lock_path, handle)
             _lock_handle(handle)
+            _validate_durable_lock_handle_identity(lock_path, handle)
             held[key] = [1, handle]
             try:
                 yield
@@ -179,6 +181,146 @@ def _open_read_only_no_follow_descriptor(path: Path) -> int:
 def _require_regular_single_link(metadata: os.stat_result) -> None:
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
         raise OSError("durable file must be a single-link regular non-symlink file")
+
+
+def _open_windows_durable_lock_descriptor(
+    path: Path,
+    *,
+    create_new: bool,
+) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+
+    generic_read = 0x80000000
+    generic_write = 0x40000000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    create_new_disposition = 1
+    open_existing = 3
+    file_attribute_normal = 0x00000080
+    file_flag_open_reparse_point = 0x00200000
+    invalid_handle_value = ctypes.c_void_p(-1).value
+
+    kernel_handle = create_file(
+        str(path),
+        generic_read | generic_write,
+        file_share_read | file_share_write | file_share_delete,
+        None,
+        create_new_disposition if create_new else open_existing,
+        file_attribute_normal | file_flag_open_reparse_point,
+        None,
+    )
+    if kernel_handle == invalid_handle_value:
+        error_code = ctypes.get_last_error()
+        if create_new and error_code in (80, 183):
+            raise FileExistsError(
+                error_code,
+                "durable lock path already exists",
+                str(path),
+            )
+        raise ctypes.WinError(error_code)
+
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    try:
+        return msvcrt.open_osfhandle(
+            kernel_handle,
+            os.O_RDWR | os.O_BINARY,
+        )
+    except BaseException:
+        close_handle(kernel_handle)
+        raise
+
+
+def _open_durable_lock_handle(path: Path):
+    """Create/open one persistent lock sidecar without traversing its final alias."""
+
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
+    descriptor: int
+    if os.name != "nt":
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        if not no_follow:
+            raise OSError("platform lacks no-follow durable lock support")
+        try:
+            descriptor = os.open(
+                path,
+                flags | os.O_CREAT | os.O_EXCL | no_follow,
+                0o600,
+            )
+        except FileExistsError:
+            _require_regular_single_link(path.lstat())
+            descriptor = os.open(path, flags | no_follow)
+    else:
+        try:
+            descriptor = _open_windows_durable_lock_descriptor(
+                path,
+                create_new=True,
+            )
+        except FileExistsError:
+            _require_regular_single_link(path.lstat())
+            descriptor = _open_windows_durable_lock_descriptor(
+                path,
+                create_new=False,
+            )
+
+    try:
+        _require_regular_single_link(os.fstat(descriptor))
+        return os.fdopen(descriptor, "r+b", closefd=True)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _validate_durable_lock_handle_identity(path: Path, handle) -> None:
+    """Bind an opened lock handle back to the current single-link pathname."""
+
+    verification_descriptor: int | None = None
+    final_verification_descriptor: int | None = None
+    try:
+        opened_before = os.fstat(handle.fileno())
+        path_before = path.lstat()
+        _require_regular_single_link(opened_before)
+        _require_regular_single_link(path_before)
+
+        verification_descriptor = _open_read_only_no_follow_descriptor(path)
+        verification_stat = os.fstat(verification_descriptor)
+        _require_regular_single_link(verification_stat)
+        if not os.path.sameopenfile(handle.fileno(), verification_descriptor):
+            raise OSError("durable lock pathname changed during acquisition")
+
+        path_after = path.lstat()
+        _require_regular_single_link(path_after)
+        final_verification_descriptor = _open_read_only_no_follow_descriptor(path)
+        final_verification_stat = os.fstat(final_verification_descriptor)
+        opened_after = os.fstat(handle.fileno())
+        _require_regular_single_link(final_verification_stat)
+        _require_regular_single_link(opened_after)
+        if not os.path.sameopenfile(handle.fileno(), final_verification_descriptor):
+            raise OSError("durable lock pathname changed during acquisition")
+    finally:
+        for descriptor in (
+            final_verification_descriptor,
+            verification_descriptor,
+        ):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
 
 
 def read_bounded_regular_file_no_follow(

@@ -1228,6 +1228,9 @@ class SQLiteMarketStore:
         _canonical_append,
         _receipt_writer,
         _batch_type=_LiveReceiptBatch,
+        _batch_init=_LiveReceiptBatch.__init__,
+        _batch_iter=_LiveReceiptBatch.__iter__,
+        _object_new=object.__new__,
         _dedupe_key=_market_event_dedupe_key,
         _quote_key=_market_event_quote_key,
         _canonical_payload_fn=_canonical_payload,
@@ -1254,8 +1257,12 @@ class SQLiteMarketStore:
         materialized = tuple(events)
         if any(type(event) is not _market_event_type for event in materialized):
             raise TypeError("live receipt authority requires exact MarketEvent values")
-        batch = _batch_type(materialized, _payload=_canonical_payload_fn)
-        canonical_events = tuple(batch)
+        # Python special-method lookup consults the class at runtime. Capture and
+        # call the canonical constructor/iterator descriptors explicitly so later
+        # descriptor rebinding cannot rewrite authority-bearing payload reconstruction.
+        batch = _object_new(_batch_type)
+        _batch_init(batch, materialized, _payload=_canonical_payload_fn)
+        canonical_events = tuple(_batch_iter(batch))
         with self._connection_lock:
             if self.connection.in_transaction:
                 raise RuntimeError(

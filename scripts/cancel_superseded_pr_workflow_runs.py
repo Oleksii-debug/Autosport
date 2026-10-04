@@ -471,6 +471,13 @@ class GitHubApi:
         request_func = getattr(request_impl, "__func__", request_impl)
         request_self = getattr(request_impl, "__self__", None)
         request_code = getattr(request_func, "__code__", None)
+        request_positional_defaults = getattr(request_func, "__defaults__", None)
+        request_keyword_defaults = getattr(request_func, "__kwdefaults__", None)
+        request_keyword_items = (
+            tuple(request_keyword_defaults.items())
+            if request_keyword_defaults is not None
+            else ()
+        )
         if request_code is None:
             raise CancellationError("pull request transport authority is unavailable")
 
@@ -482,6 +489,21 @@ class GitHubApi:
             getattr(rebound_request, "__self__", None) is not request_self
             or rebound_func is not request_func
             or getattr(request_func, "__code__", None) is not request_code
+            or getattr(request_func, "__defaults__", None)
+            is not request_positional_defaults
+            or getattr(request_func, "__kwdefaults__", None)
+            is not request_keyword_defaults
+            or (
+                request_keyword_defaults is not None
+                and (
+                    len(request_keyword_defaults) != len(request_keyword_items)
+                    or any(
+                        key not in request_keyword_defaults
+                        or request_keyword_defaults[key] is not value
+                        for key, value in request_keyword_items
+                    )
+                )
+            )
         ):
             raise CancellationError("pull request transport authority changed")
         if not isinstance(payload, dict):

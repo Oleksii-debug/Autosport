@@ -1575,6 +1575,92 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(result.status, LiveCycleStatus.DECIDED)
             self.assertEqual(factory.calls, [("input-a", ())])
 
+    def test_future_local_availability_recomputes_at_exact_boundary_without_new_market_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            future_ingest = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.00"),
+                observed_ts=self.START.isoformat(),
+                source_id="provider-a",
+                sequence=1,
+                status="open",
+                source_ts=self.START.isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=3)).isoformat(),
+            )
+            observer = _DurableObserver(workspace, [(future_ingest,), (), ()])
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+            self.assertEqual(first.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls, [("input-a", ())])
+            self.assertEqual(
+                loop._availability_deadlines["input-a"],
+                self.START + timedelta(seconds=3),
+            )
+
+            factory.calls.clear()
+            clock.value = self.START + timedelta(seconds=2)
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.NO_CHANGE)
+            self.assertEqual(factory.calls, [])
+
+            clock.value = self.START + timedelta(seconds=3)
+            third = loop.run_cycle()
+            self.assertEqual(third.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+            self.assertIsNone(loop._availability_deadlines["input-a"])
+            loop.close()
+
+    def test_future_local_availability_after_quote_expiry_does_not_schedule_false_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            too_late = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.00"),
+                observed_ts=self.START.isoformat(),
+                source_id="provider-a",
+                sequence=1,
+                status="open",
+                source_ts=self.START.isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=7)).isoformat(),
+            )
+            observer = _DurableObserver(workspace, [(too_late,), (), ()])
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+            self.assertEqual(first.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls, [("input-a", ())])
+            self.assertIsNone(loop._availability_deadlines["input-a"])
+
+            factory.calls.clear()
+            clock.value = self.START + timedelta(seconds=7)
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.NO_CHANGE)
+            self.assertEqual(factory.calls, [])
+            loop.close()
+
     def test_freshness_expiry_recomputes_without_market_delta(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

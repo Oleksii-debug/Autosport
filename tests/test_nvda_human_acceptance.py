@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from copy import copy, deepcopy
 from dataclasses import replace
+import hashlib
+import json
 import pickle
 
 import pytest
@@ -19,6 +21,22 @@ from autosport.nvda_human_acceptance import (
 
 ARTIFACT_SHA = "a" * 64
 SOURCE_SHA = "b" * 40
+
+
+def _runtime_witness_sha(transcript: dict[str, object]) -> str:
+    witness = transcript["webview2_runtime_witness"]
+    assert isinstance(witness, dict)
+    payload = (
+        json.dumps(
+            witness,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _valid_transcript() -> dict[str, object]:
@@ -64,11 +82,20 @@ def _valid_transcript() -> dict[str, object]:
     }
 
 
-def _validate(transcript: object) -> NvdaHumanAcceptanceStructuralResult:
+def _validate(
+    transcript: object,
+    *,
+    expected_runtime_witness_sha256: str | None = None,
+) -> NvdaHumanAcceptanceStructuralResult:
+    if isinstance(transcript, dict) and expected_runtime_witness_sha256 is None:
+        expected_runtime_witness_sha256 = _runtime_witness_sha(transcript)
+    if expected_runtime_witness_sha256 is None:
+        expected_runtime_witness_sha256 = "d" * 64
     return validate_human_nvda_acceptance_transcript(
         transcript,
         expected_artifact_sha256=ARTIFACT_SHA,
         expected_source_sha=SOURCE_SHA,
+        expected_webview2_runtime_witness_sha256=expected_runtime_witness_sha256,
     )
 
 
@@ -77,11 +104,19 @@ def _verify(
     *,
     artifact_sha256: str = ARTIFACT_SHA,
     source_sha: str = SOURCE_SHA,
+    runtime_witness_sha256: str | None = None,
 ) -> NvdaHumanAcceptanceStructuralResult:
+    if runtime_witness_sha256 is None:
+        runtime_witness_sha256 = getattr(
+            result,
+            "webview2_runtime_witness_sha256",
+            "d" * 64,
+        )
     return verify_human_nvda_acceptance_structural_result(
         result,
         expected_artifact_sha256=artifact_sha256,
         expected_source_sha=source_sha,
+        expected_webview2_runtime_witness_sha256=runtime_witness_sha256,
     )
 
 
@@ -492,4 +527,48 @@ def test_runtime_witness_changes_structural_transcript_identity() -> None:
         first_result.webview2_runtime_witness_sha256
         != second_result.webview2_runtime_witness_sha256
     )
+
+
+def test_transcript_rejects_valid_shaped_but_unexpected_runtime_witness() -> None:
+    transcript = _valid_transcript()
+    expected_before_mutation = _runtime_witness_sha(transcript)
+    witness = transcript["webview2_runtime_witness"]
+    assert isinstance(witness, dict)
+    witness["browser_version_string"] = "154.0.2847.99"
+
+    with pytest.raises(
+        NvdaHumanAcceptanceError,
+        match="independently expected runtime-witness file",
+    ):
+        _validate(
+            transcript,
+            expected_runtime_witness_sha256=expected_before_mutation,
+        )
+
+
+def test_result_use_rebinds_expected_runtime_witness_identity() -> None:
+    transcript = _valid_transcript()
+    result = _validate(transcript)
+
+    with pytest.raises(
+        NvdaHumanAcceptanceError,
+        match="expected WebView2 runtime witness",
+    ):
+        _verify(result, runtime_witness_sha256="e" * 64)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["E" * 64, "e" * 63, "g" * 64, 1, True],
+)
+def test_expected_runtime_witness_digest_must_be_canonical(value: object) -> None:
+    transcript = _valid_transcript()
+
+    with pytest.raises(NvdaHumanAcceptanceError):
+        validate_human_nvda_acceptance_transcript(
+            transcript,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_webview2_runtime_witness_sha256=value,  # type: ignore[arg-type]
+        )
 

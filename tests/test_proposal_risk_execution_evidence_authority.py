@@ -1617,6 +1617,35 @@ class ProductProposalRiskTerminalStateMappingTests(unittest.TestCase):
         finally:
             kwdefaults["_bind_mapping"] = original
 
+    def test_protocol_constant_rebind_is_rejected(self) -> None:
+        original = terminal_mapping_authority._MAPPING_SCHEMA
+        try:
+            terminal_mapping_authority._MAPPING_SCHEMA = "forged.mapping.v999"
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "dispatch root changed",
+            ):
+                self._binding(("winner:other-a", "winner:selection-b"))
+        finally:
+            terminal_mapping_authority._MAPPING_SCHEMA = original
+
+    def test_terminal_state_serializer_code_mutation_is_rejected(self) -> None:
+        method = terminal_mapping_authority.MarketTerminalState.to_dict
+        original_code = method.__code__
+
+        def forged_to_dict(_self):
+            return {"state_id": "forged", "settlements": []}
+
+        try:
+            method.__code__ = forged_to_dict.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTerminalStateMappingError,
+                "dispatch root changed",
+            ):
+                self._binding(("winner:other-a", "winner:selection-b"))
+        finally:
+            method.__code__ = original_code
+
 
 if __name__ == "__main__":
     unittest.main()

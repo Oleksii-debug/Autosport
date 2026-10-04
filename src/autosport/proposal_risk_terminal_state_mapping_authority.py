@@ -539,6 +539,49 @@ _RESULT_FIELDS = (
 )
 
 
+_RESULT_AUTHORITY_PROPERTY_NAMES = (
+    "mapping_identity_proven",
+    "provider_terminal_population_proven",
+    "fixed_n_member_mapping_complete",
+    "per_market_terminal_states_exact",
+    "terminal_mapping_proven",
+    "product_scenario_source_provenance_proven",
+    "iid_member_mapping_proven",
+    "joint_scenario_support_proven",
+    "scenario_execution_proven",
+    "proposal_target_counterfactual_execution_proven",
+    "risk_upper_bound_for_target",
+    "grants_risk_approval_authority",
+    "grants_ticket_authority",
+    "grants_broker_execution_authority",
+    "grants_real_money_authority",
+    "grants_state_mutation_authority",
+)
+_RESULT_AUTHORITY_PROPERTY_WITNESSES = tuple(
+    (
+        name,
+        _RESULT_TYPE.__dict__[name],
+        _RESULT_TYPE.__dict__[name].fget,
+        getattr(_RESULT_TYPE.__dict__[name].fget, "__code__", None),
+        getattr(_RESULT_TYPE.__dict__[name].fget, "__defaults__", None),
+        tuple(
+            (
+                default,
+                getattr(default, "__code__", None),
+            )
+            for default in (
+                getattr(_RESULT_TYPE.__dict__[name].fget, "__defaults__", None)
+                or ()
+            )
+        ),
+    )
+    for name in _RESULT_AUTHORITY_PROPERTY_NAMES
+)
+_RESULT_AUTHORITY_PROPERTY_WITNESSES_EXPECTED = (
+    _RESULT_AUTHORITY_PROPERTY_WITNESSES
+)
+
+
 @dataclass(frozen=True, slots=True)
 class _TerminalGroupModel:
     market_group_sha256: str
@@ -1216,9 +1259,17 @@ def _mint_result(
     return instance
 
 
+_MINT_RESULT = _mint_result
+_MINT_RESULT_CODE = getattr(_MINT_RESULT, "__code__", None)
+_MINT_RESULT_KWDEFAULTS = getattr(_MINT_RESULT, "__kwdefaults__", None)
+_MINT_BINDER = _MINT_RESULT_KWDEFAULTS["_bind_mapping"]
+_MINT_BINDER_CODE = getattr(_MINT_BINDER, "__code__", None)
+
+
 def _require_dispatch() -> None:
     if (
-        ProductProposalRiskEvaluationPrecommit is not _PRECOMMIT_TYPE
+        ProductProposalRiskTerminalStateMapping is not _RESULT_TYPE
+        or ProductProposalRiskEvaluationPrecommit is not _PRECOMMIT_TYPE
         or ProductProposalRiskTarget is not _TARGET_TYPE
         or ProductProposalTargetTerminalPopulation is not _TERMINAL_POPULATION_TYPE
         or ProductProposalRiskScenarioPopulation is not _SCENARIO_POPULATION_TYPE
@@ -1255,6 +1306,47 @@ def _require_dispatch() -> None:
         raise ProductProposalRiskTerminalStateMappingError(
             "terminal mapping dispatch root changed"
         )
+    for (
+        name,
+        descriptor,
+        getter,
+        code,
+        defaults,
+        default_witnesses,
+    ) in _RESULT_AUTHORITY_PROPERTY_WITNESSES_EXPECTED:
+        current_descriptor = _RESULT_TYPE.__dict__.get(name)
+        current_getter = getattr(current_descriptor, "fget", None)
+        current_defaults = getattr(current_getter, "__defaults__", None)
+        if (
+            current_descriptor is not descriptor
+            or current_getter is not getter
+            or getattr(current_getter, "__code__", None) is not code
+            or current_defaults is not defaults
+            or len(current_defaults or ()) != len(default_witnesses)
+            or any(
+                current_defaults[index] is not expected_default
+                or getattr(current_defaults[index], "__code__", None)
+                is not expected_code
+                for index, (expected_default, expected_code)
+                in enumerate(default_witnesses)
+            )
+        ):
+            raise ProductProposalRiskTerminalStateMappingError(
+                "terminal mapping result authority surface changed"
+            )
+
+    if (
+        _mint_result is not _MINT_RESULT
+        or getattr(_mint_result, "__code__", None) is not _MINT_RESULT_CODE
+        or getattr(_mint_result, "__kwdefaults__", None)
+        is not _MINT_RESULT_KWDEFAULTS
+        or _MINT_RESULT_KWDEFAULTS.get("_bind_mapping") is not _MINT_BINDER
+        or getattr(_MINT_BINDER, "__code__", None) is not _MINT_BINDER_CODE
+    ):
+        raise ProductProposalRiskTerminalStateMappingError(
+            "terminal mapping result mint capability changed"
+        )
+
     for name, expected, code in _HELPER_WITNESSES_EXPECTED:
         current = globals().get(name)
         if current is not expected or getattr(current, "__code__", None) is not code:

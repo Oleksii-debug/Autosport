@@ -185,6 +185,21 @@ def _install_execution_evidence_guard() -> None:
         "_require_estimator_dispatch",
         "_evidence_payload",
     )
+    module_root_names = (
+        "_SCHEMA",
+        "_BOUND_METHOD",
+        "_EXECUTION_SCOPE",
+        "_HEX",
+        "_MAX_DECIMAL_TEXT",
+        "_CP",
+        "_CP_CODE",
+        "_SOURCE_DIGEST",
+        "_SOURCE_DIGEST_CODE",
+        "_RESULT_FIELDS",
+    )
+    module_root_witnesses = tuple(
+        (name, getattr(module, name)) for name in module_root_names
+    )
     precommit_descriptor_names = (
         "__new__",
         "binding_identity_proven",
@@ -312,6 +327,11 @@ def _install_execution_evidence_guard() -> None:
             raise error_type(
                 "proposal risk execution evidence derivation mint capability changed"
             )
+        for name, expected in module_root_witnesses:
+            if getattr(module, name, None) is not expected:
+                raise error_type(
+                    f"proposal risk execution evidence protocol root {name} changed"
+                )
         for name, expected in precommit_descriptor_witnesses:
             if precommit_type.__dict__.get(name) is not expected:
                 raise error_type(

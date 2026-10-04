@@ -102,6 +102,83 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(store.trusted_live_events(), [])
             store.close()
 
+    def test_live_authority_bypasses_replaceable_public_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+            foreign = self._direct_event(sequence=2, odds="2.20")
+
+            def commit_foreign_then_lie(events):
+                store.connection.execute("BEGIN IMMEDIATE")
+                SQLiteMarketStore._append_batch_accepted_canonical(store, [foreign])
+                store.connection.commit()
+                return [event]
+
+            with patch.object(
+                store,
+                "append_batch_accepted",
+                side_effect=commit_foreign_then_lie,
+            ):
+                accepted = store._append_live_batch_accepted([event])
+
+            self.assertEqual(accepted, [event])
+            self.assertEqual(store.events(), [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            self.assertFalse(store.has_trusted_live_receipt(foreign))
+            store.close()
+
+    def test_live_append_attempt_seam_runs_before_authority_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+            transaction_states: list[bool] = []
+
+            def observe_attempt(events):
+                tuple(events)
+                transaction_states.append(store.connection.in_transaction)
+
+            with patch.object(
+                store,
+                "_before_live_append_attempt",
+                side_effect=observe_attempt,
+            ):
+                accepted = store._append_live_batch_accepted([event])
+
+            self.assertEqual(transaction_states, [False])
+            self.assertEqual(accepted, [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_live_append_attempt_seam_cannot_leave_transaction_open(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+            foreign = self._direct_event(sequence=2, odds="2.20")
+
+            def open_foreign_transaction(events):
+                tuple(events)
+                store.connection.execute("BEGIN IMMEDIATE")
+                SQLiteMarketStore._append_batch_accepted_canonical(store, [foreign])
+
+            with patch.object(
+                store,
+                "_before_live_append_attempt",
+                side_effect=open_foreign_transaction,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "must not leave an active transaction",
+                ):
+                    store._append_live_batch_accepted([event])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertFalse(store.connection.in_transaction)
+            store.close()
+
     def test_live_retry_keeps_canonical_market_event_type_after_module_rebind(self) -> None:
         class PoisonMarketEvent(MarketEvent):
             @classmethod
@@ -112,13 +189,8 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             path = Path(directory) / "market.db"
             store = SQLiteMarketStore(path)
             event = self._direct_event(sequence=1)
-            canonical_append = store.append_batch_accepted
 
-            def retry_hook(events):
-                with patch.object(storage_module, "MarketEvent", PoisonMarketEvent):
-                    return canonical_append(events)
-
-            with patch.object(store, "append_batch_accepted", side_effect=retry_hook):
+            with patch.object(storage_module, "MarketEvent", PoisonMarketEvent):
                 accepted = store._append_live_batch_accepted([event])
 
             self.assertEqual(len(accepted), 1)

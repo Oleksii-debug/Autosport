@@ -43,8 +43,25 @@ class PaperExposureBinding:
     currency: str | None
 
     def __post_init__(self) -> None:
-        if type(self.action_id) is not str or not self.action_id:
-            raise ValueError("action_id must be non-empty text")
+        _paper_impl._text(self.action_id, "action_id")
+        if self.sport is not None:
+            _paper_impl._text(self.sport, "sport")
+        if (self.bankroll_id is None) != (self.currency is None):
+            raise ValueError(
+                "bankroll_id and currency must be supplied together"
+            )
+        if self.bankroll_id is not None:
+            _paper_impl._text(self.bankroll_id, "bankroll_id")
+            currency = _paper_impl._text(self.currency, "currency")
+            if (
+                len(currency) != 3
+                or not currency.isascii()
+                or not currency.isalpha()
+                or currency != currency.upper()
+            ):
+                raise ValueError(
+                    "currency must be three-letter uppercase ASCII"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,8 +87,33 @@ class PreparedPaperExecution:
         binding_ids = tuple(item.action_id for item in self.exposure_bindings)
         if action_ids != binding_ids:
             raise ValueError("exposure bindings must exactly match execution action order")
-        if type(self.intent_evidence_json) is not str or not self.intent_evidence_json:
-            raise ValueError("intent_evidence_json must be non-empty canonical JSON")
+        if (
+            type(self.intent_evidence_json) is not str
+            or not self.intent_evidence_json
+        ):
+            raise ValueError(
+                "intent_evidence_json must be non-empty canonical JSON"
+            )
+        try:
+            intent_evidence = json.loads(self.intent_evidence_json)
+            canonical_intent_evidence = json.dumps(
+                intent_evidence,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "intent_evidence_json must be valid canonical JSON"
+            ) from exc
+        if (
+            type(intent_evidence) is not dict
+            or canonical_intent_evidence != self.intent_evidence_json
+        ):
+            raise ValueError(
+                "intent_evidence_json must be a canonical JSON object"
+            )
 
 
 @dataclass(frozen=True, slots=True)

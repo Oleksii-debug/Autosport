@@ -527,6 +527,74 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertEqual(checkpoint.last_position, 2)
             self.assertEqual(checkpoint.last_delta_id, "d2")
 
+    def test_consumer_uses_ack_clock_after_causal_visibility_cutoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = self.make_delta(payload=payload)
+            collector.append(delta)
+            deliveries = []
+            receipt = DesktopApplicationReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                receipt_id="receipt-d1",
+                applied_at="2026-01-01T00:00:05+00:00",
+            )
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda _: event,
+                apply_event=lambda *_: receipt,
+                lookup_application_receipt=lambda _: None,
+                acknowledgement_clock=lambda: "2026-01-01T00:00:06+00:00",
+                on_application_receipt=lambda *_: deliveries.append(True),
+            )
+
+            self.assertEqual(
+                consumer.drain(as_of="2026-01-01T00:00:04+00:00"),
+                ("d1",),
+            )
+            self.assertEqual(deliveries, [True])
+            self.assertTrue(checkpoint.has_ack(delta.delta_id))
+
+    def test_consumer_rejects_ack_clock_rollback_before_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = self.make_delta(payload=payload)
+            collector.append(delta)
+            receipt = DesktopApplicationReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                receipt_id="receipt-d1",
+                applied_at="2026-01-01T00:00:05+00:00",
+            )
+            deliveries = []
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda _: event,
+                apply_event=lambda *_: self.fail(
+                    "apply_event must not run when durable receipt exists"
+                ),
+                lookup_application_receipt=lambda _: receipt,
+                acknowledgement_clock=lambda: "2026-01-01T00:00:03+00:00",
+                on_application_receipt=lambda *_: deliveries.append(True),
+            )
+
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "acknowledgement clock moved before the causal drain cutoff",
+            ):
+                consumer.drain(as_of="2026-01-01T00:00:04+00:00")
+            self.assertEqual(deliveries, [])
+            self.assertFalse(checkpoint.has_ack(delta.delta_id))
     def test_consumer_rejects_misbound_durable_receipt_before_delivery(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

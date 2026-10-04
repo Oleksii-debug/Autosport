@@ -169,9 +169,6 @@ class BetfairAuthenticatedAccountIdentity:
 @dataclass(frozen=True, slots=True)
 class _CanonicalClientOrigin:
     transport: object
-    opener: object
-    opener_handlers: tuple[object, ...]
-    opener_dispatch: tuple[tuple[str, object, tuple[object, ...]], ...]
     clock: object
     credentials: object
     credential_binding: bytes
@@ -238,7 +235,8 @@ def _make_account_identity_authority():
     canonical_observed_at = client_type._observed_at
     canonical_transport_init = transport_type.__init__
     canonical_network_post = transport_type.post
-    redirect_handler_type = readonly_module._RejectAuthenticatedRedirects
+    readonly_build_opener = readonly_module.build_opener
+    redirect_handler_type = readonly_module._RejectBetfairRedirects
     canonical_redirect_request = redirect_handler_type.redirect_request
     opener_type = _urllib_request.OpenerDirector
     http_redirect_handler_type = _urllib_request.HTTPRedirectHandler
@@ -468,6 +466,7 @@ def _make_account_identity_authority():
             and client_type._observed_at is canonical_observed_at
             and transport_type.__init__ is canonical_transport_init
             and transport_type.post is canonical_network_post
+            and readonly_module.build_opener is readonly_build_opener
             and redirect_handler_type.redirect_request
             is canonical_redirect_request
             and opener_type.open is canonical_opener_open
@@ -498,54 +497,13 @@ def _make_account_identity_authority():
             )
         )
 
-    def opener_dispatch_snapshot(
-        opener: object,
-    ) -> tuple[tuple[str, object, tuple[object, ...]], ...] | None:
-        records: list[tuple[str, object, tuple[object, ...]]] = []
-        for map_name in ("handle_open", "process_request", "process_response"):
-            mapping = getattr(opener, map_name, None)
-            if type(mapping) is not dict:
-                return None
-            for key, handlers in mapping.items():
-                if type(key) not in (str, int) or type(handlers) is not list:
-                    return None
-                records.append((map_name, key, tuple(handlers)))
-        error_mapping = getattr(opener, "handle_error", None)
-        if type(error_mapping) is not dict:
-            return None
-        for protocol, by_code in error_mapping.items():
-            if type(protocol) not in (str, int) or type(by_code) is not dict:
-                return None
-            for code, handlers in by_code.items():
-                if type(code) not in (str, int) or type(handlers) is not list:
-                    return None
-                records.append((f"handle_error:{protocol}", code, tuple(handlers)))
-        records.sort(key=lambda item: (item[0], type(item[1]).__name__, str(item[1])))
-        return tuple(records)
-
-    def dispatch_matches(
-        current: tuple[tuple[str, object, tuple[object, ...]], ...] | None,
-        expected: tuple[tuple[str, object, tuple[object, ...]], ...],
-    ) -> bool:
-        if current is None or len(current) != len(expected):
-            return False
-        for actual, wanted in zip(current, expected):
-            if actual[0] != wanted[0] or actual[1] != wanted[1]:
-                return False
-            if len(actual[2]) != len(wanted[2]):
-                return False
-            if any(
-                actual_handler is not expected_handler
-                for actual_handler, expected_handler in zip(actual[2], wanted[2])
-            ):
-                return False
-        return True
-
     def canonical_network_transport(
         transport: object,
         *,
         origin: _CanonicalClientOrigin | None = None,
     ) -> bool:
+        """Validate the current #1496 per-request isolated-opener transport."""
+
         if not client_class_dispatch_is_current():
             return False
         if type(transport) is not transport_type:
@@ -553,106 +511,20 @@ def _make_account_identity_authority():
         transport_dict = getattr(transport, "__dict__", None)
         if type(transport_dict) is not dict:
             return False
-        if set(transport_dict) != {"_max_response_bytes", "_opener"}:
+        # Current #1496 deliberately keeps no opener on the transport instance.
+        # post() creates an isolated no-redirect opener for each request.
+        if set(transport_dict) != {"_max_response_bytes"}:
             return False
         max_response_bytes = transport_dict.get("_max_response_bytes")
         if type(max_response_bytes) is not int or max_response_bytes <= 0:
             return False
-
-        opener = transport_dict.get("_opener")
-        if type(opener) is not opener_type or type(opener).open is not canonical_opener_open:
+        if "post" in transport_dict or "__init__" in transport_dict:
             return False
-        opener_dict = getattr(opener, "__dict__", None)
-        if type(opener_dict) is not dict or any(
-            name in opener_dict
-            for name in ("open", "_open", "_call_chain", "error")
+        if origin is not None and (
+            type(origin) is not origin_type
+            or origin.transport is not transport
         ):
             return False
-        handlers = getattr(opener, "handlers", None)
-        if type(handlers) is not list:
-            return False
-        handler_tuple = tuple(handlers)
-        redirect_handlers = tuple(
-            handler
-            for handler in handler_tuple
-            if isinstance(handler, http_redirect_handler_type)
-        )
-        if (
-            len(redirect_handlers) != 1
-            or type(redirect_handlers[0]) is not redirect_handler_type
-        ):
-            return False
-
-        https_handlers = tuple(
-            handler
-            for handler in handler_tuple
-            if isinstance(handler, https_handler_type)
-        )
-        if len(https_handlers) != 1 or type(https_handlers[0]) is not https_handler_type:
-            return False
-        https_handler = https_handlers[0]
-        https_handler_dict = getattr(https_handler, "__dict__", None)
-        if (
-            type(https_handler_dict) is not dict
-            or "https_open" in https_handler_dict
-            or "https_request" in https_handler_dict
-            or "do_open" in https_handler_dict
-            or https_handler_type.https_open is not canonical_https_open
-            or https_handler_type.https_request is not canonical_https_request
-            or abstract_http_handler_type.do_open is not canonical_do_open
-            or http_error_processor_type.https_response is not canonical_https_response
-        ):
-            return False
-
-        dispatch = opener_dispatch_snapshot(opener)
-        if dispatch is None:
-            return False
-        dispatch_handlers = tuple(
-            handlers
-            for map_name, key, handlers in dispatch
-            if map_name == "handle_open" and key == "https"
-        )
-        request_handlers = tuple(
-            handlers
-            for map_name, key, handlers in dispatch
-            if map_name == "process_request" and key == "https"
-        )
-        response_handlers = tuple(
-            handlers
-            for map_name, key, handlers in dispatch
-            if map_name == "process_response" and key == "https"
-        )
-        if (
-            len(dispatch_handlers) != 1
-            or len(dispatch_handlers[0]) != 1
-            or dispatch_handlers[0][0] is not https_handler
-            or len(request_handlers) != 1
-            or len(request_handlers[0]) != 1
-            or request_handlers[0][0] is not https_handler
-            or len(response_handlers) != 1
-            or len(response_handlers[0]) != 1
-            or type(response_handlers[0][0]) is not http_error_processor_type
-            or "https_response" in getattr(response_handlers[0][0], "__dict__", {})
-            or any(
-                not any(handler is registered for registered in handler_tuple)
-                for _map_name, _key, handlers in dispatch
-                for handler in handlers
-            )
-        ):
-            return False
-
-        if origin is not None:
-            if type(origin) is not origin_type or origin.opener is not opener:
-                return False
-            if len(origin.opener_handlers) != len(handler_tuple):
-                return False
-            if any(
-                current is not expected
-                for current, expected in zip(handler_tuple, origin.opener_handlers)
-            ):
-                return False
-            if not dispatch_matches(dispatch, origin.opener_dispatch):
-                return False
         return True
 
     def origin_matches(
@@ -810,17 +682,8 @@ def _make_account_identity_authority():
             raise identity_error_type(
                 "canonical Betfair client factory produced invalid origin"
             )
-        opener = client._transport._opener
-        dispatch = opener_dispatch_snapshot(opener)
-        if dispatch is None:
-            raise identity_error_type(
-                "canonical Betfair opener dispatch is not inspectable"
-            )
         origin = origin_type(
             client._transport,
-            opener,
-            tuple(opener.handlers),
-            dispatch,
             client._clock,
             client._credentials,
             binding,

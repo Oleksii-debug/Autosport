@@ -289,14 +289,29 @@ jobs:
           }
           $packageWriteFenceApplied = $false
           $external = $null
+          $hadLocalAppData = Test-Path Env:LOCALAPPDATA
+          $hadWorkspaceOverride = Test-Path Env:AUTOSPORT_WORKSPACE
+          $originalLocalAppData = $env:LOCALAPPDATA
+          $originalWorkspaceOverride = $env:AUTOSPORT_WORKSPACE
+          $isolatedRoot = Join-Path $env:RUNNER_TEMP 'Autosport-external-uia'
+          if (Test-Path -LiteralPath $isolatedRoot) {
+            Remove-Item -LiteralPath $isolatedRoot -Recurse -Force
+          }
+          $isolatedLocalAppData = Join-Path $isolatedRoot 'localappdata'
+          $expectedWorkspace = Join-Path $isolatedRoot 'workspace'
+          New-Item -ItemType Directory -Path $isolatedLocalAppData -Force | Out-Null
+          New-Item -ItemType Directory -Path $expectedWorkspace -Force | Out-Null
+
           try {
             & icacls $packageRoot /deny "*${currentSid}:(OI)(CI)(WD,AD,WEA,WA,DE,DC)" /T /C | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "External UIA package write fence exited $LASTEXITCODE" }
             $packageWriteFenceApplied = $true
 
-            $expectedWorkspace = [System.IO.Path]::GetFullPath(
-              (Join-Path $env:LOCALAPPDATA 'Autosport/workspace')
-            )
+            # Launch the exact extracted artifact against clean per-gate state.
+            # Prior runner workspace/operator configuration or WebView profile data
+            # must not make this accessibility/product-stage gate pass or fail.
+            $env:LOCALAPPDATA = $isolatedLocalAppData
+            $env:AUTOSPORT_WORKSPACE = $expectedWorkspace
             ./scripts/external_uia_audit.ps1 `
               -Exe (Join-Path $packageRoot 'Autosport.exe') `
               -Output $evidence `
@@ -304,6 +319,16 @@ jobs:
               -Workspace $expectedWorkspace
             $external = Get-Content $evidence -Raw | ConvertFrom-Json
           } finally {
+            if ($hadLocalAppData) {
+              $env:LOCALAPPDATA = $originalLocalAppData
+            } else {
+              Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue
+            }
+            if ($hadWorkspaceOverride) {
+              $env:AUTOSPORT_WORKSPACE = $originalWorkspaceOverride
+            } else {
+              Remove-Item Env:AUTOSPORT_WORKSPACE -ErrorAction SilentlyContinue
+            }
             if ($packageWriteFenceApplied) {
               & icacls $packageRoot /remove:d "*${currentSid}" /T /C | Out-Null
               if ($LASTEXITCODE -ne 0) { throw "External UIA package write-fence cleanup exited $LASTEXITCODE" }
@@ -346,6 +371,8 @@ jobs:
           $verification | Add-Member -NotePropertyName extracted_external_uia_normal_close_status -NotePropertyValue $external.normal_close_status -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_runtime_witness_status -NotePropertyValue $external.runtime_witness_status -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_runtime_browser_version -NotePropertyValue $external.runtime_browser_version -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_isolated_workspace -NotePropertyValue $expectedWorkspace -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_isolated_localappdata -NotePropertyValue $isolatedLocalAppData -Force
           $verification | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $verificationPath -Encoding utf8
       - name: Upload external UIA failure evidence
         if: failure()

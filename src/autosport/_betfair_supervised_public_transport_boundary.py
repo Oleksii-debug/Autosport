@@ -115,6 +115,14 @@ _CONFIRMATION_GENERIC_CALLABLE_GRAPH = _snapshot_callable_graph(
 _CONFIRMATION_GENERIC_AUTHORITY_METHOD_GRAPH = _snapshot_class_callable_graph(
     _CONFIRMATION_GENERIC_AUTHORITY_TYPE
 )
+_CONFIRMATION_GENERIC_MONOTONIC_AUTHORITY_TYPE = (
+    _CONFIRMATION_GENERIC_MODULE.MonotonicWorkspaceAuthority
+)
+_CONFIRMATION_GENERIC_MONOTONIC_AUTHORITY_METHOD_GRAPH = (
+    _snapshot_class_callable_graph(
+        _CONFIRMATION_GENERIC_MONOTONIC_AUTHORITY_TYPE
+    )
+)
 del _snapshot_callable_graph, _snapshot_class_callable_graph
 
 _CONFIRMATION_HASHLIB = _confirmation.hashlib
@@ -274,6 +282,20 @@ def _confirmation_graph_unchanged() -> bool:
             getattr(_CONFIRMATION_GENERIC_AUTHORITY_TYPE, name, None) is value
             and getattr(value, "__code__", None) is code
             for name, value, code in _CONFIRMATION_GENERIC_AUTHORITY_METHOD_GRAPH
+        )
+        and _CONFIRMATION_GENERIC_MODULE.MonotonicWorkspaceAuthority
+        is _CONFIRMATION_GENERIC_MONOTONIC_AUTHORITY_TYPE
+        and all(
+            getattr(
+                _CONFIRMATION_GENERIC_MONOTONIC_AUTHORITY_TYPE,
+                name,
+                None,
+            )
+            is value
+            and getattr(value, "__code__", None) is code
+            for name, value, code in (
+                _CONFIRMATION_GENERIC_MONOTONIC_AUTHORITY_METHOD_GRAPH
+            )
         )
         and _confirmation.hashlib is _CONFIRMATION_HASHLIB
         and _CONFIRMATION_HASHLIB.sha256 is _CONFIRMATION_HASHLIB_SHA256

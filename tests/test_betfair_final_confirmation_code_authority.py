@@ -92,6 +92,7 @@ def test_transitive_confirmation_authority_rebinding_fails_closed(
 
     assert not boundary._confirmation_graph_unchanged()
 
+
 @pytest.mark.parametrize(
     "target",
     (
@@ -99,6 +100,7 @@ def test_transitive_confirmation_authority_rebinding_fails_closed(
         "coordinated_consume_root",
         "generic_module_helper",
         "generic_authority_helper",
+        "generic_monotonic_authority_helper",
     ),
 )
 def test_final_send_rejects_moving_generic_confirmation_trust_roots(
@@ -139,11 +141,17 @@ def test_final_send_rejects_moving_generic_confirmation_trust_roots(
             "_require_sha256",
             lambda *args, **kwargs: "0" * 64,
         )
-    else:
+    elif target == "generic_authority_helper":
         monkeypatch.setattr(
             confirmation._confirmation.SupervisedConfirmationAuthority,
             "_load",
             lambda *args, **kwargs: None,
+        )
+    else:
+        monkeypatch.setattr(
+            confirmation._confirmation.MonotonicWorkspaceAuthority,
+            "read_history",
+            lambda self: (),
         )
 
     assert not boundary._confirmation_graph_unchanged()

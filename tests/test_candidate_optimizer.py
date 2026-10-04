@@ -1,7 +1,9 @@
 import unittest
 from dataclasses import replace
 from decimal import Decimal, localcontext
+from unittest.mock import patch
 
+import autosport.candidate_optimizer as candidate_optimizer_module
 from autosport.candidate_optimizer import PortfolioAwareCandidateOptimizer
 from autosport.candidate_search import BeamParlayCandidateSearch, CandidateLeg, ParlayCandidate
 from autosport.domain import TicketLeg
@@ -382,6 +384,50 @@ class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
             impacts[0].standalone_expected_profit,
             Decimal("0.5"),
         )
+
+    def test_rebound_engine_type_global_cannot_relabel_injected_engine_authoritative(self):
+        a = CandidateLeg(
+            "e1|winner|a",
+            "e1",
+            Decimal("2"),
+            Decimal("0.5"),
+        )
+        b = CandidateLeg(
+            "e1|winner|b",
+            "e1",
+            Decimal("3"),
+            Decimal("0.5"),
+        )
+        group = ScenarioGroup(
+            "e1",
+            (
+                ScenarioOutcome(a.quote_key, Decimal("0.5")),
+                ScenarioOutcome(b.quote_key, Decimal("0.5")),
+            ),
+        )
+        engine = _ForgedRankingScenarioEngine()
+
+        with patch.object(
+            candidate_optimizer_module,
+            "ScenarioSearchEngine",
+            _ForgedRankingScenarioEngine,
+        ):
+            impacts = PortfolioAwareCandidateOptimizer(
+                scenario_engine=engine
+            ).evaluate_candidates(
+                [],
+                [_single_candidate(a), _single_candidate(b)],
+                [group],
+                stake="1",
+            )
+
+        self.assertEqual(
+            impacts[0].candidate.legs[0].quote_key,
+            b.quote_key,
+        )
+        self.assertFalse(impacts[0].scenario_reports_authoritative)
+        self.assertFalse(impacts[0].scenario_worst_case_change_proven)
+        self.assertIsNone(impacts[0].expected_case_change)
 
     def test_exact_engine_instance_analyse_override_cannot_steer_ranking(self):
         a = CandidateLeg(

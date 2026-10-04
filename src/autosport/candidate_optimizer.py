@@ -135,16 +135,53 @@ class PortfolioAwareCandidateOptimizer:
             # authority. Generic scenario extrema remain useful secondary evidence only.
             worst_proven = False
             best_proven = False
-            observed_worst_change = with_report.observed_worst - base_report.observed_worst
-            conservative_floor_change = with_report.conservative_floor - base_report.conservative_floor
-            observed_best_change = with_report.observed_best - base_report.observed_best
-            conservative_ceiling_change = with_report.conservative_ceiling - base_report.conservative_ceiling
+            try:
+                with localcontext(_CANDIDATE_DECIMAL_CONTEXT):
+                    observed_worst_change = (
+                        with_report.observed_worst - base_report.observed_worst
+                    )
+                    conservative_floor_change = (
+                        with_report.conservative_floor - base_report.conservative_floor
+                    )
+                    observed_best_change = (
+                        with_report.observed_best - base_report.observed_best
+                    )
+                    conservative_ceiling_change = (
+                        with_report.conservative_ceiling - base_report.conservative_ceiling
+                    )
 
-            expected_change: Decimal | None = None
+                    expected_change: Decimal | None = None
+                    if (
+                        base_report.expected_case is not None
+                        and with_report.expected_case is not None
+                    ):
+                        expected_change = (
+                            with_report.expected_case - base_report.expected_case
+                        )
+            except DecimalException as exc:
+                raise ValueError(
+                    "candidate portfolio impact exceeds canonical Decimal range"
+                ) from exc
+
+            impact_values = (
+                observed_worst_change,
+                conservative_floor_change,
+                observed_best_change,
+                conservative_ceiling_change,
+            )
+            if any(not value.is_finite() for value in impact_values) or (
+                expected_change is not None and not expected_change.is_finite()
+            ):
+                raise ValueError(
+                    "candidate portfolio impact must be finite"
+                )
+
             expected_mode: str | None = None
-            if base_report.expected_case is not None and with_report.expected_case is not None:
-                expected_change = with_report.expected_case - base_report.expected_case
-                expected_mode = _expected_change_mode(base_report.expected_mode, with_report.expected_mode)
+            if expected_change is not None:
+                expected_mode = _expected_change_mode(
+                    base_report.expected_mode,
+                    with_report.expected_mode,
+                )
 
             if worst_proven:
                 ranking_risk_change = observed_worst_change

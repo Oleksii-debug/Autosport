@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from hashlib import sha256
 import json
 
@@ -24,6 +24,23 @@ from autosport.workspace_lock import (
 
 
 NOW = datetime(2026, 10, 3, 20, 0, tzinfo=timezone.utc)
+
+
+class _ChangingOffsetTz(tzinfo):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def utcoffset(self, _dt: datetime | None) -> timedelta:
+        self.calls += 1
+        if self.calls == 1:
+            return timedelta(0)
+        return timedelta(hours=-12)
+
+    def dst(self, _dt: datetime | None) -> timedelta:
+        return timedelta(0)
+
+    def tzname(self, _dt: datetime | None) -> str:
+        return "CHANGING"
 
 
 def _scope(
@@ -72,6 +89,25 @@ def _active(lifecycle: ProphetXSessionLifecycle, at: datetime = NOW):
     )
     assert snapshot.state is ProphetXSessionState.ACTIVE
     return snapshot
+
+
+def test_lifecycle_time_normalization_uses_one_offset_observation(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    zone = _ChangingOffsetTz()
+    supplied = datetime(2026, 10, 3, 20, 0, tzinfo=zone)
+
+    admission = lifecycle.begin_login(
+        now=supplied,
+        access_token_available=False,
+    )
+
+    assert zone.calls == 1
+    assert admission.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+    assert admission.snapshot is not None
+    assert admission.snapshot.last_transition_at == NOW
+    assert admission.snapshot.attempt_started_at == NOW
+    assert admission.snapshot.slot_hold_started_at == NOW
+    assert admission.snapshot.slot_hold_until == NOW + CONSERVATIVE_SESSION_SLOT_HOLD
 
 
 def test_two_consumers_share_one_persisted_login_reservation(tmp_path):

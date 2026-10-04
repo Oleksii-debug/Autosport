@@ -846,6 +846,10 @@ class ManualNvdaAcceptanceLedger:
             raise NvdaManualAcceptanceIntegrityError(
                 "cannot read manual NVDA ledger anchor"
             ) from exc
+        if not raw.endswith("\n"):
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger anchor lacks canonical trailing newline"
+            )
         anchor = _parse_json_object(raw, what="manual NVDA ledger anchor")
         if frozenset(anchor) != _ANCHOR_KEYS:
             raise NvdaManualAcceptanceIntegrityError(
@@ -1004,6 +1008,10 @@ class ManualNvdaAcceptanceLedger:
             raise NvdaManualAcceptanceIntegrityError(
                 "cannot read pending manual NVDA decision"
             ) from exc
+        if not raw.endswith("\n"):
+            raise NvdaManualAcceptanceIntegrityError(
+                "pending manual NVDA decision lacks canonical trailing newline"
+            )
         pending = _parse_json_object(raw, what="pending manual NVDA decision")
         if frozenset(pending) != _PENDING_KEYS:
             raise NvdaManualAcceptanceIntegrityError(

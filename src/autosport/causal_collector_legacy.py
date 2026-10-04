@@ -751,8 +751,9 @@ class CanonicalDesktopApplication:
         _health_store_type,
         _health_get,
         _application_store_type,
+        _state_progress,
         _state_receipt,
-        _state_health_after,
+        _state_health_state,
     ) -> DesktopApplicationReceipt | None:
         state = self._state
         market_bus = self.market_bus
@@ -761,9 +762,26 @@ class CanonicalDesktopApplication:
             raise ApplicationReceiptError(
                 "completed canonical application lacks canonical journal authority"
             )
+        progress = _state_progress(state, delta)
+        if (
+            progress is None
+            or not progress.get("market_applied")
+            or not progress.get("health_applied")
+            or progress.get("completed_at") is None
+        ):
+            return None
         receipt = _state_receipt(state, delta)
         if receipt is None:
-            return None
+            raise ApplicationReceiptError(
+                "completed canonical application receipt disappeared"
+            )
+        if (
+            receipt.receipt_id != progress.get("receipt_id")
+            or receipt.applied_at != progress.get("completed_at")
+        ):
+            raise ApplicationReceiptError(
+                "completed canonical application receipt conflicts with durable progress"
+            )
 
         if type(market_bus) is not _market_bus_type:
             raise ApplicationReceiptError(
@@ -809,7 +827,17 @@ class CanonicalDesktopApplication:
             raise ApplicationReceiptError(
                 "completed canonical application lacks canonical health authority"
             )
-        expected_health = _state_health_after(state, delta)
+        try:
+            expected_health = _state_health_state(progress.get("health_after"))
+            expected_health.validate()
+        except (TypeError, ValueError) as exc:
+            raise ApplicationReceiptError(
+                "completed canonical application health evidence is malformed"
+            ) from exc
+        if expected_health.source_id != delta.source_id:
+            raise ApplicationReceiptError(
+                "completed canonical application health source identity conflicts with delta"
+            )
         try:
             actual_health = _health_get(health_store, delta.source_id)
         except Exception as exc:
@@ -1271,8 +1299,9 @@ def _bind_canonical_desktop_application_lookup_receipt(implementation):
     health_store_type = SourceHealthStore
     health_get = SourceHealthStore.get
     application_store_type = _CanonicalDesktopApplicationStore
+    state_progress = _CanonicalDesktopApplicationStore.progress
     state_receipt = _CanonicalDesktopApplicationStore.receipt
-    state_health_after = _CanonicalDesktopApplicationStore.health_after
+    state_health_state = _CanonicalDesktopApplicationStore._health_state
 
     def lookup_receipt(
         self: CanonicalDesktopApplication,
@@ -1294,8 +1323,9 @@ def _bind_canonical_desktop_application_lookup_receipt(implementation):
             _health_store_type=health_store_type,
             _health_get=health_get,
             _application_store_type=application_store_type,
+            _state_progress=state_progress,
             _state_receipt=state_receipt,
-            _state_health_after=state_health_after,
+            _state_health_state=state_health_state,
         )
 
     return lookup_receipt

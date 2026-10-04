@@ -198,8 +198,12 @@ def _timezone_aware_instant(value: str, field_name: str) -> datetime:
     return parsed
 
 
-def _observed_instant(value: str) -> datetime:
-    return _timezone_aware_instant(value, "observed_ts")
+def _observed_instant(
+    value: str,
+    *,
+    _parse=_timezone_aware_instant,
+) -> datetime:
+    return _parse(value, "observed_ts")
 
 
 def _event_order_key(
@@ -239,7 +243,11 @@ def _canonical_payload(
     return _canonical_json_fn(_encode(event))
 
 
-def _source_payload_from_raw(raw: object) -> str:
+def _source_payload_from_raw(
+    raw: object,
+    *,
+    _canonical_json_fn=_canonical_json,
+) -> str:
     if not isinstance(raw, dict):
         raise ValueError("stored market event payload must be a JSON object")
     normalized = dict(raw)
@@ -247,11 +255,16 @@ def _source_payload_from_raw(raw: object) -> str:
     # sequence is polled again. They are not source-snapshot identity.
     normalized.pop("observed_ts", None)
     normalized.pop("ingest_ts", None)
-    return _canonical_json(normalized)
+    return _canonical_json_fn(normalized)
 
 
-def _source_payload(event: MarketEvent) -> str:
-    return _source_payload_from_raw(_encode_market_event(event))
+def _source_payload(
+    event: MarketEvent,
+    *,
+    _encode=_encode_market_event,
+    _source_payload_from_raw_fn=_source_payload_from_raw,
+) -> str:
+    return _source_payload_from_raw_fn(_encode(event))
 
 
 def _typed_equal(left: object, right: object) -> bool:
@@ -259,17 +272,20 @@ def _typed_equal(left: object, right: object) -> bool:
 
 
 def _typed_payload_equal(left: object, right: object) -> bool:
-    if type(left) is not type(right):
-        return False
-    if isinstance(left, dict):
-        if left.keys() != right.keys():
+    def compare(a: object, b: object) -> bool:
+        if type(a) is not type(b):
             return False
-        return all(_typed_payload_equal(left[key], right[key]) for key in left)
-    if isinstance(left, (list, tuple)):
-        if len(left) != len(right):
-            return False
-        return all(_typed_payload_equal(a, b) for a, b in zip(left, right))
-    return left == right
+        if isinstance(a, dict):
+            if a.keys() != b.keys():
+                return False
+            return all(compare(a[key], b[key]) for key in a)
+        if isinstance(a, (list, tuple)):
+            if len(a) != len(b):
+                return False
+            return all(compare(x, y) for x, y in zip(a, b))
+        return a == b
+
+    return compare(left, right)
 
 
 def _reject_duplicate_object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -289,24 +305,32 @@ def _load_history_payload(
     payload_json: str,
     *,
     _loads=json.loads,
+    _pairs_hook=_reject_duplicate_object_pairs,
+    _parse_constant=_reject_non_finite_json_constant,
+    _json_decode_error=json.JSONDecodeError,
 ) -> dict[str, object]:
     try:
         raw = _loads(
             payload_json,
-            object_pairs_hook=_reject_duplicate_object_pairs,
-            parse_constant=_reject_non_finite_json_constant,
+            object_pairs_hook=_pairs_hook,
+            parse_constant=_parse_constant,
         )
-    except json.JSONDecodeError as exc:
+    except _json_decode_error as exc:
         raise ValueError("stored market event payload must be valid JSON") from exc
     if not isinstance(raw, dict):
         raise ValueError("stored market event payload must be a JSON object")
     return raw
 
 
-def _validate_persistable_sequence(value: object) -> int:
+def _validate_persistable_sequence(
+    value: object,
+    *,
+    _minimum=_SQLITE_INTEGER_MIN,
+    _maximum=_SQLITE_INTEGER_MAX,
+) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError("market event sequence must be a non-boolean int")
-    if value < _SQLITE_INTEGER_MIN or value > _SQLITE_INTEGER_MAX:
+    if value < _minimum or value > _maximum:
         raise ValueError("market event sequence must fit signed 64-bit SQLite INTEGER")
     return value
 
@@ -316,21 +340,27 @@ def _validate_incoming_event(
     *,
     _decode=_decode_market_event,
     _encode=_encode_market_event,
+    _validate_sequence=_validate_persistable_sequence,
+    _observed=_observed_instant,
+    _timestamp=_timezone_aware_instant,
+    _canonical_json_fn=_canonical_json,
+    _load_payload=_load_history_payload,
+    _payload_equal=_typed_payload_equal,
 ) -> str:
     """Prove an event survives the exact durable JSON/SQLite representation without type drift."""
-    _validate_persistable_sequence(event.sequence)
-    _observed_instant(event.observed_ts)
-    _timezone_aware_instant(event.ingest_ts, "ingest_ts")
+    _validate_sequence(event.sequence)
+    _observed(event.observed_ts)
+    _timestamp(event.ingest_ts, "ingest_ts")
     try:
         raw = _encode(event)
-        payload = _canonical_json(raw)
-        persisted_raw = _load_history_payload(payload)
-        if not _typed_payload_equal(raw, persisted_raw):
+        payload = _canonical_json_fn(raw)
+        persisted_raw = _load_payload(payload)
+        if not _payload_equal(raw, persisted_raw):
             raise ValueError("market event JSON representation changes payload types")
         round_tripped = _encode(_decode(persisted_raw))
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("market event payload is not canonical") from exc
-    if not _typed_payload_equal(persisted_raw, round_tripped):
+    if not _payload_equal(persisted_raw, round_tripped):
         raise ValueError("market event payload is not canonical")
     return payload
 
@@ -339,9 +369,16 @@ def _event_from_history_row(
     row: tuple[object, ...],
     *,
     _decode=_decode_market_event,
+    _history_columns=_HISTORY_COLUMNS,
+    _load_payload=_load_history_payload,
+    _canonical_json_fn=_canonical_json,
+    _canonical_payload_fn=_canonical_payload,
+    _dedupe_key_fn=_market_event_dedupe_key,
+    _quote_key_fn=_market_event_quote_key,
+    _typed_equal_fn=_typed_equal,
 ) -> MarketEvent:
     """Decode one persisted history row while proving redundant identity columns agree."""
-    if len(row) != len(_HISTORY_COLUMNS):
+    if len(row) != len(_history_columns):
         raise ValueError("market event history row has unexpected shape")
 
     (
@@ -359,18 +396,18 @@ def _event_from_history_row(
 
     if not isinstance(payload_json, str):
         raise ValueError("stored market event payload must be JSON text")
-    raw = _load_history_payload(payload_json)
-    canonical_raw = _canonical_json(raw)
+    raw = _load_payload(payload_json)
+    canonical_raw = _canonical_json_fn(raw)
     if payload_json != canonical_raw:
         raise ValueError("stored market event payload is not canonical JSON text")
 
     event = _decode(raw)
-    if canonical_raw != _canonical_payload(event):
+    if canonical_raw != _canonical_payload_fn(event):
         raise ValueError("stored market event payload is not canonical")
 
     expected = (
-        ("dedupe_key", dedupe_key, _market_event_dedupe_key(event)),
-        ("quote_key", quote_key, _market_event_quote_key(event)),
+        ("dedupe_key", dedupe_key, _dedupe_key_fn(event)),
+        ("quote_key", quote_key, _quote_key_fn(event)),
         ("event_id", event_id, event.event_id),
         ("market_id", market_id, event.market_id),
         ("selection_id", selection_id, event.selection_id),
@@ -380,7 +417,7 @@ def _event_from_history_row(
         ("sequence", sequence, event.sequence),
     )
     for field_name, persisted, canonical in expected:
-        if not _typed_equal(persisted, canonical):
+        if not _typed_equal_fn(persisted, canonical):
             raise ValueError(f"market event history row identity mismatch: {field_name}")
 
     return event
@@ -390,37 +427,48 @@ def _event_from_current_payload(
     payload_json: object,
     *,
     _decode=_decode_market_event,
+    _load_payload=_load_history_payload,
+    _canonical_json_fn=_canonical_json,
+    _canonical_payload_fn=_canonical_payload,
+    _event_order_key_fn=_event_order_key,
 ) -> MarketEvent:
     """Decode canonical projection payload independently of repairable redundant columns."""
     if not isinstance(payload_json, str):
         raise ValueError("current quote projection payload must be JSON text")
-    raw = _load_history_payload(payload_json)
+    raw = _load_payload(payload_json)
     try:
         event = _decode(raw)
     except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("current quote projection payload is not canonical") from exc
-    if _canonical_json(raw) != _canonical_payload(event):
+    if _canonical_json_fn(raw) != _canonical_payload_fn(event):
         raise ValueError("current quote projection payload is not canonical")
-    _event_order_key(event)
+    _event_order_key_fn(event)
     return event
 
 
-def _event_from_current_row(row: tuple[object, ...]) -> MarketEvent:
+def _event_from_current_row(
+    row: tuple[object, ...],
+    *,
+    _current_columns=_CURRENT_COLUMNS,
+    _decode_payload=_event_from_current_payload,
+    _quote_key_fn=_market_event_quote_key,
+    _typed_equal_fn=_typed_equal,
+) -> MarketEvent:
     """Decode one provider-aware current projection row and prove redundant identity."""
-    if len(row) != len(_CURRENT_COLUMNS):
+    if len(row) != len(_current_columns):
         raise ValueError("current quote projection row has unexpected shape")
 
     source_id, quote_key, observed_ts, sequence, payload_json = row
-    event = _event_from_current_payload(payload_json)
+    event = _decode_payload(payload_json)
 
     expected = (
         ("source_id", source_id, event.source_id),
-        ("quote_key", quote_key, _market_event_quote_key(event)),
+        ("quote_key", quote_key, _quote_key_fn(event)),
         ("observed_ts", observed_ts, event.observed_ts),
         ("sequence", sequence, event.sequence),
     )
     for field_name, persisted, canonical in expected:
-        if not _typed_equal(persisted, canonical):
+        if not _typed_equal_fn(persisted, canonical):
             raise ValueError(f"current quote projection row identity mismatch: {field_name}")
 
     return event
@@ -707,10 +755,12 @@ def _trusted_live_events_from_connection(
     *,
     _decode_row=_event_from_history_row,
     _order_key=_event_order_key,
+    _history_columns=_HISTORY_COLUMNS,
+    _authority=_LIVE_RECEIPT_AUTHORITY,
 ) -> list[MarketEvent]:
     """Read and verify receipt-authoritative history from one locked connection."""
     rows = connection.execute(
-        f"""SELECT {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)},
+        f"""SELECT {",".join(f"m.{column}" for column in _history_columns)},
                    r.ingest_ts,r.authority
             FROM market_events AS m
             INNER JOIN market_event_live_receipts AS r
@@ -718,11 +768,11 @@ def _trusted_live_events_from_connection(
     ).fetchall()
     events: list[MarketEvent] = []
     for row in rows:
-        event = _decode_row(row[: len(_HISTORY_COLUMNS)])
+        event = _decode_row(row[: len(_history_columns)])
         receipt_ingest_ts, authority = row[-2:]
         if (
             receipt_ingest_ts != event.ingest_ts
-            or authority != _LIVE_RECEIPT_AUTHORITY
+            or authority != _authority
         ):
             raise ValueError("live receipt authority conflicts with market history")
         events.append(event)

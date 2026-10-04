@@ -859,29 +859,12 @@ class PersistentLiveDecisionLoop:
                 assert store is not None
                 assert health_store is not None
 
-                def _reconcile_external_market_changes(*, force: bool = False) -> None:
-                    # MarketEventBus delivery is process-local. SQLite data_version is
-                    # only a cheap cross-connection invalidation hint; market values
-                    # still enter the mirror exclusively through the independently
-                    # proven current projection below.
-                    change_token = store.external_change_token()
-                    if (
-                        not force
-                        and self._default_market_change_token == change_token
-                    ):
-                        return
-                    for (
-                        persisted_event,
-                        append_generation,
-                    ) in store.current_by_source_with_append_generation().values():
-                        updates.reconcile_persisted(
-                            persisted_event,
-                            append_generation=append_generation,
-                        )
-                    self._default_market_change_token = change_token
-
                 try:
-                    _reconcile_external_market_changes(force=opened_here)
+                    self._reconcile_default_market_changes(
+                        store,
+                        updates,
+                        force=opened_here,
+                    )
                 except BaseException:
                     if opened_here:
                         store.close()
@@ -904,13 +887,13 @@ class PersistentLiveDecisionLoop:
                     # A peer may have committed market truth while provider I/O was
                     # failing. Reconcile it before the caller persists a ZERO
                     # provider-gap decision against this observation boundary.
-                    _reconcile_external_market_changes()
+                    self._reconcile_default_market_changes(store, updates)
                     raise
 
                 # Catch peer commits that landed while provider I/O was in flight.
                 # Same-connection appends are already delivered synchronously by the
                 # local MarketEventBus and do not advance SQLite data_version here.
-                _reconcile_external_market_changes()
+                self._reconcile_default_market_changes(store, updates)
                 return result
 
             self._observe = _default_observer
@@ -990,6 +973,64 @@ class PersistentLiveDecisionLoop:
         self._default_market_change_token = None
         if store is not None:
             store.close()
+
+    def _reconcile_default_market_changes(
+        self,
+        store: SQLiteMarketStore,
+        updates: BoundedMirrorInvalidationBuffer,
+        *,
+        force: bool = False,
+    ) -> int:
+        """Reconcile peer-process commits through independently proven market truth."""
+
+        if not isinstance(store, SQLiteMarketStore):
+            raise TypeError("store must be a SQLiteMarketStore")
+        if not isinstance(updates, BoundedMirrorInvalidationBuffer):
+            raise TypeError("updates must be a BoundedMirrorInvalidationBuffer")
+        if type(force) is not bool:
+            raise TypeError("force must be a bool")
+
+        # MarketEventBus delivery is process-local. SQLite data_version is only a
+        # cheap cross-connection invalidation hint; market values still enter the
+        # mirror exclusively through the independently proven current projection.
+        change_token = store.external_change_token()
+        if not force and self._default_market_change_token == change_token:
+            return change_token
+        for (
+            persisted_event,
+            append_generation,
+        ) in store.current_by_source_with_append_generation().values():
+            updates.reconcile_persisted(
+                persisted_event,
+                append_generation=append_generation,
+            )
+        self._default_market_change_token = change_token
+        return change_token
+
+    def _sample_decision_market_frontier(self) -> datetime:
+        """Choose a decision cutoff that cannot straddle an unseen peer append."""
+
+        store = self._default_market_store
+        if store is None:
+            return self._sample_clock()
+
+        # The token is sampled before trusted projection reconciliation and again
+        # after the candidate decision clock. If a peer commits anywhere across that
+        # interval, discard the candidate cutoff, reconcile the newly durable truth,
+        # and sample again. Once stable, any later peer commit necessarily occurred
+        # after the selected cutoff and belongs to a later cycle.
+        for _ in range(8):
+            expected_token = self._reconcile_default_market_changes(
+                store,
+                self.mirror_updates,
+            )
+            decision_time = self._sample_clock()
+            if store.external_change_token() == expected_token:
+                return decision_time
+
+        raise LiveDecisionProgressError(
+            "cross-process market truth changed continuously across decision cutoff"
+        )
 
     def __enter__(self) -> "PersistentLiveDecisionLoop":
         return self
@@ -1277,11 +1318,11 @@ class PersistentLiveDecisionLoop:
                     ),
                 )
             return self._persist_provider_gap(
-                self._sample_clock(),
+                self._sample_decision_market_frontier(),
                 exc,
             )
 
-        now = self._sample_clock()
+        now = self._sample_decision_market_frontier()
         batch = self.mirror_updates.drain(
             max_items=self.bounds.max_dirty_per_cycle
         )

@@ -2670,6 +2670,7 @@ _WEB_BRIDGE_PUBLIC_METHOD_WITNESSES = tuple(
 _WEB_BRIDGE_HOST_METHOD_NAMES = (
     "_bind_trusted_window",
     "_close_from_host",
+    "_registered_controller_record_locked",
     "_revoke_trust",
     "_runtime_witness_path",
 )
@@ -2744,6 +2745,27 @@ def _require_canonical_web_bridge_surface(
     return api
 
 
+def _require_canonical_web_bridge_controller(
+    api: AutosportWebBridge,
+) -> AutosportWebBridge:
+    """Reject test/dummy controller authority at the privileged host boundary."""
+
+    with api._trust_lock:
+        try:
+            _controller, controller_type, _operations, _workspace_witness = (
+                api._registered_controller_record_locked()
+            )
+        except WindowsWebBridgeTrustError as exc:
+            raise WindowsWebViewUnavailable(
+                "Autosport could not verify the canonical WebView controller authority"
+            ) from exc
+    if controller_type is None:
+        raise WindowsWebViewUnavailable(
+            "Autosport refused a non-canonical WebView controller authority"
+        )
+    return api
+
+
 def launch_windows_shell(
     bridge: AutosportWebBridge | None = None,
     *,
@@ -2785,6 +2807,7 @@ def launch_windows_shell(
     api = _require_canonical_web_bridge_surface(
         AutosportWebBridge() if bridge is None else bridge
     )
+    api = _require_canonical_web_bridge_controller(api)
     bind_trusted_window = api._bind_trusted_window
     close_from_host = api._close_from_host
     revoke_trust = api._revoke_trust

@@ -98,6 +98,13 @@ class _FakeWebview:
         self.bridge_rejected_after_navigation = True
 
 
+def _allow_noncanonical_controller_for_host_test(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "autosport.windows_webview_shell._require_canonical_web_bridge_controller",
+        lambda api: api,
+    )
+
+
 def test_bridge_rejects_public_calls_before_trusted_document_binding() -> None:
     controller = _Controller()
     bridge = AutosportWebBridge(controller)
@@ -615,6 +622,7 @@ def test_launch_rejects_instance_shadow_of_allowlisted_bridge_method(
     (
         "_bind_trusted_window",
         "_close_from_host",
+        "_registered_controller_record_locked",
         "_revoke_trust",
         "_runtime_witness_path",
     ),
@@ -640,7 +648,27 @@ def test_launch_rejects_instance_shadow_of_host_bridge_method(
     assert controller.events == []
 
 
+def test_launch_rejects_noncanonical_controller_authority(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    fake = _FakeWebview()
+    controller = _Controller()
+    bridge = AutosportWebBridge(controller)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    with pytest.raises(
+        WindowsWebViewUnavailable,
+        match="non-canonical WebView controller authority",
+    ):
+        launch_windows_shell(bridge, storage_path=tmp_path / "webview")
+
+    assert fake.api is None
+    assert controller.events == []
+
+
 def test_launch_binds_bridge_before_pywebview_api_use(monkeypatch) -> None:
+    _allow_noncanonical_controller_for_host_test(monkeypatch)
     fake = _FakeWebview()
     controller = _Controller()
     bridge = AutosportWebBridge(controller)
@@ -681,6 +709,7 @@ def test_launch_captures_host_methods_before_callback_tocou(
     monkeypatch,
     tmp_path,
 ) -> None:
+    _allow_noncanonical_controller_for_host_test(monkeypatch)
     fake = _HostMethodRetargetAfterValidationWebview()
     controller = _Controller()
     bridge = AutosportWebBridge(controller)
@@ -721,6 +750,7 @@ def test_launch_captures_revoke_before_navigation_tocou(
     monkeypatch,
     tmp_path,
 ) -> None:
+    _allow_noncanonical_controller_for_host_test(monkeypatch)
     fake = _RevokeRetargetAfterValidationWebview()
     controller = _Controller()
     bridge = AutosportWebBridge(controller)
@@ -757,6 +787,7 @@ def test_first_remote_document_never_becomes_bridge_trust_on_first_load(
     monkeypatch,
     tmp_path,
 ) -> None:
+    _allow_noncanonical_controller_for_host_test(monkeypatch)
     fake = _ForeignFirstDocumentWebview()
     controller = _Controller()
     bridge = AutosportWebBridge(controller)
@@ -793,6 +824,7 @@ def test_loopback_retarget_after_initialize_cannot_replace_packaged_document(
     monkeypatch,
     tmp_path,
 ) -> None:
+    _allow_noncanonical_controller_for_host_test(monkeypatch)
     fake = _LoopbackRetargetBeforeFirstLoadWebview()
     controller = _Controller()
     bridge = AutosportWebBridge(controller)
@@ -830,6 +862,7 @@ def test_bind_expected_url_rejects_tocou_navigation_before_initial_trust() -> No
 
 
 def test_navigation_before_load_revokes_bridge_and_fails_launch(monkeypatch) -> None:
+    _allow_noncanonical_controller_for_host_test(monkeypatch)
     fake = _FakeWebview(navigate_to="https://foreign.example/")
     controller = _Controller()
     bridge = AutosportWebBridge(controller)
@@ -913,6 +946,7 @@ def test_primary_webview_failure_is_not_masked_by_secondary_teardown_failure(
     monkeypatch,
     tmp_path,
 ) -> None:
+    _allow_noncanonical_controller_for_host_test(monkeypatch)
     fake = _LaunchFailureWebview()
     controller = _AlwaysFailCloseController()
     bridge = AutosportWebBridge(controller)
@@ -934,6 +968,7 @@ def test_successful_webview_return_with_failed_finalizer_is_bounded(
     monkeypatch,
     tmp_path,
 ) -> None:
+    _allow_noncanonical_controller_for_host_test(monkeypatch)
     fake = _FakeWebview()
     controller = _AlwaysFailCloseController()
     bridge = AutosportWebBridge(controller)
@@ -954,6 +989,7 @@ def test_native_window_close_vetoes_first_close_until_canonical_teardown_finishe
     monkeypatch,
     tmp_path,
 ) -> None:
+    _allow_noncanonical_controller_for_host_test(monkeypatch)
     controller = _Controller()
     fake = _NativeClosingWebview(controller)
     bridge = AutosportWebBridge(controller)
@@ -972,6 +1008,7 @@ def test_native_window_close_failure_stays_open_then_retries_teardown(
     monkeypatch,
     tmp_path,
 ) -> None:
+    _allow_noncanonical_controller_for_host_test(monkeypatch)
     controller = _FailingCloseController()
     fake = _NativeClosingWebview(controller)
     bridge = AutosportWebBridge(controller)
@@ -1054,6 +1091,7 @@ def test_native_close_falls_back_synchronously_if_teardown_thread_cannot_start(
     monkeypatch,
     tmp_path,
 ) -> None:
+    _allow_noncanonical_controller_for_host_test(monkeypatch)
     fake = _ThreadStartFailureWebview()
     controller = _Controller()
     bridge = AutosportWebBridge(controller)

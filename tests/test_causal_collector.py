@@ -1560,6 +1560,41 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertIsNone(application.lookup_receipt(delta))
             market_store.close()
 
+    def test_canonical_application_rechecks_event_after_preparation_callbacks(self):
+        event = MarketEvent.from_dict(event_payload())
+        delta = self.make_delta(payload=event.to_dict())
+        clock_calls = []
+
+        def mutating_clock():
+            clock_calls.append(True)
+            if len(clock_calls) == 1:
+                event.metadata["late_mutation"] = "must-not-be-persisted"
+            return "2026-01-01T00:00:05+00:00"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            market_store = SQLiteMarketStore(root / "market.db")
+            health_store = SourceHealthStore(root / "health.json")
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                health_store,
+                root / "canonical-application.json",
+                clock=mutating_clock,
+            )
+
+            with self.assertRaisesRegex(
+                DeltaConflictError,
+                "changed during desktop application",
+            ):
+                application.apply(delta, event)
+
+            self.assertEqual(clock_calls, [True])
+            self.assertEqual(market_store.events(event.event_id), [])
+            self.assertEqual(health_store.get(event.source_id).poll_count, 0)
+            self.assertIsNone(application.lookup_receipt(delta))
+            market_store.close()
+
+
     def test_canonical_application_receipt_time_is_after_durable_completion(self):
         event = MarketEvent.from_dict(event_payload())
         payload = event.to_dict()

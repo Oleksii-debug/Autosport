@@ -649,6 +649,14 @@ class CanonicalDesktopApplication:
             )
 
         if not progress.get("market_applied"):
+            # MarketEvent is frozen only at the outer dataclass layer; canonical
+            # metadata remains a mutable JSON object. External preparation callbacks
+            # (notably the injected clock) run after the first digest proof, so repeat
+            # the proof at the last boundary before durable market persistence.
+            if _canonical_digest(event) != digest:
+                raise DeltaConflictError(
+                    "canonical market event changed during desktop application"
+                )
             self.market_bus.publish(event)
             self._state.mark_market_applied(delta)
             progress = self._state.progress(delta)

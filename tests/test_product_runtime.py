@@ -223,6 +223,37 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 restored.close()
 
+    def test_product_runtime_authority_graph_is_immutable_after_build(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_autonomous_product_runtime(
+                workspace=Path(directory),
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product runtime authority field 'coordinator' is immutable",
+                ):
+                    runtime.coordinator = object()
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product runtime authority field 'market_store' is immutable",
+                ):
+                    runtime.market_store = object()
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "product runtime authority field 'tick' is immutable",
+                ):
+                    runtime.tick = lambda: None
+                with self.assertRaises(AttributeError):
+                    _ = runtime.__dict__
+                self.assertEqual(runtime.status().source_id, "provider-a")
+            finally:
+                runtime.close()
+
     def test_builder_ignores_product_desktop_consumer_module_rebind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

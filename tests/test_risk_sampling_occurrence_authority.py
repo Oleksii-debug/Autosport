@@ -618,12 +618,51 @@ def test_run_admission_is_product_issued_before_run_start(
     assert receipt.member_index == 0
     assert len(receipt.expected_draw_plan_sha256) == 64
     assert len(receipt.expected_draw_transcript_sha256) == 64
+    assert receipt.workspace_instance_id
+    assert receipt.authority_generation > 0
+    assert len(receipt.authority_record_sha256) == 64
     assert receipt.product_precommit_bound is True
     assert receipt.run_admission_bound is False
     assert receipt.execution_consumption_proven is False
     assert receipt.occurrence_ancestry_proven is False
     assert receipt.iid_qualified is False
     assert receipt.grants_real_money_authority is False
+
+
+def test_manual_admission_sidecar_without_monotonic_authority_is_rejected(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values = _product_precommit(tmp_path, monkeypatch)
+    plan = _resolve(values)
+    workspace = values[1]
+    authority_root = values[3]
+    authority_state = draw_authority._run_admission_authority(
+        workspace,
+        experiment_id=plan.experiment_id,
+        member_index=0,
+        authority_root=authority_root,
+    )
+    state = draw_authority._run_admission_core(
+        plan,
+        member_index=0,
+    )
+    state["workspace_instance_id"] = authority_state.workspace_instance_id
+    path = draw_authority._run_admission_state_path(
+        workspace,
+        experiment_id=plan.experiment_id,
+        member_index=0,
+    )
+    path.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="authority|history|rollback|re-resolved",
+    ):
+        _issue_admission(values)
 
 
 def test_run_registry_persists_exact_draw_admission_receipt(

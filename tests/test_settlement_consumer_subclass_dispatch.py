@@ -8,7 +8,7 @@ class SettlementConsumerSubclassDispatchTests(unittest.TestCase):
     def test_continuous_session_class_body_cannot_shadow_settlement_consumer(self) -> None:
         with self.assertRaisesRegex(
             TypeError,
-            "canonical settlement consumer entry binding is immutable",
+            "canonical settlement consumer entry binding is immutable|canonical settlement coordinator is not extensible",
         ):
 
             class ForgedContinuousSession(ContinuousSessionCoordinator):
@@ -26,26 +26,13 @@ class SettlementConsumerSubclassDispatchTests(unittest.TestCase):
                     return "forged-result"
 
     def test_continuous_session_clean_subclass_cannot_later_install_shadow(self) -> None:
-        class CleanContinuousSession(ContinuousSessionCoordinator):
-            pass
-
         with self.assertRaisesRegex(
             TypeError,
-            "canonical settlement consumer entry binding is immutable",
+            "canonical settlement coordinator is not extensible",
         ):
-            CleanContinuousSession._settle = lambda self, **kwargs: ((), ())
 
-        with self.assertRaisesRegex(
-            TypeError,
-            "canonical settlement consumer entry binding is immutable",
-        ):
-            del CleanContinuousSession._settle
-
-        with self.assertRaisesRegex(
-            TypeError,
-            "canonical settlement consumer entry binding is immutable",
-        ):
-            CleanContinuousSession._settlement_consumer_bindings_sealed = False
+            class CleanContinuousSession(ContinuousSessionCoordinator):
+                pass
 
     def test_autosport_session_clean_subclass_cannot_later_install_shadow(self) -> None:
         class CleanAutosportSession(AutosportSession):

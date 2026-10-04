@@ -348,76 +348,110 @@ def _bounded_manifest_bytes(
 
 def _validated_projection(
     payload: bytes,
+    *,
+    _bounded_impl=_bounded_manifest_bytes,
+    _json_loads=json.loads,
+    _json_decode_error=json.JSONDecodeError,
+    _strict_object_impl=_strict_object,
+    _reject_nonfinite_impl=_reject_nonfinite,
+    _required_fields=frozenset(_REQUIRED_FIELDS),
+    _manifest_kind=_MANIFEST_KIND,
+    _canonical_text_impl=_canonical_text,
+    _scopes_impl=_scopes,
+    _timestamp_impl=_timestamp,
+    _error_type=SourceRightsManifestError,
+    _dict_type=dict,
+    _set_type=set,
+    _int_type=int,
+    _sorted=sorted,
+    _type=type,
 ) -> tuple[str, tuple[str, ...], datetime, datetime, str, str, datetime]:
-    payload = _bounded_manifest_bytes(payload)
+    payload = _bounded_impl(payload)
     try:
-        raw = json.loads(
+        raw = _json_loads(
             payload.decode("utf-8"),
-            object_pairs_hook=_strict_object,
-            parse_constant=_reject_nonfinite,
+            object_pairs_hook=_strict_object_impl,
+            parse_constant=_reject_nonfinite_impl,
         )
     except UnicodeDecodeError as exc:
-        raise SourceRightsManifestError(
+        raise _error_type(
             "source-rights manifest must be valid UTF-8 JSON"
         ) from exc
-    except json.JSONDecodeError as exc:
-        raise SourceRightsManifestError(
+    except _json_decode_error as exc:
+        raise _error_type(
             "source-rights manifest must be valid JSON"
         ) from exc
     except RecursionError as exc:
-        raise SourceRightsManifestError(
+        raise _error_type(
             "source-rights manifest must be valid JSON"
         ) from exc
 
-    if type(raw) is not dict:
-        raise SourceRightsManifestError("source-rights manifest must be a JSON object")
-    fields = set(raw)
-    if fields != _REQUIRED_FIELDS:
-        missing = sorted(_REQUIRED_FIELDS - fields)
-        unknown = sorted(fields - _REQUIRED_FIELDS)
+    if _type(raw) is not _dict_type:
+        raise _error_type(
+            "source-rights manifest must be a JSON object"
+        )
+    fields = _set_type(raw)
+    if fields != _required_fields:
+        missing = _sorted(_required_fields - fields)
+        unknown = _sorted(fields - _required_fields)
         details: list[str] = []
         if missing:
             details.append("missing=" + ",".join(missing))
         if unknown:
             details.append("unknown=" + ",".join(unknown))
-        raise SourceRightsManifestError(
+        raise _error_type(
             "source-rights manifest fields must match schema exactly"
             + (": " + " ".join(details) if details else "")
         )
 
-    if type(raw["schema_version"]) is not int or raw["schema_version"] != 1:
-        raise SourceRightsManifestError(
+    if (
+        _type(raw["schema_version"]) is not _int_type
+        or raw["schema_version"] != 1
+    ):
+        raise _error_type(
             "source-rights manifest schema_version must be exact integer 1"
         )
-    if raw["kind"] != _MANIFEST_KIND:
-        raise SourceRightsManifestError(
-            f"source-rights manifest kind must be {_MANIFEST_KIND}"
+    if raw["kind"] != _manifest_kind:
+        raise _error_type(
+            f"source-rights manifest kind must be {_manifest_kind}"
         )
     if raw["human_approved"] is not True:
-        raise SourceRightsManifestError(
+        raise _error_type(
             "source-rights manifest must explicitly set human_approved=true"
         )
 
-    source_identity = _canonical_text(
+    source_identity = _canonical_text_impl(
         raw["source_identity"],
         field_name="source_identity",
     )
-    authorized_scopes = _scopes(raw["authorized_scopes"])
-    effective_at = _timestamp(raw["effective_at"], field_name="effective_at")
-    expires_at = _timestamp(raw["expires_at"], field_name="expires_at")
-    approved_by = _canonical_text(raw["approved_by"], field_name="approved_by")
-    approval_reference = _canonical_text(
+    authorized_scopes = _scopes_impl(raw["authorized_scopes"])
+    effective_at = _timestamp_impl(
+        raw["effective_at"],
+        field_name="effective_at",
+    )
+    expires_at = _timestamp_impl(
+        raw["expires_at"],
+        field_name="expires_at",
+    )
+    approved_by = _canonical_text_impl(
+        raw["approved_by"],
+        field_name="approved_by",
+    )
+    approval_reference = _canonical_text_impl(
         raw["approval_reference"],
         field_name="approval_reference",
     )
-    approved_at = _timestamp(raw["approved_at"], field_name="approved_at")
+    approved_at = _timestamp_impl(
+        raw["approved_at"],
+        field_name="approved_at",
+    )
 
     if approved_at > effective_at:
-        raise SourceRightsManifestError(
+        raise _error_type(
             "approved_at must not be later than effective_at"
         )
     if expires_at <= effective_at:
-        raise SourceRightsManifestError(
+        raise _error_type(
             "expires_at must be later than effective_at"
         )
 
@@ -434,126 +468,205 @@ def _validated_projection(
 
 def _validated_manifest_snapshot(
     manifest: SourceRightsManifest,
+    *,
+    _bounded_impl=_bounded_manifest_bytes,
+    _canonical_text_impl=_canonical_text,
+    _runtime_scopes_impl=_runtime_scopes,
+    _runtime_timestamp_impl=_runtime_timestamp,
+    _error_type=SourceRightsManifestError,
 ) -> tuple[str, tuple[str, ...], datetime, datetime, str, str, datetime]:
-    _bounded_manifest_bytes(manifest.manifest_bytes)
-    digest = _canonical_text(manifest.manifest_sha256, field_name="manifest_sha256")
-    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
-        raise SourceRightsManifestError("source-rights manifest snapshot digest is malformed")
+    _bounded_impl(manifest.manifest_bytes)
+    digest = _canonical_text_impl(
+        manifest.manifest_sha256,
+        field_name="manifest_sha256",
+    )
+    if (
+        len(digest) != 64
+        or any(ch not in "0123456789abcdef" for ch in digest)
+    ):
+        raise _error_type(
+            "source-rights manifest snapshot digest is malformed"
+        )
     return (
-        _canonical_text(manifest.source_identity, field_name="manifest source_identity"),
-        _runtime_scopes(manifest.authorized_scopes),
-        _runtime_timestamp(manifest.effective_at, field_name="manifest effective_at"),
-        _runtime_timestamp(manifest.expires_at, field_name="manifest expires_at"),
-        _canonical_text(manifest.approved_by, field_name="manifest approved_by"),
-        _canonical_text(
+        _canonical_text_impl(
+            manifest.source_identity,
+            field_name="manifest source_identity",
+        ),
+        _runtime_scopes_impl(manifest.authorized_scopes),
+        _runtime_timestamp_impl(
+            manifest.effective_at,
+            field_name="manifest effective_at",
+        ),
+        _runtime_timestamp_impl(
+            manifest.expires_at,
+            field_name="manifest expires_at",
+        ),
+        _canonical_text_impl(
+            manifest.approved_by,
+            field_name="manifest approved_by",
+        ),
+        _canonical_text_impl(
             manifest.approval_reference,
             field_name="manifest approval_reference",
         ),
-        _runtime_timestamp(manifest.approved_at, field_name="manifest approved_at"),
+        _runtime_timestamp_impl(
+            manifest.approved_at,
+            field_name="manifest approved_at",
+        ),
     )
 
 
-def load_source_rights_manifest(path: str | Path) -> SourceRightsManifest:
-    """Load and validate one exact source-rights manifest byte snapshot."""
-
-    manifest_path = Path(path)
-    try:
-        with manifest_path.open("rb") as handle:
-            payload = handle.read(_MAX_MANIFEST_BYTES + 1)
-    except OSError as exc:
-        raise SourceRightsManifestError(
-            f"source-rights manifest is not readable: {manifest_path}"
-        ) from exc
-    payload = _bounded_manifest_bytes(payload)
-
-    (
-        source_identity,
-        authorized_scopes,
-        effective_at,
-        expires_at,
-        approved_by,
-        approval_reference,
-        approved_at,
-    ) = _validated_projection(payload)
-
-    return SourceRightsManifest(
-        manifest_path=str(manifest_path),
-        manifest_sha256=hashlib.sha256(payload).hexdigest(),
-        source_identity=source_identity,
-        authorized_scopes=authorized_scopes,
-        effective_at=effective_at,
-        expires_at=expires_at,
-        approved_by=approved_by,
-        approval_reference=approval_reference,
-        approved_at=approved_at,
-        manifest_bytes=payload,
-    )
-
-
-def authorize_source_use(
-    manifest: SourceRightsManifest,
+def _build_source_rights_loader(
     *,
-    source_identity: str,
-    required_scope: str,
-    at: datetime,
-) -> SourceRightsAuthorization:
-    """Authorize one exact source/scope use at one instant.
+    _path_type=Path,
+    _max_manifest_bytes=_MAX_MANIFEST_BYTES,
+    _bounded_impl=_bounded_manifest_bytes,
+    _projection_impl=_validated_projection,
+    _manifest_type=SourceRightsManifest,
+    _sha256_constructor=hashlib.sha256,
+    _error_type=SourceRightsManifestError,
+    _str_type=str,
+):
+    """Compose the public loader from canonical policy-evidence roots."""
 
-    Scope matching is exact and case-sensitive. The valid interval is
-    [effective_at, expires_at); equality with expires_at is expired.
-    """
+    def load_source_rights_manifest(
+        path: str | Path,
+    ) -> SourceRightsManifest:
+        """Load and validate one exact source-rights manifest byte snapshot."""
 
-    if type(manifest) is not SourceRightsManifest:
-        raise SourceRightsManifestError(
-            "manifest must be an exact verified SourceRightsManifest"
-        )
+        manifest_path = _path_type(path)
+        try:
+            with manifest_path.open("rb") as handle:
+                payload = handle.read(_max_manifest_bytes + 1)
+        except OSError as exc:
+            raise _error_type(
+                f"source-rights manifest is not readable: {manifest_path}"
+            ) from exc
+        payload = _bounded_impl(payload)
 
-    requested_source = _canonical_text(
-        source_identity,
-        field_name="requested source_identity",
-    )
-    scope = _canonical_text(required_scope, field_name="required_scope")
-    if "*" in scope:
-        raise SourceRightsManifestError(
-            "required_scope must be explicit; wildcard scopes are forbidden"
-        )
-    checked_at = _runtime_timestamp(at, field_name="authorization check time")
+        (
+            source_identity,
+            authorized_scopes,
+            effective_at,
+            expires_at,
+            approved_by,
+            approval_reference,
+            approved_at,
+        ) = _projection_impl(payload)
 
-    object_projection = _validated_manifest_snapshot(manifest)
-    if hashlib.sha256(manifest.manifest_bytes).hexdigest() != manifest.manifest_sha256:
-        raise SourceRightsManifestError(
-            "source-rights manifest snapshot digest is inconsistent"
-        )
-
-    projection = _validated_projection(manifest.manifest_bytes)
-    if projection != object_projection:
-        raise SourceRightsManifestError(
-            "source-rights manifest snapshot fields are inconsistent"
-        )
-
-    if requested_source != manifest.source_identity:
-        raise SourceRightsManifestError(
-            "source_identity is not authorized by this manifest"
-        )
-    if scope not in manifest.authorized_scopes:
-        raise SourceRightsManifestError(
-            "required_scope is not explicitly authorized by this manifest"
-        )
-    if checked_at < manifest.effective_at:
-        raise SourceRightsManifestError(
-            "source-rights authorization is not yet effective"
-        )
-    if checked_at >= manifest.expires_at:
-        raise SourceRightsManifestError(
-            "source-rights authorization has expired"
+        return _manifest_type(
+            manifest_path=_str_type(manifest_path),
+            manifest_sha256=_sha256_constructor(payload).hexdigest(),
+            source_identity=source_identity,
+            authorized_scopes=authorized_scopes,
+            effective_at=effective_at,
+            expires_at=expires_at,
+            approved_by=approved_by,
+            approval_reference=approval_reference,
+            approved_at=approved_at,
+            manifest_bytes=payload,
         )
 
-    return SourceRightsAuthorization(
-        source_identity=manifest.source_identity,
-        required_scope=scope,
-        checked_at=checked_at,
-        manifest_sha256=manifest.manifest_sha256,
-        approved_by=manifest.approved_by,
-        approval_reference=manifest.approval_reference,
-        _issuer=_AUTHORIZATION_ISSUER,
-    )
+    return load_source_rights_manifest
+
+
+load_source_rights_manifest = _build_source_rights_loader()
+del _build_source_rights_loader
+
+
+def _build_authorize_source_use(
+    *,
+    _manifest_type=SourceRightsManifest,
+    _canonical_text_impl=_canonical_text,
+    _runtime_timestamp_impl=_runtime_timestamp,
+    _snapshot_impl=_validated_manifest_snapshot,
+    _projection_impl=_validated_projection,
+    _sha256_constructor=hashlib.sha256,
+    _issue_impl=_issue_source_rights_authorization,
+    _error_type=SourceRightsManifestError,
+    _type=type,
+):
+    """Compose positive source-use authorization from canonical roots only."""
+
+    def authorize_source_use(
+        manifest: SourceRightsManifest,
+        *,
+        source_identity: str,
+        required_scope: str,
+        at: datetime,
+    ) -> SourceRightsAuthorization:
+        """Authorize one exact source/scope use at one instant.
+
+        Scope matching is exact and case-sensitive. The valid interval is
+        [effective_at, expires_at); equality with expires_at is expired.
+        """
+
+        if _type(manifest) is not _manifest_type:
+            raise _error_type(
+                "manifest must be an exact verified SourceRightsManifest"
+            )
+
+        requested_source = _canonical_text_impl(
+            source_identity,
+            field_name="requested source_identity",
+        )
+        scope = _canonical_text_impl(
+            required_scope,
+            field_name="required_scope",
+        )
+        if "*" in scope:
+            raise _error_type(
+                "required_scope must be explicit; wildcard scopes are forbidden"
+            )
+        checked_at = _runtime_timestamp_impl(
+            at,
+            field_name="authorization check time",
+        )
+
+        object_projection = _snapshot_impl(manifest)
+        if (
+            _sha256_constructor(manifest.manifest_bytes).hexdigest()
+            != manifest.manifest_sha256
+        ):
+            raise _error_type(
+                "source-rights manifest snapshot digest is inconsistent"
+            )
+
+        projection = _projection_impl(manifest.manifest_bytes)
+        if projection != object_projection:
+            raise _error_type(
+                "source-rights manifest snapshot fields are inconsistent"
+            )
+
+        if requested_source != manifest.source_identity:
+            raise _error_type(
+                "source_identity is not authorized by this manifest"
+            )
+        if scope not in manifest.authorized_scopes:
+            raise _error_type(
+                "required_scope is not explicitly authorized by this manifest"
+            )
+        if checked_at < manifest.effective_at:
+            raise _error_type(
+                "source-rights authorization is not yet effective"
+            )
+        if checked_at >= manifest.expires_at:
+            raise _error_type(
+                "source-rights authorization has expired"
+            )
+
+        return _issue_impl(
+            source_identity=manifest.source_identity,
+            required_scope=scope,
+            checked_at=checked_at,
+            manifest_sha256=manifest.manifest_sha256,
+            approved_by=manifest.approved_by,
+            approval_reference=manifest.approval_reference,
+        )
+
+    return authorize_source_use
+
+
+authorize_source_use = _build_authorize_source_use()
+del _build_authorize_source_use
+

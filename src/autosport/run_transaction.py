@@ -549,6 +549,10 @@ class RunTransaction:
     def stage_outputs(self, book: PaperBook, canonical_ledger_path: str | Path) -> tuple[str, str]:
         self._require_complete_identity_anchor()
         manifest = self._read_manifest()
+        if replay_evidence is not None:
+            manifest["replay_execution_receipt_sha256"] = replay_evidence[
+                "replay_execution_receipt_sha256"
+            ]
         if manifest["phase"] != "staging":
             raise RunTransactionError("transaction is not in staging phase")
         canonical_ledger = Path(canonical_ledger_path)
@@ -1629,6 +1633,9 @@ class RunTransaction:
             "strategy_id": manifest.get("strategy_id"),
             "sampling_draw_admission_receipt_sha256": manifest.get(
                 "sampling_draw_admission_receipt_sha256"
+            ),
+            "replay_execution_receipt_sha256": manifest.get(
+                "replay_execution_receipt_sha256"
             ),
         }
         mismatches = [

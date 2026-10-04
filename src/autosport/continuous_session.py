@@ -254,6 +254,8 @@ class ContinuousSessionStatus:
     source_state_projection_backlog: bool = False
     invalidation_pending_count: int = 0
     invalidation_full_refresh_required: bool = False
+    settlement_evidence_count: int = 0
+    settlement_evidence_materialized: bool = True
 
 
 def _text(value: object, field: str) -> str:
@@ -1222,6 +1224,8 @@ class _ContinuousSessionState:
                 last_error_code=raw["last_error_code"],
                 last_full_refresh_at=raw["last_full_refresh_at"],
                 settlement_evidence=tuple(dict(item) for item in evidence),
+                settlement_evidence_count=raw["settlement_evidence_count"],
+                settlement_evidence_materialized=True,
                 source_gap_state=raw["source_gap_state"],
                 source_sync_state=raw["source_sync_state"],
                 source_state_delta_id=raw["source_state_delta_id"],
@@ -1247,6 +1251,8 @@ class _ContinuousSessionState:
             last_error_code=raw["last_error_code"],
             last_full_refresh_at=raw["last_full_refresh_at"],
             settlement_evidence=(),
+            settlement_evidence_count=raw["settlement_evidence_count"],
+            settlement_evidence_materialized=False,
             source_gap_state=raw["source_gap_state"],
             source_sync_state=raw["source_sync_state"],
             source_state_delta_id=raw["source_state_delta_id"],

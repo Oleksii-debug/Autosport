@@ -69,6 +69,19 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             finally:
                 reopened.close()
 
+    def test_generic_market_bus_remains_receipt_provenance_neutral(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            event = self._direct_event()
+            store = SQLiteMarketStore(path)
+            bus = MarketEventBus(store)
+
+            self.assertEqual(bus.publish_many([event]), 1)
+            self.assertEqual(store.events(), [event])
+            self.assertFalse(store.has_trusted_live_receipt(event))
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
     def test_live_ingestion_persists_market_row_and_receipt_authority_together(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

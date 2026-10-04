@@ -576,6 +576,15 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     observation=record.as_observation(),
                     started_at=started_at,
                 )
+        expected_run_id = _impl._run_id(
+            plan,
+            trigger_id,
+            config,
+        )
+        if run_id != expected_run_id:
+            raise PaperExecutionStateError(
+                "run_id does not match canonical plan/trigger/model identity"
+            )
         run_events = [
             event
             for event in durable_events

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
@@ -199,6 +200,7 @@ def _source_payload(
 
 
 _LIVE_RECEIPT_ISSUE_TOKEN = object()
+_LIVE_RECEIPT_CONTEXT = ContextVar("autosport_live_receipt_context", default=None)
 
 
 class _LiveReceiptBatch:
@@ -849,8 +851,6 @@ class SQLiteMarketStore:
     def __init__(self, path: str | Path = "autosport.db") -> None:
         self.path = Path(path)
         self._connection_lock = RLock()
-        # Only an internally issued exact capability can grant live receipt authority.
-        self._active_live_receipt_batch: _LiveReceiptBatch | None = None
         self.connection = sqlite3.connect(self.path, check_same_thread=False)
         try:
             self.connection.execute("PRAGMA journal_mode=WAL")
@@ -1134,6 +1134,7 @@ class SQLiteMarketStore:
         _event_type: type[MarketEvent] = MarketEvent,
         _capability_type: type[_LiveReceiptBatch] = _LiveReceiptBatch,
         _expected_issue_token=_LIVE_RECEIPT_ISSUE_TOKEN,
+        _live_context=_LIVE_RECEIPT_CONTEXT,
         _canonical_payload_fn=_canonical_payload,
         _dedupe_key=_market_event_dedupe_key,
         _quote_key=_market_event_quote_key,
@@ -1143,7 +1144,14 @@ class SQLiteMarketStore:
             raise TypeError("live receipt authority requires an exact SQLiteMarketStore")
         if type(event) is not _event_type:
             raise TypeError("live receipt authority requires an exact MarketEvent")
-        capability = self._active_live_receipt_batch
+        context = _live_context.get()
+        capability = (
+            context[1]
+            if type(context) is tuple
+            and len(context) == 2
+            and context[0] is self
+            else None
+        )
         if (
             type(capability) is not _capability_type
             or capability._issue_token is not _expected_issue_token
@@ -1194,7 +1202,9 @@ class SQLiteMarketStore:
         _market_event_type: type[MarketEvent] = MarketEvent,
         _capability_type: type[_LiveReceiptBatch] = _LiveReceiptBatch,
         _capability_init=_LiveReceiptBatch.__init__,
+        _capability_iter=_LiveReceiptBatch.__iter__,
         _issue_token=_LIVE_RECEIPT_ISSUE_TOKEN,
+        _live_context=_LIVE_RECEIPT_CONTEXT,
         _object_new=object.__new__,
         _dedupe_key=_market_event_dedupe_key,
         _canonical_payload_fn=_canonical_payload,
@@ -1222,7 +1232,7 @@ class SQLiteMarketStore:
             requested_counts[identity] = requested_counts.get(identity, 0) + 1
 
         with self._connection_lock:
-            if self._active_live_receipt_batch is not None:
+            if _live_context.get() is not None:
                 raise RuntimeError("nested live receipt authority write is not allowed")
             receipt_keys_before = {
                 _dedupe_key(event)
@@ -1233,11 +1243,12 @@ class SQLiteMarketStore:
                 ).fetchone()
                 is not None
             }
-            self._active_live_receipt_batch = capability
+            issued_generation = tuple(_capability_iter(capability))
+            context_token = _live_context.set((self, capability))
             try:
-                accepted = self.append_batch_accepted(capability)
+                accepted = self.append_batch_accepted(issued_generation)
             finally:
-                self._active_live_receipt_batch = None
+                _live_context.reset(context_token)
 
             if type(accepted) is not list:
                 raise TypeError("live append must return a list of accepted MarketEvent values")
@@ -1270,13 +1281,21 @@ class SQLiteMarketStore:
         _capability_type: type[_LiveReceiptBatch] = _LiveReceiptBatch,
         _capability_authorizes=_LiveReceiptBatch.authorizes,
         _capability_iter=_LiveReceiptBatch.__iter__,
+        _live_context=_LIVE_RECEIPT_CONTEXT,
         _insert_one_fn=_insert_one,
         _insert_receipt_fn=_insert_live_receipt_authority,
     ) -> list[MarketEvent]:
         """Insert one normalized batch in one transaction and return newly accepted events."""
         accepted: list[MarketEvent] = []
         with self._connection_lock:
-            capability = self._active_live_receipt_batch
+            context = _live_context.get()
+            capability = (
+                context[1]
+                if type(context) is tuple
+                and len(context) == 2
+                and context[0] is self
+                else None
+            )
             live_receipt_authority = (
                 type(capability) is _capability_type
                 and _capability_authorizes(capability, events)
@@ -1428,3 +1447,4 @@ def _seal_live_receipt_authority_call_surfaces() -> None:
 _seal_live_receipt_authority_call_surfaces()
 del _seal_live_receipt_authority_call_surfaces
 del _LIVE_RECEIPT_ISSUE_TOKEN
+del _LIVE_RECEIPT_CONTEXT

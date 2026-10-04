@@ -615,6 +615,23 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
         "execution action quote_observed_at",
     )
     action_quote_observed_at = action_quote_observed_at.astimezone(timezone.utc)
+    if (
+        price_ladder_authoritative
+        and price_ladder_admission is not None
+        and price_ladder_admission.acquisition_started_at.astimezone(
+            timezone.utc
+        )
+        < action_quote_observed_at
+    ):
+        # A market-definition witness from before the durable action quote may
+        # describe a ladder generation that was already obsolete when the
+        # quoted price was formed. Preserve diagnostics but revoke its ability
+        # to satisfy this decision-time gate.
+        price_ladder_authoritative = False
+        price_ladder_evidence_digest = None
+        price_ladder_reasons.append(
+            "PRICE_LADDER_EVIDENCE_PREDATES_ACTION_QUOTE"
+        )
     if acquisition_started_at.astimezone(timezone.utc) < action_quote_observed_at:
         raise ValueError(
             "market-book depth observation predates durable execution quote"

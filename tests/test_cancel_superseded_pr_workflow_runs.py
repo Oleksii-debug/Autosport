@@ -954,6 +954,65 @@ def test_cancel_rejects_nested_snapshot_kwdefault_rebase(monkeypatch) -> None:
     assert api.cancelled == []
 
 
+def test_cancel_rejects_preentry_production_active_runs_shadow(
+    monkeypatch,
+) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    forged_calls: list[str] = []
+
+    def forged_active_runs() -> tuple[WorkflowRun, ...]:
+        forged_calls.append("active")
+        return ()
+
+    monkeypatch.setattr(api, "active_runs", forged_active_runs)
+
+    with pytest.raises(
+        CancellationError,
+        match="superseded-run cancellation authority changed",
+    ):
+        cancel_superseded(
+            api=api,
+            pr_number=2008,
+            event_head_sha=HEAD_B,
+            workflow_name="CI",
+            current_run_id=11,
+        )
+
+    assert forged_calls == []
+
+
+def test_cancel_rejects_preentry_production_cancel_shadow(
+    monkeypatch,
+) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    forged_calls: list[int] = []
+
+    def forged_cancel(run_id: int) -> None:
+        forged_calls.append(run_id)
+
+    monkeypatch.setattr(api, "cancel", forged_cancel)
+
+    with pytest.raises(
+        CancellationError,
+        match="superseded-run cancellation authority changed",
+    ):
+        cancel_superseded(
+            api=api,
+            pr_number=2008,
+            event_head_sha=HEAD_B,
+            workflow_name="CI",
+            current_run_id=11,
+        )
+
+    assert forged_calls == []
+
+
 def test_cancel_rejects_inflight_active_runs_shadow(monkeypatch) -> None:
     forged_calls: list[str] = []
 

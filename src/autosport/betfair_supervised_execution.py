@@ -592,6 +592,7 @@ class BetfairSupervisedPlaceOrdersClient:
         bound: BoundSupervisedExecutionPlan,
         provider_order_ref: str,
         execution_workspace: Path,
+        _before_transport: Callable[[str], None] | None = None,
     ) -> BetfairPlaceExecutionReport:
         selection_id = _validate_betfair_place_action(action)
         self._gate.require(
@@ -645,6 +646,8 @@ class BetfairSupervisedPlaceOrdersClient:
             "X-Application": self._credentials.application_key,
             "X-Authentication": self._credentials.session_token,
         }
+        if _before_transport is not None:
+            _before_transport(request_sha256)
         try:
             payload = self._transport.post(
                 BETTING_JSON_RPC_ENDPOINT,
@@ -947,13 +950,13 @@ def _place_action_with_final_durable_authority(
     execution_workspace: Path,
     clock: Callable[[], str],
 ) -> BetfairPlaceExecutionReport:
-    """Fsync SUBMITTED and hold durable approval stable through provider I/O.
+    """Hold approval stable and fsync SUBMITTED at the transport boundary.
 
-    The ledger's canonical writer fence is deliberately held across the one
-    irreversible provider call. A durable approval revocation therefore either
-    commits before this operation and denies the send, or cannot commit until
-    the already-authorized provider call has returned. The operation performs
-    every deterministic local authority check before persisting SUBMITTED.
+    The canonical ledger writer fence spans the one irreversible provider call.
+    Final approval/quote time is sampled by the private pre-transport callback,
+    after the exact request bytes have been built and immediately before POST.
+    A durable approval revocation therefore either commits first and denies the
+    send, or cannot commit until the already-authorized provider call returns.
     """
 
     def operation() -> BetfairPlaceExecutionReport:
@@ -985,27 +988,10 @@ def _place_action_with_final_durable_authority(
                 "final supervised send provider order reference drifted"
             )
 
-        send_at = clock()
-        _require_approval(bound, approval, send_at)
+        # Fast fail on already-revoked durable authority before provider request
+        # construction. The same fact is re-resolved again at the exact transport
+        # boundary below while this writer fence is still held.
         _require_durable_approval(ledger, bound, approval)
-        if _time(send_at, "final send time") < _time(
-            attempt.attempt.reserved_at,
-            "attempt reserved_at",
-        ):
-            raise BetfairSupervisedExecutionError(
-                "final send time precedes attempt reservation"
-            )
-        if _time(send_at, "final send time") >= _time(
-            action.expires_at,
-            "action expires_at",
-        ):
-            raise BetfairSupervisedExecutionError(
-                "placeOrders final send is at/after quote expiry"
-            )
-
-        # Re-run every deterministic local provider gate while both the owner
-        # workspace lock and durable ledger writer fence are held. Only after
-        # those checks pass may SUBMITTED become durable.
         _validate_betfair_place_action(action)
         client._gate.require(
             action=action,
@@ -1022,13 +1008,36 @@ def _place_action_with_final_durable_authority(
                 "provider_order_ref must be <=32 lowercase hex characters"
             )
 
-        ledger._append(
-            EventType.ATTEMPT_SUBMITTED,
-            bound.execution_plan.plan_id,
-            action.action_id,
-            attempt_id,
-            {"submitted_at": send_at},
-        )
+        submitted = False
+
+        def authorize_and_submit(_request_sha256: str) -> None:
+            nonlocal submitted
+            send_at = clock()
+            _require_approval(bound, approval, send_at)
+            _require_durable_approval(ledger, bound, approval)
+            if _time(send_at, "final send time") < _time(
+                attempt.attempt.reserved_at,
+                "attempt reserved_at",
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "final send time precedes attempt reservation"
+                )
+            if _time(send_at, "final send time") >= _time(
+                action.expires_at,
+                "action expires_at",
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "placeOrders final send is at/after quote expiry"
+                )
+            ledger._append(
+                EventType.ATTEMPT_SUBMITTED,
+                bound.execution_plan.plan_id,
+                action.action_id,
+                attempt_id,
+                {"submitted_at": send_at},
+            )
+            submitted = True
+
         try:
             return client.place_action(
                 action,
@@ -1036,13 +1045,17 @@ def _place_action_with_final_durable_authority(
                 bound=bound,
                 provider_order_ref=provider_ref,
                 execution_workspace=execution_workspace,
+                _before_transport=authorize_and_submit,
             )
         except BetfairPlaceOrdersAmbiguous:
             raise
         except Exception as exc:
-            # SUBMITTED is already durable. Any exception after entering the
-            # provider-call boundary is therefore effect-ambiguous, even if a
-            # custom transport or post-response validator raised it locally.
+            if not submitted:
+                # Deterministic local denial happened before provider I/O and
+                # before SUBMITTED became durable. Preserve RESERVED truth.
+                raise
+            # SUBMITTED is durable and the callback returned to the provider-call
+            # boundary. Any subsequent exception is effect-ambiguous.
             raise BetfairPlaceOrdersAmbiguous(
                 "placeOrders dispatch failed after durable submission; "
                 "authoritative readback required"
@@ -1081,10 +1094,11 @@ def execute_betfair_supervised_action(
     # Owner authority and durable supervised approval are independently
     # serialized through the irreversible boundary. EconomicGoalStore
     # successors share WorkspaceEconomicLock. The final ledger operation then
-    # re-resolves approval/attempt/order-ref truth, fsyncs SUBMITTED, and keeps
-    # the canonical ledger writer fence held through placeOrders. A tighter
-    # owner revision or durable approval revocation therefore wins before the
-    # send or waits until the already-authorized send has returned.
+    # re-resolves approval/attempt/order-ref truth, fsyncs SUBMITTED at the
+    # exact pre-transport callback, and keeps the canonical ledger writer fence
+    # held through placeOrders. A tighter owner revision or durable approval
+    # revocation therefore wins before the send or waits until the already-
+    # authorized send has returned.
     with WorkspaceEconomicLock(execution_workspace):
         client._gate.require(
             action=action,

@@ -1639,6 +1639,73 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_current_read_rejects_deleted_projection_row(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                event = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(event))
+                store.connection.execute(
+                    """DELETE FROM current_quotes
+                       WHERE source_id=? AND quote_key=?""",
+                    (event.source_id, event.quote_key),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "current quote projection diverges from canonical market history",
+                ):
+                    store.current_by_source()
+            finally:
+                store.close()
+
+    def test_current_read_rejects_coherent_forged_projection_row(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                event = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(event))
+                forged = self.event(
+                    sequence=999,
+                    odds="99.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                store.connection.execute(
+                    """UPDATE current_quotes
+                       SET observed_ts=?, sequence=?, payload_json=?
+                       WHERE source_id=? AND quote_key=?""",
+                    (
+                        forged.observed_ts,
+                        forged.sequence,
+                        storage_module._canonical_payload(forged),
+                        event.source_id,
+                        event.quote_key,
+                    ),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "current quote projection diverges from canonical market history",
+                ):
+                    store.current_by_source()
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "current quote projection diverges from canonical market history",
+                ):
+                    store.current()
+            finally:
+                store.close()
+
     def test_events_rejects_coherent_positive_history_rewrite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

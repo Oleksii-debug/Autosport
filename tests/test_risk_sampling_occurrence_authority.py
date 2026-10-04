@@ -728,6 +728,52 @@ def test_tampered_run_admission_state_fails_closed(
     assert len(receipt.receipt_sha256) == 64
 
 
+def test_run_admission_rejects_hardlinked_state_alias(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values = _product_precommit(tmp_path, monkeypatch)
+    _issue_admission(values)
+    workspace = values[1]
+    paths = tuple(workspace.glob(".risk-iid-run-admission-*.json"))
+    assert len(paths) == 1
+    alias = workspace / "admission-hardlink-alias.json"
+    try:
+        alias.hardlink_to(paths[0])
+    except OSError:
+        pytest.skip("hard links are unavailable on this filesystem")
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="re-resolved|regular non-aliased",
+    ):
+        _issue_admission(values)
+
+
+def test_run_admission_rejects_symlink_path_replacement(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    values = _product_precommit(tmp_path, monkeypatch)
+    _issue_admission(values)
+    workspace = values[1]
+    paths = tuple(workspace.glob(".risk-iid-run-admission-*.json"))
+    assert len(paths) == 1
+    path = paths[0]
+    real = workspace / "admission-real.json"
+    path.replace(real)
+    try:
+        path.symlink_to(real)
+    except OSError:
+        pytest.skip("symbolic links are unavailable on this platform")
+
+    with pytest.raises(
+        ProductIidDrawPlanError,
+        match="re-resolved|regular non-aliased",
+    ):
+        _issue_admission(values)
+
+
 def test_run_admission_truth_cannot_be_caller_constructed_or_subclassed() -> None:
     with pytest.raises(TypeError, match="product-issued"):
         ProductIidRunAdmissionReceipt(

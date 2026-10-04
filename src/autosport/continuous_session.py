@@ -1059,6 +1059,7 @@ class _ContinuousSessionState:
         list[dict[str, str]],
         dict[str, str | None],
         list[dict[str, object]],
+        tuple[str, ...],
     ]:
         known = {
             item["evidence_id"]: item
@@ -1081,6 +1082,7 @@ class _ContinuousSessionState:
             for item in pending.values()
         }
         seen_input_ids: set[str] = set()
+        accepted_input_ids: list[str] = []
         for evidence in settlement_evidence:
             normalized, normalized_outcomes, outcomes_digest = (
                 _settlement_snapshot(evidence)
@@ -1091,6 +1093,7 @@ class _ContinuousSessionState:
                     "settlement evidence repeats evidence_id"
                 )
             seen_input_ids.add(evidence_id)
+            accepted_input_ids.append(evidence_id)
             existing = known.get(evidence_id)
             if existing is not None and existing != normalized:
                 raise ContinuousSessionError(
@@ -1142,6 +1145,7 @@ class _ContinuousSessionState:
             list(sorted(known.values(), key=lambda item: item["evidence_id"])),
             dict(sorted(outcome_digests.items())),
             list(sorted(pending.values(), key=lambda item: item["evidence_id"])),
+            tuple(accepted_input_ids),
         )
 
     def validate_settlement_evidence(
@@ -1179,7 +1183,7 @@ class _ContinuousSessionState:
         """Durably bind settlement interpretation before any PAPER economic commit."""
 
         def mutate(raw: dict[str, Any]) -> None:
-            evidence, outcome_digests, pending = self._merge_settlement_evidence(
+            evidence, outcome_digests, pending, _ = self._merge_settlement_evidence(
                 raw,
                 settlement_evidence,
             )
@@ -1208,16 +1212,12 @@ class _ContinuousSessionState:
         # Reuse the closure-bound durable integrity path for exact evidence,
         # event/reference and quote-outcome digest comparison. It is intentionally
         # side-effect free here because raw is only the freshly read candidate.
-        self._merge_settlement_evidence(raw, settlement_evidence)
+        _, _, _, recovered_ids = self._merge_settlement_evidence(
+            raw,
+            settlement_evidence,
+        )
 
-        seen_ids: set[str] = set()
-        for evidence in settlement_evidence:
-            evidence_id = evidence.evidence_id
-            if evidence_id in seen_ids:
-                raise ContinuousSessionError(
-                    "recovered settlement evidence repeats evidence_id"
-                )
-            seen_ids.add(evidence_id)
+        for evidence_id in recovered_ids:
             if evidence_id not in known_ids:
                 raise ContinuousSessionError(
                     "recovered settlement evidence was not durably staged before P&L"
@@ -1250,16 +1250,15 @@ class _ContinuousSessionState:
                 item["evidence_id"]
                 for item in raw["pending_settlement_resolutions"]
             }
-            evidence, outcome_digests, pending = self._merge_settlement_evidence(
-                raw,
-                settlement_evidence,
+            evidence, outcome_digests, pending, _accepted_input_ids = (
+                self._merge_settlement_evidence(
+                    raw,
+                    settlement_evidence,
+                )
             )
-            # The merge above is the closure-bound canonicality boundary. Consume
-            # identity only after it has accepted every exact resolution.
-            processed = {
-                resolution.evidence_id
-                for resolution in settlement_evidence
-            }
+            # Consume only the detached identities returned by the closure-bound
+            # canonical snapshot; never reread the live caller objects after proof.
+            processed = set(_accepted_input_ids)
             if not retained.issubset(processed):
                 raise ContinuousSessionError(
                     "retained pending settlement identity was not processed"
@@ -1354,16 +1353,15 @@ class _ContinuousSessionState:
                 item["evidence_id"]
                 for item in raw["pending_settlement_resolutions"]
             }
-            evidence, outcome_digests, pending = self._merge_settlement_evidence(
-                raw,
-                settlement_evidence,
+            evidence, outcome_digests, pending, _accepted_input_ids = (
+                self._merge_settlement_evidence(
+                    raw,
+                    settlement_evidence,
+                )
             )
-            # The merge above is the closure-bound canonicality boundary. Consume
-            # identity only after it has accepted every exact resolution.
-            processed = {
-                resolution.evidence_id
-                for resolution in settlement_evidence
-            }
+            # Consume only the detached identities returned by the closure-bound
+            # canonical snapshot; never reread the live caller objects after proof.
+            processed = set(_accepted_input_ids)
             if not retained.issubset(processed):
                 raise ContinuousSessionError(
                     "retained pending settlement identity was not processed"

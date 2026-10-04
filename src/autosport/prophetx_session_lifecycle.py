@@ -545,6 +545,21 @@ class ProphetXSessionSnapshot:
                         "wait hold is below the conservative refresh floor"
                     )
 
+        if (
+            self.state is ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+            and (
+                self.last_failure_class
+                is ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT
+                or self.last_renewal_failure_class
+                is ProphetXRenewalFailureClass.AMBIGUOUS_PROVIDER_RESULT
+            )
+            and self.slot_hold_until
+            < self.last_transition_at + CONSERVATIVE_SESSION_SLOT_HOLD
+        ):
+            raise ProphetXSessionLifecycleError(
+                "ambiguous provider result hold is below the conservative floor"
+            )
+
         if self.state in {
             ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
             ProphetXSessionState.PROVIDER_UNAVAILABLE,

@@ -56,6 +56,7 @@ def _install_precommit_guard() -> None:
     canonical_issue = module.issue_product_proposal_risk_evaluation_precommit
     canonical_resolve = module.resolve_product_proposal_risk_evaluation_precommit
     canonical_require = module._require_dispatch
+    binding_type = module.ProductProposalRiskEvaluationPrecommit
 
     if (
         type(canonical_issue) is not FunctionType
@@ -90,6 +91,13 @@ def _install_precommit_guard() -> None:
         raise RuntimeError(
             "proposal risk evaluation precommit helper dispatch is unavailable"
         )
+    binding_descriptor_witnesses = tuple(
+        (name, binding_type.__dict__.get(name)) for name in module._BINDING_FIELDS
+    )
+    if any(value is None for _, value in binding_descriptor_witnesses):
+        raise RuntimeError(
+            "proposal risk evaluation precommit binding descriptors are unavailable"
+        )
 
     issue_code = canonical_issue.__code__
     resolve_code = canonical_resolve.__code__
@@ -103,6 +111,15 @@ def _install_precommit_guard() -> None:
             raise error_type(
                 "proposal risk evaluation precommit dispatch guard root changed"
             )
+        if module.ProductProposalRiskEvaluationPrecommit is not binding_type:
+            raise error_type(
+                "proposal risk evaluation precommit binding type was rebound"
+            )
+        for name, expected in binding_descriptor_witnesses:
+            if binding_type.__dict__.get(name) is not expected:
+                raise error_type(
+                    f"proposal risk evaluation precommit binding descriptor {name} changed"
+                )
         for name, expected, code in helper_witnesses:
             current = getattr(module, name, None)
             if current is not expected or getattr(current, "__code__", None) is not code:
@@ -443,7 +460,6 @@ def _install_execution_evidence_guard() -> None:
     )
 
 
-_install_precommit_guard()
 _seal_write_once_slots(
     _execution_authority.ProductProposalRiskEvaluationPrecommit,
     _authority._BINDING_FIELDS,
@@ -471,6 +487,7 @@ _seal_write_once_slots(
     _execution_authority.ProductProposalRiskExecutionEvidence,
     _execution_authority._RESULT_FIELDS,
 )
+_install_precommit_guard()
 _install_execution_evidence_guard()
 del _seal_write_once_slots
 del _WriteOnceSlot

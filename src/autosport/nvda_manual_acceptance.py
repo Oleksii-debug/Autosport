@@ -1241,23 +1241,12 @@ class ManualNvdaAcceptanceLedger:
                 "manual NVDA ledger writer authority is invalid"
             ) from exc
 
-    def resolve_current(
+    def _resolve_structural_current(
         self,
         *,
-        transcript: object,
-        expected_artifact_sha256: str,
-        expected_source_sha: str,
-        expected_webview2_runtime_witness_sha256: str,
+        structural: object,
         protocol_version: str = PROTOCOL_VERSION,
     ) -> ManualNvdaAcceptanceResolution | None:
-        structural = _structural_result(
-            transcript,
-            expected_artifact_sha256=expected_artifact_sha256,
-            expected_source_sha=expected_source_sha,
-            expected_webview2_runtime_witness_sha256=(
-                expected_webview2_runtime_witness_sha256
-            ),
-        )
         protocol = _require_protocol(protocol_version)
         matching = [
             record
@@ -1365,7 +1354,7 @@ del _install_record_decision_authority
 
 def _seal_resolution_issuance(register_witness) -> None:
     ledger_type = ManualNvdaAcceptanceLedger
-    implementation = ledger_type.resolve_current
+    implementation = ledger_type._resolve_structural_current
     implementation_code = implementation.__code__
     structural_result = _structural_result
     structural_result_code = structural_result.__code__
@@ -1459,28 +1448,39 @@ def _seal_resolution_issuance(register_witness) -> None:
     ) -> ManualNvdaAcceptanceResolution | None:
         if (
             ledger_type.resolve_current is not resolve_current
+            or ledger_type._resolve_structural_current is not implementation
             or implementation.__code__ is not implementation_code
-            or implementation.__globals__.get("_structural_result")
-            is not structural_result
+            or _structural_result is not structural_result
             or getattr(structural_result, "__code__", None)
             is not structural_result_code
-            or implementation.__globals__.get("_resolution_fingerprint")
-            is not fingerprint_for
+            or _resolution_fingerprint is not fingerprint_for
             or getattr(fingerprint_for, "__code__", None) is not fingerprint_code
             or "resolve_current" in vars(self)
+            or "_resolve_structural_current" in vars(self)
         ):
             raise NvdaManualAcceptanceStateError(
                 "manual NVDA resolution issuance authority changed"
             )
         require_reader_graph(self)
-        resolution = implementation(
-            self,
-            transcript=transcript,
+        structural = structural_result(
+            transcript,
             expected_artifact_sha256=expected_artifact_sha256,
             expected_source_sha=expected_source_sha,
             expected_webview2_runtime_witness_sha256=(
                 expected_webview2_runtime_witness_sha256
             ),
+        )
+        if (
+            _structural_result is not structural_result
+            or getattr(structural_result, "__code__", None)
+            is not structural_result_code
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution issuance authority changed"
+            )
+        resolution = implementation(
+            self,
+            structural=structural,
             protocol_version=protocol_version,
         )
         require_reader_graph(self)

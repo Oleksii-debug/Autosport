@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
+from operator import attrgetter
 from threading import RLock
 from weakref import ReferenceType, ref
 
@@ -48,8 +49,65 @@ class BetfairAccountFundsPrecheckError(RuntimeError):
     """Account/funds evidence cannot support this fail-closed precheck."""
 
 
+def _build_funds_precheck_meta():
+    """Seal public diagnostic/economic authority semantics after construction."""
+
+    sealed_classes: set[type] = set()
+    protected_names = frozenset(
+        {
+            "venue_id",
+            "account_id",
+            "adapter_id",
+            "adapter_version",
+            "required_liability",
+            "available_to_bet_balance",
+            "currency_code",
+            "account_observed_at",
+            "funds_observed_at",
+            "evaluated_at",
+            "account_details_sha256",
+            "account_funds_sha256",
+            "stable_account_identity_proven",
+            "numeric_sufficient",
+            "liability_unit_proven",
+            "passed",
+            "execution_authorized",
+            "precheck_id",
+            "_stable_account_identity_proven_constant",
+            "_liability_unit_proven_constant",
+            "_passed_constant",
+            "_execution_authorized_constant",
+        }
+    )
+
+    class _BetfairFundsPrecheckMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "Betfair funds precheck authority surface is sealed: " + name
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name: str) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "Betfair funds precheck authority surface is sealed: " + name
+                )
+            super().__delattr__(name)
+
+        @classmethod
+        def seal(mcls, cls: type) -> None:
+            sealed_classes.add(cls)
+
+    return _BetfairFundsPrecheckMeta
+
+
+_BetfairFundsPrecheckMeta = _build_funds_precheck_meta()
+del _build_funds_precheck_meta
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True)
-class BetfairAccountFundsPrecheck:
+class BetfairAccountFundsPrecheck(metaclass=_BetfairFundsPrecheckMeta):
     venue_id: str
     account_id: str
     adapter_id: str
@@ -79,30 +137,33 @@ class BetfairAccountFundsPrecheck:
         _sha(self.account_details_sha256, "account_details_sha256")
         _sha(self.account_funds_sha256, "account_funds_sha256")
 
-    @property
-    def stable_account_identity_proven(self) -> bool:
-        return False
+    _stable_account_identity_proven_constant = False
+    _liability_unit_proven_constant = False
+    _passed_constant = False
+    _execution_authorized_constant = False
+
+    stable_account_identity_proven = property(
+        attrgetter("_stable_account_identity_proven_constant")
+    )
 
     @property
     def numeric_sufficient(self) -> bool:
         return self.available_to_bet_balance >= self.required_liability
 
-    @property
-    def liability_unit_proven(self) -> bool:
-        return False
-
-    @property
-    def passed(self) -> bool:
-        return self.numeric_sufficient and self.liability_unit_proven
-
-    @property
-    def execution_authorized(self) -> bool:
-        return False
+    liability_unit_proven = property(
+        attrgetter("_liability_unit_proven_constant")
+    )
+    passed = property(attrgetter("_passed_constant"))
+    execution_authorized = property(
+        attrgetter("_execution_authorized_constant")
+    )
 
     @property
     def precheck_id(self) -> str:
         return _digest(self)
 
+
+_BetfairFundsPrecheckMeta.seal(BetfairAccountFundsPrecheck)
 
 @dataclass(slots=True)
 class _IssuedRecord:
@@ -300,25 +361,50 @@ def _make_authority():
             record = issued.get(id(value))
             if record is None or record.value_ref() is not value:
                 return False
+
+        def revoke() -> None:
+            with lock:
+                current_record = issued.get(id(value))
+                if current_record is record:
+                    issued.pop(id(value), None)
+
         try:
             identity = require_identity(record.identity, client=record.client)
             if value.account_id != identity.session_context_id:
+                revoke()
                 return False
             if value.currency_code != identity.currency_code:
+                revoke()
                 return False
             if value.account_details_sha256 != identity.account_details_sha256:
+                revoke()
                 return False
-            current = provider_time(canonical_observed_at(record.client), "authority checked_at")
+            current = provider_time(
+                canonical_observed_at(record.client),
+                "authority checked_at",
+            )
             temporal(value.account_observed_at, value.funds_observed_at, current)
             if digest(value) != record.fingerprint:
+                revoke()
                 return False
-            return (
+            valid = (
                 not value.stable_account_identity_proven
                 and not value.passed
                 and not value.liability_unit_proven
                 and not value.execution_authorized
             )
-        except (AttributeError, TypeError, ValueError, identity_error, readonly_error, precheck_error):
+            if not valid:
+                revoke()
+            return valid
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            identity_error,
+            readonly_error,
+            precheck_error,
+        ):
+            revoke()
             return False
 
     def require_authoritative(value: object) -> BetfairAccountFundsPrecheck:

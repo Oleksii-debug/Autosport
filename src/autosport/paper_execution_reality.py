@@ -1337,6 +1337,24 @@ def execute_paper_plan(
         observation_evidence_ids[action_id] = observation.evidence_id
 
     run_id = _impl._run_id(plan, trigger_id, config)
+    for sequence, action in enumerate(plan.actions):
+        if action.side != "BACK":
+            raise PaperExecutionStateError(
+                "PAPER execution-reality exposure model supports BACK only "
+                "until canonical LAY liability authority exists"
+            )
+        observation = observations.get(action.action_id)
+        if observation is not None:
+            _impl._observed_attempt(
+                run_id=run_id,
+                plan=plan,
+                action=action,
+                sequence=sequence,
+                config=config,
+                observation=observation,
+                started_at=started_at,
+            )
+
     ledger.reserve_run(
         run_id=run_id,
         trigger_id=trigger_id,
@@ -1398,11 +1416,6 @@ def execute_paper_plan(
 
     for sequence in range(len(attempts), len(plan.actions)):
         action = plan.actions[sequence]
-        if action.side != "BACK":
-            raise PaperExecutionStateError(
-                "PAPER execution-reality exposure model supports BACK only "
-                "until canonical LAY liability authority exists"
-            )
         observation = observations.get(action.action_id)
         if observation is not None:
             attempt = _impl._observed_attempt(

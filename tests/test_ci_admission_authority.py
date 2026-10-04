@@ -631,3 +631,35 @@ def test_main_rejects_replaced_admission_kwdefault_mapping(monkeypatch) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", "token")
 
     assert controller_module.main(_main_admission_args()) == 2
+
+def test_admission_rejects_nested_snapshot_kwdefault_rebase(monkeypatch) -> None:
+    defaults = controller_module._qualification_snapshot.__kwdefaults__
+    assert defaults is not None
+    forged_calls: list[object] = []
+
+    def forged_reader(qualification: object) -> tuple[str, bool]:
+        forged_calls.append(qualification)
+        return HEAD_A, True
+
+    monkeypatch.setitem(
+        defaults,
+        "_qualification_state_reader",
+        forged_reader,
+    )
+
+    class FakeApi:
+        def live_pr_qualification(self, pr_number: int) -> tuple[str, bool]:
+            raise AssertionError(f"nested authority drift must fail first: {pr_number}")
+
+    with pytest.raises(
+        CancellationError,
+        match="pull request admission authority changed",
+    ):
+        controller_module.admit_current_head(
+            api=FakeApi(),
+            pr_number=2008,
+            event_head_sha=HEAD_A,
+        )
+
+    assert forged_calls == []
+

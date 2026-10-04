@@ -35,6 +35,7 @@ class ProphetXGeolocationState(str, Enum):
     UNKNOWN_CONTRACT = "unknown_contract"
     UNKNOWN_LOCAL_IP = "unknown_local_ip"
     UNKNOWN_UNVERIFIED_PROVIDER_ORIGIN = "unknown_unverified_provider_origin"
+    UNKNOWN_CLOCK_ROLLBACK = "unknown_clock_rollback"
     EXPIRED = "expired"
 
 
@@ -383,14 +384,31 @@ class ProphetXGeolocationClient:
             )
         action_sha = _action_sha(action)
         request_started_at = self._clock()
-        _iso(request_started_at, "request_started_at")
+        request_started = _iso(request_started_at, "request_started_at")
         request_id = _canonical_sha(
             {"action_sha256": action_sha, "request_started_at": request_started_at}
         )
         observed_at = request_started_at
-        observed = _iso(observed_at, "observed_at")
+        observed = request_started
+        action_expires_at = _iso(action.expires_at, "action expires_at")
         state = ProphetXGeolocationState.UNKNOWN_LOCAL_IP
         source_sha: str | None = None
+
+        if observed >= action_expires_at:
+            return _issue_admission(
+                ProphetXGeolocationAdmission(
+                    ADAPTER_ID,
+                    ADAPTER_VERSION,
+                    "sandbox",
+                    action.action_id,
+                    action_sha,
+                    request_id,
+                    observed_at,
+                    SANDBOX_GEOLOCATION_ENDPOINT,
+                    ProphetXGeolocationState.EXPIRED,
+                    None,
+                )
+            )
 
         try:
             if (
@@ -448,7 +466,9 @@ class ProphetXGeolocationClient:
 
         observed_at = self._clock()
         observed = _iso(observed_at, "observed_at")
-        if observed >= _iso(action.expires_at, "action expires_at"):
+        if observed < request_started:
+            state = ProphetXGeolocationState.UNKNOWN_CLOCK_ROLLBACK
+        elif observed >= action_expires_at:
             state = ProphetXGeolocationState.EXPIRED
         return _issue_admission(
             ProphetXGeolocationAdmission(

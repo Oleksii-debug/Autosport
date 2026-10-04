@@ -302,6 +302,48 @@ def test_result_after_action_expiry_is_expired(monkeypatch):
     assert admission.state is ProphetXGeolocationState.EXPIRED
 
 
+def test_expired_action_fails_closed_before_ip_leaves_process():
+    transport = FakeTransport()
+    admission = ProphetXGeolocationClient(
+        transport,
+        clock=lambda: EXPIRY,
+    ).check(action(), "203.0.113.9")
+
+    assert admission.state is ProphetXGeolocationState.EXPIRED
+    assert admission.source_payload_sha256 is None
+    assert transport.calls == []
+
+
+def test_clock_rollback_after_provider_round_trip_cannot_mint_allow(monkeypatch):
+    provider_calls: list[str] = []
+
+    def provider_response(self, endpoint, *, body, timeout_seconds):
+        del self, body, timeout_seconds
+        provider_calls.append(endpoint)
+        return response()
+
+    monkeypatch.setattr(
+        UrllibProphetXGeolocationTransport,
+        "post",
+        provider_response,
+    )
+    times = iter(
+        (
+            "2026-09-22T21:04:00+00:00",
+            "2026-09-22T21:03:59+00:00",
+        )
+    )
+
+    admission = ProphetXGeolocationClient(clock=lambda: next(times)).check(
+        action(),
+        "203.0.113.9",
+    )
+
+    assert provider_calls == [SANDBOX_GEOLOCATION_ENDPOINT]
+    assert admission.state is ProphetXGeolocationState.UNKNOWN_CLOCK_ROLLBACK
+    assert admission.observed_at == "2026-09-22T21:03:59+00:00"
+
+
 def test_response_arriving_after_expiry_cannot_keep_pre_request_allow(monkeypatch):
     monkeypatch.setattr(
         UrllibProphetXGeolocationTransport,

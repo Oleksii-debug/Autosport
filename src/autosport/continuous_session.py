@@ -1237,7 +1237,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 last_success_at=self._state.snapshot().last_success_at or now,
             )
         except Exception as exc:
-            self._state.record_failure(code=type(exc).__name__)
+            try:
+                self._state.record_failure(code=type(exc).__name__)
+            except Exception as checkpoint_exc:
+                # Diagnostic checkpoint failure must never replace the market,
+                # settlement, replay or economic error that caused this tick to fail.
+                try:
+                    exc.add_note(
+                        "continuous-session failure checkpoint also failed: "
+                        f"{type(checkpoint_exc).__name__}: {checkpoint_exc}"
+                    )
+                except Exception:
+                    pass
             raise
 
 # Seal the consumer entry after class creation. The metaclass data descriptor also

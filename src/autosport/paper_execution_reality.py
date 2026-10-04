@@ -392,6 +392,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         started_at: str,
         observation_evidence_ids: Mapping[str, str],
         suspended_action_ids: frozenset[str] = frozenset(),
+        evidence_registry: PaperExecutionEvidenceRegistry | None = None,
     ) -> PaperExecutionRun | None:
         events = self.events(run_id)
         if not events:
@@ -480,14 +481,44 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     raise PaperExecutionIntegrityError(
                         "durable synthetic attempt is not reproducible"
                     )
-            elif (
-                attempt.evidence_grade is EvidenceGrade.SYNTHETIC
-                or attempt.evidence_id != evidence_id
-                or attempt.evidence_sha256 is None
-            ):
-                raise PaperExecutionIntegrityError(
-                    "durable observed attempt conflicts with reserved evidence"
-                )
+            else:
+                if not isinstance(
+                    evidence_registry,
+                    PaperExecutionEvidenceRegistry,
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "durable observed attempt requires evidence registry"
+                    )
+                try:
+                    record = evidence_registry.resolve(evidence_id)
+                    observation = record.as_observation()
+                    _impl._verify_observation_authority(
+                        action=action,
+                        observation=observation,
+                        registry=evidence_registry,
+                    )
+                    expected_attempt = _impl._observed_attempt(
+                        run_id=run_id,
+                        plan=plan,
+                        action=action,
+                        sequence=index,
+                        config=config,
+                        observation=observation,
+                        started_at=started_at,
+                    )
+                except (
+                    PaperExecutionIntegrityError,
+                    PaperExecutionStateError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    raise PaperExecutionIntegrityError(
+                        "durable observed attempt evidence is invalid"
+                    ) from exc
+                if attempt != expected_attempt:
+                    raise PaperExecutionIntegrityError(
+                        "durable observed attempt is not reproducible"
+                    )
 
         completions = [event for event in events if event["event_type"] == "RUN_COMPLETED"]
         if len(completions) > 1:
@@ -760,6 +791,7 @@ def execute_paper_plan(
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
         suspended_action_ids=suspended_action_ids,
+        evidence_registry=evidence_registry,
     )
     assert existing is not None
     if existing.completed:
@@ -785,6 +817,7 @@ def execute_paper_plan(
             started_at=started_at,
             observation_evidence_ids=observation_evidence_ids,
             suspended_action_ids=suspended_action_ids,
+            evidence_registry=evidence_registry,
         )
         assert result is not None
         return result
@@ -873,6 +906,7 @@ def execute_paper_plan(
                 started_at=started_at,
                 observation_evidence_ids=observation_evidence_ids,
                 suspended_action_ids=suspended_action_ids,
+                evidence_registry=evidence_registry,
             )
             assert result is not None
             return result
@@ -891,6 +925,7 @@ def execute_paper_plan(
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
         suspended_action_ids=suspended_action_ids,
+        evidence_registry=evidence_registry,
     )
     assert result is not None
     return result

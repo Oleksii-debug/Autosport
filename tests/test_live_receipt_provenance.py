@@ -220,6 +220,34 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertTrue(store.has_trusted_live_receipt(event))
             store.close()
 
+    def test_live_retry_hook_cannot_rebind_batch_iterator_before_canonical_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self._direct_event(sequence=1)
+            forged = replace(event, ingest_ts="2000-01-01T00:00:00+00:00")
+            capability_type = storage_module._LiveReceiptBatch
+            original_iter = capability_type.__iter__
+
+            def rebind_after_snapshot(_events):
+                capability_type.__iter__ = lambda _capability: iter((forged,))
+
+            try:
+                with patch.object(
+                    store,
+                    "_before_live_append_attempt",
+                    side_effect=rebind_after_snapshot,
+                ):
+                    accepted = store._append_live_batch_accepted([event])
+            finally:
+                capability_type.__iter__ = original_iter
+
+            self.assertEqual(accepted, [event])
+            trusted = store.trusted_live_events()
+            self.assertEqual(trusted, [event])
+            self.assertEqual(trusted[0].ingest_ts, event.ingest_ts)
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
     def test_live_retry_keeps_canonical_market_event_type_after_module_rebind(self) -> None:
         class PoisonMarketEvent(MarketEvent):
             @classmethod

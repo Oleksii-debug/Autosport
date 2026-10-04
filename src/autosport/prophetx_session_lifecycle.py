@@ -294,6 +294,19 @@ class ProphetXSessionSnapshot:
                 "transient failure evidence requires a positive failure count"
             )
 
+        if (
+            self.state
+            in {
+                ProphetXSessionState.NO_SESSION,
+                ProphetXSessionState.ACTIVE,
+                ProphetXSessionState.EXPIRED,
+            }
+            and self.transient_failures != 0
+        ):
+            raise ProphetXSessionLifecycleError(
+                "non-failure session state cannot carry transient failure count"
+            )
+
         if self.state is ProphetXSessionState.AUTH_RETRYABLE_FAILURE:
             valid_failure_evidence = (
                 self.last_failure_class

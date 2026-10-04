@@ -868,6 +868,39 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 finally:
                     runtime.close()
 
+    def test_source_resolver_identity_rejects_malformed_configuration_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(
+                ProductCompositionError,
+                "product_source_configuration_sha256 must be lowercase SHA-256 hex",
+            ):
+                build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(configuration_sha256="not-a-digest"),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+            self.assertFalse((root / "product_composition.json").exists())
+
+    def test_source_resolver_identity_rejects_instance_resolver_shadow(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = _Source()
+            source.resolve_event = lambda _delta: _event()
+            with self.assertRaisesRegex(
+                ProductCompositionError,
+                "per-instance resolve_event shadowing",
+            ):
+                build_autonomous_product_runtime(
+                    workspace=root,
+                    source=source,
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+            self.assertFalse((root / "product_composition.json").exists())
     def test_restart_rejects_changed_source_config_with_same_resolver(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

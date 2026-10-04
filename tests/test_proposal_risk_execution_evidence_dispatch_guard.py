@@ -59,6 +59,8 @@ class ProductProposalRiskExecutionEvidenceDispatchGuardTests(unittest.TestCase):
             evidence_authority._mint({})
 
     def test_module_minter_cannot_accept_a_caller_selected_capability(self) -> None:
+        # This is the regression for the mutable-default escape hatch: the public
+        # module minter must not retain the canonical expected token in its defaults.
         caller_capability = object()
         self.assertIsNone(evidence_authority._mint.__kwdefaults__)
         with self.assertRaisesRegex(
@@ -70,6 +72,8 @@ class ProductProposalRiskExecutionEvidenceDispatchGuardTests(unittest.TestCase):
                 mint_capability=caller_capability,
             )
 
+        # Even if caller code installs its own default, the sealed minter compares
+        # against a closure-held canonical token and therefore still fails closed.
         original_defaults = evidence_authority._mint.__kwdefaults__
         try:
             evidence_authority._mint.__kwdefaults__ = {

@@ -349,6 +349,13 @@ jobs:
             throw 'External UIA evidence did not prove ordinary packaged close/teardown'
           }
           if (
+            $external.keyboard_shortcuts_status -ne 'PASS' -or
+            [string]$external.f2_focus_automation_id -ne '301' -or
+            [string]$external.f8_focus_automation_id -ne '204'
+          ) {
+            throw 'External UIA evidence did not prove packaged F2/F8 keyboard focus navigation'
+          }
+          if (
             $external.runtime_witness_status -ne 'PASS' -or
             [string]::IsNullOrWhiteSpace([string]$external.runtime_browser_version) -or
             -not [string]::Equals(
@@ -369,6 +376,9 @@ jobs:
           $verification | Add-Member -NotePropertyName extracted_external_uia_read_only_package_status -NotePropertyValue 'PASS' -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_duplicate_launch_status -NotePropertyValue $external.duplicate_launch_status -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_normal_close_status -NotePropertyValue $external.normal_close_status -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_keyboard_shortcuts_status -NotePropertyValue $external.keyboard_shortcuts_status -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_f2_focus_automation_id -NotePropertyValue $external.f2_focus_automation_id -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_f8_focus_automation_id -NotePropertyValue $external.f8_focus_automation_id -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_runtime_witness_status -NotePropertyValue $external.runtime_witness_status -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_runtime_browser_version -NotePropertyValue $external.runtime_browser_version -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_isolated_workspace -NotePropertyValue $expectedWorkspace -Force

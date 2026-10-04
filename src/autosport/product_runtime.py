@@ -590,6 +590,7 @@ def _source_resolver_identity_impl(
     _sha256,
     _function_type,
     _method_type,
+    _object_getattribute,
 ) -> str:
     """Fingerprint the durable delta-to-MarketEvent authority used across restart."""
 
@@ -597,6 +598,15 @@ def _source_resolver_identity_impl(
     if getattr(source, "source_id", None) != source_id:
         raise _error_type(
             "source resolver identity conflicts with configured source_id"
+        )
+    source_type = type(source)
+    if source_type.__getattribute__ is not _object_getattribute:
+        raise _error_type(
+            "product source must use canonical object attribute lookup"
+        )
+    if any("__getattr__" in vars(owner) for owner in source_type.__mro__):
+        raise _error_type(
+            "product source cannot define fallback attribute dispatch"
         )
     instance_dict = getattr(source, "__dict__", None)
     if type(instance_dict) is dict and "resolve_event" in instance_dict:
@@ -702,6 +712,7 @@ def _bind_source_resolver_identity(implementation):
     sha256 = hashlib.sha256
     function_type = FunctionType
     method_type = MethodType
+    object_getattribute = object.__getattribute__
 
     def bound(
         *,
@@ -719,6 +730,7 @@ def _bind_source_resolver_identity(implementation):
             _sha256=sha256,
             _function_type=function_type,
             _method_type=method_type,
+            _object_getattribute=object_getattribute,
         )
 
     return bound

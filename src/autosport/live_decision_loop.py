@@ -36,6 +36,7 @@ from .market_mirror_runtime import (
 from .opportunity import Opportunity, OpportunityContractError, QuoteRef
 from .paper import PaperBook
 from .paper_execution_adoption import (
+    PaperExecutionAdoptionError,
     PaperExecutionAdoptionRuntime,
     PaperExposureBinding,
     PreparedPaperExecution,

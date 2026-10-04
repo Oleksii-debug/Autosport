@@ -320,6 +320,31 @@ def test_symlinked_operator_source_config_is_rejected_without_following_target(
     assert OperatorSourceConfigStore(target).read().source_id == "paper-fixture"
 
 
+def test_explicit_write_replaces_symlinked_config_without_touching_target(
+    tmp_path: Path,
+) -> None:
+    external = tmp_path / "external-operator-source.json"
+    external_store = OperatorSourceConfigStore(external)
+    external_config = external_store.write_source_id("paper-fixture")
+    external_bytes = external.read_bytes()
+
+    path = tmp_path / "operator-source.json"
+    try:
+        path.symlink_to(external)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable on this runner: {exc}")
+
+    store = OperatorSourceConfigStore(path)
+    configured = store.write_source_id("betfair-exchange")
+
+    assert configured.source_id == "betfair-exchange"
+    assert not path.is_symlink()
+    assert store.read() == configured
+    assert external.read_bytes() == external_bytes
+    assert external_store.read() == external_config
+
+
+
 def test_dangling_symlink_config_is_invalid_not_missing_setup(
     tmp_path: Path,
 ) -> None:

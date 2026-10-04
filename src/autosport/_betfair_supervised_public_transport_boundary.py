@@ -747,7 +747,11 @@ def _durable_submitted_at(
     return attempt.submitted_at
 
 
-def _build_trusted_private_place_action(private_place_action, private_place_action_code):
+def _build_trusted_private_place_action(
+    private_place_action,
+    private_place_action_code,
+    canonical_execute_code,
+):
     frame_getter = sys._getframe
 
     def _trusted_private_place_action(
@@ -767,7 +771,7 @@ def _build_trusted_private_place_action(private_place_action, private_place_acti
             caller_code = frame_getter(1).f_code
         except (AttributeError, ValueError):
             caller_code = None
-        if caller_code is not _CANONICAL_EXECUTE_CODE:
+        if caller_code is not canonical_execute_code:
             raise _impl.BetfairSupervisedExecutionError(
                 "private Betfair provider write requires canonical execution caller"
             )
@@ -992,6 +996,7 @@ def _build_trusted_private_place_action(private_place_action, private_place_acti
 _TRUSTED_PRIVATE_PLACE_ACTION = _build_trusted_private_place_action(
     _RAW_PLACE_ACTION,
     _RAW_PLACE_ACTION_CODE,
+    _CANONICAL_EXECUTE_CODE,
 )
 del _RAW_PLACE_ACTION, _RAW_PLACE_ACTION_CODE
 _TRUSTED_PRIVATE_PLACE_ACTION_CODE = _TRUSTED_PRIVATE_PLACE_ACTION.__code__
@@ -1140,7 +1145,7 @@ _public_place_action.__qualname__ = f"{_CLIENT_TYPE.__name__}.place_action"
 _public_place_action.__module__ = _impl.__name__
 
 
-def _build_place_action_boundary(frame_getter):
+def _build_place_action_boundary(frame_getter, canonical_execute_code):
     class _PlaceActionBoundary:
         __slots__ = ()
 
@@ -1149,7 +1154,7 @@ def _build_place_action_boundary(frame_getter):
                 caller_code = frame_getter(1).f_code
             except (AttributeError, ValueError):
                 caller_code = None
-            if caller_code is _CANONICAL_EXECUTE_CODE:
+            if caller_code is canonical_execute_code:
                 if not _trusted_profile_graph_unchanged():
                     raise _impl.BetfairSupervisedExecutionError(
                         "trusted runtime profile authority changed"
@@ -1169,7 +1174,10 @@ def _build_place_action_boundary(frame_getter):
     return _PlaceActionBoundary, _PlaceActionBoundary()
 
 
-_PLACE_ACTION_BOUNDARY_TYPE, _BOUNDARY = _build_place_action_boundary(sys._getframe)
+_PLACE_ACTION_BOUNDARY_TYPE, _BOUNDARY = _build_place_action_boundary(
+    sys._getframe,
+    _CANONICAL_EXECUTE_CODE,
+)
 del _build_place_action_boundary
 _PLACE_ACTION_BOUNDARY_GET = _PLACE_ACTION_BOUNDARY_TYPE.__get__
 _PLACE_ACTION_BOUNDARY_GET_CODE = _PLACE_ACTION_BOUNDARY_GET.__code__

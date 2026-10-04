@@ -356,3 +356,71 @@ def test_rebound_boundary_sys_cannot_forge_canonical_caller(monkeypatch) -> None
     assert dispatch is boundary._public_place_action
     assert boundary._canonical_internal_dispatch_unchanged()
 
+def test_coordinated_canonical_execute_root_rebinding_cannot_forge_descriptor_caller(
+    monkeypatch,
+) -> None:
+    assert boundary._canonical_internal_dispatch_unchanged()
+    original_code = boundary._CANONICAL_EXECUTE_CODE
+
+    def forged_canonical_caller():
+        return boundary._BOUNDARY.__get__(None, boundary._CLIENT_TYPE)
+
+    monkeypatch.setattr(boundary, "_CANONICAL_EXECUTE", forged_canonical_caller)
+    monkeypatch.setattr(
+        boundary,
+        "_CANONICAL_EXECUTE_CODE",
+        forged_canonical_caller.__code__,
+    )
+
+    dispatch = forged_canonical_caller()
+
+    assert dispatch is boundary._public_place_action
+    closure = dict(
+        zip(
+            boundary._PLACE_ACTION_BOUNDARY_GET.__code__.co_freevars,
+            boundary._PLACE_ACTION_BOUNDARY_GET.__closure__ or (),
+        )
+    )
+    assert closure["canonical_execute_code"].cell_contents is original_code
+
+
+def test_coordinated_canonical_execute_root_rebinding_cannot_call_trusted_private(
+    monkeypatch,
+) -> None:
+    original_code = boundary._CANONICAL_EXECUTE_CODE
+
+    def forged_canonical_caller():
+        return boundary._TRUSTED_PRIVATE_PLACE_ACTION(
+            None,
+            None,
+            profile=None,
+            bound=None,
+            provider_order_ref="forged",
+            execution_workspace=None,
+            _before_transport=lambda _request_sha256: None,
+            _transport_post=boundary._PROVIDER_HTTP_POST,
+            _response_parser=boundary._RESPONSE_PARSER,
+            _observation_clock=boundary._OBSERVATION_CLOCK,
+        )
+
+    monkeypatch.setattr(boundary, "_CANONICAL_EXECUTE", forged_canonical_caller)
+    monkeypatch.setattr(
+        boundary,
+        "_CANONICAL_EXECUTE_CODE",
+        forged_canonical_caller.__code__,
+    )
+
+    with pytest.raises(
+        boundary._impl.BetfairSupervisedExecutionError,
+        match="private Betfair provider write requires canonical execution caller",
+    ):
+        forged_canonical_caller()
+
+    closure = dict(
+        zip(
+            boundary._TRUSTED_PRIVATE_PLACE_ACTION.__code__.co_freevars,
+            boundary._TRUSTED_PRIVATE_PLACE_ACTION.__closure__ or (),
+        )
+    )
+    assert closure["canonical_execute_code"].cell_contents is original_code
+

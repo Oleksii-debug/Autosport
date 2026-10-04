@@ -32,6 +32,7 @@ from autosport.live_decision_loop import (
     PersistentLiveDecisionLoop,
 )
 from autosport.market_bus import MarketEventBus
+from autosport.market_mirror import MirrorSnapshot
 from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
 from autosport.opportunity import Opportunity, OpportunityDecision, QuoteRef, StrategyClass
 from autosport.paper import PaperBook
@@ -4112,6 +4113,55 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 )
             self.assertEqual(extra_ticket_observer.calls, 0)
             del resumed_book.tickets[forged_ticket.ticket_id]
+
+    def test_intent_factory_cannot_inject_stale_quote_outside_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            current = self._event(
+                selection="selection-a",
+                sequence=2,
+                odds="2.10",
+                observed=self.START + timedelta(seconds=1),
+            )
+            stale = self._event(
+                selection="selection-a",
+                sequence=1,
+                odds="2.00",
+                observed=self.START,
+            )
+            base_factory = _PositiveIntentFactory(
+                self.INTENT_CONFIG_SHA256
+            )
+
+            def stale_factory(input_id, snapshot):
+                stale_snapshot = MirrorSnapshot(
+                    revision=snapshot.revision,
+                    events=(stale,),
+                )
+                return base_factory(input_id, stale_snapshot)
+
+            stale_factory.strategy_version_id = "live-test-strategy-v1"
+
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(current,)]),
+                factory=stale_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "intent quote is not bound to focused market snapshot",
+            ):
+                loop.run_cycle()
+
+            progress = json.loads(
+                loop.progress_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(progress["phase"], "pending")
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            loop.close()
 
     def test_pending_restart_recovers_before_polling_new_quote(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

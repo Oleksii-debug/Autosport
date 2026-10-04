@@ -1973,7 +1973,9 @@ class PersistentLiveDecisionLoop:
                 ),
             )
             produced = self.intent_factory(input_id, focused)
-            self._intent_cache[input_id] = self._validated_intents(produced)
+            intents = self._validated_intents(produced)
+            self._require_intents_bound_to_snapshot(intents, focused)
+            self._intent_cache[input_id] = intents
 
     def _validated_intents(self, produced: object) -> tuple[object, ...]:
         from .portfolio_plan import OpportunityIntent
@@ -2000,6 +2002,31 @@ class PersistentLiveDecisionLoop:
                     "live intent model identity does not match registered StrategyVersion"
                 )
         return produced
+
+    @staticmethod
+    def _require_intents_bound_to_snapshot(
+        intents: tuple[object, ...],
+        snapshot: MirrorSnapshot,
+    ) -> None:
+        """Reject canonical intents whose quote bytes did not come from this view."""
+
+        if not isinstance(snapshot, MirrorSnapshot):
+            raise TypeError("snapshot must be MirrorSnapshot")
+        for intent in intents:
+            for quote in intent.opportunity.quotes:
+                matches = tuple(
+                    event
+                    for event in snapshot.events
+                    if QuoteRef.from_market_event(
+                        event,
+                        market_snapshot_hash=quote.market_snapshot_hash,
+                    )
+                    == quote
+                )
+                if len(matches) != 1:
+                    raise LiveDecisionProgressError(
+                        "live intent quote is not bound to focused market snapshot"
+                    )
 
     def _capture_input_views(
         self,
@@ -2084,7 +2111,9 @@ class PersistentLiveDecisionLoop:
     ) -> None:
         for input_id, snapshot in snapshots.items():
             produced = self.intent_factory(input_id, snapshot)
-            self._intent_cache[input_id] = self._validated_intents(produced)
+            intents = self._validated_intents(produced)
+            self._require_intents_bound_to_snapshot(intents, snapshot)
+            self._intent_cache[input_id] = intents
 
     def _all_cached_intents(self) -> tuple[object, ...]:
         flattened: list[object] = []

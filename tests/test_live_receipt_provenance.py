@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import autosport.ingestion as ingestion_module
 import autosport.market_bus as market_bus_module
+import autosport.market_mirror as market_mirror_module
 import autosport.storage as storage_module
 from autosport.domain import MarketEvent
 from autosport.ingestion import IngestionEngine
@@ -453,6 +454,61 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
 
             self.assertEqual(store.events(), [])
             self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
+    def test_trusted_replay_survives_store_module_rebind(self) -> None:
+        class PoisonStore(SQLiteMarketStore):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store)
+            with patch.object(market_mirror_module, "SQLiteMarketStore", PoisonStore):
+                live = MarketMirror.from_live_store(store)
+                replay = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(2026, 10, 4, 3, 0, 3, tzinfo=timezone.utc),
+                    max_age=timedelta(seconds=30),
+                    require_live_receipt_authority=True,
+                )
+
+            self.assertEqual(len(live.snapshot()), 1)
+            self.assertEqual(len(replay.events), 1)
+            store.close()
+
+    def test_trusted_replay_uses_sealed_receipt_reader_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store)
+
+            with patch.object(
+                SQLiteMarketStore,
+                "trusted_live_events",
+                side_effect=AssertionError("mutable trusted reader must not be consulted"),
+            ):
+                replay = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(2026, 10, 4, 3, 0, 3, tzinfo=timezone.utc),
+                    max_age=timedelta(seconds=30),
+                    require_live_receipt_authority=True,
+                )
+
+            self.assertEqual(len(replay.events), 1)
+            store.close()
+
+    def test_live_bootstrap_uses_sealed_current_reader_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store)
+
+            with patch.object(
+                SQLiteMarketStore,
+                "trusted_live_current_by_source",
+                side_effect=AssertionError("mutable trusted current reader must not be consulted"),
+            ):
+                live = MarketMirror.from_live_store(store)
+
+            self.assertEqual(len(live.snapshot()), 1)
             store.close()
 
     def test_store_subclass_cannot_forge_live_bootstrap_or_replay_authority(self) -> None:

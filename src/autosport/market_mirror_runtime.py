@@ -329,18 +329,24 @@ class BoundedMirrorInvalidationBuffer:
         with self._lock:
             return self._full_refresh_required
 
-    def accept_persisted(self, event: MarketEvent) -> MirrorApplyResult:
-        """Apply one already-durable event and record its affected quote if material.
+    def _accept_with_causal_authority(
+        self,
+        event: MarketEvent,
+        *,
+        decision_causal: bool,
+    ) -> MirrorApplyResult:
+        """Atomically apply one durable event and publish any material invalidation."""
 
-        The tracker lock covers both mirror mutation and invalidation publication so
-        a concurrent ``drain`` cannot observe an applied mirror update before its
-        downstream invalidation state has been established.
-        """
         if not isinstance(event, MarketEvent):
             raise TypeError("event must be a MarketEvent")
+        if type(decision_causal) is not bool:
+            raise TypeError("decision_causal must be a bool")
 
         with self._lock:
-            result = self._mirror.apply(event)
+            result = self._mirror._apply_with_causal_authority(
+                event,
+                decision_causal=decision_causal,
+            )
             if result.status is not MirrorUpdate.APPLIED:
                 return result
 
@@ -361,6 +367,40 @@ class BoundedMirrorInvalidationBuffer:
 
             self._dirty[key] = None
             return result
+
+    def accept_persisted(self, event: MarketEvent) -> MirrorApplyResult:
+        """Apply one newly product-issued durable event and publish its invalidation.
+
+        MarketEventBus invokes this only for values returned by
+        SQLiteMarketStore.append_batch_accepted(), so those values are positive
+        product-issued append generations and are decision-causal by construction.
+        """
+
+        return self._accept_with_causal_authority(
+            event,
+            decision_causal=True,
+        )
+
+    def reconcile_persisted(
+        self,
+        event: MarketEvent,
+        *,
+        append_generation: int,
+    ) -> MirrorApplyResult:
+        """Reconcile proven history without losing provenance or invalidations.
+
+        Generation zero is sealed migration/audit state rather than causal evidence.
+        Positive generations are product-issued. Any APPLIED transition is still
+        invalidated: an incomplete mirror can gain a causal value or lose one behind a
+        higher non-causal sequence fence, and downstream decision inputs must refresh.
+        """
+
+        if type(append_generation) is not int or append_generation < 0:
+            raise ValueError("append_generation must be a non-negative int")
+        return self._accept_with_causal_authority(
+            event,
+            decision_causal=append_generation > 0,
+        )
 
     def drain(self, *, max_items: int = 250) -> MirrorInvalidationBatch:
         """Return at most ``max_items`` affected keys, or one full-refresh fence."""

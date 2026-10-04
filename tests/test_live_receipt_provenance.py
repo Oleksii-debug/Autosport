@@ -183,6 +183,35 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertTrue(has_receipt)
             store.close()
 
+    def test_live_receipt_path_uses_sealed_json_codec_descriptors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            event = self._direct_event(sequence=1)
+
+            with (
+                patch.object(
+                    storage_module.json,
+                    "loads",
+                    side_effect=AssertionError("mutable json.loads must not be consulted"),
+                ),
+                patch.object(
+                    storage_module.json,
+                    "dumps",
+                    side_effect=AssertionError("mutable json.dumps must not be consulted"),
+                ),
+            ):
+                accepted = store._append_live_batch_accepted([event])
+                trusted = store.trusted_live_events()
+                current = store.trusted_live_current_by_source()
+                has_receipt = store.has_trusted_live_receipt(event)
+
+            self.assertEqual(accepted, [event])
+            self.assertEqual(trusted, [event])
+            self.assertEqual(current[(event.source_id, event.quote_key)], event)
+            self.assertTrue(has_receipt)
+            store.close()
+
     def test_live_receipt_self_type_authority_survives_module_class_rebind(self) -> None:
         class PoisonStore(SQLiteMarketStore):
             pass

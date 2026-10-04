@@ -1996,6 +1996,33 @@ class AutosportWebController:
             if poll() is None:
                 pause.wait(0.01)
 
+    @staticmethod
+    def _consume_joined_product_terminal(worker: Any) -> str | None:
+        """Consume terminal product truth after its non-daemon thread has joined."""
+
+        if not worker.busy:
+            return None
+        poll = getattr(worker, "poll", None)
+        if not callable(poll):
+            raise RuntimeError("product runtime worker does not expose terminal polling")
+
+        terminal_kind: str | None = None
+        while worker.busy:
+            message = poll()
+            if message is None:
+                raise RuntimeError(
+                    "product runtime worker joined without publishing terminal state"
+                )
+            kind = getattr(message, "kind", None)
+            if kind in {"STOPPED", "ERROR"}:
+                terminal_kind = kind
+
+        if terminal_kind is None:
+            raise RuntimeError(
+                "product runtime worker ended without terminal lifecycle state"
+            )
+        return terminal_kind
+
     def close(self) -> None:
         with self._lock:
             if getattr(self, "_close_complete", False):
@@ -2036,6 +2063,13 @@ class AutosportWebController:
             elif join_product() is not True:
                 raise RuntimeError(
                     "product runtime worker did not reach terminal thread state"
+                )
+
+            terminal_kind = self._consume_joined_product_terminal(self.product_worker)
+            if terminal_kind == "ERROR":
+                self._quarantine_product_runtime_truth(Path(self._active_workspace))
+                raise RuntimeError(
+                    "product runtime terminated with error during close"
                 )
         except BaseException as exc:
             with self._lock:

@@ -281,3 +281,86 @@ def test_webview_close_process_control_interrupt_keeps_controller_retryable(
     assert product.stop_reasons == ["app_close", "app_close"]
     assert product.join_calls == 1
 
+class _TerminalProductMessage:
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+
+
+class _JoinedTerminalProductWorker(_IdleProductWorker):
+    def __init__(self, terminal_kind: str | None) -> None:
+        super().__init__()
+        self.busy = True
+        self.terminal_kind = terminal_kind
+        self.join_calls = 0
+        self.poll_calls = 0
+
+    def join(self, timeout=None) -> bool:
+        del timeout
+        self.join_calls += 1
+        return True
+
+    def poll(self):
+        self.poll_calls += 1
+        if self.terminal_kind is None:
+            return None
+        self.busy = False
+        return _TerminalProductMessage(self.terminal_kind)
+
+
+def test_webview_close_consumes_joined_product_stopped_truth(tmp_path: Path) -> None:
+    controller = _bare_controller(tmp_path)
+    product = _JoinedTerminalProductWorker("STOPPED")
+    controller.product_worker = product
+
+    controller.close()
+
+    assert controller._close_complete is True
+    assert product.busy is False
+    assert product.stop_reasons == ["app_close"]
+    assert product.join_calls == 1
+    assert product.poll_calls == 1
+
+
+def test_webview_close_rejects_joined_product_error_truth(tmp_path: Path) -> None:
+    controller = _bare_controller(tmp_path)
+    product = _JoinedTerminalProductWorker("ERROR")
+    controller.product_worker = product
+    quarantined: list[Path] = []
+    controller._quarantine_product_runtime_truth = (
+        lambda workspace: quarantined.append(Path(workspace))
+    )
+
+    try:
+        controller.close()
+    except RuntimeError as exc:
+        assert "terminated with error during close" in str(exc)
+    else:
+        raise AssertionError("joined product ERROR was accepted as safe close")
+
+    assert controller._closing is False
+    assert getattr(controller, "_close_complete", False) is False
+    assert product.busy is False
+    assert quarantined == [tmp_path]
+    assert "Вікно залишено відкритим" in controller.last_error
+
+
+def test_webview_close_rejects_join_without_terminal_publication(
+    tmp_path: Path,
+) -> None:
+    controller = _bare_controller(tmp_path)
+    product = _JoinedTerminalProductWorker(None)
+    controller.product_worker = product
+
+    try:
+        controller.close()
+    except RuntimeError as exc:
+        assert "without publishing terminal state" in str(exc)
+    else:
+        raise AssertionError("missing product terminal truth was accepted as safe close")
+
+    assert controller._closing is False
+    assert getattr(controller, "_close_complete", False) is False
+    assert product.busy is True
+    assert product.join_calls == 1
+    assert product.poll_calls == 1
+

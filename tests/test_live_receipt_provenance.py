@@ -1496,6 +1496,34 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_late_stale_trusted_receipt_does_not_regress_trusted_current_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                newer = self._direct_event(sequence=2, odds="2.40")
+                stale = self._direct_event(sequence=1, odds="2.00")
+                self.assertEqual(
+                    store._append_live_batch_accepted([newer, stale]),
+                    [newer, stale],
+                )
+
+                current = store.trusted_live_current_by_source()
+                latest = current[(newer.source_id, newer.quote_key)]
+                self.assertEqual(latest.sequence, 2)
+                self.assertEqual(latest.decimal_odds, Decimal("2.40"))
+                self.assertEqual(
+                    store.connection.execute(
+                        """SELECT sequence,dedupe_key
+                           FROM trusted_live_current_quotes
+                           WHERE source_id=? AND quote_key=?""",
+                        (newer.source_id, newer.quote_key),
+                    ).fetchone(),
+                    (newer.sequence, newer.dedupe_key),
+                )
+                self.assertEqual(len(store.trusted_live_events()), 2)
+            finally:
+                store.close()
+
     def test_generic_newer_history_does_not_advance_trusted_current_projection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

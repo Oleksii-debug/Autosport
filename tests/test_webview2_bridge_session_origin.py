@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -275,3 +276,49 @@ def test_native_window_close_vetoes_teardown_failure_and_preserves_trusted_retry
         ("state", None),
         ("close", None),
     ]
+
+
+class _BlockingCloseController(_Controller):
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_entered = threading.Event()
+        self.release_close = threading.Event()
+
+    def close(self) -> None:
+        self.events.append(("close", None))
+        self.close_entered.set()
+        if not self.release_close.wait(2.0):
+            raise RuntimeError("test close was not released")
+
+
+def test_bridge_does_not_hold_document_trust_lock_across_long_close() -> None:
+    controller = _BlockingCloseController()
+    bridge = AutosportWebBridge(controller)
+    window = _Window()
+    bridge._bind_trusted_window(window)
+
+    errors: list[BaseException] = []
+
+    def run_close() -> None:
+        try:
+            bridge.close()
+        except BaseException as exc:
+            errors.append(exc)
+
+    close_thread = threading.Thread(target=run_close)
+    close_thread.start()
+    try:
+        assert controller.close_entered.wait(1.0)
+        # A long canonical teardown must not monopolize the trust lock. State
+        # remains readable from the same trusted document while close is pending;
+        # ordinary controller admission is separately fenced by _closing in the
+        # real controller and the emergency safety lane remains independent.
+        assert bridge.get_state() == {"ok": True, "state": {"status": "ok"}}
+        assert close_thread.is_alive()
+    finally:
+        controller.release_close.set()
+        close_thread.join(2.0)
+
+    assert errors == []
+    with pytest.raises(WindowsWebBridgeTrustError):
+        bridge.get_state()

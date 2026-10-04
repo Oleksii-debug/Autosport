@@ -2138,12 +2138,14 @@ class AutosportWebBridge:
         return {"ok": True, "state": self._controller.state()}
 
     def close(self) -> None:
-        # Do not revoke the only trusted operator surface until canonical teardown
-        # has actually completed. If teardown fails, the caller receives the error
-        # and the still-bound window can present state and retry the safe close.
+        # Validate the initiating document under the trust lock, then release it
+        # while canonical teardown waits. This mirrors dispatch/get_state: a long
+        # backend operation must not monopolize the document-trust lane or delay
+        # safety/state traffic from the still-visible trusted window.
         with self._trust_lock:
             self._assert_trusted_session_locked()
-            self._controller.close()
+        self._controller.close()
+        with self._trust_lock:
             self._host_shutdown = True
             self._trust_revoked = True
 
@@ -2153,7 +2155,8 @@ class AutosportWebBridge:
         with self._trust_lock:
             if self._host_shutdown:
                 return
-            self._controller.close()
+        self._controller.close()
+        with self._trust_lock:
             self._host_shutdown = True
             self._trust_revoked = True
 

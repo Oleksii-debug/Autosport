@@ -169,8 +169,8 @@ def _product_precommit(
     tmp_path,
     monkeypatch,
     *,
-    initial_capital_state_sha256: str = "5" * 64,
-    stake_policy_sha256: str = "6" * 64,
+    initial_capital_state_sha256: str | None = None,
+    stake_policy_sha256: str | None = None,
 ):
     membership = _membership()
     workspace = tmp_path / "workspace"
@@ -179,6 +179,23 @@ def _product_precommit(
     registry_path.write_text("{}\n", encoding="utf-8")
     RunRegistry.initialize_pristine(workspace / "run_registry.json")
     authority_root = tmp_path / "authority"
+
+    if initial_capital_state_sha256 is None:
+        frozen_initial_book_path = workspace / ".iid-frozen-initial-book.json"
+        PaperBook("100").save(frozen_initial_book_path)
+        initial_capital_state_sha256 = hashlib.sha256(
+            frozen_initial_book_path.read_bytes()
+        ).hexdigest()
+    if stake_policy_sha256 is None:
+        frozen_goal = EconomicGoalContract(
+            goal_id="risk-path-goal",
+            revision=1,
+            bankroll_id="risk-path-bankroll",
+            currency="USD",
+        )
+        stake_policy_sha256 = PaperRiskPolicy(
+            economic_goal=frozen_goal,
+        ).provenance_sha256
 
     monkeypatch.setattr(
         publication,

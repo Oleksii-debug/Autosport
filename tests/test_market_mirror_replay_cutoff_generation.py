@@ -4206,6 +4206,66 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_invalid_cutoff_ancestry_cannot_be_extended_by_abort_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                authority = self.direct_issue_first_cutoff_authority(
+                    store,
+                    as_of=self.CUTOFF,
+                    max_generation=0,
+                    tx_id="legacy-manual-cutoff",
+                )
+                first_rows = store._validated_replay_cutoff_rows()
+                self.assertEqual(len(first_rows), 1)
+                prior_state = store._replay_cutoff_authority_state_sha256(first_rows)
+                self.assertIsNotNone(prior_state)
+                assert prior_state is not None
+
+                second_as_of = storage_module._canonical_replay_cutoff(
+                    (self.CUTOFF + timedelta(seconds=1)).isoformat()
+                )
+                second_id = storage_module._replay_cutoff_id(second_as_of)
+                corpus_sha256 = store._frozen_replay_corpus_sha256(0)
+                second_binding = storage_module._replay_cutoff_binding_sha256(
+                    cutoff_id=second_id,
+                    canonical_as_of=second_as_of,
+                    max_append_generation=0,
+                    corpus_sha256=corpus_sha256,
+                )
+                second_rows = tuple(
+                    sorted(
+                        (*first_rows, (second_id, second_as_of, 0)),
+                        key=lambda row: row[0],
+                    )
+                )
+                second_state = storage_module._replay_cutoff_state_sha256(
+                    second_rows,
+                    sealed_corpus_sha256=corpus_sha256,
+                )
+                self.assertIsNotNone(second_state)
+                assert second_state is not None
+                second_tx = f"{second_id[:32]}-{'5' * 32}"
+                authority.prepare(
+                    tx_id=second_tx,
+                    observed_state_sha256=prior_state,
+                    intended_state_sha256=second_state,
+                    semantic_binding_sha256=second_binding,
+                )
+                before_recovery = authority.read_history()
+                self.assertEqual(before_recovery[-1].phase.value, "PREPARE")
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "committed transaction identity is invalid",
+                ):
+                    self.replay(store)
+
+                self.assertEqual(authority.read_history(), before_recovery)
+                self.assertEqual(authority.read_history()[-1].phase.value, "PREPARE")
+            finally:
+                store.close()
+
     def test_cutoff_inside_atomic_append_batch_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

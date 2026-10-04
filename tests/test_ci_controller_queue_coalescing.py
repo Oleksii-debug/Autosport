@@ -402,6 +402,139 @@ def test_main_rejects_preentry_active_run_method_rebind(monkeypatch) -> None:
     assert forged_calls == []
 
 
+def test_active_runs_rejects_preentry_status_reader_rebind(monkeypatch) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    forged_calls: list[str] = []
+
+    def forged_status_reader(_self, status: str) -> tuple[WorkflowRun, ...]:
+        forged_calls.append(status)
+        return ()
+
+    monkeypatch.setattr(
+        WorkflowScopedGitHubApi,
+        "_active_runs_for_status",
+        forged_status_reader,
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="active workflow reader authority changed",
+    ):
+        api.active_runs()
+    assert forged_calls == []
+
+
+def test_active_runs_rejects_preentry_recovery_reader_rebind(monkeypatch) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    forged_calls: list[int] = []
+
+    def forged_recovery(_self, run: WorkflowRun) -> WorkflowRun:
+        forged_calls.append(run.run_id)
+        return run
+
+    monkeypatch.setattr(
+        WorkflowScopedGitHubApi,
+        "_recover_candidate_run_reference",
+        forged_recovery,
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="active workflow reader authority changed",
+    ):
+        api.active_runs()
+    assert forged_calls == []
+
+
+def test_active_runs_rejects_status_reader_kwdefaults_rebase(monkeypatch) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    status_reader = WorkflowScopedGitHubApi._active_runs_for_status
+    defaults = status_reader.__kwdefaults__
+    assert defaults is not None
+    forged_calls: list[str] = []
+
+    def forged_parser(_payload) -> WorkflowRun:
+        forged_calls.append("parser")
+        return WorkflowRun(
+            run_id=999,
+            head_sha=STALE_HEAD,
+            workflow_name="CI",
+            pr_numbers=(303,),
+            status="queued",
+        )
+
+    monkeypatch.setitem(defaults, "_run_parser", forged_parser)
+    monkeypatch.setitem(defaults, "_run_parser_code", forged_parser.__code__)
+
+    with pytest.raises(
+        CancellationError,
+        match="active workflow reader authority changed",
+    ):
+        api.active_runs()
+    assert forged_calls == []
+
+
+def test_active_runs_rejects_inflight_status_reader_rebind(monkeypatch) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_status_reader = WorkflowScopedGitHubApi._active_runs_for_status
+    forged_calls: list[str] = []
+
+    def forged_status_reader(_self, status: str) -> tuple[WorkflowRun, ...]:
+        forged_calls.append(status)
+        return ()
+
+    def fake_request(
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ) -> object:
+        assert method == "GET"
+        assert not allowed_http_errors
+        assert "status=queued" in path
+        monkeypatch.setattr(
+            WorkflowScopedGitHubApi,
+            "_active_runs_for_status",
+            forged_status_reader,
+        )
+        return {"total_count": 0, "workflow_runs": []}
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    with pytest.raises(
+        CancellationError,
+        match="active workflow reader authority changed",
+    ):
+        api.active_runs()
+    assert forged_calls == []
+    assert canonical_status_reader is not forged_status_reader
+
+
+def test_active_runs_public_entrypoint_has_no_mutable_default_authority() -> None:
+    assert WorkflowScopedGitHubApi.active_runs.__defaults__ is None
+    assert WorkflowScopedGitHubApi.active_runs.__kwdefaults__ is None
+
+
 def test_main_rejects_preentry_orphan_method_rebind(monkeypatch) -> None:
     forged_calls: list[str] = []
 

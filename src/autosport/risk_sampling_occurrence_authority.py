@@ -658,9 +658,152 @@ def resolve_product_iid_expected_draw_plan(
 def _build_draw_plan_verifier(
     resolver,
     plan_type: type[ProductIidExpectedDrawPlan],
+    frame_type: type[SamplingFrameUnit],
+    member_draw_type: type[ProductIidExpectedMemberDraw],
 ):
     module_globals = globals()
     resolver_code = getattr(resolver, "__code__", None)
+    if resolver_code is None:
+        raise RuntimeError("IID draw-plan resolver authority is unavailable")
+
+    def require_dispatch() -> None:
+        if (
+            module_globals.get("resolve_product_iid_expected_draw_plan")
+            is not resolver
+            or getattr(resolver, "__code__", None) is not resolver_code
+            or module_globals.get("ProductIidExpectedDrawPlan") is not plan_type
+            or module_globals.get("SamplingFrameUnit") is not frame_type
+            or module_globals.get("ProductIidExpectedMemberDraw")
+            is not member_draw_type
+        ):
+            raise ProductIidDrawPlanError(
+                "IID draw-plan verifier authority dispatch changed"
+            )
+
+    def exact_text(value: object, name: str) -> str:
+        if type(value) is not str:
+            raise ProductIidDrawPlanError(
+                f"IID draw-plan {name} is not exact text"
+            )
+        return value
+
+    def exact_int(value: object, name: str) -> int:
+        if type(value) is not int:
+            raise ProductIidDrawPlanError(
+                f"IID draw-plan {name} is not an exact integer"
+            )
+        return value
+
+    def exact_text_tuple(value: object, name: str) -> tuple[str, ...]:
+        if type(value) is not tuple or any(type(item) is not str for item in value):
+            raise ProductIidDrawPlanError(
+                f"IID draw-plan {name} is not an exact text tuple"
+            )
+        return value
+
+    def exact_int_tuple(value: object, name: str) -> tuple[int, ...]:
+        if type(value) is not tuple or any(type(item) is not int for item in value):
+            raise ProductIidDrawPlanError(
+                f"IID draw-plan {name} is not an exact integer tuple"
+            )
+        return value
+
+    def snapshot(value: ProductIidExpectedDrawPlan) -> tuple[object, ...]:
+        if type(value) is not plan_type:
+            raise TypeError("candidate must be an exact ProductIidExpectedDrawPlan")
+        frame_units = object.__getattribute__(value, "frame_units")
+        member_draws = object.__getattribute__(value, "member_draws")
+        if type(frame_units) is not tuple or type(member_draws) is not tuple:
+            raise ProductIidDrawPlanError(
+                "IID draw-plan nested evidence is not canonical"
+            )
+
+        frame_snapshot: list[tuple[str, str]] = []
+        for index, item in enumerate(frame_units):
+            if type(item) is not frame_type:
+                raise ProductIidDrawPlanError(
+                    "IID draw-plan frame unit type is not canonical"
+                )
+            frame_snapshot.append(
+                (
+                    exact_text(
+                        object.__getattribute__(item, "unit_id"),
+                        f"frame_units[{index}].unit_id",
+                    ),
+                    exact_text(
+                        object.__getattribute__(item, "payload_sha256"),
+                        f"frame_units[{index}].payload_sha256",
+                    ),
+                )
+            )
+
+        draw_snapshot: list[tuple[object, ...]] = []
+        for index, item in enumerate(member_draws):
+            if type(item) is not member_draw_type:
+                raise ProductIidDrawPlanError(
+                    "IID draw-plan member draw type is not canonical"
+                )
+            draw_snapshot.append(
+                (
+                    exact_text(
+                        object.__getattribute__(item, "member_id"),
+                        f"member_draws[{index}].member_id",
+                    ),
+                    exact_int(
+                        object.__getattribute__(item, "member_index"),
+                        f"member_draws[{index}].member_index",
+                    ),
+                    exact_text(
+                        object.__getattribute__(item, "stream_sha256"),
+                        f"member_draws[{index}].stream_sha256",
+                    ),
+                    exact_int(
+                        object.__getattribute__(item, "draw_count"),
+                        f"member_draws[{index}].draw_count",
+                    ),
+                    exact_int_tuple(
+                        object.__getattribute__(item, "draw_indices"),
+                        f"member_draws[{index}].draw_indices",
+                    ),
+                    exact_text_tuple(
+                        object.__getattribute__(item, "draw_unit_ids"),
+                        f"member_draws[{index}].draw_unit_ids",
+                    ),
+                    exact_text_tuple(
+                        object.__getattribute__(item, "draw_payload_sha256"),
+                        f"member_draws[{index}].draw_payload_sha256",
+                    ),
+                    exact_text(
+                        object.__getattribute__(item, "draw_transcript_sha256"),
+                        f"member_draws[{index}].draw_transcript_sha256",
+                    ),
+                )
+            )
+
+        return (
+            exact_text(
+                object.__getattribute__(value, "experiment_id"),
+                "experiment_id",
+            ),
+            exact_text(
+                object.__getattribute__(value, "sampling_manifest_sha256"),
+                "sampling_manifest_sha256",
+            ),
+            exact_text(
+                object.__getattribute__(value, "sampling_frame_sha256"),
+                "sampling_frame_sha256",
+            ),
+            exact_text(
+                object.__getattribute__(value, "horizon_sha256"),
+                "horizon_sha256",
+            ),
+            tuple(frame_snapshot),
+            tuple(draw_snapshot),
+            exact_text(
+                object.__getattribute__(value, "plan_sha256"),
+                "plan_sha256",
+            ),
+        )
 
     def verifier(
         candidate: ProductIidExpectedDrawPlan,
@@ -673,17 +816,8 @@ def _build_draw_plan_verifier(
         horizon_json: str,
         authority_root: str | Path | None = None,
     ) -> ProductIidExpectedDrawPlan:
-        if (
-            module_globals.get("resolve_product_iid_expected_draw_plan")
-            is not resolver
-            or getattr(resolver, "__code__", None) is not resolver_code
-            or module_globals.get("ProductIidExpectedDrawPlan") is not plan_type
-        ):
-            raise ProductIidDrawPlanError(
-                "IID draw-plan verifier authority dispatch changed"
-            )
-        if type(candidate) is not plan_type:
-            raise TypeError("candidate must be an exact ProductIidExpectedDrawPlan")
+        require_dispatch()
+        candidate_snapshot = snapshot(candidate)
         canonical = resolver(
             membership,
             registry_path=registry_path,
@@ -693,19 +827,12 @@ def _build_draw_plan_verifier(
             horizon_json=horizon_json,
             authority_root=authority_root,
         )
-        if (
-            module_globals.get("resolve_product_iid_expected_draw_plan")
-            is not resolver
-            or getattr(resolver, "__code__", None) is not resolver_code
-            or module_globals.get("ProductIidExpectedDrawPlan") is not plan_type
-        ):
-            raise ProductIidDrawPlanError(
-                "IID draw-plan verifier authority dispatch changed"
-            )
-        if candidate != canonical:
+        require_dispatch()
+        if snapshot(canonical) != candidate_snapshot:
             raise ProductIidDrawPlanError(
                 "IID expected draw plan differs from canonical frozen evidence"
             )
+        require_dispatch()
         return canonical
 
     verifier.__name__ = "verify_product_iid_expected_draw_plan"
@@ -716,6 +843,8 @@ def _build_draw_plan_verifier(
 verify_product_iid_expected_draw_plan = _build_draw_plan_verifier(
     resolve_product_iid_expected_draw_plan,
     ProductIidExpectedDrawPlan,
+    SamplingFrameUnit,
+    ProductIidExpectedMemberDraw,
 )
 del _build_draw_plan_verifier
 

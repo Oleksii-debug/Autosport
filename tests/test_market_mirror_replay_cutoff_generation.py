@@ -3301,6 +3301,61 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_append_batch_freezes_each_event_before_generator_resumes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            original = MarketEvent.from_dict(
+                {
+                    **self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    ).to_dict(),
+                    "metadata": {"witness": {"value": 1}},
+                }
+            )
+
+            def generated_events():
+                yield original
+                original.metadata["witness"]["value"] = 2
+
+            try:
+                accepted = store.append_batch_accepted(generated_events())
+                self.assertEqual(accepted[0].metadata["witness"]["value"], 1)
+                self.assertEqual(store.events()[0].metadata["witness"]["value"], 1)
+                self.assertEqual(original.metadata["witness"]["value"], 2)
+            finally:
+                store.close()
+
+    def test_append_batch_rejects_non_event_before_issuance_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            entered = False
+
+            class ForbiddenLock:
+                def __enter__(self):
+                    nonlocal entered
+                    entered = True
+                    raise AssertionError("issuance lock must not be entered")
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            try:
+                with patch.object(
+                    SQLiteMarketStore,
+                    "_market_append_issuance_lock",
+                    new=staticmethod(lambda _authority: ForbiddenLock()),
+                ):
+                    with self.assertRaisesRegex(
+                        TypeError,
+                        "only MarketEvent",
+                    ):
+                        store.append_batch_accepted((object(),))
+                self.assertFalse(entered)
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

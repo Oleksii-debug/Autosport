@@ -291,6 +291,27 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(store.trusted_live_events(), [])
             store.close()
 
+    def test_private_live_receipt_seam_rejects_event_subclass_before_serialization(self) -> None:
+        class ForgingEvent(MarketEvent):
+            def to_dict(self):
+                raise AssertionError("subclass serialization must not be consulted")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            canonical = self._direct_event(sequence=1)
+            forged = ForgingEvent.from_dict(canonical.to_dict())
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "live receipt authority requires exact MarketEvent values",
+            ):
+                store._append_live_batch_accepted([forged])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
     def test_private_live_receipt_seam_rejects_store_subclass(self) -> None:
         class StoreSubclass(SQLiteMarketStore):
             pass

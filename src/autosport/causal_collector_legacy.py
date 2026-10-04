@@ -9,6 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .domain import MarketEvent
 from .workspace_lock import WorkspaceEconomicLock
 
 

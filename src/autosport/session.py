@@ -72,6 +72,7 @@ _IID_EXPECTED_MULTISET_CODE = getattr(_IID_EXPECTED_MULTISET, "__code__", None)
 _IID_REPLAY_ENGINE = ReplayEngine
 _IID_DATASET_TYPE = ReplayDataset
 _IID_MEMBERSHIP_TYPE = ResolvedFixedNRiskMembership
+_IID_PATH_TYPE = type(Path("."))
 _IID_DATASET_LOADER = load_dataset
 _IID_DATASET_LOADER_CODE = getattr(_IID_DATASET_LOADER, "__code__", None)
 _IID_EXECUTION_RECEIPT_TYPE = ProductIidRunExecutionReceipt
@@ -433,7 +434,9 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
             raise TypeError(
                 "membership must be an exact ResolvedFixedNRiskMembership"
             )
-        dataset_root = Path(dataset.root).expanduser().resolve(strict=True)
+        if type(dataset.root) is not _IID_PATH_TYPE:
+            raise TypeError("dataset.root must be an exact platform Path")
+        dataset_root = dataset.root.expanduser().resolve(strict=True)
         manifest_path = dataset_root / "manifest.json"
         try:
             manifest_before = manifest_path.read_bytes()

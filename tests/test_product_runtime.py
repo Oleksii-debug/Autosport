@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autosport.causal_collector import (
-    ApplicationReceiptError,
     CollectorDelta,
     DesktopDeltaCheckpointStore,
     canonical_event_digest,
@@ -129,6 +128,10 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 initial_bankroll="100",
             )
             try:
+                self.assertIs(
+                    runtime.coordinator.desktop_consumer._acknowledgement_clock,
+                    clock,
+                )
                 first_status = runtime.status()
                 self.assertEqual(first_status.cycles_completed, 0)
                 self.assertEqual(first_status.source_id, "provider-a")
@@ -155,6 +158,37 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 self.assertEqual(restored.manifest.initial_bankroll, "100")
             finally:
                 restored.close()
+
+    def test_runtime_ack_clock_allows_application_after_causal_cutoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event()
+            delta = _delta(event)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(resolved_event=event),
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                self.assertEqual(
+                    runtime.coordinator.desktop_consumer.drain(
+                        as_of="2026-09-20T13:57:59+00:00",
+                    ),
+                    (delta.delta_id,),
+                )
+                self.assertEqual(runtime.mirror.snapshot(), (event,))
+                self.assertEqual(runtime.invalidations.pending_count, 1)
+                receipt = DesktopDeltaCheckpointStore(
+                    root / "desktop_acks.json"
+                ).application_receipt(delta)
+                self.assertIsNotNone(receipt)
+                self.assertEqual(receipt.applied_at, clock.value)
+            finally:
+                runtime.close()
 
     def test_runtime_preload_excludes_unreceipted_market_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -345,45 +379,6 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     sleep=lambda _: None,
                     initial_bankroll="100",
                 )
-
-    def test_future_application_receipt_cannot_publish_before_as_of(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            clock = _Clock()
-            event = _event()
-            delta = _delta(event)
-            runtime = build_autonomous_product_runtime(
-                workspace=root,
-                source=_Source(resolved_event=event),
-                clock=clock,
-                sleep=lambda _: None,
-                initial_bankroll="100",
-            )
-            try:
-                self.assertTrue(runtime.collector.delta_store.append(delta))
-                with self.assertRaisesRegex(
-                    ApplicationReceiptError,
-                    "desktop_available_at <= applied_at <= acknowledged_at",
-                ):
-                    runtime.coordinator.desktop_consumer.drain(
-                        as_of="2026-09-20T13:57:59+00:00",
-                    )
-                self.assertEqual(runtime.mirror.snapshot(), ())
-                self.assertEqual(runtime.invalidations.pending_count, 0)
-                self.assertFalse(
-                    DesktopDeltaCheckpointStore(
-                        root / "desktop_acks.json"
-                    ).has_ack(delta.delta_id)
-                )
-
-                self.assertEqual(
-                    runtime.coordinator.desktop_consumer.drain(as_of=clock.value),
-                    (delta.delta_id,),
-                )
-                self.assertEqual(runtime.mirror.snapshot(), (event,))
-                self.assertEqual(runtime.invalidations.pending_count, 1)
-            finally:
-                runtime.close()
 
     def test_crash_after_market_persist_replays_canonical_application_exactly_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

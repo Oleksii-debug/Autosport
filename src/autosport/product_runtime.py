@@ -1111,6 +1111,7 @@ def build_autonomous_product_runtime(
             resolve_event=source.resolve_event,
             apply_event=canonical_application.apply,
             lookup_application_receipt=canonical_application.lookup_receipt,
+            acknowledgement_clock=resolved_clock,
             on_application_receipt=deliver_completed_desktop_application,
         )
         coordinator = ContinuousSessionCoordinator(

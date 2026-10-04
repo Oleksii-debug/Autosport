@@ -736,8 +736,79 @@ class CanonicalDesktopApplication:
         self.clock = clock
         self._state = _CanonicalDesktopApplicationStore(state_path)
 
-    def lookup_receipt(self, delta: CollectorDelta) -> DesktopApplicationReceipt | None:
-        return self._state.receipt(delta)
+    def _lookup_receipt_impl(
+        self,
+        delta: CollectorDelta,
+        *,
+        _market_bus_type,
+        _market_store_type,
+        _market_events,
+        _event_type,
+        _canonical_digest,
+        _dedupe_getter,
+        _health_store_type,
+        _health_get,
+    ) -> DesktopApplicationReceipt | None:
+        receipt = self._state.receipt(delta)
+        if receipt is None:
+            return None
+
+        if type(self.market_bus) is not _market_bus_type:
+            raise ApplicationReceiptError(
+                "completed canonical application lacks canonical market bus authority"
+            )
+        market_store = getattr(self.market_bus, "store", None)
+        if type(market_store) is not _market_store_type:
+            raise ApplicationReceiptError(
+                "completed canonical application lacks canonical market storage authority"
+            )
+        try:
+            history = _market_events(market_store, delta.event_id)
+        except Exception as exc:
+            raise ApplicationReceiptError(
+                "cannot verify durable canonical market effect for application receipt"
+            ) from exc
+
+        matches = []
+        for event in history:
+            if type(event) is not _event_type:
+                raise ApplicationReceiptError(
+                    "canonical market history returned a non-canonical event type"
+                )
+            try:
+                event_dedupe_key = _dedupe_getter(event)
+                event_digest = _canonical_digest(event)
+            except Exception as exc:
+                raise ApplicationReceiptError(
+                    "cannot verify canonical market identity for application receipt"
+                ) from exc
+            if (
+                event.source_id == delta.source_id
+                and event_dedupe_key == delta.event_dedupe_key
+                and event_digest == receipt.canonical_event_digest
+            ):
+                matches.append(event)
+        if len(matches) != 1:
+            raise ApplicationReceiptError(
+                "application receipt does not resolve to exactly one durable canonical market effect"
+            )
+
+        if type(self.health_store) is not _health_store_type:
+            raise ApplicationReceiptError(
+                "completed canonical application lacks canonical health authority"
+            )
+        expected_health = self._state.health_after(delta)
+        try:
+            actual_health = _health_get(self.health_store, delta.source_id)
+        except Exception as exc:
+            raise ApplicationReceiptError(
+                "cannot verify durable canonical health effect for application receipt"
+            ) from exc
+        if actual_health != expected_health:
+            raise ApplicationReceiptError(
+                "application receipt lacks its durable canonical health effect"
+            )
+        return receipt
 
     def completed_receipts_for_source(
         self,
@@ -907,6 +978,55 @@ CanonicalDesktopApplication.apply = _bind_canonical_desktop_application_apply(
 )
 del CanonicalDesktopApplication._apply_impl
 del _bind_canonical_desktop_application_apply
+
+
+def _bind_canonical_desktop_application_lookup_receipt(implementation):
+    """Re-prove completed receipt effects through sealed canonical authorities."""
+
+    from .ingestion_health import SourceHealthStore
+    from .market_bus import MarketEventBus
+    from .storage import SQLiteMarketStore
+
+    market_bus_type = MarketEventBus
+    market_store_type = SQLiteMarketStore
+    market_events = SQLiteMarketStore.events
+    event_type = MarketEvent
+    canonical_digest = canonical_event_digest
+    dedupe_getter = MarketEvent.dedupe_key.fget
+    health_store_type = SourceHealthStore
+    health_get = SourceHealthStore.get
+
+    def lookup_receipt(
+        self: CanonicalDesktopApplication,
+        delta: CollectorDelta,
+    ) -> DesktopApplicationReceipt | None:
+        if dedupe_getter is None:
+            raise ApplicationReceiptError(
+                "canonical MarketEvent dedupe identity descriptor is unavailable"
+            )
+        return implementation(
+            self,
+            delta,
+            _market_bus_type=market_bus_type,
+            _market_store_type=market_store_type,
+            _market_events=market_events,
+            _event_type=event_type,
+            _canonical_digest=canonical_digest,
+            _dedupe_getter=dedupe_getter,
+            _health_store_type=health_store_type,
+            _health_get=health_get,
+        )
+
+    return lookup_receipt
+
+
+CanonicalDesktopApplication.lookup_receipt = (
+    _bind_canonical_desktop_application_lookup_receipt(
+        CanonicalDesktopApplication._lookup_receipt_impl
+    )
+)
+del CanonicalDesktopApplication._lookup_receipt_impl
+del _bind_canonical_desktop_application_lookup_receipt
 
 
 class CollectorDeltaStore(_JsonAtomicStore):

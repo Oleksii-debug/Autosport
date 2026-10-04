@@ -479,6 +479,14 @@ class ProphetXSessionSnapshot:
                 raise ProphetXSessionLifecycleError(
                     "renewal-due retry horizon must match transient renewal failure evidence"
                 )
+            if (
+                self.retry_not_before is not None
+                and self.slot_hold_until is not None
+                and self.slot_hold_until < self.retry_not_before
+            ):
+                raise ProphetXSessionLifecycleError(
+                    "renewal slot hold cannot undercut retry horizon"
+                )
 
         if self.state is ProphetXSessionState.LOGIN_IN_FLIGHT:
             if (

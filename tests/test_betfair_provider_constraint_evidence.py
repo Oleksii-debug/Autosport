@@ -805,3 +805,97 @@ def test_observation_freezes_normalized_time_against_mutable_tzinfo() -> None:
         BetfairConstraintResolutionState.CONSISTENT_UNVERIFIED
     )
 
+
+
+def test_resolution_consistent_state_requires_candidate_evidence() -> None:
+    item = observation()
+    resolved = resolve(item)
+    resolution_type = type(resolved)
+
+    with pytest.raises(
+        BetfairProviderConstraintError,
+        match="CONSISTENT_UNVERIFIED requires candidate evidence",
+    ):
+        resolution_type(
+            state=BetfairConstraintResolutionState.CONSISTENT_UNVERIFIED,
+            provider_id="betfair",
+            jurisdiction_scope="UK_INTERNATIONAL",
+            currency_code="GBP",
+            as_of=resolved.as_of,
+            candidate_generation_sha256s=(),
+            semantic_sha256=resolved.semantic_sha256,
+            min_standard_size=resolved.min_standard_size,
+            min_payout=resolved.min_payout,
+            lower_minimum_payout_enabled=resolved.lower_minimum_payout_enabled,
+            resolution_sha256=resolved.resolution_sha256,
+        )
+
+
+def test_resolution_no_evidence_rejects_candidate_generations() -> None:
+    item = observation()
+    resolution_type = type(resolve(item))
+
+    with pytest.raises(
+        BetfairProviderConstraintError,
+        match="NO_EVIDENCE cannot carry candidate generations",
+    ):
+        resolution_type(
+            state=BetfairConstraintResolutionState.NO_EVIDENCE,
+            provider_id="betfair",
+            jurisdiction_scope="UK_INTERNATIONAL",
+            currency_code="GBP",
+            as_of=T0 + timedelta(days=1),
+            candidate_generation_sha256s=(item.generation_sha256,),
+            semantic_sha256=None,
+            min_standard_size=None,
+            min_payout=None,
+            lower_minimum_payout_enabled=None,
+            resolution_sha256="0" * 64,
+        )
+
+
+def test_resolution_conflict_requires_multiple_candidate_generations() -> None:
+    item = observation()
+    resolution_type = type(resolve(item))
+
+    with pytest.raises(
+        BetfairProviderConstraintError,
+        match="CONFLICTING_UNVERIFIED requires at least two candidate generations",
+    ):
+        resolution_type(
+            state=BetfairConstraintResolutionState.CONFLICTING_UNVERIFIED,
+            provider_id="betfair",
+            jurisdiction_scope="UK_INTERNATIONAL",
+            currency_code="GBP",
+            as_of=T0 + timedelta(days=1),
+            candidate_generation_sha256s=(item.generation_sha256,),
+            semantic_sha256=None,
+            min_standard_size=None,
+            min_payout=None,
+            lower_minimum_payout_enabled=None,
+            resolution_sha256="0" * 64,
+        )
+
+
+def test_resolution_semantic_hash_must_match_exposed_thresholds() -> None:
+    item = observation()
+    resolved = resolve(item)
+    resolution_type = type(resolved)
+
+    with pytest.raises(
+        BetfairProviderConstraintError,
+        match="semantic_sha256 does not match threshold semantics",
+    ):
+        resolution_type(
+            state=BetfairConstraintResolutionState.CONSISTENT_UNVERIFIED,
+            provider_id="betfair",
+            jurisdiction_scope="UK_INTERNATIONAL",
+            currency_code="GBP",
+            as_of=resolved.as_of,
+            candidate_generation_sha256s=resolved.candidate_generation_sha256s,
+            semantic_sha256=resolved.semantic_sha256,
+            min_standard_size=Decimal("2"),
+            min_payout=resolved.min_payout,
+            lower_minimum_payout_enabled=resolved.lower_minimum_payout_enabled,
+            resolution_sha256=resolved.resolution_sha256,
+        )

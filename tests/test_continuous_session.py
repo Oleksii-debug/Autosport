@@ -521,6 +521,72 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_settlement_completed_phase_ignores_module_alias_retargeting(self) -> None:
+        class _HostileEventPhase:
+            COMPLETED = EventPhase.PRE_MATCH
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:phase-authority",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-phase-authority",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            book = PaperBook("100")
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+                provider_source_ids=("provider-a",),
+            )
+            book.save(root / "paper_book.json")
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="provider-result:phase-authority",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="phase-authority-evidence",
+                evidence_sha256="f" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=_OutcomeAuthority(resolution),
+            )
+            try:
+                with patch.object(
+                    continuous_session_module,
+                    "EventPhase",
+                    _HostileEventPhase,
+                ):
+                    result = coordinator.tick()
+                self.assertEqual(result.settled_ticket_ids, (ticket.ticket_id,))
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("110"))
+                self.assertEqual(
+                    durable.tickets[ticket.ticket_id].status.value,
+                    "won",
+                )
+            finally:
+                store.close()
+
     def test_shared_lifecycle_foreign_source_is_outside_session_settlement_authority(
         self,
     ) -> None:

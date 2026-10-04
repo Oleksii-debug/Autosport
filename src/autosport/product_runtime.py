@@ -1487,6 +1487,16 @@ def _build_autonomous_product_runtime_impl(
             settlement_authority_identity=settlement_authority_identity,
         )
 
+        def require_source_resolver_authority() -> None:
+            current_identity = _source_resolver_identity_fn(
+                source=source,
+                source_id=source_id,
+            )
+            if current_identity != manifest.source_resolver_identity:
+                raise ProductCompositionError(
+                    "source resolver authority changed after product composition"
+                )
+
         lifecycle = _lifecycle_type(root / "catalog.json")
         market_store = _market_store_type(root / "market.db")
         lease_stack.callback(market_store.close)
@@ -1516,7 +1526,29 @@ def _build_autonomous_product_runtime_impl(
 
         dependencies = _dependency_index_type(mirror)
         collector_store = _collector_store_type(root / "collector_deltas.json")
-        collector = _collector_service_type(
+        base_collector_run_cycle = _collector_service_type.run_cycle
+        base_bounded_provider_call = _collector_service_type._bounded_provider_call
+
+        class ProductCollectorService(_collector_service_type):
+            def _bounded_provider_call(self, action):
+                def guarded_action():
+                    require_source_resolver_authority()
+                    result = action()
+                    require_source_resolver_authority()
+                    return result
+
+                return base_bounded_provider_call(self, guarded_action)
+
+            def run_cycle(self, *, _schedule_slot=None):
+                require_source_resolver_authority()
+                result = base_collector_run_cycle(
+                    self,
+                    _schedule_slot=_schedule_slot,
+                )
+                require_source_resolver_authority()
+                return result
+
+        collector = ProductCollectorService(
             delta_store=collector_store,
             lifecycle=lifecycle,
             source=source,
@@ -1530,14 +1562,7 @@ def _build_autonomous_product_runtime_impl(
         source_resolve_event = source.resolve_event
 
         def resolve_product_event(delta: CollectorDelta) -> MarketEvent:
-            current_identity = _source_resolver_identity_fn(
-                source=source,
-                source_id=source_id,
-            )
-            if current_identity != manifest.source_resolver_identity:
-                raise ProductCompositionError(
-                    "source resolver authority changed after product composition"
-                )
+            require_source_resolver_authority()
             return source_resolve_event(delta)
 
         def lookup_completed_desktop_application(

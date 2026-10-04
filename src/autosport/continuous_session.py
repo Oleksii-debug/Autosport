@@ -60,6 +60,7 @@ def _bind_canonical_settlement_engine(method):
     canonical_book_save = PaperBook.save
     canonical_workspace_lock_type = WorkspaceEconomicLock
     canonical_collector_source_id_get = HeadlessCollectorService.source_id.fget
+    canonical_completed_phase = EventPhase.COMPLETED
     canonical_hex = frozenset("0123456789abcdef")
     canonical_outcomes = frozenset({"win", "loss", "void"})
 
@@ -148,6 +149,7 @@ def _bind_canonical_settlement_engine(method):
             _lifecycle_get=canonical_lifecycle_get,
             _lifecycle_record_type=canonical_lifecycle_record_type,
             _settlement_instant=canonical_instant,
+            _completed_phase=canonical_completed_phase,
         )
 
     def guarded(self, *args, **kwargs):
@@ -1359,6 +1361,7 @@ def _bind_canonical_settlement_resolution_collection(method):
     lifecycle_read = ContinuousEventLifecycle._read
     lifecycle_record_type = EventLifecycleRecord
     collector_source_id_get = HeadlessCollectorService.source_id.fget
+    completed_phase = EventPhase.COMPLETED
     datetime_type = datetime
     timezone_utc = timezone.utc
     valid_hex = frozenset("0123456789abcdef")
@@ -1444,6 +1447,7 @@ def _bind_canonical_settlement_resolution_collection(method):
             _lifecycle_records=canonical_records,
             _collector_source_id_get=collector_source_id_get,
             _settlement_instant=canonical_instant,
+            _settlement_completed_phase=completed_phase,
         )
 
     guarded.__name__ = method.__name__
@@ -1463,6 +1467,7 @@ def _canonical_open_quote_keys_for_book(
     _lifecycle_get: Callable[[ContinuousEventLifecycle, str], EventLifecycleRecord | None],
     _lifecycle_record_type: type[EventLifecycleRecord],
     _settlement_instant: Callable[[object, str], datetime],
+    _completed_phase: EventPhase,
 ) -> set[str]:
     """Resolve the exact provider/sport/native-event scope allowed to mutate P&L."""
 
@@ -1475,7 +1480,7 @@ def _canonical_open_quote_keys_for_book(
         raise ContinuousSessionError(
             "settlement event identity is absent from durable lifecycle"
         )
-    if record.phase is not EventPhase.COMPLETED:
+    if record.phase is not _completed_phase:
         raise ContinuousSessionError(
             "settlement event is not durably completed"
         )
@@ -1857,6 +1862,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _lifecycle_records: Callable[[ContinuousEventLifecycle], tuple[EventLifecycleRecord, ...]],
         _collector_source_id_get: Callable[[HeadlessCollectorService], str],
         _settlement_instant: Callable[[object, str], datetime],
+        _settlement_completed_phase: EventPhase,
     ) -> tuple[SettlementResolution, ...]:
         if self._outcome_resolver is None:
             return ()
@@ -1872,7 +1878,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             # records are outside this session's economic authority.
             if record.source_id != self._settlement_source_id:
                 continue
-            if record.phase is not EventPhase.COMPLETED or record.settlement_ref is None:
+            if record.phase is not _settlement_completed_phase or record.settlement_ref is None:
                 continue
             if record.settlement_discovered_at is None:
                 raise ContinuousSessionError(
@@ -1920,6 +1926,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _lifecycle_records: Callable[[ContinuousEventLifecycle], tuple[EventLifecycleRecord, ...]],
         _collector_source_id_get: Callable[[HeadlessCollectorService], str],
         _settlement_instant: Callable[[object, str], datetime],
+        _settlement_completed_phase: EventPhase,
     ) -> tuple[SettlementResolution, ...]:
         if _collector_source_id_get(self.collector) != self._settlement_source_id:
             raise ContinuousSessionError(
@@ -1950,7 +1957,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             record = records.get(resolution.event_identity)
             if (
                 record is None
-                or record.phase is not EventPhase.COMPLETED
+                or record.phase is not _settlement_completed_phase
                 or record.settlement_ref != resolution.settlement_ref
                 or record.settlement_discovered_at is None
             ):
@@ -1977,6 +1984,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _lifecycle_records: Callable[[ContinuousEventLifecycle], tuple[EventLifecycleRecord, ...]],
         _collector_source_id_get: Callable[[HeadlessCollectorService], str],
         _settlement_instant: Callable[[object, str], datetime],
+        _settlement_completed_phase: EventPhase,
     ) -> tuple[SettlementResolution, ...]:
         if self._settlement_prepared_resolutions is None:
             return ()
@@ -2017,7 +2025,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             record = records.get(resolution.event_identity)
             if (
                 record is None
-                or record.phase is not EventPhase.COMPLETED
+                or record.phase is not _settlement_completed_phase
                 or record.settlement_ref != resolution.settlement_ref
                 or record.settlement_discovered_at is None
             ):

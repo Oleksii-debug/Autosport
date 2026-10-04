@@ -76,6 +76,13 @@ class _AlternateResolverSource(_Source):
         return event
 
 
+class _OpaqueResolverDispatchSource(_Source):
+    def __getattribute__(self, name):
+        if name == "resolve_event":
+            return lambda _delta: _event()
+        return object.__getattribute__(self, name)
+
+
 def _event() -> MarketEvent:
     return MarketEvent.from_dict(
         {
@@ -878,6 +885,22 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 build_autonomous_product_runtime(
                     workspace=root,
                     source=_Source(configuration_sha256="not-a-digest"),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+            self.assertFalse((root / "product_composition.json").exists())
+
+    def test_source_resolver_identity_rejects_opaque_instance_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(
+                ProductCompositionError,
+                "resolve_event instance dispatch is not canonical",
+            ):
+                build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_OpaqueResolverDispatchSource(),
                     clock=_Clock(),
                     sleep=lambda _: None,
                     initial_bankroll="100",

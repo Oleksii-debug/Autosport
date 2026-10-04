@@ -521,7 +521,12 @@ def _build_serialized_settlement_operations():
             outcomes_descriptor.__set__(self, published)
             issue_outcomes_authority(self, published)
 
-    def settle_ready(self, book: PaperBook) -> list[str]:
+    def settle_ready(
+        self,
+        book: PaperBook,
+        *,
+        settled_at: str | None = None,
+    ) -> list[str]:
         # Keep one exact lock from outcome snapshot through the entire canonical
         # PaperBook economic commit. record() consumes this same closure-owned
         # lock, so neither operation can be retargeted at runtime.
@@ -578,6 +583,7 @@ def _build_serialized_settlement_operations():
                     ticket_id,
                     winning,
                     voids,
+                    settled_at=settled_at,
                 )
                 settled.append(ticket_id)
             return settled

@@ -359,6 +359,9 @@ $report = [ordered]@{
     runtime_witness_status = 'NOT_REQUESTED'
     runtime_witness_path = $null
     runtime_browser_version = $null
+    keyboard_shortcuts_status = 'NOT_RUN'
+    f2_focus_automation_id = $null
+    f8_focus_automation_id = $null
     controls = @()
     failures = @()
     real_money_execution = $false
@@ -551,6 +554,32 @@ try {
     $report.root_name = [string]$uiaRoot.Current.Name
     if ([string]::IsNullOrWhiteSpace($report.root_name)) {
         $report.failures += 'main window has no external UIA Name'
+    }
+
+    # Exercise the shipped keyboard accelerators through the real external
+    # Windows input/UIA boundary. Static handler inspection alone cannot prove that
+    # the packaged WebView receives the key or moves focus to the semantic target.
+    try {
+        $uiaRoot.SetFocus()
+        [System.Windows.Forms.SendKeys]::SendWait('{F2}')
+        Start-Sleep -Milliseconds 150
+        $focusedF2 = [System.Windows.Automation.AutomationElement]::FocusedElement
+        $report.f2_focus_automation_id = [string]$focusedF2.Current.AutomationId
+        if ($report.f2_focus_automation_id -ne '301') {
+            throw "F2 did not move packaged keyboard focus to semantic screen navigation"
+        }
+
+        $uiaRoot.SetFocus()
+        [System.Windows.Forms.SendKeys]::SendWait('{F8}')
+        Start-Sleep -Milliseconds 150
+        $focusedF8 = [System.Windows.Automation.AutomationElement]::FocusedElement
+        $report.f8_focus_automation_id = [string]$focusedF8.Current.AutomationId
+        if ($report.f8_focus_automation_id -ne '204') {
+            throw "F8 did not move packaged keyboard focus to evaluation evidence"
+        }
+        $report.keyboard_shortcuts_status = 'PASS'
+    } catch {
+        $report.failures += "packaged keyboard shortcut audit failed: $($_.Exception.Message)"
     }
 
     # Owner/manual details are intentionally hidden in the semantic document at

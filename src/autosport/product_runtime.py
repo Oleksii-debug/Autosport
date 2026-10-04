@@ -417,18 +417,27 @@ class ProductCollectorSource(CollectorServiceSource, Protocol):
 class ProductCompositionManifest:
     source_id: str
     initial_bankroll: str
+    source_resolver_identity: str | None = None
     settlement_authority_identity: str | None = None
 
 
 class _ManifestStore:
     _SCHEMA = "autosport.autonomous_product_composition"
-    _VERSION = 2
+    _VERSION = 3
     _V1_FIELDS = {"schema", "schema_version", "source_id", "initial_bankroll"}
+    _V2_FIELDS = {
+        "schema",
+        "schema_version",
+        "source_id",
+        "initial_bankroll",
+        "settlement_authority_identity",
+    }
     _FIELDS = {
         "schema",
         "schema_version",
         "source_id",
         "initial_bankroll",
+        "source_resolver_identity",
         "settlement_authority_identity",
     }
 
@@ -454,12 +463,34 @@ class _ManifestStore:
             self._text(raw.get("initial_bankroll"), "initial_bankroll")
             return {
                 **raw,
+                "source_resolver_identity": None,
                 "settlement_authority_identity": None,
+            }
+        if version == 2 and set(raw) == self._V2_FIELDS:
+            self._text(raw.get("source_id"), "source_id")
+            self._text(raw.get("initial_bankroll"), "initial_bankroll")
+            return {
+                **raw,
+                "source_resolver_identity": None,
             }
         if version != self._VERSION or set(raw) != self._FIELDS:
             raise ProductCompositionError("product composition manifest schema mismatch")
         self._text(raw.get("source_id"), "source_id")
         self._text(raw.get("initial_bankroll"), "initial_bankroll")
+        source_identity = raw.get("source_resolver_identity")
+        if source_identity is not None:
+            source_identity = self._text(
+                source_identity,
+                "source_resolver_identity",
+            )
+            if (
+                len(source_identity) != 64
+                or source_identity != source_identity.lower()
+                or any(character not in "0123456789abcdef" for character in source_identity)
+            ):
+                raise ProductCompositionError(
+                    "source_resolver_identity must be lowercase SHA-256 hex"
+                )
         authority_identity = raw.get("settlement_authority_identity")
         if authority_identity is not None:
             identity = self._text(
@@ -481,10 +512,26 @@ class _ManifestStore:
         *,
         source_id: str,
         initial_bankroll: str,
+        source_resolver_identity: str,
         settlement_authority_identity: str | None,
     ) -> ProductCompositionManifest:
         source_id = self._text(source_id, "source_id")
         initial_bankroll = self._text(initial_bankroll, "initial_bankroll")
+        source_resolver_identity = self._text(
+            source_resolver_identity,
+            "source_resolver_identity",
+        )
+        if (
+            len(source_resolver_identity) != 64
+            or source_resolver_identity != source_resolver_identity.lower()
+            or any(
+                character not in "0123456789abcdef"
+                for character in source_resolver_identity
+            )
+        ):
+            raise ProductCompositionError(
+                "source_resolver_identity must be lowercase SHA-256 hex"
+            )
         if settlement_authority_identity is not None:
             settlement_authority_identity = self._text(
                 settlement_authority_identity,
@@ -499,6 +546,7 @@ class _ManifestStore:
                     "schema_version": self._VERSION,
                     "source_id": source_id,
                     "initial_bankroll": initial_bankroll,
+                    "source_resolver_identity": source_resolver_identity,
                     "settlement_authority_identity": settlement_authority_identity,
                 },
             )
@@ -511,6 +559,10 @@ class _ManifestStore:
             raise ProductCompositionError(
                 "configured initial_bankroll conflicts with durable product composition"
             )
+        if raw["source_resolver_identity"] != source_resolver_identity:
+            raise ProductCompositionError(
+                "source resolver identity conflicts with durable product composition"
+            )
         if raw["settlement_authority_identity"] != settlement_authority_identity:
             raise ProductCompositionError(
                 "settlement authority identity conflicts with durable product composition"
@@ -518,9 +570,106 @@ class _ManifestStore:
         return ProductCompositionManifest(
             source_id=source_id,
             initial_bankroll=initial_bankroll,
+            source_resolver_identity=source_resolver_identity,
             settlement_authority_identity=settlement_authority_identity,
         )
 
+
+def _source_resolver_identity(
+    *,
+    source: ProductCollectorSource,
+    source_id: str,
+) -> str:
+    """Fingerprint the durable delta-to-MarketEvent authority used across restart."""
+
+    source_id = _ManifestStore._text(source_id, "source_id")
+    if getattr(source, "source_id", None) != source_id:
+        raise ProductCompositionError(
+            "source resolver identity conflicts with configured source_id"
+        )
+    stream_epoch = _ManifestStore._text(
+        getattr(source, "stream_epoch", None),
+        "source.stream_epoch",
+    )
+    instance_dict = getattr(source, "__dict__", None)
+    if type(instance_dict) is dict and "resolve_event" in instance_dict:
+        raise ProductCompositionError(
+            "product source forbids per-instance resolve_event shadowing"
+        )
+    resolver = getattr(type(source), "resolve_event", None)
+    if type(resolver) is not FunctionType:
+        raise ProductCompositionError(
+            "product source must use a concrete class resolve_event method"
+        )
+    if resolver.__defaults__ is not None or resolver.__kwdefaults__ not in (None, {}):
+        raise ProductCompositionError(
+            "product source resolve_event cannot use mutable call defaults"
+        )
+    if resolver.__closure__ is not None:
+        raise ProductCompositionError(
+            "product source resolve_event cannot close over mutable authority"
+        )
+    try:
+        resolver_semantic_sha256 = function_semantic_sha256(
+            resolver,
+            runtime_owner=type(source),
+        )
+    except ResolverSemanticIdentityError as exc:
+        raise ProductCompositionError(
+            "product source resolve_event semantics cannot be fingerprinted safely"
+        ) from exc
+
+    def optional_text(name: str) -> str | None:
+        value = None
+        if type(instance_dict) is dict and name in instance_dict:
+            value = instance_dict[name]
+        else:
+            for owner in type(source).__mro__:
+                if name in vars(owner):
+                    raw = vars(owner)[name]
+                    if type(raw) is str:
+                        value = raw
+                    break
+        if value is None:
+            return None
+        return _ManifestStore._text(value, name)
+
+    explicit_configuration = optional_text(
+        "product_source_configuration_sha256"
+    )
+    authority_binding = optional_text("_authority_binding_sha256")
+    for field_name, digest in (
+        ("product_source_configuration_sha256", explicit_configuration),
+        ("_authority_binding_sha256", authority_binding),
+    ):
+        if digest is not None and (
+            len(digest) != 64
+            or digest != digest.lower()
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ProductCompositionError(
+                f"{field_name} must be lowercase SHA-256 hex"
+            )
+
+    payload = {
+        "source_id": source_id,
+        "stream_epoch": stream_epoch,
+        "implementation": f"{type(source).__module__}.{type(source).__qualname__}",
+        "resolver_owner": f"{resolver.__module__}.{resolver.__qualname__}",
+        "resolver_semantic_sha256": resolver_semantic_sha256,
+        "configuration_sha256": explicit_configuration,
+        "authority_binding_sha256": authority_binding,
+        "lawful_terms_ref": optional_text("lawful_terms_ref"),
+        "retention_ref": optional_text("retention_ref"),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 def _settlement_authority_identity(
     *,
@@ -1197,6 +1346,7 @@ def _build_autonomous_product_runtime_impl(
     _canonical_application_lookup,
     _paper_book_type,
     _runtime_lease_type,
+    _source_resolver_identity_fn,
     _settlement_authority_identity_fn,
     _manifest_store_type,
     _lifecycle_type,
@@ -1250,6 +1400,10 @@ def _build_autonomous_product_runtime_impl(
         ) from exc
 
     with lease_stack:
+        source_resolver_identity = _source_resolver_identity_fn(
+            source=source,
+            source_id=source_id,
+        )
         settlement_authority_identity = _settlement_authority_identity_fn(
             source=source,
             source_id=source_id,
@@ -1258,6 +1412,7 @@ def _build_autonomous_product_runtime_impl(
         manifest = _manifest_store_type(root / "product_composition.json").load_or_create(
             source_id=source_id,
             initial_bankroll=normalized_bankroll,
+            source_resolver_identity=source_resolver_identity,
             settlement_authority_identity=settlement_authority_identity,
         )
 
@@ -1406,6 +1561,7 @@ def _bind_autonomous_product_runtime_builder(
     canonical_application_lookup,
     paper_book_type,
     runtime_lease_type,
+    source_resolver_identity_fn,
     settlement_authority_identity_fn,
     manifest_store_type,
     lifecycle_type,
@@ -1449,6 +1605,7 @@ def _bind_autonomous_product_runtime_builder(
             _canonical_application_lookup=canonical_application_lookup,
             _paper_book_type=paper_book_type,
             _runtime_lease_type=runtime_lease_type,
+            _source_resolver_identity_fn=source_resolver_identity_fn,
             _settlement_authority_identity_fn=settlement_authority_identity_fn,
             _manifest_store_type=manifest_store_type,
             _lifecycle_type=lifecycle_type,
@@ -1479,6 +1636,7 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     CanonicalDesktopApplication.lookup_receipt,
     PaperBook,
     _ProductRuntimeLease,
+    _source_resolver_identity,
     _settlement_authority_identity,
     _ManifestStore,
     ContinuousEventLifecycle,

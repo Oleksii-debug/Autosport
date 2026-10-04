@@ -816,6 +816,58 @@ class CanonicalDesktopApplication:
     ) -> tuple[DesktopApplicationReceipt, ...]:
         return self._state.completed_receipts_for_source(source_id)
 
+    def _verified_completed_receipts_for_source_impl(
+        self,
+        source_id: str,
+        *,
+        _health_store_type,
+        _health_read,
+        _application_read,
+    ) -> tuple[DesktopApplicationReceipt, ...]:
+        receipts = self._state.completed_receipts_for_source(source_id)
+        if not receipts:
+            return ()
+
+        if type(self.health_store) is not _health_store_type:
+            raise ApplicationReceiptError(
+                "completed canonical applications lack canonical health authority"
+            )
+        try:
+            health_raw = _health_read(self.health_store)
+            application_raw = _application_read(self._state)
+        except Exception as exc:
+            raise ApplicationReceiptError(
+                "cannot verify completed canonical application health history"
+            ) from exc
+
+        history = health_raw.get("history")
+        applications = application_raw.get("applications")
+        if type(history) is not dict or type(applications) is not dict:
+            raise ApplicationReceiptError(
+                "completed canonical application health evidence is malformed"
+            )
+        entries = history.get(source_id, ())
+        if type(entries) is not list:
+            raise ApplicationReceiptError(
+                "completed canonical application health history is malformed"
+            )
+
+        for receipt in receipts:
+            item = applications.get(receipt.delta_id)
+            if type(item) is not dict:
+                raise ApplicationReceiptError(
+                    "completed canonical application entry disappeared"
+                )
+            expected_health = item.get("health_after")
+            if not any(
+                type(entry) is dict and entry.get("state") == expected_health
+                for entry in entries
+            ):
+                raise ApplicationReceiptError(
+                    "completed canonical application lacks durable health history evidence"
+                )
+        return receipts
+
     @staticmethod
     def _outcome(
         delta: CollectorDelta,
@@ -1027,6 +1079,39 @@ CanonicalDesktopApplication.lookup_receipt = (
 )
 del CanonicalDesktopApplication._lookup_receipt_impl
 del _bind_canonical_desktop_application_lookup_receipt
+
+
+def _bind_verified_completed_receipts_for_source(implementation):
+    """Bind restart health-history proof to canonical durable authorities."""
+
+    from .ingestion_health import SourceHealthStore
+
+    health_store_type = SourceHealthStore
+    health_read = SourceHealthStore._read
+    application_read = _JsonAtomicStore._read
+
+    def verified_completed_receipts_for_source(
+        self: CanonicalDesktopApplication,
+        source_id: str,
+    ) -> tuple[DesktopApplicationReceipt, ...]:
+        return implementation(
+            self,
+            source_id,
+            _health_store_type=health_store_type,
+            _health_read=health_read,
+            _application_read=application_read,
+        )
+
+    return verified_completed_receipts_for_source
+
+
+CanonicalDesktopApplication.verified_completed_receipts_for_source = (
+    _bind_verified_completed_receipts_for_source(
+        CanonicalDesktopApplication._verified_completed_receipts_for_source_impl
+    )
+)
+del CanonicalDesktopApplication._verified_completed_receipts_for_source_impl
+del _bind_verified_completed_receipts_for_source
 
 
 class CollectorDeltaStore(_JsonAtomicStore):

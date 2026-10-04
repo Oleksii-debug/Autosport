@@ -869,7 +869,7 @@ class PaperExecutionRealityTests(unittest.TestCase):
                 odds="2.40",
                 stake="10.00",
             )
-            execute_paper_plan(
+            result = execute_paper_plan(
                 plan=current,
                 trigger_id="trigger-evidence-chronology",
                 config=config(),
@@ -895,6 +895,12 @@ class PaperExecutionRealityTests(unittest.TestCase):
                 events[evidence_index],
             )
             rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "evidence was not durable before RUN_RESERVED",
+            ):
+                ledger.record_attempt(result.attempts[0])
 
             with self.assertRaisesRegex(
                 PaperExecutionIntegrityError,
@@ -1169,6 +1175,42 @@ class PaperExecutionRealityTests(unittest.TestCase):
                     recovery_decision=result.recovery_decision,
                     worst_case_exposure=result.worst_case_exposure,
                 )
+
+    def test_observed_attempt_retry_reproves_registered_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(
+                Path(tmp) / "paper-execution.jsonl"
+            )
+            current = plan(action("a1"))
+            observation, registry = registered_observation(
+                ledger,
+                current.actions[0],
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.40",
+                stake="10.00",
+            )
+            result = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-observed-record-proof",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                observations={"a1": observation},
+                evidence_registry=registry,
+            )
+            forged_payload = result.attempts[0].to_dict()
+            forged_payload["reason"] = "forged observed retry"
+            forged = type(result.attempts[0]).from_dict(
+                forged_payload
+            )
+            event_count = len(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "conflicts with durable observed evidence",
+            ):
+                ledger.record_attempt(forged)
+            self.assertEqual(len(ledger.events()), event_count)
 
     def test_writer_lock_fails_closed_instead_of_creating_parallel_history(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -342,6 +342,21 @@ class _ProductStartTransitionStore:
         self.path = Path(path)
 
     def _read(self) -> dict[str, object] | None:
+        schema = "autosport.product_runtime_start_transition"
+        version = 1
+        phases = frozenset(
+            {"STARTING", "COMPLETED", "ROLLED_BACK", "RECOVERY_REQUIRED"}
+        )
+        fields = frozenset(
+            {
+                "schema",
+                "schema_version",
+                "generation",
+                "phase",
+                "collector_was_stopped",
+                "session_pre_state",
+            }
+        )
         if not self.path.exists():
             return None
         try:
@@ -352,9 +367,9 @@ class _ProductStartTransitionStore:
             ) from exc
         if (
             type(raw) is not dict
-            or set(raw) != self._FIELDS
-            or raw.get("schema") != self._SCHEMA
-            or raw.get("schema_version") != self._VERSION
+            or set(raw) != fields
+            or raw.get("schema") != schema
+            or raw.get("schema_version") != version
         ):
             raise ProductCompositionError(
                 "durable product START transition schema mismatch"
@@ -369,7 +384,7 @@ class _ProductStartTransitionStore:
                 "durable product START transition generation is invalid"
             )
         phase = raw.get("phase")
-        if phase not in self._PHASES:
+        if phase not in phases:
             raise ProductCompositionError(
                 "durable product START transition phase is invalid"
             )
@@ -397,7 +412,9 @@ class _ProductStartTransitionStore:
 
     def pending(self) -> dict[str, object] | None:
         raw = self._read()
-        if raw is None or raw["phase"] not in self._PENDING_PHASES:
+        if raw is None or raw["phase"] not in frozenset(
+            {"STARTING", "RECOVERY_REQUIRED"}
+        ):
             return None
         return dict(raw)
 
@@ -426,7 +443,9 @@ class _ProductStartTransitionStore:
                 "product START pre-state authorities disagree"
             )
         current = self._read()
-        if current is not None and current["phase"] in self._PENDING_PHASES:
+        if current is not None and current["phase"] in frozenset(
+            {"STARTING", "RECOVERY_REQUIRED"}
+        ):
             raise ProductCompositionError(
                 "unfinished product START transition requires recovery"
             )
@@ -434,8 +453,8 @@ class _ProductStartTransitionStore:
         atomic_write_json(
             self.path,
             {
-                "schema": self._SCHEMA,
-                "schema_version": self._VERSION,
+                "schema": "autosport.product_runtime_start_transition",
+                "schema_version": 1,
                 "generation": generation,
                 "phase": "STARTING",
                 "collector_was_stopped": collector_was_stopped,

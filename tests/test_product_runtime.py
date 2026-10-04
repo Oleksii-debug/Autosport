@@ -9,6 +9,7 @@ import autosport.causal_collector_legacy as causal_collector_legacy_module
 import autosport.product_runtime as product_runtime_module
 
 from autosport.causal_collector import (
+    ApplicationReceiptError,
     CollectorDelta,
     DesktopApplicationReceipt,
     DesktopDeltaCheckpointStore,
@@ -384,7 +385,7 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 self.assertTrue(runtime.collector.delta_store.append(delta))
                 desktop = runtime.coordinator.desktop_consumer
                 with self.assertRaisesRegex(
-                    Exception,
+                    ApplicationReceiptError,
                     "clock moved backward after receipt delivery",
                 ):
                     desktop.drain(as_of="2026-09-20T13:58:00+00:00")

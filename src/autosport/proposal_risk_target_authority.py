@@ -40,6 +40,7 @@ _ALLOCATION_ALGORITHM = (
 )
 _AUTHORITY_DOMAIN = "proposal-risk-target-precommit-v1"
 _WORKSPACE_BINDING_KEY = "workspace-binding-v1"
+_TARGET_CHAIN_KEY = "current-target-chain-v1"
 _TARGET_AUTHORITY_PREFIX = "target-v1:"
 _HEX = frozenset("0123456789abcdef")
 _MAX_DECIMAL_TEXT = 256
@@ -96,6 +97,8 @@ _LEDGER_APPEND = JsonlDecisionLedger.append_economic
 _LEDGER_APPEND_CODE = getattr(_LEDGER_APPEND, "__code__", None)
 _LEDGER_RESOLVE = JsonlDecisionLedger.verified_economic_decision_for_material_action
 _LEDGER_RESOLVE_CODE = getattr(_LEDGER_RESOLVE, "__code__", None)
+_LEDGER_RECORDS = JsonlDecisionLedger.verified_records
+_LEDGER_RECORDS_CODE = getattr(_LEDGER_RECORDS, "__code__", None)
 _PROVENANCE_FOR = provenance_for
 _PROVENANCE_FOR_CODE = getattr(_PROVENANCE_FOR, "__code__", None)
 _ENSURE_DURABLE_FILE = ensure_durable_file
@@ -456,6 +459,12 @@ def _require_dispatch() -> None:
             _LEDGER_RESOLVE_CODE,
             "economic decision resolver",
         ),
+        (
+            JsonlDecisionLedger.verified_records,
+            _LEDGER_RECORDS,
+            _LEDGER_RECORDS_CODE,
+            "verified Decision Ledger record reader",
+        ),
     )
     for current, expected, code, name in method_checks:
         if current is not expected:
@@ -778,19 +787,173 @@ def _authority_for_workspace(workspace: Path) -> MonotonicWorkspaceAuthority:
 def _target_authority(
     workspace: Path,
     workspace_instance_id: str,
-    target_sha256: str,
 ) -> MonotonicWorkspaceAuthority:
+    """Return the single monotonic current-target chain for this workspace."""
+
     try:
         return _AUTHORITY_TYPE(
             workspace=workspace,
             workspace_instance_id=workspace_instance_id,
             domain=_AUTHORITY_DOMAIN,
-            key=_TARGET_AUTHORITY_PREFIX + _sha(target_sha256, "target_sha256"),
+            key=_TARGET_CHAIN_KEY,
         )
     except MonotonicWorkspaceAuthorityError as exc:
         raise ProductProposalRiskTargetError(
             "proposal-risk target independent authority is unavailable"
         ) from exc
+
+
+def _verified_chain_target_record(
+    ledger: JsonlDecisionLedger,
+    workspace_instance_id: str,
+    target_sha256: str,
+) -> DecisionRecord | None:
+    """Resolve the exact historical target record without requiring a current goal.
+
+    The machine-side target chain already commits the target digest. This reader is
+    used only to prove that the exact append-only Decision Ledger record anchoring a
+    prior chain tip still exists. It never restores current sizing or risk authority.
+    """
+
+    target_sha256 = _sha(target_sha256, "target_sha256")
+    action_id = _TARGET_AUTHORITY_PREFIX + target_sha256
+    try:
+        records = _LEDGER_RECORDS(ledger)
+    except (DecisionLedgerIntegrityError, OSError, TypeError, ValueError) as exc:
+        raise ProductProposalRiskTargetError(
+            "proposal-risk target chain cannot verify the Decision Ledger"
+        ) from exc
+    matched = tuple(record for record in records if record.decision_id == action_id)
+    if not matched:
+        return None
+    if len(matched) != 1:
+        raise ProductProposalRiskTargetError(
+            "proposal-risk target chain contains duplicate decision identity"
+        )
+    record = matched[0]
+    payload = record.payload
+    if (
+        record.action != _ACTION
+        or record.agent != _AGENT
+        or record.replay_run_id != action_id
+        or record.context_hash != target_sha256
+        or payload.get("schema") != _SCHEMA
+        or payload.get("workspace_instance_id") != workspace_instance_id
+        or payload.get("target_sha256") != target_sha256
+        or payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY) != action_id
+        or payload.get("proposal_target_counterfactual_execution_proven") is not False
+        or payload.get("risk_upper_bound_for_target") is not False
+        or payload.get("grants_ticket_authority") is not False
+        or payload.get("grants_real_money_authority") is not False
+    ):
+        raise ProductProposalRiskTargetError(
+            "proposal-risk target chain record identity is invalid"
+        )
+    return record
+
+
+def _recover_target_chain(
+    authority: MonotonicWorkspaceAuthority,
+    ledger: JsonlDecisionLedger,
+    workspace_instance_id: str,
+    goal: EconomicGoalContract,
+    policy: PaperRiskPolicy,
+    book: PaperBook,
+) -> str | None:
+    """Recover one interrupted target transition and return the committed chain tip."""
+
+    try:
+        history = authority.read_history()
+    except MonotonicWorkspaceAuthorityError as exc:
+        raise ProductProposalRiskTargetError(
+            "proposal-risk target chain history is invalid"
+        ) from exc
+
+    if history and history[-1].phase is AuthorityPhase.PREPARE:
+        pending = history[-1]
+        pending_target = _sha(
+            pending.intended_state_sha256, "pending target_sha256"
+        )
+        pending_record = _verified_chain_target_record(
+            ledger, workspace_instance_id, pending_target
+        )
+        try:
+            if pending_record is None:
+                recovery = authority.recover(
+                    observed_state_sha256=pending.previous_committed_state_sha256,
+                    tx_id=pending.tx_id,
+                    semantic_binding_sha256=pending.semantic_binding_sha256,
+                )
+                if recovery.disposition is not RecoveryDisposition.ABORTED_PREPARE:
+                    raise ProductProposalRiskTargetError(
+                        "missing target append did not abort its pending chain transition"
+                    )
+            else:
+                action_id = _TARGET_AUTHORITY_PREFIX + pending_target
+                current_record = _LEDGER_RESOLVE(
+                    ledger,
+                    action_id,
+                    goal,
+                    risk_policy=policy,
+                )
+                if current_record is None:
+                    raise ProductProposalRiskTargetError(
+                        "pending target append is not current economic authority"
+                    )
+                _build_target(
+                    workspace_instance_id=workspace_instance_id,
+                    record=current_record,
+                    goal=goal,
+                    policy=policy,
+                    book=book,
+                    expected_target_sha256=pending_target,
+                )
+                recovery = authority.recover(
+                    observed_state_sha256=pending_target,
+                    tx_id=pending.tx_id,
+                    semantic_binding_sha256=pending.semantic_binding_sha256,
+                )
+                if recovery.disposition not in {
+                    RecoveryDisposition.COMMITTED_PREPARE,
+                    RecoveryDisposition.CURRENT,
+                }:
+                    raise ProductProposalRiskTargetError(
+                        "durable target append did not commit its pending chain transition"
+                    )
+        except (DecisionLedgerIntegrityError, MonotonicWorkspaceAuthorityError, TypeError, ValueError) as exc:
+            raise ProductProposalRiskTargetError(
+                "proposal-risk target chain crash recovery failed"
+            ) from exc
+        try:
+            history = authority.read_history()
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ProductProposalRiskTargetError(
+                "proposal-risk target chain history cannot be refreshed"
+            ) from exc
+
+    latest_commit = next(
+        (
+            record
+            for record in reversed(history)
+            if record.phase is AuthorityPhase.COMMIT
+        ),
+        None,
+    )
+    if latest_commit is None:
+        return None
+    latest_target = _sha(
+        latest_commit.intended_state_sha256, "latest target_sha256"
+    )
+    if (
+        _verified_chain_target_record(
+            ledger, workspace_instance_id, latest_target
+        )
+        is None
+    ):
+        raise ProductProposalRiskTargetError(
+            "current proposal-risk target chain tip is missing from the Decision Ledger"
+        )
+    return latest_target
 
 
 def _require_target_authority_committed(
@@ -801,14 +964,14 @@ def _require_target_authority_committed(
         recovery = authority.recover(observed_state_sha256=target_sha256)
     except MonotonicWorkspaceAuthorityError as exc:
         raise ProductProposalRiskTargetError(
-            "proposal-risk target independent authority cannot be re-resolved"
+            "proposal-risk target is missing, rolled back, or superseded"
         ) from exc
     if (
         recovery.disposition is not RecoveryDisposition.CURRENT
         or recovery.committed_state_sha256 != target_sha256
     ):
         raise ProductProposalRiskTargetError(
-            "proposal-risk target independent authority is not committed"
+            "proposal-risk target is not the current committed target"
         )
 
 
@@ -1130,13 +1293,14 @@ def issue_product_proposal_risk_target(
     signal_strengths: tuple[Decimal | str, ...],
     contexts: tuple[ProposedTicketRiskContext, ...],
 ) -> ProductProposalRiskTarget:
-    """Durably precommit the exact pre-risk target derived by canonical sizing.
+    """Durably precommit the one current pre-risk target from canonical sizing.
 
     No caller-selected stake vector or risk-of-ruin bound is accepted. The product
     reloads its own EconomicGoal/PaperBook, derives the vector through the existing
     allocator with only the ruin gate internally relaxed, appends the causal target
-    to the existing Decision Ledger, and binds that append to independent monotonic
-    workspace identity.
+    to the existing Decision Ledger, and advances one independent monotonic target
+    chain. A newer target supersedes all older targets instead of leaving multiple
+    simultaneously valid alternatives.
     """
 
     _require_dispatch()
@@ -1191,16 +1355,16 @@ def issue_product_proposal_risk_target(
         )
         target_sha256 = _digest(material)
         action_id = _TARGET_AUTHORITY_PREFIX + target_sha256
-        authority = _target_authority(
-            workspace, workspace_instance_id, target_sha256
-        )
+        authority = _target_authority(workspace, workspace_instance_id)
 
-        try:
-            history = authority.read_history()
-        except MonotonicWorkspaceAuthorityError as exc:
-            raise ProductProposalRiskTargetError(
-                "proposal-risk target independent authority history is invalid"
-            ) from exc
+        current_target = _recover_target_chain(
+            authority,
+            ledger,
+            workspace_instance_id,
+            goal,
+            policy,
+            book,
+        )
 
         try:
             existing = _LEDGER_RESOLVE(
@@ -1214,137 +1378,10 @@ def issue_product_proposal_risk_target(
                 "proposal-risk target Decision Ledger re-resolution failed"
             ) from exc
 
-        if existing is None:
-            if any(record.phase is AuthorityPhase.COMMIT for record in history):
+        if existing is not None:
+            if current_target != target_sha256:
                 raise ProductProposalRiskTargetError(
-                    "independent proposal-target authority proves a committed target "
-                    "whose durable Decision Ledger record is missing"
-                )
-            if history and history[-1].phase is AuthorityPhase.PREPARE:
-                pending = history[-1]
-                try:
-                    recovery = authority.recover(
-                        observed_state_sha256=None,
-                        tx_id=pending.tx_id,
-                        semantic_binding_sha256=pending.semantic_binding_sha256,
-                    )
-                except MonotonicWorkspaceAuthorityError as exc:
-                    raise ProductProposalRiskTargetError(
-                        "proposal-risk target abandoned PREPARE cannot be recovered"
-                    ) from exc
-                if recovery.disposition is not RecoveryDisposition.ABORTED_PREPARE:
-                    raise ProductProposalRiskTargetError(
-                        "proposal-risk target missing-ledger PREPARE did not abort"
-                    )
-                try:
-                    history = authority.read_history()
-                except MonotonicWorkspaceAuthorityError as exc:
-                    raise ProductProposalRiskTargetError(
-                        "proposal-risk target authority history cannot be refreshed"
-                    ) from exc
-
-            attempt_tx_id = f"{target_sha256}:{len(history) + 1}"
-            try:
-                authority.prepare(
-                    tx_id=attempt_tx_id,
-                    observed_state_sha256=None,
-                    intended_state_sha256=target_sha256,
-                    semantic_binding_sha256=target_sha256,
-                )
-            except MonotonicWorkspaceAuthorityError as exc:
-                raise ProductProposalRiskTargetError(
-                    "proposal-risk target independent PREPARE failed"
-                ) from exc
-
-            payload = {
-                **material,
-                "target_sha256": target_sha256,
-                MATERIAL_ACTION_ID_PAYLOAD_KEY: action_id,
-            }
-            try:
-                record = DecisionRecord(
-                    replay_run_id=action_id,
-                    agent=_AGENT,
-                    observed_ts=decision_ts,
-                    action=_ACTION,
-                    payload=payload,
-                    context_hash=target_sha256,
-                    decision_id=action_id,
-                )
-                _LEDGER_APPEND(
-                    ledger,
-                    record,
-                    goal,
-                    risk_policy=policy,
-                )
-                existing = _LEDGER_RESOLVE(
-                    ledger,
-                    action_id,
-                    goal,
-                    risk_policy=policy,
-                )
-            except (DecisionLedgerIntegrityError, OSError, TypeError, ValueError) as exc:
-                try:
-                    authority.recover(
-                        observed_state_sha256=None,
-                        tx_id=attempt_tx_id,
-                        semantic_binding_sha256=target_sha256,
-                    )
-                except MonotonicWorkspaceAuthorityError:
-                    pass
-                raise ProductProposalRiskTargetError(
-                    "proposal-risk target Decision Ledger append failed"
-                ) from exc
-            if existing is None:
-                raise ProductProposalRiskTargetError(
-                    "proposal-risk target append did not re-resolve"
-                )
-
-            # Re-read every product-owned economic input after the durable ledger
-            # append and before the independent authority COMMIT. Cooperating
-            # writers are excluded by WorkspaceEconomicLock; this second read also
-            # fails closed if an uncooperative filesystem writer changed the goal,
-            # PaperBook, or ledger during target issuance.
-            fresh_goal, fresh_policy, fresh_book, fresh_ledger = _current_product_state(
-                workspace
-            )
-            try:
-                fresh_existing = _LEDGER_RESOLVE(
-                    fresh_ledger,
-                    action_id,
-                    fresh_goal,
-                    risk_policy=fresh_policy,
-                )
-            except (DecisionLedgerIntegrityError, TypeError, ValueError) as exc:
-                raise ProductProposalRiskTargetError(
-                    "proposal-risk target product state changed before authority COMMIT"
-                ) from exc
-            if fresh_existing is None:
-                raise ProductProposalRiskTargetError(
-                    "proposal-risk target disappeared before authority COMMIT"
-                )
-            target = _build_target(
-                workspace_instance_id=workspace_instance_id,
-                record=fresh_existing,
-                goal=fresh_goal,
-                policy=fresh_policy,
-                book=fresh_book,
-                expected_target_sha256=target_sha256,
-            )
-            try:
-                authority.commit(
-                    tx_id=attempt_tx_id,
-                    observed_state_sha256=target_sha256,
-                    semantic_binding_sha256=target_sha256,
-                )
-            except MonotonicWorkspaceAuthorityError as exc:
-                raise ProductProposalRiskTargetError(
-                    "proposal-risk target independent COMMIT failed; recovery is required"
-                ) from exc
-        else:
-            if not history:
-                raise ProductProposalRiskTargetError(
-                    "durable proposal-target ledger record lacks independent workspace authority"
+                    "proposal-risk target was already superseded and cannot be reissued"
                 )
             target = _build_target(
                 workspace_instance_id=workspace_instance_id,
@@ -1354,38 +1391,125 @@ def issue_product_proposal_risk_target(
                 book=book,
                 expected_target_sha256=target_sha256,
             )
-            if history[-1].phase is AuthorityPhase.PREPARE:
-                pending = history[-1]
-                if (
-                    pending.intended_state_sha256 != target_sha256
-                    or pending.semantic_binding_sha256 != target_sha256
-                ):
-                    raise ProductProposalRiskTargetError(
-                        "pending proposal-risk target authority does not match "
-                        "the durable record"
-                    )
+            _require_target_authority_committed(authority, target_sha256)
+            return target
+
+        try:
+            history = authority.read_history()
+            attempt_tx_id = f"{target_sha256}:{len(history) + 1}"
+            authority.prepare(
+                tx_id=attempt_tx_id,
+                observed_state_sha256=current_target,
+                intended_state_sha256=target_sha256,
+                semantic_binding_sha256=target_sha256,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ProductProposalRiskTargetError(
+                "proposal-risk target chain PREPARE failed"
+            ) from exc
+
+        payload = {
+            **material,
+            "target_sha256": target_sha256,
+            MATERIAL_ACTION_ID_PAYLOAD_KEY: action_id,
+        }
+        try:
+            record = DecisionRecord(
+                replay_run_id=action_id,
+                agent=_AGENT,
+                observed_ts=decision_ts,
+                action=_ACTION,
+                payload=payload,
+                context_hash=target_sha256,
+                decision_id=action_id,
+            )
+            _LEDGER_APPEND(
+                ledger,
+                record,
+                goal,
+                risk_policy=policy,
+            )
+            existing = _LEDGER_RESOLVE(
+                ledger,
+                action_id,
+                goal,
+                risk_policy=policy,
+            )
+        except (DecisionLedgerIntegrityError, OSError, TypeError, ValueError) as exc:
+            # If the append is absent, the PREPARE is safely abortable against the
+            # previous target tip. If the exact target record is already durable,
+            # preserve the PREPARE: only exact crash recovery may decide COMMIT.
+            try:
+                crossed = _verified_chain_target_record(
+                    ledger, workspace_instance_id, target_sha256
+                )
+            except ProductProposalRiskTargetError:
+                crossed = None
+            if crossed is None:
                 try:
-                    recovery = authority.recover(
-                        observed_state_sha256=target_sha256,
-                        tx_id=pending.tx_id,
-                        semantic_binding_sha256=pending.semantic_binding_sha256,
+                    authority.recover(
+                        observed_state_sha256=current_target,
+                        tx_id=attempt_tx_id,
+                        semantic_binding_sha256=target_sha256,
                     )
-                except MonotonicWorkspaceAuthorityError as exc:
-                    raise ProductProposalRiskTargetError(
-                        "proposal-risk target crash recovery failed"
-                    ) from exc
-                if recovery.disposition not in {
-                    RecoveryDisposition.COMMITTED_PREPARE,
-                    RecoveryDisposition.CURRENT,
-                }:
-                    raise ProductProposalRiskTargetError(
-                        "proposal-risk target crash recovery did not prove "
-                        "the ledger append"
-                    )
+                except MonotonicWorkspaceAuthorityError:
+                    pass
+                raise ProductProposalRiskTargetError(
+                    "proposal-risk target Decision Ledger append failed"
+                ) from exc
+            raise ProductProposalRiskTargetError(
+                "proposal-risk target append crossed durability boundary; "
+                "exact chain recovery is required"
+            ) from exc
+
+        if existing is None:
+            raise ProductProposalRiskTargetError(
+                "proposal-risk target append did not re-resolve"
+            )
+
+        # Re-read every product-owned economic input after the durable ledger append
+        # and before independent chain COMMIT. Cooperating writers are excluded by
+        # WorkspaceEconomicLock; this second read also catches an uncooperative
+        # filesystem mutation before positive target authority is published.
+        fresh_goal, fresh_policy, fresh_book, fresh_ledger = _current_product_state(
+            workspace
+        )
+        try:
+            fresh_existing = _LEDGER_RESOLVE(
+                fresh_ledger,
+                action_id,
+                fresh_goal,
+                risk_policy=fresh_policy,
+            )
+        except (DecisionLedgerIntegrityError, TypeError, ValueError) as exc:
+            raise ProductProposalRiskTargetError(
+                "proposal-risk target product state changed before chain COMMIT"
+            ) from exc
+        if fresh_existing is None:
+            raise ProductProposalRiskTargetError(
+                "proposal-risk target disappeared before chain COMMIT"
+            )
+        target = _build_target(
+            workspace_instance_id=workspace_instance_id,
+            record=fresh_existing,
+            goal=fresh_goal,
+            policy=fresh_policy,
+            book=fresh_book,
+            expected_target_sha256=target_sha256,
+        )
+        try:
+            authority.commit(
+                tx_id=attempt_tx_id,
+                observed_state_sha256=target_sha256,
+                semantic_binding_sha256=target_sha256,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ProductProposalRiskTargetError(
+                "proposal-risk target chain COMMIT failed; recovery is required"
+            ) from exc
 
         _require_target_authority_committed(authority, target_sha256)
         return target
-
 
 def resolve_product_proposal_risk_target(
     workspace: Path,
@@ -1407,9 +1531,7 @@ def resolve_product_proposal_risk_target(
         goal, policy, book, ledger = _current_product_state(workspace)
         workspace_authority = _authority_for_workspace(workspace)
         workspace_instance_id = workspace_authority.workspace_instance_id
-        authority = _target_authority(
-            workspace, workspace_instance_id, target_sha256
-        )
+        authority = _target_authority(workspace, workspace_instance_id)
         _require_target_authority_committed(authority, target_sha256)
         action_id = _TARGET_AUTHORITY_PREFIX + target_sha256
         try:
@@ -1452,6 +1574,8 @@ _PROPOSAL_TARGET_HELPER_WITNESSES = tuple(
         "_target_material",
         "_authority_for_workspace",
         "_target_authority",
+        "_verified_chain_target_record",
+        "_recover_target_chain",
         "_require_target_authority_committed",
         "_derive",
         "_current_product_state",

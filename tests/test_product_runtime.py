@@ -307,6 +307,23 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_product_runtime_ignores_object_setattr_authority_bypass(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_autonomous_product_runtime(
+                workspace=Path(directory),
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            original = runtime.coordinator
+            try:
+                object.__setattr__(runtime, "coordinator", object())
+                self.assertIs(runtime.coordinator, original)
+                self.assertEqual(runtime.status().source_id, "provider-a")
+            finally:
+                runtime.close()
+
     def test_builder_ignores_product_desktop_consumer_module_rebind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

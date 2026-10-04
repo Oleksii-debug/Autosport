@@ -94,8 +94,8 @@ def _receipt_authoritative_runtime_current(
         after_delta_id = deltas[-1].delta_id
 
     accepted: list[MarketEvent] = []
-    for (stored_source_id, _quote_key), event in market_store.current_by_source().items():
-        if stored_source_id != source_id:
+    for event in market_store.events():
+        if event.source_id != source_id:
             continue
         if canonical_event_digest(event) in receipt_digests:
             accepted.append(event)

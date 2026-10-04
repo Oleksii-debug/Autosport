@@ -407,6 +407,60 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 durable["bindings"][ticket.ticket_id]["settlement_intent"]
             )
 
+    def test_prepare_rejects_unscoped_event_identity_with_matching_quote_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                _runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            unscoped = SettlementResolution(
+                event_identity=leg.event_id,
+                settlement_ref="unscoped-result",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="unscoped-evidence",
+                evidence_sha256="9" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "provider/event identity differs",
+            ):
+                bridge.prepare_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(unscoped,),
+                    at="2026-09-19T21:20:00+00:00",
+                )
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            self.assertIsNone(
+                durable["bindings"][ticket.ticket_id]["settlement_intent"]
+            )
+
     def test_prepare_rejects_multiple_evidence_authorities_for_same_quote(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

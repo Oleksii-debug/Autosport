@@ -1843,6 +1843,35 @@ class DesktopDeltaConsumer:
                 if _validated_ack_receipt(checkpoint, delta) is not None:
                     continue
 
+                def receipt_recovery_is_current(
+                    expected_receipt,
+                    *,
+                    required: bool,
+                ) -> bool:
+                    recovered_receipt = lookup_application_receipt(delta)
+                    if recovered_receipt is None:
+                        if required:
+                            raise ApplicationReceiptError(
+                                "durable application receipt disappeared before desktop acknowledgement"
+                            )
+                        return False
+                    if type(recovered_receipt) is not _receipt_type:
+                        raise ApplicationReceiptError(
+                            "recoverable application receipt must use the canonical receipt type"
+                        )
+                    _validate_receipt(recovered_receipt)
+                    if (
+                        recovered_receipt.delta_id != expected_receipt.delta_id
+                        or recovered_receipt.canonical_event_digest
+                        != expected_receipt.canonical_event_digest
+                        or recovered_receipt.receipt_id != expected_receipt.receipt_id
+                        or recovered_receipt.applied_at != expected_receipt.applied_at
+                    ):
+                        raise ApplicationReceiptError(
+                            "durable application receipt changed before desktop acknowledgement"
+                        )
+                    return True
+
                 durable_receipt = lookup_application_receipt(delta)
                 if durable_receipt is not None:
                     if type(durable_receipt) is not _receipt_type:
@@ -1879,6 +1908,10 @@ class DesktopDeltaConsumer:
                                     "pre_delivery_acknowledged_at",
                                 ),
                             )
+                    receipt_recovery_is_current(
+                        durable_receipt,
+                        required=True,
+                    )
                     _ack_locked(
                         checkpoint,
                         delta,
@@ -1902,6 +1935,10 @@ class DesktopDeltaConsumer:
                 _validate_receipt(receipt)
                 if receipt.delta_id != delta.delta_id or receipt.canonical_event_digest != digest:
                     raise ApplicationReceiptError("application receipt is not bound to this delta/digest")
+                receipt_is_recoverable = receipt_recovery_is_current(
+                    receipt,
+                    required=False,
+                )
                 acknowledged_at = _acknowledged_at(
                     self,
                     delta,
@@ -1923,6 +1960,11 @@ class DesktopDeltaConsumer:
                                 "pre_delivery_acknowledged_at",
                             ),
                         )
+                if receipt_is_recoverable:
+                    receipt_recovery_is_current(
+                        receipt,
+                        required=True,
+                    )
                 _ack_locked(
                     checkpoint,
                     delta,

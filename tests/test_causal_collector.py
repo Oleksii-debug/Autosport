@@ -2889,6 +2889,57 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertEqual(len(reopened_market.events("e1")), 1)
             reopened_market.close()
 
+    def test_consumer_reproves_recoverable_receipt_after_post_delivery_clock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            receipt_store = DurableApplicationReceiptStore(root / "receipts.json")
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = self.make_delta(payload=payload)
+            collector.append(delta)
+            receipt = DesktopApplicationReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                receipt_id="receipt-d1",
+                applied_at="2026-01-01T00:00:05+00:00",
+            )
+            clock_samples = 0
+            deliveries = []
+
+            def apply_event(_delta, _event):
+                receipt_store.put(receipt)
+                return receipt
+
+            def acknowledgement_clock():
+                nonlocal clock_samples
+                clock_samples += 1
+                if clock_samples == 2:
+                    receipt_store.path.write_text("{}\n", encoding="utf-8")
+                    return "2026-01-01T00:00:07+00:00"
+                return "2026-01-01T00:00:06+00:00"
+
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda _: event,
+                apply_event=apply_event,
+                lookup_application_receipt=receipt_store.get,
+                acknowledgement_clock=acknowledgement_clock,
+                on_application_receipt=lambda *_: deliveries.append("delivered"),
+            )
+
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "durable application receipt disappeared before desktop acknowledgement",
+            ):
+                consumer.drain(as_of="2026-01-01T00:00:04+00:00")
+
+            self.assertEqual(clock_samples, 2)
+            self.assertEqual(deliveries, ["delivered"])
+            self.assertFalse(checkpoint.has_ack(delta.delta_id))
+
     def test_crash_before_atomic_replace_preserves_previous_durable_commit(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "collector.json"

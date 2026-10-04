@@ -901,6 +901,39 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     initial_bankroll="100",
                 )
             self.assertFalse((root / "product_composition.json").exists())
+    def test_restart_allows_legitimate_stream_epoch_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_source = _Source()
+            first_source.stream_epoch = "epoch-1"
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=first_source,
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            original_identity = runtime.manifest.source_resolver_identity
+            runtime.close()
+
+            second_source = _Source()
+            second_source.stream_epoch = "epoch-2"
+            restored = build_autonomous_product_runtime(
+                workspace=root,
+                source=second_source,
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                self.assertEqual(
+                    restored.manifest.source_resolver_identity,
+                    original_identity,
+                )
+                self.assertEqual(restored.collector.source.stream_epoch, "epoch-2")
+            finally:
+                restored.close()
+
     def test_restart_rejects_changed_source_config_with_same_resolver(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

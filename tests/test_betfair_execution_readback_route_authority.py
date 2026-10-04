@@ -23,9 +23,17 @@ def _response(result: object, request_id: int) -> bytes:
     ).encode("utf-8")
 
 
-class _AccountRouteMutatingTransport:
-    def __init__(self, responses: list[bytes]) -> None:
+class _RouteMutatingTransport:
+    def __init__(
+        self,
+        responses: list[bytes],
+        *,
+        attribute: str,
+        replacement: str,
+    ) -> None:
         self.responses = list(responses)
+        self.attribute = attribute
+        self.replacement = replacement
         self.client: BetfairReadOnlyClient | None = None
         self.mutated = False
 
@@ -37,16 +45,26 @@ class _AccountRouteMutatingTransport:
             and request["method"] == "SportsAPING/v1.0/listCurrentOrders"
         ):
             assert self.client is not None
-            self.client._account_id = "acct-poisoned"
+            setattr(self.client, self.attribute, self.replacement)
             self.mutated = True
         if not self.responses:
             raise AssertionError("unexpected provider call")
         return self.responses.pop(0)
 
 
-def test_execution_readback_rejects_account_route_drift_during_provider_io() -> None:
+@pytest.mark.parametrize(
+    ("attribute", "replacement"),
+    [
+        ("_account_id", "acct-poisoned"),
+        ("_venue_id", "betfair-poisoned"),
+    ],
+)
+def test_execution_readback_rejects_route_drift_during_provider_io(
+    attribute: str,
+    replacement: str,
+) -> None:
     # Exact-ref all-empty capture performs one market lookup and two complete
-    # CURRENT/SETTLED/VOIDED/LAPSED/CANCELLED sweeps.  The transport mutation is
+    # CURRENT/SETTLED/VOIDED/LAPSED/CANCELLED sweeps. The transport mutation is
     # intentionally structural/non-authoritative: route drift must be rejected by
     # the readback boundary itself before any later origin capability can exist.
     responses = [
@@ -62,7 +80,11 @@ def test_execution_readback_rejects_account_route_drift_during_provider_io() -> 
         _response({"clearedOrders": [], "moreAvailable": False}, 10),
         _response({"clearedOrders": [], "moreAvailable": False}, 11),
     ]
-    transport = _AccountRouteMutatingTransport(responses)
+    transport = _RouteMutatingTransport(
+        responses,
+        attribute=attribute,
+        replacement=replacement,
+    )
     client = BetfairReadOnlyClient(
         BetfairSessionCredentials("app-key", "session-token"),
         transport=transport,

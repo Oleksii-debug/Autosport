@@ -717,6 +717,62 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_path_replacement_after_cutoff_prepare_cannot_commit_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            moved_path = Path(directory) / "market-moved.db"
+            store = SQLiteMarketStore(path)
+            try:
+                self.assertTrue(
+                    store.append(
+                        self.event(
+                            sequence=1,
+                            odds="2.00",
+                            observed_ts="2026-09-16T19:00:00+00:00",
+                        )
+                    )
+                )
+                authority = store._replay_cutoff_authority()
+                before = authority.read_history()
+                original_commit = store._commit_stable_database_path
+                replaced = False
+
+                def replace_before_cutoff_commit():
+                    nonlocal replaced
+                    if not replaced:
+                        replaced = True
+                        try:
+                            os.replace(path, moved_path)
+                            path.touch()
+                        except OSError as exc:
+                            self.skipTest(
+                                f"open SQLite pathname replacement unavailable on this platform: {exc}"
+                            )
+                    return original_commit()
+
+                with patch.object(
+                    store,
+                    "_commit_stable_database_path",
+                    new=replace_before_cutoff_commit,
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "market database pathname no longer identifies the opened database",
+                    ):
+                        self.replay(store)
+
+                self.assertTrue(replaced)
+                after = authority.read_history()
+                before_commits = [
+                    record for record in before if record.phase.value == "COMMIT"
+                ]
+                after_commits = [
+                    record for record in after if record.phase.value == "COMMIT"
+                ]
+                self.assertEqual(after_commits, before_commits)
+            finally:
+                store.close()
+
     def test_late_backdated_append_cannot_rewrite_frozen_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

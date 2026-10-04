@@ -179,6 +179,47 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertFalse(store.connection.in_transaction)
             store.close()
 
+    def test_live_batch_constructor_descriptor_rebind_cannot_redirect_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self._direct_event(sequence=1)
+            capability_type = storage_module._LiveReceiptBatch
+
+            with patch.object(
+                capability_type,
+                "__init__",
+                side_effect=AssertionError(
+                    "runtime capability constructor descriptor must not be consulted"
+                ),
+            ):
+                accepted = store._append_live_batch_accepted([event])
+
+            self.assertEqual(accepted, [event])
+            self.assertEqual(store.trusted_live_events(), [event])
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
+    def test_live_batch_iterator_descriptor_rebind_cannot_rewrite_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self._direct_event(sequence=1)
+            forged = replace(event, ingest_ts="2000-01-01T00:00:00+00:00")
+            capability_type = storage_module._LiveReceiptBatch
+
+            with patch.object(
+                capability_type,
+                "__iter__",
+                lambda _capability: iter((forged,)),
+            ):
+                accepted = store._append_live_batch_accepted([event])
+
+            self.assertEqual(accepted, [event])
+            trusted = store.trusted_live_events()
+            self.assertEqual(trusted, [event])
+            self.assertEqual(trusted[0].ingest_ts, event.ingest_ts)
+            self.assertTrue(store.has_trusted_live_receipt(event))
+            store.close()
+
     def test_live_retry_keeps_canonical_market_event_type_after_module_rebind(self) -> None:
         class PoisonMarketEvent(MarketEvent):
             @classmethod

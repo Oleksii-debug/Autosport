@@ -9,6 +9,7 @@ from autosport import betfair_settlement_revisions as settlement
 from autosport.betfair_account_readonly import (
     ADAPTER_ID as BETFAIR_ADAPTER_ID,
     ADAPTER_VERSION as BETFAIR_ADAPTER_VERSION,
+    BetfairExecutionReadbackEnvelope,
 )
 from autosport.real_execution_ledger import ExecutionAction, RealExecutionLedger
 
@@ -177,3 +178,66 @@ def test_ledger_class_dispatch_rebind_fails_before_owner_resolution(
         match="execution identity dispatch changed",
     ):
         _require_owner(ledger)
+
+
+def _guarded_ingest(*, action, capture, ledger) -> None:
+    store = object.__new__(settlement.BetfairSettlementRevisionStore)
+    settlement.BetfairSettlementRevisionStore.ingest(
+        store,
+        ledger,
+        plan_id="plan-1",
+        attempt_id="attempt-1",
+        action=action,
+        capture=capture,
+    )
+
+
+def test_capture_subclass_cannot_override_adapter_issuance(tmp_path) -> None:
+    class ForgedCapture(BetfairExecutionReadbackEnvelope):
+        def assert_authoritative(self):  # pragma: no cover - must never dispatch
+            return None
+
+    forged = object.__new__(ForgedCapture)
+    ledger = RealExecutionLedger(tmp_path / "execution.jsonl")
+
+    with pytest.raises(
+        settlement.BetfairSettlementRevisionError,
+        match="exact BetfairExecutionReadbackEnvelope",
+    ):
+        _guarded_ingest(action=_action(), capture=forged, ledger=ledger)
+
+
+def test_action_subclass_cannot_override_durable_serialization(tmp_path) -> None:
+    class ForgedAction(ExecutionAction):
+        def to_dict(self):  # pragma: no cover - must never dispatch
+            return _action().to_dict()
+
+    action = ForgedAction(**_action().to_dict())
+    ledger = RealExecutionLedger(tmp_path / "execution.jsonl")
+
+    with pytest.raises(
+        settlement.BetfairSettlementRevisionError,
+        match="exact ExecutionAction",
+    ):
+        _guarded_ingest(action=action, capture=object(), ledger=ledger)
+
+
+@pytest.mark.parametrize("method_name", ["assert_authoritative", "_authority_fingerprint"])
+def test_capture_class_authority_rebind_fails_before_ingest(
+    tmp_path,
+    monkeypatch,
+    method_name,
+) -> None:
+    capture = object.__new__(BetfairExecutionReadbackEnvelope)
+    ledger = RealExecutionLedger(tmp_path / "execution.jsonl")
+    monkeypatch.setattr(
+        BetfairExecutionReadbackEnvelope,
+        method_name,
+        lambda self: None,
+    )
+
+    with pytest.raises(
+        settlement.BetfairSettlementRevisionError,
+        match="execution identity dispatch changed",
+    ):
+        _guarded_ingest(action=_action(), capture=capture, ledger=ledger)

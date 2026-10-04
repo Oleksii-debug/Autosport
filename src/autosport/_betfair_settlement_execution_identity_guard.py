@@ -36,7 +36,16 @@ _LEDGER_TYPE = _settlement.RealExecutionLedger
 _ATTEMPT_STATE = _settlement.AttemptState
 _RECEIPT_TYPE = _settlement.ExternalReceiptIdentity
 _LEDGER_ERROR = _settlement.ExecutionLedgerError
+_ACTION_TYPE = _settlement.ExecutionAction
+_CAPTURE_TYPE = _settlement.BetfairExecutionReadbackEnvelope
+_CAPTURE_ERROR = _settlement.BetfairReadOnlyError
+_STORE_TYPE = _settlement.BetfairSettlementRevisionStore
 
+_ORIGINAL_INGEST = _STORE_TYPE.ingest
+_ORIGINAL_INGEST_CODE = getattr(_ORIGINAL_INGEST, "__code__", None)
+_ACTION_TO_DICT = vars(_ACTION_TYPE).get("to_dict")
+_CAPTURE_VERIFY = vars(_CAPTURE_TYPE).get("assert_authoritative")
+_CAPTURE_FINGERPRINT = vars(_CAPTURE_TYPE).get("_authority_fingerprint")
 _ORIGINAL_MATCH_ORDER = _settlement._match_order
 _ORIGINAL_MATCH_ORDER_CODE = getattr(_ORIGINAL_MATCH_ORDER, "__code__", None)
 _ORIGINAL_REQUIRE_OWNER = _settlement._require_attempt_receipt_owner
@@ -54,7 +63,11 @@ _LEDGER_DISPATCH = {
 }
 
 if (
-    _ORIGINAL_MATCH_ORDER_CODE is None
+    _ORIGINAL_INGEST_CODE is None
+    or not callable(_ACTION_TO_DICT)
+    or not callable(_CAPTURE_VERIFY)
+    or not callable(_CAPTURE_FINGERPRINT)
+    or _ORIGINAL_MATCH_ORDER_CODE is None
     or _ORIGINAL_REQUIRE_OWNER_CODE is None
     or _CANONICAL_TIME_CODE is None
     or any(value is None for value in _LEDGER_DISPATCH.values())
@@ -64,7 +77,16 @@ if (
 
 def _require_dispatch() -> None:
     if (
-        _settlement._match_order is not _match_order_with_execution_identity
+        _STORE_TYPE.ingest is not _ingest_with_exact_authority
+        or getattr(_ORIGINAL_INGEST, "__code__", None) is not _ORIGINAL_INGEST_CODE
+        or vars(_ACTION_TYPE).get("to_dict") is not _ACTION_TO_DICT
+        or vars(_CAPTURE_TYPE).get("assert_authoritative") is not _CAPTURE_VERIFY
+        or vars(_CAPTURE_TYPE).get("_authority_fingerprint") is not _CAPTURE_FINGERPRINT
+        or _settlement.ExecutionAction is not _ACTION_TYPE
+        or _settlement.BetfairExecutionReadbackEnvelope is not _CAPTURE_TYPE
+        or _settlement.BetfairReadOnlyError is not _CAPTURE_ERROR
+        or _settlement.BetfairSettlementRevisionStore is not _STORE_TYPE
+        or _settlement._match_order is not _match_order_with_execution_identity
         or _settlement._require_attempt_receipt_owner
         is not _require_owner_with_exact_ledger_dispatch
         or getattr(_ORIGINAL_MATCH_ORDER, "__code__", None)
@@ -100,6 +122,46 @@ def _require_exact_ledger_surface(ledger) -> None:
             "settlement ledger authority dispatch is instance-shadowed: "
             + ", ".join(shadowed)
         )
+
+
+def _require_exact_action_capture(action, capture) -> None:
+    if type(action) is not _ACTION_TYPE:
+        raise _ERROR("settlement action must be the exact ExecutionAction")
+    if type(capture) is not _CAPTURE_TYPE:
+        raise _ERROR(
+            "settlement capture must be the exact BetfairExecutionReadbackEnvelope"
+        )
+    _require_dispatch()
+    try:
+        _CAPTURE_VERIFY(capture)
+    except _CAPTURE_ERROR as exc:
+        raise _ERROR(
+            "settlement capture is not canonical adapter-issued evidence"
+        ) from exc
+    _require_dispatch()
+
+
+def _ingest_with_exact_authority(
+    self,
+    ledger,
+    *,
+    plan_id,
+    attempt_id,
+    action,
+    capture,
+):
+    _require_dispatch()
+    _require_exact_action_capture(action, capture)
+    result = _ORIGINAL_INGEST(
+        self,
+        ledger,
+        plan_id=plan_id,
+        attempt_id=attempt_id,
+        action=action,
+        capture=capture,
+    )
+    _require_dispatch()
+    return result
 
 
 def _match_order_with_execution_identity(action, capture):
@@ -148,10 +210,13 @@ def _require_owner_with_exact_ledger_dispatch(
     _require_dispatch()
 
 
+if _STORE_TYPE.ingest is not _ORIGINAL_INGEST:
+    raise RuntimeError("Betfair settlement ingest dispatch changed before guard install")
 if _settlement._match_order is not _ORIGINAL_MATCH_ORDER:
     raise RuntimeError("Betfair settlement match-order dispatch changed before guard install")
 if _settlement._require_attempt_receipt_owner is not _ORIGINAL_REQUIRE_OWNER:
     raise RuntimeError("Betfair settlement ledger-owner dispatch changed before guard install")
+_STORE_TYPE.ingest = _ingest_with_exact_authority
 _settlement._match_order = _match_order_with_execution_identity
 _settlement._require_attempt_receipt_owner = _require_owner_with_exact_ledger_dispatch
 

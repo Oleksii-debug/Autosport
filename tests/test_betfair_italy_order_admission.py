@@ -338,3 +338,66 @@ def test_hard_false_admission_authority_surface_is_sealed():
 
     with pytest.raises(AttributeError):
         object.__setattr__(result, "real_money_execution", True)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("selection_id", 0, "selection_id"),
+        ("side", "BUY", "side"),
+        ("size", Decimal("0"), "size"),
+        ("price", Decimal("1"), "price"),
+        ("bet_target_type", "UNKNOWN_TARGET", "bet_target_type"),
+    ],
+)
+def test_evaluation_revalidates_post_construction_slot_mutation(
+    field, value, message
+):
+    instruction = I()
+    # frozen dataclasses are not an integrity boundary: object.__setattr__
+    # can still write slots, so evaluation must validate its own snapshot.
+    object.__setattr__(instruction, field, value)
+
+    with pytest.raises(ItalianOrderAdmissionError, match=message):
+        evaluate_italian_limit_batch((instruction,))
+
+
+def test_overlimit_batch_rejects_before_member_validation():
+    # Once the request already violates the provider's 50-instruction shape,
+    # no caller-controlled member scan is needed to reach a fail-closed result.
+    result = evaluate_italian_limit_batch((object(),) * 51)  # type: ignore[arg-type]
+    assert result.state is ItalianLimitAdmissionState.REJECTED
+    assert result.reason_codes == ("TOO_MANY_INSTRUCTIONS",)
+    assert result.preselected_returns_eur == ()
+
+
+def test_exact_return_arithmetic_ignores_ambient_decimal_exponent_limits():
+    instruction = I(size="1234.50", price="8.10")
+    with localcontext() as ctx:
+        ctx.prec = 3
+        ctx.Emax = 2
+        ctx.Emin = -2
+        result = evaluate_italian_limit_batch((instruction,))
+
+    assert result.state is ItalianLimitAdmissionState.RULESET_SATISFIED_UNBOUND
+    assert result.preselected_returns_eur == (Decimal("9999.4500"),)
+
+
+def test_evaluator_captures_authority_dependencies_against_module_rebinding(
+    monkeypatch,
+):
+    instruction = I()
+    monkeypatch.setattr(italy_guard, "ItalianLimitInstruction", object)
+    monkeypatch.setattr(italy_guard, "ItalianLimitBatchAdmission", object)
+    monkeypatch.setattr(italy_guard, "ItalianLimitAdmissionState", object)
+    monkeypatch.setattr(italy_guard, "Decimal", str)
+    monkeypatch.setattr(italy_guard, "Fraction", object)
+    monkeypatch.setattr(italy_guard, "_MAX_DECIMAL_DIGITS", 1)
+    monkeypatch.setattr(italy_guard, "_MAX_ABS_EXPONENT", 0)
+
+    result = evaluate_italian_limit_batch((instruction,))
+    assert result.state is ItalianLimitAdmissionState.RULESET_SATISFIED_UNBOUND
+    assert result.reason_codes == ()
+    assert result.admissible is False
+    assert result.execution_authorized is False
+    assert result.real_money_execution is False

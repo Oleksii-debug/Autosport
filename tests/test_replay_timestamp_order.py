@@ -6,6 +6,7 @@ from decimal import Decimal
 from autosport.domain import MarketEvent
 from autosport.replay import (
     ReplayEngine,
+    market_event_payload_multiset_sha256,
     market_event_payload_sequence_sha256,
     market_event_payload_sha256,
 )
@@ -299,6 +300,44 @@ class ReplayTimestampOrderTests(unittest.TestCase):
         self.assertEqual(
             market_event_payload_sha256(forged),
             market_event_payload_sha256(base),
+        )
+
+    def test_consumed_payload_multiset_preserves_duplicate_multiplicity(self):
+        first = self._event(
+            "event-a",
+            "2026-01-01T00:00:00+00:00",
+            1,
+        )
+        second = self._event(
+            "event-b",
+            "2026-01-01T00:01:00+00:00",
+            2,
+        )
+        first_sha = market_event_payload_sha256(first)
+        second_sha = market_event_payload_sha256(second)
+
+        run = ReplayEngine([second, first, second]).run(
+            lambda _event: None,
+            run_id="multiset-multiplicity",
+        )
+
+        self.assertEqual(
+            run.consumed_event_payload_multiset_sha256,
+            market_event_payload_multiset_sha256(
+                (second_sha, first_sha, second_sha)
+            ),
+        )
+        self.assertNotEqual(
+            run.consumed_event_payload_multiset_sha256,
+            market_event_payload_multiset_sha256((second_sha, first_sha)),
+        )
+
+    def test_event_payload_multiset_is_order_independent(self):
+        left = ("a" * 64, "b" * 64, "a" * 64)
+        right = ("a" * 64, "a" * 64, "b" * 64)
+        self.assertEqual(
+            market_event_payload_multiset_sha256(left),
+            market_event_payload_multiset_sha256(right),
         )
 
     def test_event_payload_sequence_rejects_noncanonical_digest(self):

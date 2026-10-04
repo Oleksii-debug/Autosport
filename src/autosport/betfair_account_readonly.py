@@ -1879,13 +1879,13 @@ def _install_market_price_ladder_authority():
         self: BetfairReadOnlyClient,
         market_id: str,
     ) -> BetfairMarketPriceLadderObservation:
+        nonlocal read_sequence
         if not canonical_rpc_dispatch(self):
             raise BetfairReadOnlyError(
                 "canonical price-ladder RPC dispatch changed"
             )
         origin_at_read_start = source_origin_authoritative(self)
         with generation_lock:
-            nonlocal read_sequence
             read_sequence += 1
             acquisition_sequence = read_sequence
         acquisition_started_at = canonical_now("acquisition-start instant")

@@ -549,10 +549,6 @@ class RunTransaction:
     def stage_outputs(self, book: PaperBook, canonical_ledger_path: str | Path) -> tuple[str, str]:
         self._require_complete_identity_anchor()
         manifest = self._read_manifest()
-        if replay_evidence is not None:
-            manifest["replay_execution_receipt_sha256"] = replay_evidence[
-                "replay_execution_receipt_sha256"
-            ]
         if manifest["phase"] != "staging":
             raise RunTransactionError("transaction is not in staging phase")
         canonical_ledger = Path(canonical_ledger_path)
@@ -696,6 +692,10 @@ class RunTransaction:
                     )
 
         manifest = self._read_manifest()
+        if replay_evidence is not None:
+            manifest["replay_execution_receipt_sha256"] = replay_evidence[
+                "replay_execution_receipt_sha256"
+            ]
         if manifest["phase"] != "staging":
             raise RunTransactionError("transaction is not in staging phase")
         if not self.staged_book_path.is_file() or not self.staged_ledger_path.is_file():

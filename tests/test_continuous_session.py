@@ -5154,6 +5154,42 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_continuous_state_class_guard_ignores_protected_set_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-state-protected-set-rebind",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            state_type = type(coordinator._state)
+            original_protected = (
+                continuous_session_module._CONTINUOUS_STATE_PROTECTED_ENTRIES
+            )
+            try:
+                continuous_session_module._CONTINUOUS_STATE_PROTECTED_ENTRIES = (
+                    frozenset()
+                )
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "continuous session state authority binding is immutable",
+                ):
+                    state_type.record_success = lambda *_args, **_kwargs: None
+            finally:
+                continuous_session_module._CONTINUOUS_STATE_PROTECTED_ENTRIES = (
+                    original_protected
+                )
+                store.close()
+
     def test_continuous_state_authority_entries_reject_subclass_override(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -965,6 +965,9 @@ class PersistentLiveDecisionLoop:
         self._availability_deadlines: dict[str, datetime | None] = {}
         self._availability_generations: dict[str, int] = {}
         self._availability_heap: list[tuple[datetime, str, int]] = []
+        self._decision_market_frontier_as_of: datetime | None = None
+        self._decision_market_history: tuple[tuple[MarketEvent, int], ...] | None = None
+        self._decision_market_history_frozen = False
 
     def close(self) -> None:
         """Release the optional long-lived default market-store connection."""
@@ -972,6 +975,9 @@ class PersistentLiveDecisionLoop:
         self._default_market_store = None
         self._default_health_store = None
         self._default_market_change_token = None
+        self._decision_market_frontier_as_of = None
+        self._decision_market_history = None
+        self._decision_market_history_frozen = False
         if store is not None:
             store.close()
 
@@ -1008,8 +1014,30 @@ class PersistentLiveDecisionLoop:
         self._default_market_change_token = change_token
         return change_token
 
+    def _decision_refresh_may_need_history(self, as_of: datetime) -> bool:
+        """Return whether this cycle can reach focused snapshot materialization."""
+
+        if (
+            self.mirror_updates.pending_count
+            or self.mirror_updates.full_refresh_required
+            or self._pending_affected
+            or self._needs_cache_rebuild
+        ):
+            return True
+        return any(
+            deadline is not None and deadline <= as_of
+            for deadline in (
+                *self._freshness_deadlines.values(),
+                *self._availability_deadlines.values(),
+            )
+        )
+
     def _sample_decision_market_frontier(self) -> datetime:
-        """Choose a decision cutoff that cannot straddle an unseen peer append."""
+        """Choose a cutoff and freeze any exceptional history it may consume."""
+
+        self._decision_market_frontier_as_of = None
+        self._decision_market_history = None
+        self._decision_market_history_frozen = False
 
         store = self._default_market_store
         if store is None:
@@ -1018,15 +1046,30 @@ class PersistentLiveDecisionLoop:
         # The token is sampled before trusted projection reconciliation and again
         # after the candidate decision clock. If a peer commits anywhere across that
         # interval, discard the candidate cutoff, reconcile the newly durable truth,
-        # and sample again. Once stable, any later peer commit necessarily occurred
-        # after the selected cutoff and belongs to a later cycle.
+        # and sample again. When the latest-only mirror hides a causally visible
+        # predecessor, freeze the already-proven append history inside this same token
+        # interval. A later fallback must consume this snapshot rather than re-open the
+        # database after the decision cutoff.
         for _ in range(_MARKET_FRONTIER_RETRY_LIMIT):
             expected_token = self._reconcile_default_market_changes(
                 store,
                 self.mirror_updates,
             )
             decision_time = self._sample_clock()
+            frozen_history: tuple[tuple[MarketEvent, int], ...] | None = None
+            if self._decision_refresh_may_need_history(decision_time) and any(
+                self.dependencies.requires_current_history_fallback(
+                    input_id,
+                    as_of=decision_time,
+                )
+                for input_id in self.dependencies.input_ids
+            ):
+                frozen_history = tuple(store.events_with_append_generation())
+
             if store.external_change_token() == expected_token:
+                self._decision_market_frontier_as_of = decision_time
+                self._decision_market_history = frozen_history
+                self._decision_market_history_frozen = True
                 return decision_time
 
         raise LiveDecisionProgressError(
@@ -1835,17 +1878,27 @@ class PersistentLiveDecisionLoop:
                     as_of=as_of,
                 )
                 if history_fallback:
-                    if history_store is None:
-                        history_store = self._default_market_store
-                        if history_store is None:
-                            history_store = SQLiteMarketStore(
-                                self.workspace / "market.db"
+                    if (
+                        self._decision_market_history_frozen
+                        and self._decision_market_frontier_as_of == as_of
+                    ):
+                        if self._decision_market_history is None:
+                            raise LiveDecisionProgressError(
+                                "decision frontier did not freeze required market history"
                             )
-                            owns_history_store = True
-                    if history_events is None:
-                        history_events = tuple(
-                            history_store.events_with_append_generation()
-                        )
+                        history_events = self._decision_market_history
+                    else:
+                        if history_store is None:
+                            history_store = self._default_market_store
+                            if history_store is None:
+                                history_store = SQLiteMarketStore(
+                                    self.workspace / "market.db"
+                                )
+                                owns_history_store = True
+                        if history_events is None:
+                            history_events = tuple(
+                                history_store.events_with_append_generation()
+                            )
                     (
                         snapshot,
                         next_history_availability,

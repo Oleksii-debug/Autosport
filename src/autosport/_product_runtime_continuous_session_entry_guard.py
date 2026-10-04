@@ -33,7 +33,10 @@ def _install_guard() -> None:
             or getattr(canonical_entry, "__code__", None) is not canonical_entry_code
         ):
             raise session_error("continuous-session product entry authority changed")
-        self._coherent_status()
+        # Product tick needs lifecycle/source coherence only. Full settlement
+        # history remains an explicit operator/audit surface through status(); scanning
+        # it here would restore O(total historical settlements) work on every tick.
+        self._coherent_status(include_settlement_history=False)
         result = canonical_entry(self.coordinator)
         if (
             entry_module.tick_continuous_session is not canonical_entry

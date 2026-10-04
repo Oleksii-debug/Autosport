@@ -186,7 +186,7 @@ class RealExecutionAcceptanceStateMatrixTests(unittest.TestCase):
                         AttemptState(initial_status.value),
                     )
 
-    def test_unknown_not_found_is_only_retryable_after_newer_durable_evidence(self) -> None:
+    def test_unknown_not_found_remains_non_authoritative_for_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"
             ledger = self._submitted_ledger(path)
@@ -223,30 +223,25 @@ class RealExecutionAcceptanceStateMatrixTests(unittest.TestCase):
                 ledger.attempt_state("try-1"),
                 AttemptState.RECONCILED_NOT_FOUND,
             )
-            self.assertTrue(ledger.can_retry_action(plan_id="p1", action_id="a1"))
+            self.assertFalse(ledger.can_retry_action(plan_id="p1", action_id="a1"))
 
             restarted = RealExecutionLedger(path)
             self.assertEqual(
                 restarted.attempt_state("try-1"),
                 AttemptState.RECONCILED_NOT_FOUND,
             )
-            self.assertTrue(
-                restarted.can_retry_action(plan_id="p1", action_id="a1")
-            )
-
-            restarted.begin_attempt(
-                plan_id="p1",
-                action_id="a1",
-                attempt_id="try-2",
-                reserved_at=RETRY_RESERVED_AT,
-            )
-            self.assertEqual(
-                restarted.attempt_state("try-2"),
-                AttemptState.RESERVED,
-            )
             self.assertFalse(
                 restarted.can_retry_action(plan_id="p1", action_id="a1")
             )
+            with self.assertRaisesRegex(
+                ExecutionStateError, "product-issued no-effect authority"
+            ):
+                restarted.begin_attempt(
+                    plan_id="p1",
+                    action_id="a1",
+                    attempt_id="try-2",
+                    reserved_at=RETRY_RESERVED_AT,
+                )
 
     def test_unknown_positive_reconciliation_requires_matching_evidence_before_terminal_ack(
         self,

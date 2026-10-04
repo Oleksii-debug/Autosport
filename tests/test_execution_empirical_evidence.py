@@ -28,6 +28,7 @@ from autosport.real_execution_ledger import (
     ExecutionAction,
     ExecutionLedgerIntegrityError,
     ExecutionPlan,
+    ExecutionStateError,
     ExternalAcknowledgement,
     RealExecutionLedger,
     ReconciliationSnapshot,
@@ -499,26 +500,21 @@ def test_caller_ack_cannot_upgrade_provider_outcome_authority(tmp_path):
         )
 
 
-def test_wall_clock_cross_stage_inversion_is_not_reported_as_latency(tmp_path):
+def test_wall_clock_cross_stage_inversion_is_rejected_before_projection(tmp_path):
     ledger = _ledger(tmp_path)
     _bind_provider(
         ledger,
         observed_at="2026-09-21T10:00:01.900000+00:00",
     )
-    _ack(
-        ledger,
-        acknowledged_at="2026-09-21T10:00:01.800000+00:00",
-    )
 
-    evidence = build_empirical_execution_evidence(
-        ledger,
-        attempt_id="attempt-1",
-    )
-
-    assert evidence.provider_evidence_observed_at > evidence.acknowledged_at
-    assert evidence.causal_timing_status == TIMING_STATUS_UNKNOWN
-    assert evidence.submit_to_provider_evidence_us is None
-    assert evidence.submit_to_acknowledgement_us is None
+    with pytest.raises(
+        ExecutionStateError,
+        match="acknowledgement precedes attempt causal boundary",
+    ):
+        _ack(
+            ledger,
+            acknowledged_at="2026-09-21T10:00:01.800000+00:00",
+        )
 
 
 def test_builder_issuance_does_not_mint_product_root_provenance(tmp_path):

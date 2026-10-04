@@ -1217,6 +1217,119 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertEqual(deliveries, [])
             self.assertFalse(checkpoint.has_ack(delta.delta_id))
 
+    def test_consumer_rejects_existing_ack_with_wrong_digest_before_skip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            delta = self.make_delta()
+            collector.append(delta)
+            checkpoint._write(
+                {
+                    "schema_version": 1,
+                    "acks": [
+                        {
+                            "delta_id": delta.delta_id,
+                            "canonical_event_digest": "0" * 64,
+                            "acknowledged_at": "2026-01-01T00:00:06+00:00",
+                            "application_receipt_id": "receipt-d1",
+                            "applied_at": "2026-01-01T00:00:05+00:00",
+                        }
+                    ],
+                    "streams": {},
+                }
+            )
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda *_: self.fail("tampered ACK must fail before resolve"),
+                apply_event=lambda *_: self.fail("tampered ACK must fail before apply"),
+                lookup_application_receipt=lambda *_: self.fail(
+                    "tampered ACK must fail before receipt lookup"
+                ),
+            )
+
+            with self.assertRaisesRegex(
+                AckConflictError,
+                "existing desktop ack disagrees with collector evidence",
+            ):
+                consumer.drain(as_of="2026-01-01T00:00:06+00:00")
+
+    def test_consumer_rejects_existing_ack_with_invalid_timing_before_skip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            delta = self.make_delta()
+            collector.append(delta)
+            checkpoint._write(
+                {
+                    "schema_version": 1,
+                    "acks": [
+                        {
+                            "delta_id": delta.delta_id,
+                            "canonical_event_digest": delta.canonical_event_digest,
+                            "acknowledged_at": "2026-01-01T00:00:04+00:00",
+                            "application_receipt_id": "receipt-d1",
+                            "applied_at": "2026-01-01T00:00:05+00:00",
+                        }
+                    ],
+                    "streams": {},
+                }
+            )
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda *_: self.fail("invalid ACK must fail before resolve"),
+                apply_event=lambda *_: self.fail("invalid ACK must fail before apply"),
+                lookup_application_receipt=lambda *_: self.fail(
+                    "invalid ACK must fail before receipt lookup"
+                ),
+            )
+
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "existing desktop acknowledgement timing is invalid",
+            ):
+                consumer.drain(as_of="2026-01-01T00:00:06+00:00")
+
+    def test_consumer_rejects_duplicate_existing_ack_records_before_skip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            delta = self.make_delta()
+            collector.append(delta)
+            ack = {
+                "delta_id": delta.delta_id,
+                "canonical_event_digest": delta.canonical_event_digest,
+                "acknowledged_at": "2026-01-01T00:00:06+00:00",
+                "application_receipt_id": "receipt-d1",
+                "applied_at": "2026-01-01T00:00:05+00:00",
+            }
+            checkpoint._write(
+                {
+                    "schema_version": 1,
+                    "acks": [dict(ack), dict(ack)],
+                    "streams": {},
+                }
+            )
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda *_: self.fail("duplicate ACK must fail before resolve"),
+                apply_event=lambda *_: self.fail("duplicate ACK must fail before apply"),
+                lookup_application_receipt=lambda *_: self.fail(
+                    "duplicate ACK must fail before receipt lookup"
+                ),
+            )
+
+            with self.assertRaisesRegex(
+                AckConflictError,
+                "multiple desktop acknowledgements exist for delta d1",
+            ):
+                consumer.drain(as_of="2026-01-01T00:00:06+00:00")
+
     def test_consumer_rechecks_peer_ack_after_serialization_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

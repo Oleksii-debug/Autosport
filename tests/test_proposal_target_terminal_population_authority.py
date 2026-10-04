@@ -21,6 +21,7 @@ from autosport.paper import PaperBook
 from autosport.proposal_risk_target_authority import (
     issue_product_proposal_risk_target,
 )
+import autosport.proposal_target_terminal_population_authority as terminal_population_authority
 from autosport.proposal_target_terminal_population_authority import (
     ProductProposalTargetTerminalPopulation,
     ProductProposalTargetTerminalPopulationError,
@@ -316,6 +317,40 @@ class ProductProposalTargetTerminalPopulationTests(unittest.TestCase):
                 target_sha256=exchange_target.target_sha256,
                 authorities=(self._authority(),),
             )
+
+    def test_target_resolver_rebinding_is_rejected_before_dispatch(self) -> None:
+        authority = self._authority()
+        with patch.object(
+            terminal_population_authority,
+            "resolve_product_proposal_risk_target",
+            lambda *_args, **_kwargs: self.target,
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalTargetTerminalPopulationError,
+                "dispatch changed",
+            ):
+                issue_product_proposal_target_terminal_population(
+                    self.workspace,
+                    target_sha256=self.target.target_sha256,
+                    authorities=(authority,),
+                )
+
+    def test_market_authority_method_rebinding_is_rejected(self) -> None:
+        authority = self._authority()
+        with patch.object(
+            MarketSettlementOutcomeAuthority,
+            "to_dict",
+            lambda _self: {"authority_sha256": authority.authority_sha256},
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalTargetTerminalPopulationError,
+                "dispatch changed",
+            ):
+                issue_product_proposal_target_terminal_population(
+                    self.workspace,
+                    target_sha256=self.target.target_sha256,
+                    authorities=(authority,),
+                )
 
     def test_duplicate_authority_identity_is_rejected(self) -> None:
         authority = self._authority()

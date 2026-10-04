@@ -14,7 +14,7 @@ wrap a consistent structural result; this module does not create that authority.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 import hashlib
@@ -111,16 +111,27 @@ def _utc(
     value: object,
     field: str,
     _datetime_type=datetime,
+    _timedelta_type=timedelta,
     _utc_zone=timezone.utc,
+    _one_day=timedelta(days=1),
     _error_type=BetfairProviderConstraintError,
 ) -> datetime:
-    if (
-        type(value) is not _datetime_type
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
+    if type(value) is not _datetime_type or value.tzinfo is None:
         raise _error_type(f"{field} must be timezone-aware datetime")
-    return value.astimezone(_utc_zone)
+    try:
+        offset = value.utcoffset()
+    except Exception as exc:
+        raise _error_type(f"{field} has invalid timezone offset") from exc
+    if (
+        type(offset) is not _timedelta_type
+        or not (-_one_day < offset < _one_day)
+    ):
+        raise _error_type(f"{field} must have a bounded concrete UTC offset")
+    try:
+        naive_utc = value.replace(tzinfo=None) - offset
+    except (OverflowError, ValueError) as exc:
+        raise _error_type(f"{field} cannot be normalized to UTC") from exc
+    return naive_utc.replace(tzinfo=_utc_zone)
 
 
 def _positive_decimal(
@@ -451,6 +462,8 @@ class BetfairProviderConstraintResolution(
         _utc_fn=_utc,
         _sha256_fn=_sha256,
         _positive_decimal_fn=_positive_decimal,
+        _canonical_sha256_fn=_canonical_sha256,
+        _decimal_text_fn=_decimal_text,
         _error_type=BetfairProviderConstraintError,
     ):
         if type(state) is not _state_type:
@@ -461,11 +474,13 @@ class BetfairProviderConstraintResolution(
             raise _error_type("provider_id must be canonical betfair")
         _scope_fn(jurisdiction_scope)
         _currency_fn(currency_code)
-        _utc_fn(as_of, "as_of")
+        current = _utc_fn(as_of, "as_of")
         if type(candidate_generation_sha256s) is not tuple:
             raise _error_type("candidate_generation_sha256s must be tuple")
         if tuple(sorted(candidate_generation_sha256s)) != candidate_generation_sha256s:
             raise _error_type("candidate_generation_sha256s must be sorted")
+        if len(set(candidate_generation_sha256s)) != len(candidate_generation_sha256s):
+            raise _error_type("candidate_generation_sha256s must be unique")
         for value in candidate_generation_sha256s:
             _sha256_fn(value, "candidate_generation_sha256")
         _sha256_fn(resolution_sha256, "resolution_sha256")
@@ -509,6 +524,35 @@ class BetfairProviderConstraintResolution(
                 "non-consistent result cannot expose provider thresholds"
             )
 
+        expected_resolution_sha256 = _canonical_sha256_fn(
+            {
+                "schema": "autosport.betfair_standard_limit_constraint_resolution",
+                "schema_version": SCHEMA_VERSION,
+                "state": state.value,
+                "provider_id": provider_id,
+                "jurisdiction_scope": jurisdiction_scope,
+                "currency_code": currency_code,
+                "as_of": current.isoformat(),
+                "candidate_generation_sha256s": candidate_generation_sha256s,
+                "semantic_sha256": semantic_sha256,
+                "min_standard_size": (
+                    None
+                    if min_standard_size is None
+                    else _decimal_text_fn(min_standard_size)
+                ),
+                "min_payout": (
+                    None
+                    if min_payout is None
+                    else _decimal_text_fn(min_payout)
+                ),
+                "lower_minimum_payout_enabled": lower_minimum_payout_enabled,
+            }
+        )
+        if resolution_sha256 != expected_resolution_sha256:
+            raise _error_type(
+                "resolution_sha256 does not match canonical resolution content"
+            )
+
         return tuple.__new__(
             cls,
             (
@@ -516,7 +560,7 @@ class BetfairProviderConstraintResolution(
                 provider_id,
                 jurisdiction_scope,
                 currency_code,
-                as_of,
+                current,
                 candidate_generation_sha256s,
                 semantic_sha256,
                 min_standard_size,
@@ -578,6 +622,17 @@ def _build_constraint_resolver():
 
     observation_new = observation_type.__new__
     result_new = result_type.__new__
+    provider_getter = observation_type.__dict__["provider_id"].fget
+    scope_getter = observation_type.__dict__["jurisdiction_scope"].fget
+    currency_getter = observation_type.__dict__["currency_code"].fget
+    min_size_getter = observation_type.__dict__["min_standard_size"].fget
+    min_payout_getter = observation_type.__dict__["min_payout"].fget
+    lower_enabled_getter = observation_type.__dict__["lower_minimum_payout_enabled"].fget
+    available_getter = observation_type.__dict__["available_at"].fget
+    effective_from_getter = observation_type.__dict__["effective_from"].fget
+    effective_until_getter = observation_type.__dict__["effective_until"].fget
+    review_expires_getter = observation_type.__dict__["review_expires_at"].fget
+    order_family_getter = observation_type.__dict__["order_family"].fget
     generation_getter = observation_type.__dict__["generation_sha256"].fget
     semantic_getter = observation_type.__dict__["semantic_sha256"].fget
 
@@ -689,10 +744,10 @@ def _build_constraint_resolver():
         matching = tuple(
             item
             for item in normalized_observations
-            if item.provider_id == provider_id
-            and item.jurisdiction_scope == scope
-            and item.currency_code == currency
-            and item.order_family == order_family
+            if provider_getter(item) == provider_id
+            and scope_getter(item) == scope
+            and currency_getter(item) == currency
+            and order_family_getter(item) == order_family
         )
         if not matching:
             return make_result(
@@ -706,7 +761,7 @@ def _build_constraint_resolver():
         causally_available = tuple(
             item
             for item in matching
-            if utc_fn(item.available_at, "available_at") <= current
+            if utc_fn(available_getter(item), "available_at") <= current
         )
         if not causally_available:
             # Future evidence did not exist for this product decision cut.
@@ -721,10 +776,11 @@ def _build_constraint_resolver():
         applicable = tuple(
             item
             for item in causally_available
-            if utc_fn(item.effective_from, "effective_from") <= current
+            if utc_fn(effective_from_getter(item), "effective_from") <= current
             and (
-                item.effective_until is None
-                or current < utc_fn(item.effective_until, "effective_until")
+                effective_until_getter(item) is None
+                or current
+                < utc_fn(effective_until_getter(item), "effective_until")
             )
         )
         if not applicable:
@@ -739,7 +795,7 @@ def _build_constraint_resolver():
         reviewed_current = tuple(
             item
             for item in applicable
-            if current < utc_fn(item.review_expires_at, "review_expires_at")
+            if current < utc_fn(review_expires_getter(item), "review_expires_at")
         )
         if not reviewed_current:
             return make_result(
@@ -768,9 +824,9 @@ def _build_constraint_resolver():
             as_of=current,
             candidates=reviewed_current,
             semantic_sha256=semantic_getter(exemplar),
-            min_standard_size=exemplar.min_standard_size,
-            min_payout=exemplar.min_payout,
-            lower_minimum_payout_enabled=exemplar.lower_minimum_payout_enabled,
+            min_standard_size=min_size_getter(exemplar),
+            min_payout=min_payout_getter(exemplar),
+            lower_minimum_payout_enabled=lower_enabled_getter(exemplar),
         )
 
     return resolve_betfair_standard_limit_constraint_evidence

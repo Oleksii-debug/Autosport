@@ -14,40 +14,40 @@ from . import proposal_risk_evaluation_precommit_authority as _authority
 from . import proposal_risk_execution_evidence_authority as _execution_authority
 
 
-class _WriteOnceSlot:
-    """Delegate one dataclass slot while rejecting post-construction mutation."""
+def _make_write_once_slot(slot, name: str):
+    """Hide the mutable slot delegate in a closure and expose first-write-only access."""
 
-    __slots__ = ("_slot", "_name")
+    class _WriteOnceSlot:
+        __slots__ = ()
+        _autosport_write_once_slot = True
 
-    def __init__(self, slot, name: str) -> None:
-        self._slot = slot
-        self._name = name
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            return slot.__get__(instance, owner)
 
-    def __get__(self, instance, owner=None):
-        if instance is None:
-            return self
-        return self._slot.__get__(instance, owner)
+        def __set__(self, instance, value) -> None:
+            try:
+                slot.__get__(instance, type(instance))
+            except AttributeError:
+                slot.__set__(instance, value)
+                return
+            raise AttributeError(f"{name} is write-once product evidence")
 
-    def __set__(self, instance, value) -> None:
-        try:
-            self._slot.__get__(instance, type(instance))
-        except AttributeError:
-            self._slot.__set__(instance, value)
-            return
-        raise AttributeError(f"{self._name} is write-once product evidence")
+        def __delete__(self, instance) -> None:
+            raise AttributeError(f"{name} is write-once product evidence")
 
-    def __delete__(self, instance) -> None:
-        raise AttributeError(f"{self._name} is write-once product evidence")
+    return _WriteOnceSlot()
 
 
 def _seal_write_once_slots(owner, names) -> None:
     for name in names:
         current = owner.__dict__.get(name)
-        if isinstance(current, _WriteOnceSlot):
+        if getattr(current, "_autosport_write_once_slot", False) is True:
             continue
         if current is None or not hasattr(current, "__get__") or not hasattr(current, "__set__"):
             raise RuntimeError(f"proposal risk product slot {name} is unavailable")
-        setattr(owner, name, _WriteOnceSlot(current, name))
+        setattr(owner, name, _make_write_once_slot(current, name))
 
 
 def _install_precommit_guard() -> None:
@@ -490,7 +490,7 @@ _seal_write_once_slots(
 _install_precommit_guard()
 _install_execution_evidence_guard()
 del _seal_write_once_slots
-del _WriteOnceSlot
+del _make_write_once_slot
 del _install_precommit_guard
 del _install_execution_evidence_guard
 del _authority

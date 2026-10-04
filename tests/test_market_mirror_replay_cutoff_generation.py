@@ -819,6 +819,49 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_persist_and_apply_hot_duplicate_does_not_rescan_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                source_ts = "2026-09-16T18:59:59+00:00"
+                original = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T18:59:59+00:00",
+                    ingest_ts="2026-09-16T18:59:59+00:00",
+                    source_ts=source_ts,
+                )
+                retry = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:02+00:00",
+                    ingest_ts="2026-09-16T19:00:02+00:00",
+                    source_ts=source_ts,
+                )
+                mirror = MarketMirror()
+                first = mirror.persist_and_apply(store, original)
+                self.assertEqual(first.status.value, "applied")
+
+                with patch.object(
+                    store,
+                    "events",
+                    side_effect=AssertionError(
+                        "hot duplicate must not rescan canonical history"
+                    ),
+                ):
+                    duplicate = mirror.persist_and_apply(store, retry)
+
+                self.assertEqual(duplicate.status.value, "duplicate")
+                persisted = mirror.event_for_quote_key(
+                    original.source_id,
+                    original.quote_key,
+                )
+                self.assertIsNotNone(persisted)
+                assert persisted is not None
+                self.assertEqual(persisted.to_dict(), original.to_dict())
+            finally:
+                store.close()
+
     def test_late_backdated_append_cannot_rewrite_frozen_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

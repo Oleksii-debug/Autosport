@@ -37,6 +37,7 @@ $expected = @(
     [ordered]@{ key = 'owner_economic_open'; automation_id = '305'; name = 'Економічні межі власника'; required_pattern = 'Action'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; child_types = @() },
     [ordered]@{ key = 'owner_economic_status'; automation_id = '306'; name = 'Стан економічних меж власника'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_value_read_only = $true; child_types = @() },
     [ordered]@{ key = 'owner_economic_readback'; automation_id = '307'; name = 'Точні економічні межі власника'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.List'; child_types = @('ControlType.ListItem') },
+    [ordered]@{ key = 'owner_economic_close'; automation_id = '329'; name = 'Закрити економічні межі'; required_pattern = 'Action'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; child_types = @() },
     [ordered]@{ key = 'product_source'; automation_id = 'product-source-select'; name = 'Джерело даних для тривалої симуляційної роботи'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; child_types = @() },
     [ordered]@{ key = 'product_source_save'; automation_id = 'product-source-save'; name = 'Зберегти джерело даних'; required_pattern = 'Action'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; child_types = @() },
     [ordered]@{ key = 'product_runtime_start'; automation_id = 'product-runtime-start'; name = 'Запустити симуляційну роботу'; required_pattern = $null; require_external_focus = $false; expected_control_type = 'ControlType.Button'; allow_disabled = $true; child_types = @() },
@@ -720,6 +721,34 @@ try {
 
     if ($report.controls.Count -ne $expected.Count) {
         $report.failures += "external UIA found $($report.controls.Count) of $($expected.Count) critical controls"
+    }
+
+    # Close both expanded disclosures through external UIA and prove focus
+    # returns to the corresponding trigger before the subtree disappears.
+    if ($report.failures.Count -eq 0) {
+        try {
+            $ownerClose = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '329'
+            if ($null -eq $ownerClose) {
+                throw "owner close control disappeared before focus-handoff audit"
+            }
+            Invoke-ExternalAction -Element $ownerClose
+            $focusDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(2, $TimeoutSeconds))
+            if ($null -eq (Wait-ForFocusedAutomationId -AutomationId '305' -Deadline $focusDeadline)) {
+                throw "owner disclosure close did not restore focus to automation_id=305"
+            }
+
+            $manualClose = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '336'
+            if ($null -eq $manualClose) {
+                throw "manual close control disappeared before focus-handoff audit"
+            }
+            Invoke-ExternalAction -Element $manualClose
+            $focusDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(2, $TimeoutSeconds))
+            if ($null -eq (Wait-ForFocusedAutomationId -AutomationId '330' -Deadline $focusDeadline)) {
+                throw "manual disclosure close did not restore focus to automation_id=330"
+            }
+        } catch {
+            $report.failures += "packaged disclosure focus-handoff audit failed: $($_.Exception.Message)"
+        }
     }
 
     # A semantic/accessibility PASS must also prove that the exact packaged main

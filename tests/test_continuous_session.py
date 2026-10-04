@@ -3892,6 +3892,135 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_direct_state_rejects_mutated_settlement_before_durable_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-state-structural-validation",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:state-structural-validation",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="state-structural-validation-evidence",
+                evidence_sha256="1" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                state_path = root / "continuous_session.json"
+                before = state_path.read_text(encoding="utf-8")
+                resolution.quote_outcomes["event-1|winner|home"] = "forged"
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "quote_outcomes contains unsupported outcome",
+                ):
+                    coordinator._state.record_settlement_evidence(
+                        settlement_evidence=(resolution,),
+                    )
+                self.assertEqual(state_path.read_text(encoding="utf-8"), before)
+                self.assertEqual(coordinator.status().settlement_evidence, ())
+                self.assertEqual(
+                    coordinator.status().pending_settlement_evidence_ids,
+                    (),
+                )
+            finally:
+                store.close()
+
+    def test_direct_state_requires_exact_tuple_settlement_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-state-tuple-validation",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:state-tuple-validation",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="state-tuple-validation-evidence",
+                evidence_sha256="2" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                state_path = root / "continuous_session.json"
+                before = state_path.read_text(encoding="utf-8")
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "settlement_evidence must be a tuple",
+                ):
+                    coordinator._state.record_settlement_evidence(
+                        settlement_evidence=[resolution],
+                    )
+                self.assertEqual(state_path.read_text(encoding="utf-8"), before)
+            finally:
+                store.close()
+
+    def test_direct_state_rejects_resolution_subclass_after_global_rebind(self) -> None:
+        class _ForgedResolution(SettlementResolution):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-state-type-validation",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            forged = _ForgedResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:state-type-validation",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="state-type-validation-evidence",
+                evidence_sha256="3" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            original = continuous_session_module.SettlementResolution
+            try:
+                state_path = root / "continuous_session.json"
+                before = state_path.read_text(encoding="utf-8")
+                continuous_session_module.SettlementResolution = _ForgedResolution
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "settlement evidence must be canonical",
+                ):
+                    coordinator._state.record_settlement_evidence(
+                        settlement_evidence=(forged,),
+                    )
+                self.assertEqual(state_path.read_text(encoding="utf-8"), before)
+            finally:
+                continuous_session_module.SettlementResolution = original
+                store.close()
+
     def test_pending_settlement_outcomes_tamper_fails_digest_reproof(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

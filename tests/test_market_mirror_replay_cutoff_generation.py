@@ -4830,6 +4830,45 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_committed_append_prefix_ignores_negative_unissued_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                tail = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:00.500000+00:00",
+                )
+                self.assertTrue(store.append(first))
+                self.direct_insert_positive_generation(
+                    store,
+                    tail,
+                    generation=-1,
+                )
+
+                # Negative generations are never part of product chronology. They
+                # cannot poison an older exact prefix merely because SQL "<=" would
+                # otherwise place them inside every positive frontier.
+                store.require_committed_append_generation(1)
+                prefix = store.events_at_committed_append_boundary(1)
+                self.assertEqual(
+                    [(event.sequence, generation) for event, generation in prefix],
+                    [(1, 1)],
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "append generation is invalid",
+                ):
+                    store.require_current_append_authority_with_boundary(1)
+            finally:
+                store.close()
+
     def test_committed_append_prefix_ignores_noncontiguous_unissued_tail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

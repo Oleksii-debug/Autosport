@@ -2405,7 +2405,11 @@ class SQLiteMarketStore:
                             FROM market_events AS m
                             JOIN market_event_commit_order AS c
                               ON c.dedupe_key = m.dedupe_key
-                            WHERE c.append_generation <= ?""",
+                            WHERE c.append_generation = 0
+                               OR (
+                                   c.append_generation > 0
+                                   AND c.append_generation <= ?
+                               )""",
                         (max_generation,),
                     ).fetchall()
 

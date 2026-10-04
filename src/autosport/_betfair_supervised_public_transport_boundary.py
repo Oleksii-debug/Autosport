@@ -13,13 +13,22 @@ fresh workspace-bound profile re-resolution through the private placeOrders call
 runtime-profile revocation and the irreversible provider effect are linearized: a
 revocation that wins first denies before SUBMITTED/provider I/O; a write admitted
 first keeps the exact RUNNING profile current until the provider call exits.
+
+The final-send callback additionally composes the durable supervised-confirmation
+journal.  SUBMITTED + exact request SHA are persisted first under the existing STOP
+lease, then the exact operator receipt is consumed for that attempt/intent/request,
+and only then may the provider POST run.  A crash anywhere after SUBMITTED therefore
+never permits blind retransmission; authoritative provider readback remains required.
 """
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+from dataclasses import dataclass
 import sys
 from pathlib import Path
 
+from . import betfair_execution_confirmation as _confirmation
 from . import betfair_supervised_execution as _impl
 from . import trusted_runtime_code_profile as _runtime_profile
 
@@ -36,6 +45,9 @@ _RESPONSE_PARSER = _impl._CANONICAL_PARSE_PLACE_ORDERS_RESPONSE
 _RESPONSE_PARSER_CODE = _impl._CANONICAL_PARSE_PLACE_ORDERS_RESPONSE_CODE
 _OBSERVATION_CLOCK = _impl._CANONICAL_PROVIDER_OBSERVATION_CLOCK
 _OBSERVATION_CLOCK_CODE = _impl._CANONICAL_PROVIDER_OBSERVATION_CLOCK_CODE
+_CONFIRMATION_ERROR = _confirmation.BetfairExecutionConfirmationError
+_CONSUME_CONFIRMATION = _confirmation.consume_betfair_execution_confirmation
+_CONSUME_CONFIRMATION_CODE = getattr(_CONSUME_CONFIRMATION, "__code__", None)
 
 # Reuse the exact canonical #1891 process-local authority graph. These are not new
 # mirrors: identity checks below deliberately fail closed if the owning module
@@ -63,12 +75,33 @@ if (
     or _RESPONSE_PARSER_CODE is None
     or not callable(_OBSERVATION_CLOCK)
     or _OBSERVATION_CLOCK_CODE is None
+    or not callable(_CONSUME_CONFIRMATION)
+    or _CONSUME_CONFIRMATION_CODE is None
     or type(_TRUSTED_ACTIVE_BY_WORKSPACE) is not dict
     or type(_TRUSTED_ISSUED) is not dict
     or not callable(_REQUIRE_TRUSTED_PROFILE)
     or _REQUIRE_TRUSTED_PROFILE_CODE is None
 ):
     raise RuntimeError("canonical Betfair provider-write composition is unavailable")
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecutionConfirmationContext:
+    ledger: _impl.RealExecutionLedger
+    bound: _impl.BoundSupervisedExecutionPlan
+    approval: _impl.SupervisedApproval
+    action_id: str
+    attempt_id: str
+    client: _impl.BetfairSupervisedPlaceOrdersClient
+    workspace: str
+    receipt_id: str | None
+    review_sha256: str | None
+
+
+_CONFIRMATION_CONTEXT: ContextVar[_ExecutionConfirmationContext | None] = ContextVar(
+    "autosport_betfair_execution_confirmation_context",
+    default=None,
+)
 
 
 def _trusted_profile_graph_unchanged() -> bool:
@@ -82,6 +115,16 @@ def _trusted_profile_graph_unchanged() -> bool:
         is _REQUIRE_TRUSTED_PROFILE
         and getattr(_REQUIRE_TRUSTED_PROFILE, "__code__", None)
         is _REQUIRE_TRUSTED_PROFILE_CODE
+    )
+
+
+def _confirmation_graph_unchanged() -> bool:
+    return (
+        _confirmation.BetfairExecutionConfirmationError is _CONFIRMATION_ERROR
+        and _confirmation.consume_betfair_execution_confirmation
+        is _CONSUME_CONFIRMATION
+        and getattr(_CONSUME_CONFIRMATION, "__code__", None)
+        is _CONSUME_CONFIRMATION_CODE
     )
 
 
@@ -131,6 +174,32 @@ def _require_current_workspace_profile_locked(workspace: str):
     return profile
 
 
+def _require_confirmation_context(
+    *,
+    client: _impl.BetfairSupervisedPlaceOrdersClient,
+    action: _impl.ExecutionAction,
+    bound: _impl.BoundSupervisedExecutionPlan,
+    workspace: str,
+) -> _ExecutionConfirmationContext:
+    context = _CONFIRMATION_CONTEXT.get()
+    if type(context) is not _ExecutionConfirmationContext:
+        raise _impl.BetfairSupervisedExecutionError(
+            "Betfair provider write requires durable operator confirmation"
+        )
+    if (
+        context.client is not client
+        or context.bound is not bound
+        or context.action_id != action.action_id
+        or context.workspace != workspace
+        or context.receipt_id is None
+        or context.review_sha256 is None
+    ):
+        raise _impl.BetfairSupervisedExecutionError(
+            "Betfair operator confirmation context does not bind this exact execution"
+        )
+    return context
+
+
 def _build_trusted_private_place_action(
     private_place_action,
     private_place_action_code,
@@ -150,8 +219,8 @@ def _build_trusted_private_place_action(
         _response_parser=None,
         _observation_clock=None,
     ):
-        """Compose current trusted-runtime authority with the exact private write seam."""
-    
+        """Compose runtime + confirmation authority with the exact private write seam."""
+
         try:
             caller_code = sys._getframe(1).f_code
         except (AttributeError, ValueError):
@@ -172,13 +241,46 @@ def _build_trusted_private_place_action(
                 "canonical Betfair internal provider-write dependencies changed"
             )
         workspace = _canonical_workspace_text(execution_workspace)
-    
+        confirmation_context = _require_confirmation_context(
+            client=self,
+            action=action,
+            bound=bound,
+            workspace=workspace,
+        )
+
+        def _confirmed_before_transport(request_sha256: str) -> None:
+            # The existing callback durably establishes the no-blind-retry boundary
+            # and binds these exact request bytes before confirmation is consumed.
+            _before_transport(request_sha256)
+            if not _confirmation_graph_unchanged():
+                raise _impl.BetfairSupervisedExecutionError(
+                    "Betfair confirmation authority changed before provider send"
+                )
+            try:
+                _CONSUME_CONFIRMATION(
+                    Path(workspace),
+                    bound,
+                    confirmation_context.approval,
+                    action_id=action.action_id,
+                    attempt_id=confirmation_context.attempt_id,
+                    receipt_id=confirmation_context.receipt_id,
+                    expected_review_sha256=confirmation_context.review_sha256,
+                    request_sha256=request_sha256,
+                )
+            except _CONFIRMATION_ERROR as exc:
+                raise _impl.BetfairSupervisedExecutionError(
+                    "durable Betfair operator confirmation denied final provider send"
+                ) from exc
+
         # This is deliberately the existing #1891 RLock, not a new admission lock.
         # Holding it through the private call prevents STOP/runtime cleanup from
         # revoking the profile between positive re-resolution and irreversible POST.
         with _TRUSTED_PROFILE_LOCK:
             _require_current_workspace_profile_locked(workspace)
-            if not _canonical_internal_dispatch_unchanged():
+            if (
+                not _canonical_internal_dispatch_unchanged()
+                or not _confirmation_graph_unchanged()
+            ):
                 raise _impl.BetfairSupervisedExecutionError(
                     "canonical Betfair internal provider-write authority changed"
                 )
@@ -189,7 +291,7 @@ def _build_trusted_private_place_action(
                 bound=bound,
                 provider_order_ref=provider_order_ref,
                 execution_workspace=execution_workspace,
-                _before_transport=_before_transport,
+                _before_transport=_confirmed_before_transport,
                 _transport_post=_PROVIDER_HTTP_POST,
                 _response_parser=_RESPONSE_PARSER,
                 _observation_clock=_OBSERVATION_CLOCK,
@@ -211,6 +313,68 @@ _impl._CANONICAL_BETFAIR_PLACE_ACTION = _TRUSTED_PRIVATE_PLACE_ACTION
 _impl._CANONICAL_BETFAIR_PLACE_ACTION_CODE = _TRUSTED_PRIVATE_PLACE_ACTION_CODE
 
 
+def _confirmed_execute_betfair_supervised_action(
+    ledger: _impl.RealExecutionLedger,
+    bound: _impl.BoundSupervisedExecutionPlan,
+    approval: _impl.SupervisedApproval,
+    *,
+    action_id: str,
+    attempt_id: str,
+    profile: _impl.BookmakerCapabilityProfile,
+    client: _impl.BetfairSupervisedPlaceOrdersClient,
+    clock=None,
+    confirmation_receipt_id: str | None = None,
+    confirmation_review_sha256: str | None = None,
+):
+    """Run canonical execution while carrying one exact durable final-send receipt.
+
+    Missing confirmation remains a valid input only for calls that fail before the
+    irreversible provider boundary.  If the call reaches that boundary, transport
+    is denied while the attempt remains RESERVED.  This preserves existing
+    pre-admission diagnostic behavior without retaining an unconfirmed send path.
+    """
+
+    try:
+        workspace = str(Path(ledger.path).parent.resolve())
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise _impl.BetfairSupervisedExecutionError(
+            "Betfair execution ledger workspace is not canonical"
+        ) from exc
+    context = _ExecutionConfirmationContext(
+        ledger=ledger,
+        bound=bound,
+        approval=approval,
+        action_id=action_id,
+        attempt_id=attempt_id,
+        client=client,
+        workspace=workspace,
+        receipt_id=confirmation_receipt_id,
+        review_sha256=confirmation_review_sha256,
+    )
+    token = _CONFIRMATION_CONTEXT.set(context)
+    try:
+        return _CANONICAL_EXECUTE(
+            ledger,
+            bound,
+            approval,
+            action_id=action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            clock=clock,
+        )
+    finally:
+        _CONFIRMATION_CONTEXT.reset(token)
+
+
+_PUBLIC_EXECUTE = _confirmed_execute_betfair_supervised_action
+_PUBLIC_EXECUTE_CODE = _PUBLIC_EXECUTE.__code__
+_PUBLIC_EXECUTE.__name__ = _CANONICAL_EXECUTE.__name__
+_PUBLIC_EXECUTE.__qualname__ = _CANONICAL_EXECUTE.__qualname__
+_PUBLIC_EXECUTE.__module__ = _CANONICAL_EXECUTE.__module__
+_PUBLIC_EXECUTE.__doc__ = _CANONICAL_EXECUTE.__doc__
+
+
 def _canonical_internal_dispatch_unchanged() -> bool:
     return (
         _CLIENT_TYPE is _impl.BetfairSupervisedPlaceOrdersClient
@@ -224,7 +388,8 @@ def _canonical_internal_dispatch_unchanged() -> bool:
         and "_RAW_PLACE_ACTION" not in globals()
         and "_RAW_PLACE_ACTION_CODE" not in globals()
         and "_PRIVATE_PLACE_ACTION" not in globals()
-        and _impl.execute_betfair_supervised_action is _CANONICAL_EXECUTE
+        and _impl.execute_betfair_supervised_action is _PUBLIC_EXECUTE
+        and getattr(_PUBLIC_EXECUTE, "__code__", None) is _PUBLIC_EXECUTE_CODE
         and getattr(_CANONICAL_EXECUTE, "__code__", None)
         is _CANONICAL_EXECUTE_CODE
         and _impl._PROVIDER_HTTP_POST is _PROVIDER_HTTP_POST
@@ -240,6 +405,7 @@ def _canonical_internal_dispatch_unchanged() -> bool:
         and getattr(_OBSERVATION_CLOCK, "__code__", None)
         is _OBSERVATION_CLOCK_CODE
         and _trusted_profile_graph_unchanged()
+        and _confirmation_graph_unchanged()
     )
 
 
@@ -297,3 +463,4 @@ class _PlaceActionBoundary:
 
 _BOUNDARY = _PlaceActionBoundary()
 _CLIENT_TYPE.place_action = _BOUNDARY
+_impl.execute_betfair_supervised_action = _PUBLIC_EXECUTE

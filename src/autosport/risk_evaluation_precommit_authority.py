@@ -84,6 +84,45 @@ def _digest(payload: object) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _reconstructed_v2_design_sha256(
+    membership: ResolvedFixedNRiskMembership,
+    spec: ResolvedFixedNRiskEvaluationSpec,
+) -> str:
+    """Recompute the full frozen v2 design instead of trusting resolver fields."""
+
+    return _digest(
+        {
+            "kind": "autosport-risk-fixed-n-run-membership-v2",
+            "dataset_snapshot_id": membership.dataset_snapshot_id,
+            "planned_run_ids": list(membership.planned_run_ids),
+            "planned_n": membership.planned_n,
+            "sampling_frame_sha256": _sha(
+                membership.sampling_frame_sha256,
+                "sampling_frame_sha256",
+            ),
+            "risk_method": membership.risk_method,
+            "dependence_qualification": "SEPARATE_REQUIRED",
+            "confidence_level": _canonical_decimal(
+                spec.confidence_level,
+                "confidence_level",
+            ),
+            "ruin_threshold": _canonical_decimal(
+                spec.ruin_threshold,
+                "ruin_threshold",
+            ),
+            "risk_target_scope": spec.risk_target_scope,
+            "initial_capital_state_sha256": _sha(
+                spec.initial_capital_state_sha256,
+                "initial_capital_state_sha256",
+            ),
+            "stake_policy_sha256": _sha(
+                spec.stake_policy_sha256,
+                "stake_policy_sha256",
+            ),
+        }
+    )
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class ProductFixedNRiskEvaluationPrecommitAuthority:
     """Product-owned statistical policy frozen before fixed-N outcomes.
@@ -252,6 +291,10 @@ def resolve_product_fixed_n_risk_evaluation_precommit(
         or spec.dataset_snapshot_id != membership.dataset_snapshot_id
         or spec.dataset_manifest_sha256 != membership.dataset_manifest_sha256
         or spec.planned_run_ids != membership.planned_run_ids
+        or spec.precommitted_at != membership.precommitted_at
+        or spec.outcome_reveal_after != membership.outcome_reveal_after
+        or _reconstructed_v2_design_sha256(membership, spec)
+        != membership.design_sha256
         or structure.research_protocol_id != spec.research_protocol_id
         or structure.protocol_sha256 != spec.protocol_sha256
         or structure.dataset_snapshot_id != spec.dataset_snapshot_id
@@ -336,10 +379,31 @@ def resolve_product_fixed_n_risk_evaluation_precommit(
     return result
 
 
+_AUTHORITY_FIELDS = (
+    "workspace_instance_id",
+    "experiment_id",
+    "research_protocol_id",
+    "protocol_sha256",
+    "dataset_snapshot_id",
+    "dataset_manifest_sha256",
+    "membership_design_sha256",
+    "sampling_manifest_sha256",
+    "planned_member_ids",
+    "confidence_level",
+    "ruin_threshold",
+    "risk_target_scope",
+    "initial_capital_state_sha256",
+    "stake_policy_sha256",
+    "authority_sha256",
+)
+
+
 def _build_verifier(resolver, authority_type):
     module_globals = globals()
     resolver_code = getattr(resolver, "__code__", None)
-    field_names = tuple(authority_type.__dataclass_fields__)
+    if resolver_code is None:
+        raise RuntimeError("risk-evaluation precommit resolver is unavailable")
+    field_names = _AUTHORITY_FIELDS
 
     def verifier(
         candidate: ProductFixedNRiskEvaluationPrecommitAuthority,
@@ -375,13 +439,41 @@ def _build_verifier(resolver, authority_type):
             sampling_manifest_json=sampling_manifest_json,
             authority_root=authority_root,
         )
-        for field_name in field_names:
-            supplied = getattr(candidate, field_name)
-            expected = getattr(canonical, field_name)
-            if type(supplied) is not type(expected) or supplied != expected:
-                raise ProductRiskEvaluationPrecommitError(
-                    "risk-evaluation precommit does not match canonical durable roots"
-                )
+        if (
+            module_globals.get(
+                "resolve_product_fixed_n_risk_evaluation_precommit"
+            )
+            is not resolver
+            or getattr(resolver, "__code__", None) is not resolver_code
+            or module_globals.get(
+                "ProductFixedNRiskEvaluationPrecommitAuthority"
+            )
+            is not authority_type
+        ):
+            raise ProductRiskEvaluationPrecommitError(
+                "risk-evaluation precommit verifier dispatch changed"
+            )
+        _require_dispatch()
+        if type(canonical) is not authority_type:
+            raise ProductRiskEvaluationPrecommitError(
+                "risk-evaluation precommit resolver returned invalid authority type"
+            )
+        try:
+            differs = any(
+                type(object.__getattribute__(candidate, field_name))
+                is not type(object.__getattribute__(canonical, field_name))
+                or object.__getattribute__(candidate, field_name)
+                != object.__getattribute__(canonical, field_name)
+                for field_name in field_names
+            )
+        except AttributeError as exc:
+            raise ProductRiskEvaluationPrecommitError(
+                "risk-evaluation precommit does not match canonical durable roots"
+            ) from exc
+        if differs:
+            raise ProductRiskEvaluationPrecommitError(
+                "risk-evaluation precommit does not match canonical durable roots"
+            )
         return canonical
 
     return verifier

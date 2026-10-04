@@ -2215,7 +2215,7 @@ class PersistentLiveDecisionLoop:
                 execution_result = self.paper_execution.execute(
                     prepared=prepared_execution,
                     trigger_id=decision_id,
-                    started_at=plan.decision_ts,
+                    started_at=_require_utc_clock(self.clock).isoformat(),
                     materialize_exposure=(self.mode is LiveDecisionMode.PAPER),
                 )
                 assert expected_execution_payload is not None

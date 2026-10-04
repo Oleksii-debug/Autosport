@@ -10,7 +10,7 @@ from autosport.product_runtime import (
     _settlement_authority_identity,
     build_autonomous_product_runtime,
 )
-from autosport.product_source import ParlayApiProductSource
+from autosport.product_source import ParlayApiProductSource, ProductSourceStateError
 from autosport.resolver_semantics import (
     ResolverSemanticIdentityError,
     function_semantic_sha256,
@@ -229,6 +229,42 @@ def test_live_settlement_result_is_not_released_after_in_call_authority_mutation
         assert source.settlement_configuration_sha256 == SHA_B
     finally:
         runtime.close()
+
+
+def test_parlay_product_source_authority_roots_are_immutable_after_construction(
+    tmp_path,
+) -> None:
+    class _Provider:
+        source_id = "parlayapi:table_tennis"
+
+        def read_batch(self, _max_items=1000):
+            raise AssertionError("authority sealing test must not perform provider I/O")
+
+    source = ParlayApiProductSource(
+        _Provider(),
+        workspace=tmp_path / "source-workspace",
+        authority_root=tmp_path / "authority",
+        lawful_terms_ref="terms:parlayapi:test",
+        retention_ref="retention:parlayapi:test",
+        clock=lambda: NOW,
+    )
+    replacements = {
+        "provider": _Provider(),
+        "stream_epoch": "forged-epoch",
+        "clock": lambda: "2026-09-21T10:00:00Z",
+        "normalizer": object(),
+        "state_path": tmp_path / "forged-state.json",
+        "_authority_binding_sha256": "b" * 64,
+        "_authority_fields_sealed": False,
+    }
+    for name, value in replacements.items():
+        original = getattr(source, name)
+        with pytest.raises(
+            ProductSourceStateError,
+            match=rf"product source authority field {name} is immutable",
+        ):
+            setattr(source, name, value)
+        assert getattr(source, name) is original or getattr(source, name) == original
 
 
 def test_resolver_semantic_fingerprint_ignores_install_relocation() -> None:

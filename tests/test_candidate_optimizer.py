@@ -1,12 +1,12 @@
 import unittest
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 from autosport.candidate_optimizer import PortfolioAwareCandidateOptimizer
 from autosport.candidate_search import BeamParlayCandidateSearch, CandidateLeg, ParlayCandidate
 from autosport.domain import TicketLeg
 from autosport.paper import PaperBook
-from autosport.scenario_search import ScenarioGroup, ScenarioOutcome, ScenarioSearchEngine
+from autosport.scenario_search import ScenarioGroup, ScenarioOutcome, ScenarioSearchEngine, ScenarioSearchReport
 
 
 def _single_candidate(leg: CandidateLeg) -> ParlayCandidate:
@@ -23,6 +23,39 @@ class _ForgedTerminalScenarioEngine(ScenarioSearchEngine):
             report,
             outcome_space_exhaustive=True,
             outcome_space_exact=True,
+        )
+
+
+class _FixedImpactScenarioEngine(ScenarioSearchEngine):
+    """Deterministic report source for isolating optimizer delta arithmetic."""
+
+    def analyse(self, tickets, groups):
+        if len(tickets) == 1:
+            return ScenarioSearchReport(
+                "fixed",
+                2,
+                2,
+                Decimal("-10.123456789"),
+                Decimal("20.234567891"),
+                Decimal("-30.345678912"),
+                Decimal("40.456789123"),
+                True,
+                True,
+                Decimal("5.567891234"),
+                "fixed",
+            )
+        return ScenarioSearchReport(
+            "fixed",
+            2,
+            2,
+            Decimal("-8.987654321"),
+            Decimal("23.876543219"),
+            Decimal("-32.765432198"),
+            Decimal("44.654321987"),
+            True,
+            True,
+            Decimal("7.543219876"),
+            "fixed",
         )
 
 
@@ -166,6 +199,42 @@ class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
         self.assertFalse(impact.worst_case_change_proven)
         self.assertTrue(impact.scenario_worst_case_change_proven)
         self.assertEqual(impact.ranking_risk_truth, "conservative-floor-change")
+
+    def test_portfolio_impact_deltas_ignore_ambient_decimal_context(self):
+        book = PaperBook("1000")
+        existing_leg = TicketLeg("e1", "winner", "a", Decimal("2"))
+        existing = book.open_ticket([existing_leg], "1")
+        candidate_leg = CandidateLeg(
+            "e1|winner|b", "e1", Decimal("2"), Decimal("0.5")
+        )
+        groups = [
+            ScenarioGroup(
+                "e1-winner",
+                (
+                    ScenarioOutcome(existing_leg.quote_key),
+                    ScenarioOutcome(candidate_leg.quote_key),
+                ),
+            )
+        ]
+        optimizer = PortfolioAwareCandidateOptimizer(
+            scenario_engine=_FixedImpactScenarioEngine()
+        )
+
+        baseline = optimizer.evaluate_candidates(
+            [existing], [_single_candidate(candidate_leg)], groups, stake="1"
+        )[0]
+        with localcontext() as context:
+            context.prec = 2
+            hostile = optimizer.evaluate_candidates(
+                [existing], [_single_candidate(candidate_leg)], groups, stake="1"
+            )[0]
+
+        self.assertEqual(hostile.observed_worst_case_change, baseline.observed_worst_case_change)
+        self.assertEqual(hostile.conservative_floor_change, baseline.conservative_floor_change)
+        self.assertEqual(hostile.observed_best_case_change, baseline.observed_best_case_change)
+        self.assertEqual(hostile.conservative_ceiling_change, baseline.conservative_ceiling_change)
+        self.assertEqual(hostile.expected_case_change, baseline.expected_case_change)
+        self.assertEqual(hostile.ranking_risk_change, baseline.ranking_risk_change)
 
     def test_injected_report_flags_cannot_authorize_terminal_risk_truth(self):
         book = PaperBook("1000")

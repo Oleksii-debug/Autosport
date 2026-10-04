@@ -42,6 +42,20 @@ _MAX_DECIMAL_TEXT = 256
 _PROPOSAL_EVALUATION_SCOPE = (
     "EXACT_PROPOSAL_TARGET_FIXED_STAKE_VECTOR_COUNTERFACTUAL_V1"
 )
+_PROTOCOL_CONSTANTS = (
+    _SCHEMA,
+    _ACTION,
+    _AGENT,
+    _ACTION_PREFIX,
+    _PROPOSAL_EVALUATION_SCOPE,
+)
+_PROTOCOL_CONSTANTS_EXPECTED = (
+    "autosport.proposal-risk-evaluation-precommit.v1",
+    "PROPOSAL_RISK_EVALUATION_PRECOMMIT",
+    "autosport.proposal-risk-evaluation-precommit-authority.v1",
+    "proposal-risk-evaluation-precommit-v1:",
+    "EXACT_PROPOSAL_TARGET_FIXED_STAKE_VECTOR_COUNTERFACTUAL_V1",
+)
 
 _TARGET_TYPE = ProductProposalRiskTarget
 _TARGET_RESOLVER = resolve_product_proposal_risk_target
@@ -384,6 +398,13 @@ def _workspace_path(value: object) -> Path:
 
 def _require_dispatch() -> None:
     if (
+        _PROTOCOL_CONSTANTS != _PROTOCOL_CONSTANTS_EXPECTED
+        or _SCHEMA != _PROTOCOL_CONSTANTS_EXPECTED[0]
+        or _ACTION != _PROTOCOL_CONSTANTS_EXPECTED[1]
+        or _AGENT != _PROTOCOL_CONSTANTS_EXPECTED[2]
+        or _ACTION_PREFIX != _PROTOCOL_CONSTANTS_EXPECTED[3]
+        or _PROPOSAL_EVALUATION_SCOPE != _PROTOCOL_CONSTANTS_EXPECTED[4]
+        or
         ProductProposalRiskTarget is not _TARGET_TYPE
         or resolve_product_proposal_risk_target is not _TARGET_RESOLVER
         or getattr(_TARGET_RESOLVER, "__code__", None) is not _TARGET_RESOLVER_CODE

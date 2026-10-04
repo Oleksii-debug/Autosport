@@ -935,7 +935,16 @@ def assess_betfair_historical_market_definition_authority(
             refusal_reason="betfair_market_definition_is_not_open_at_roster_revision",
         )
 
-    complete = market_definition.get("complete")
+    if "complete" not in market_definition:
+        return MarketOutcomeAuthorityAssessment(
+            identity=identity,
+            status=OutcomeAuthorityStatus.REFUSED,
+            authority=None,
+            refusal_reason=(
+                "betfair_market_definition_runner_roster_completeness_unverified"
+            ),
+        )
+    complete = market_definition["complete"]
     if type(complete) is not bool:
         raise ValueError("marketDefinition.complete must be a boolean")
     if not complete:

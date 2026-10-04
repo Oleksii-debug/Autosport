@@ -104,6 +104,8 @@ def _validate_open_ticket_economics_for_analysis(
     ticket_id: object,
     stake: object,
     legs: object,
+    *,
+    _validate_ticket_leg=PaperBook._validate_ticket_leg,
 ) -> None:
     amount = _require_finite_decimal(
         stake,
@@ -116,7 +118,7 @@ def _validate_open_ticket_economics_for_analysis(
             f"portfolio ticket {ticket_id} requires at least one canonical leg"
         )
     for leg in legs:
-        PaperBook._validate_ticket_leg(leg, ticket_id=ticket_id)
+        _validate_ticket_leg(leg, ticket_id=ticket_id)
     quote_keys = tuple(leg.quote_key for leg in legs)
     if len(quote_keys) != len(set(quote_keys)):
         raise ValueError(
@@ -129,6 +131,7 @@ def _snapshot_open_tickets_for_analysis(
     *,
     _paper_ticket_type: type[PaperTicket] = PaperTicket,
     _open_status: TicketStatus = TicketStatus.OPEN,
+    _validate_placed_at=PaperBook._validate_placed_at,
 ) -> list[PaperTicket]:
     """Detach one causally coherent cut of mutable ticket economics.
 
@@ -176,7 +179,7 @@ def _snapshot_open_tickets_for_analysis(
             raise ValueError(
                 f"portfolio open ticket {ticket_id} cannot have settled_at"
             )
-        PaperBook._validate_placed_at(placed_at, snapshot=True)
+        _validate_placed_at(placed_at, snapshot=True)
         _validate_open_ticket_economics_for_analysis(
             ticket_id,
             stake,
@@ -208,6 +211,31 @@ def _snapshot_open_tickets_for_analysis(
             raise ValueError("portfolio ticket changed during snapshot")
 
     return snapshots
+
+
+def _normalize_resolution_keys_for_analysis(
+    values: object,
+    label: str,
+    *,
+    _normalizer=PaperBook._normalize_resolution_keys,
+) -> set[str]:
+    return _normalizer(values, label)
+
+
+def _settlement_result_for_analysis(
+    ticket: PaperTicket,
+    balance: Decimal,
+    winning_quote_keys: set[str],
+    void_quote_keys: set[str],
+    *,
+    _settlement_result=PaperBook._settlement_result,
+) -> tuple[TicketStatus, Decimal, Decimal]:
+    return _settlement_result(
+        ticket,
+        balance,
+        winning_quote_keys,
+        void_quote_keys,
+    )
 
 
 def _scenario_profit_in_context(
@@ -292,7 +320,7 @@ class PortfolioEngine:
 
     @staticmethod
     def scenario_profit(tickets: list[PaperTicket], winning_quote_keys: set[str]) -> Decimal:
-        winning_snapshot = PaperBook._normalize_resolution_keys(
+        winning_snapshot = _normalize_resolution_keys_for_analysis(
             winning_quote_keys,
             "winning_quote_keys",
         )
@@ -360,7 +388,7 @@ class PortfolioEngine:
                         for quote_key in leg_keys
                         if snapshot[quote_key] == "void"
                     }
-                    _status, payout, _balance = PaperBook._settlement_result(
+                    _status, payout, _balance = _settlement_result_for_analysis(
                         ticket,
                         _canonical_decimal("0"),
                         winners,

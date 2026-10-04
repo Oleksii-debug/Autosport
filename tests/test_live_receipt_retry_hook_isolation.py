@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from contextvars import copy_context
 from datetime import timezone
 from decimal import Decimal
 from pathlib import Path
@@ -10,6 +11,52 @@ from autosport.storage import SQLiteMarketStore
 
 
 class LiveReceiptRetryHookIsolationTests(unittest.TestCase):
+    def test_copied_retry_context_cannot_replay_carrier_authority_after_abort(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = MarketEvent(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.00"),
+                observed_ts="2026-10-04T03:00:01+00:00",
+                source_id="provider-a",
+                sequence=1,
+                market_type=MarketType.WINNER,
+                ingest_ts="2026-10-04T03:00:02+00:00",
+                metadata={"origin": "canonical"},
+            )
+            captured_contexts = []
+            stashed_batches = []
+
+            def abort_and_capture(events):
+                captured_contexts.append(copy_context())
+                stashed_batches.append(events)
+                raise RuntimeError("abort after copying retry context")
+
+            with patch.object(
+                store,
+                "_before_live_append_attempt",
+                side_effect=abort_and_capture,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "abort after copying"):
+                    store._append_live_batch_accepted([event])
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            self.assertEqual(store.trusted_live_current_by_source(), {})
+            self.assertEqual(len(captured_contexts), 1)
+            self.assertEqual(len(stashed_batches), 1)
+
+            accepted = captured_contexts[0].run(
+                store.append_batch_accepted,
+                stashed_batches[0],
+            )
+            self.assertEqual(len(accepted), 1)
+            self.assertFalse(store.has_trusted_live_receipt(accepted[0]))
+            self.assertEqual(store.trusted_live_current_by_source(), {})
+            store.close()
+
     def test_retry_hook_cannot_rewrite_trusted_live_payload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

@@ -505,7 +505,10 @@ class MarketSettlementOutcomeAuthority:
                 "serialized market outcome authority must contain canonical fields"
             )
         if (
-            raw["schema"] != "autosport.market_settlement_outcome_authority"
+            type(raw["schema"]) is not str
+            or raw["schema"] != "autosport.market_settlement_outcome_authority"
+            or type(raw["schema_version"]) is not int
+            or isinstance(raw["schema_version"], bool)
             or raw["schema_version"] != 1
         ):
             raise ValueError("unsupported market outcome authority schema")
@@ -526,7 +529,14 @@ class MarketSettlementOutcomeAuthority:
             )
         if raw["authority_sha256"] != canonical["authority_sha256"]:
             raise ValueError("market outcome authority hash mismatch")
-        if raw != canonical:
+        try:
+            raw_canonical_json = _canonical_json(raw)
+            verified_canonical_json = _canonical_json(canonical)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "serialized market outcome authority must contain canonical JSON data"
+            ) from exc
+        if raw_canonical_json != verified_canonical_json:
             raise ValueError(
                 "serialized market outcome authority does not match separately "
                 "verified source evidence"

@@ -8,6 +8,9 @@ from unittest.mock import patch
 from autosport.domain import MarketEvent
 from autosport.market_bus import MarketEventBus
 from autosport.market_mirror import MarketMirror, MirrorUpdate
+from autosport.market_state_identity import (
+    PROPHETX_REST_MARKET_STATE_CONTRACT,
+)
 from autosport.market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependencyIndex,
@@ -38,6 +41,47 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             status="open",
             source_ts=timestamp,
             ingest_ts=timestamp,
+        )
+
+    @staticmethod
+    def semantic_event(
+        *,
+        sequence: int,
+        odds: str = "2.00",
+        observed_ts: str | None = None,
+        ingest_ts: str | None = None,
+    ) -> MarketEvent:
+        observed = observed_ts or (
+            f"2026-09-16T19:00:{sequence:02d}+00:00"
+        )
+        return MarketEvent(
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            decimal_odds=Decimal(odds),
+            observed_ts=observed,
+            source_id="prophetx:sandbox",
+            sequence=sequence,
+            status="open",
+            ingest_ts=ingest_ts or observed,
+            metadata={
+                "provider": "prophetx",
+                "environment": "sandbox",
+                "transport_surface": "v3_affiliate_get_markets",
+                "request_fingerprint_sha256": "a" * 64,
+                "product_acquisition_sequence": sequence,
+                "response_sha256": f"{sequence:x}".rjust(64, "0"),
+                "snapshot_fingerprint_sha256": (
+                    f"{sequence + 100:x}".rjust(64, "0")
+                ),
+                "sequence_authority_id": "prophetx-rest-test-authority",
+                "sequence_source_id": (
+                    "prophetx:sandbox:rest:v3-affiliate-get-markets"
+                ),
+                "semantic_state_contract": (
+                    PROPHETX_REST_MARKET_STATE_CONTRACT
+                ),
+            },
         )
 
     def test_market_bus_persists_before_mirror_subscriber_runs(self) -> None:
@@ -90,6 +134,98 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertEqual(
             runtime.drain(max_items=2).changed_keys,
             (("provider-a", "event-1|market-1|selection-1"),),
+        )
+
+    def test_semantic_refresh_advances_liveness_without_downstream_invalidation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                mirror = MarketMirror()
+                runtime = BoundedMirrorInvalidationBuffer(mirror)
+                first = self.semantic_event(sequence=1)
+                refresh = self.semantic_event(
+                    sequence=2,
+                    observed_ts="2026-09-16T19:00:10+00:00",
+                    ingest_ts="2026-09-16T19:00:10+00:00",
+                )
+
+                admitted_first = store.append_batch_accepted((first,))
+                self.assertEqual(len(admitted_first), 1)
+                first_result = runtime.accept_persisted(admitted_first[0])
+                self.assertEqual(first_result.status, MirrorUpdate.APPLIED)
+                first_revision = mirror.view().revision
+                runtime.drain()
+
+                admitted_refresh = store.append_batch_accepted((refresh,))
+                self.assertEqual(len(admitted_refresh), 1)
+                refresh_result = runtime.accept_persisted(
+                    admitted_refresh[0]
+                )
+
+                self.assertEqual(
+                    refresh_result.status,
+                    MirrorUpdate.REFRESH,
+                )
+                self.assertEqual(runtime.pending_count, 0)
+                self.assertEqual(runtime.drain().changed_keys, ())
+                self.assertEqual(
+                    [event.sequence for event in store.events()],
+                    [1, 2],
+                )
+                self.assertEqual(
+                    store.current_by_source()[
+                        (refresh.source_id, refresh.quote_key)
+                    ].sequence,
+                    2,
+                )
+                latest = mirror.event_for_quote_key(
+                    refresh.source_id,
+                    refresh.quote_key,
+                )
+                self.assertIsNotNone(latest)
+                self.assertEqual(latest.sequence, 2)
+                self.assertEqual(
+                    mirror.view().revision,
+                    first_revision + 1,
+                )
+                active = mirror.active_view(
+                    as_of=datetime(
+                        2026, 9, 16, 19, 0, 10, 500000,
+                        tzinfo=timezone.utc,
+                    ),
+                    max_age=timedelta(seconds=1),
+                )
+                self.assertEqual(
+                    [event.sequence for event in active.events],
+                    [2],
+                )
+            finally:
+                store.close()
+
+    def test_semantic_change_still_invalidates_after_refresh(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        first = self.semantic_event(sequence=1)
+        refresh = self.semantic_event(sequence=2)
+        changed = self.semantic_event(sequence=3, odds="2.10")
+
+        self.assertEqual(
+            runtime.accept_persisted(first).status,
+            MirrorUpdate.APPLIED,
+        )
+        runtime.drain()
+        self.assertEqual(
+            runtime.accept_persisted(refresh).status,
+            MirrorUpdate.REFRESH,
+        )
+        self.assertEqual(runtime.pending_count, 0)
+        self.assertEqual(
+            runtime.accept_persisted(changed).status,
+            MirrorUpdate.APPLIED,
+        )
+        self.assertEqual(
+            runtime.drain().changed_keys,
+            ((changed.source_id, changed.quote_key),),
         )
 
     def test_distinct_key_overflow_promotes_to_full_refresh_without_losing_mirror_truth(self) -> None:

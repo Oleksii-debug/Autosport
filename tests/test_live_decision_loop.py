@@ -3970,6 +3970,90 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             execution_ledger._write_anchor_unlocked(execution_events)
             execution_ledger.events()
 
+            reordered_events = json.loads(json.dumps(execution_events))
+            scope_index = next(
+                index
+                for index, item in enumerate(reordered_events)
+                if item["event_type"] == "PAPER_EXPOSURE_SCOPE_BOUND"
+            )
+            reserve_index = next(
+                index
+                for index, item in enumerate(reordered_events)
+                if item["event_type"] == "RUN_RESERVED"
+            )
+            reordered_events[scope_index], reordered_events[reserve_index] = (
+                reordered_events[reserve_index],
+                reordered_events[scope_index],
+            )
+            previous_sha256 = None
+            for sequence, item in enumerate(reordered_events):
+                item["sequence"] = sequence
+                item["previous_sha256"] = previous_sha256
+                event_body = {
+                    key: value
+                    for key, value in item.items()
+                    if key != "event_sha256"
+                }
+                item["event_sha256"] = hashlib.sha256(
+                    json.dumps(
+                        event_body,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+                previous_sha256 = item["event_sha256"]
+            execution_ledger.path.write_text(
+                "".join(
+                    json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                    for item in reordered_events
+                ),
+                encoding="utf-8",
+            )
+            execution_ledger._write_anchor_unlocked(reordered_events)
+            execution_ledger.events()
+
+            chronology_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "scope/reservation chronology is invalid",
+            ):
+                self._loop(
+                    workspace,
+                    observer=chronology_observer,
+                    factory=_PositiveIntentFactory(
+                        self.INTENT_CONFIG_SHA256
+                    ),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                    book=resumed_book,
+                    authority=authority,
+                    paper_execution=resumed_execution,
+                )
+            self.assertEqual(chronology_observer.calls, 0)
+
+            execution_ledger.path.write_text(
+                "".join(
+                    json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                    for item in execution_events
+                ),
+                encoding="utf-8",
+            )
+            execution_ledger._write_anchor_unlocked(execution_events)
+            execution_ledger.events()
+
             scope_events = json.loads(json.dumps(execution_events))
             scope_index = next(
                 index

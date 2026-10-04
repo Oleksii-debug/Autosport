@@ -3289,10 +3289,22 @@ class PersistentLiveDecisionLoop:
                 "committed live decision lacks exact #623 reservation/scope evidence"
             )
 
-        reservation = reservations[0].get("payload")
+        reservation_event = reservations[0]
+        scope_event = scopes[0]
+        reservation = reservation_event.get("payload")
         if type(reservation) is not dict:
             raise DecisionLedgerIntegrityError(
                 "committed live decision #623 reservation is invalid"
+            )
+        scope_sequence = scope_event.get("sequence")
+        reservation_sequence = reservation_event.get("sequence")
+        if (
+            type(scope_sequence) is not int
+            or type(reservation_sequence) is not int
+            or scope_sequence >= reservation_sequence
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 scope/reservation chronology is invalid"
             )
         action_ids = reservation.get("action_ids")
         positive_count = sum(stake > 0 for stake in durable_plan.stakes)
@@ -3348,12 +3360,19 @@ class PersistentLiveDecisionLoop:
                 "committed live decision lacks terminal #623 completion"
             )
         completion = completions[0]
-        if any(
-            event.get("sequence", -1) > completion.get("sequence", -1)
-            for event in attempt_events
+        completion_sequence = completion.get("sequence")
+        if (
+            type(completion_sequence) is not int
+            or completion_sequence <= reservation_sequence
+            or any(
+                type(event.get("sequence")) is not int
+                or event["sequence"] <= reservation_sequence
+                or event["sequence"] >= completion_sequence
+                for event in attempt_events
+            )
         ):
             raise DecisionLedgerIntegrityError(
-                "committed live decision has #623 attempt after completion"
+                "committed live decision #623 event chronology is invalid"
             )
         completion_payload = completion.get("payload")
         if (

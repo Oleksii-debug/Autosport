@@ -87,22 +87,13 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             self.root / "scientific-registry.json"
         )
 
-        assessment = assess_betfair_historical_market_definition_authority(
+        self.outcome_authority = issue_synthetic_market_outcome_authority(
+            event_id="event-voc",
             market_id="1.23456789",
-            market_definition={
-                "eventId": "event-voc",
-                "eventTypeId": "2593174",
-                "marketType": "MATCH_ODDS",
-                "status": "OPEN",
-                "runners": [{"id": "101"}, {"id": "202"}],
-            },
-            provider_publish_at=T_AUTHORITY,
+            selection_ids=("101", "202"),
+            causal_cutoff=T_AUTHORITY,
             observed_at=T_AUTHORITY,
         )
-        self.assertEqual(assessment.status, OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE)
-        self.assertIsNotNone(assessment.authority)
-        self.outcome_authority = assessment.authority
-        assert self.outcome_authority is not None
 
         self.quote_keys = self.outcome_authority.quote_keys
         self.outcome_record = {
@@ -128,25 +119,14 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         (self.root / self.outcome_file).write_bytes(outcome_bytes)
         self.outcome_sha256 = hashlib.sha256(outcome_bytes).hexdigest()
 
-        second_assessment = assess_betfair_historical_market_definition_authority(
+        self.second_outcome_authority = issue_synthetic_market_outcome_authority(
+            event_id="event-voc-2",
             market_id="1.23456790",
-            market_definition={
-                "eventId": "event-voc-2",
-                "eventTypeId": "2593174",
-                "marketType": "MATCH_ODDS",
-                "status": "OPEN",
-                "runners": [{"id": "303"}, {"id": "404"}],
-            },
-            provider_publish_at=T_AUTHORITY,
+            selection_ids=("303", "404"),
+            causal_cutoff=T_AUTHORITY,
             observed_at=T_AUTHORITY,
         )
-        self.assertEqual(
-            second_assessment.status,
-            OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE,
-        )
-        self.assertIsNotNone(second_assessment.authority)
-        self.second_outcome_authority = second_assessment.authority
-        assert self.second_outcome_authority is not None
+
         second_quote_keys = self.second_outcome_authority.quote_keys
         second_record = {
             "schema_version": 2,

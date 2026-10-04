@@ -1009,11 +1009,39 @@ class BetdaqEconomicReadbackClient:
         *,
         _product_clock_dispatch=_canonical_product_receive_clock,
         _product_clock_dispatch_code=_canonical_product_receive_clock.__code__,
+        _request_builder=_request_xml,
+        _request_builder_code=_request_xml.__code__,
+        _request_builder_defaults=_request_xml.__defaults__,
+        _request_builder_kwdefaults=_request_xml.__kwdefaults__,
     ) -> tuple[ET.Element, BetdaqEconomicEvidence]:
         if method not in ("GetOrderDetails", "ListAccountPostings", "ListAccountPostingsById"):
             raise BetdaqEconomicReadbackError("method is outside economic READ allowlist")
         client = self._account_client
-        request_identity = _economic_request_identity(method, request_attributes)
+        if type(request_attributes) is not dict:
+            raise BetdaqEconomicReadbackError(
+                "economic request attributes must be an exact dict"
+            )
+        # Freeze the authority material before any callback or lock acquisition.
+        # The actual SOAP builder receives a private copy of this snapshot, never
+        # the caller-owned mapping used to mint request identity.
+        request_attributes_snapshot = dict(request_attributes)
+        request_identity = _economic_request_identity(
+            method,
+            request_attributes_snapshot,
+        )
+
+        def request_builder_current() -> bool:
+            live_builder = globals().get("_request_xml")
+            return (
+                live_builder is _request_builder
+                and getattr(live_builder, "__code__", None) is _request_builder_code
+                and getattr(_request_builder, "__code__", None) is _request_builder_code
+                and getattr(_request_builder, "__defaults__", None)
+                is _request_builder_defaults
+                and getattr(_request_builder, "__kwdefaults__", None)
+                is _request_builder_kwdefaults
+            )
+
         protocol_authority = _canonical_economic_protocol_authority()
         secure_endpoint, external_ns, _, _ = protocol_authority
         headers = {
@@ -1056,7 +1084,19 @@ class BetdaqEconomicReadbackClient:
                 raise BetdaqEconomicReadbackError(
                     "BETDAQ authenticated account context is not canonical"
                 )
-            body = _request_xml(credentials, method, request_attributes)
+            if not request_builder_current():
+                raise BetdaqEconomicReadbackError(
+                    "request body does not match exact economic request authority"
+                )
+            body = _request_builder(
+                credentials,
+                method,
+                dict(request_attributes_snapshot),
+            )
+            if not request_builder_current():
+                raise BetdaqEconomicReadbackError(
+                    "request body does not match exact economic request authority"
+                )
             transport = client._transport
             try:
                 require_transport, https_post = _canonical_economic_transport_dispatch()

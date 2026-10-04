@@ -3749,6 +3749,49 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 )
             self.assertEqual(resumed_observer.calls, 0)
 
+            extra_payload_envelope = json.loads(
+                json.dumps(original_envelope)
+            )
+            extra_payload_record = extra_payload_envelope["record"]
+            extra_payload_record["payload"]["forged_authority"] = {
+                "claim": "alternate execution truth"
+            }
+            canonical = JsonlDecisionLedger._canonical_record(
+                extra_payload_record
+            )
+            extra_payload_envelope["sha256"] = hashlib.sha256(
+                canonical.encode("utf-8")
+            ).hexdigest()
+            ledger_path.write_text(
+                json.dumps(
+                    extra_payload_envelope,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            JsonlDecisionLedger(ledger_path).verify_integrity()
+
+            extra_payload_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "payload schema is noncanonical",
+            ):
+                self._loop(
+                    workspace,
+                    observer=extra_payload_observer,
+                    factory=_PositiveIntentFactory(
+                        self.INTENT_CONFIG_SHA256
+                    ),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                    book=resumed_book,
+                    authority=authority,
+                    paper_execution=resumed_execution,
+                )
+            self.assertEqual(extra_payload_observer.calls, 0)
+
             model_envelope = json.loads(json.dumps(original_envelope))
             model_record = model_envelope["record"]
             model_record["payload"]["paper_execution"]["model_fingerprint"] = (

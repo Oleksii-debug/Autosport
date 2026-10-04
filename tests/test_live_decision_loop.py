@@ -3783,12 +3783,14 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             store = SQLiteMarketStore(workspace / "market.db")
             try:
-                store.append(
-                    self._event(
-                        selection="selection-a",
-                        sequence=2,
-                        odds="2.10",
-                        observed=self.START + timedelta(milliseconds=500),
+                MarketEventBus(store)._publish_many_live_ingestion(
+                    (
+                        self._event(
+                            selection="selection-a",
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START + timedelta(milliseconds=500),
+                        ),
                     )
                 )
             finally:
@@ -4232,12 +4234,14 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             store = SQLiteMarketStore(workspace / "market.db")
             try:
-                store.append(
-                    self._event(
-                        selection="selection-b",
-                        sequence=1,
-                        odds="3.00",
-                        observed=self.START + timedelta(seconds=2),
+                MarketEventBus(store)._publish_many_live_ingestion(
+                    (
+                        self._event(
+                            selection="selection-b",
+                            sequence=1,
+                            odds="3.00",
+                            observed=self.START + timedelta(seconds=2),
+                        ),
                     )
                 )
             finally:
@@ -4377,7 +4381,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             store = SQLiteMarketStore(workspace / "market.db")
             try:
-                store.append(quote)
+                MarketEventBus(store)._publish_many_live_ingestion((quote,))
             finally:
                 store.close()
 

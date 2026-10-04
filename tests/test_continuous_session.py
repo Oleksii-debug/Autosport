@@ -4665,6 +4665,141 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_direct_state_rejects_noncanonical_settlement_before_attribute_access(self) -> None:
+        class PoisonResolution:
+            def __getattribute__(self, name):
+                raise AssertionError(f"noncanonical settlement attribute accessed: {name}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-state-noncanonical",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            try:
+                state_path = root / "continuous_session.json"
+                before = state_path.read_text(encoding="utf-8")
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "settlement evidence must be canonical",
+                ):
+                    coordinator._state.record_settlement_evidence(
+                        settlement_evidence=(PoisonResolution(),),
+                    )
+                self.assertEqual(state_path.read_text(encoding="utf-8"), before)
+            finally:
+                store.close()
+
+    def test_direct_state_rejects_duplicate_settlement_before_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-state-duplicate-publish",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:state-duplicate-publish",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="state-duplicate-publish-evidence",
+                evidence_sha256="3" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                state_path = root / "continuous_session.json"
+                before = state_path.read_text(encoding="utf-8")
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "settlement evidence repeats evidence_id",
+                ):
+                    coordinator._state.record_settlement_evidence(
+                        settlement_evidence=(resolution, resolution),
+                    )
+                self.assertEqual(state_path.read_text(encoding="utf-8"), before)
+                self.assertEqual(coordinator.status().settlement_evidence, ())
+                self.assertEqual(
+                    coordinator.status().pending_settlement_evidence_ids,
+                    (),
+                )
+            finally:
+                store.close()
+
+    def test_duplicate_pending_settlement_cannot_complete_or_advance_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-state-duplicate-completion",
+                        position=1,
+                        events=(_event(phase=EventPhase.PRE_MATCH),),
+                    )
+                ),
+                clock,
+            )
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:state-duplicate-completion",
+                quote_outcomes={"event-1|winner|home": "win"},
+                evidence_id="state-duplicate-completion-evidence",
+                evidence_sha256="4" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            try:
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                before = coordinator.status()
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "settlement evidence repeats evidence_id",
+                ):
+                    coordinator._state.complete_pending_settlement_commit(
+                        settlement_evidence=(resolution, resolution),
+                        retain_pending_evidence_ids=(),
+                    )
+                after_completion = coordinator.status()
+                self.assertEqual(after_completion, before)
+
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "settlement evidence repeats evidence_id",
+                ):
+                    coordinator._state.record_success(
+                        at=clock(),
+                        full_refresh=False,
+                        settlement_evidence=(resolution, resolution),
+                        retain_pending_evidence_ids=(),
+                    )
+                after_success = coordinator.status()
+                self.assertEqual(after_success, before)
+            finally:
+                store.close()
+
     def test_direct_state_rejects_mutated_settlement_before_durable_publish(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

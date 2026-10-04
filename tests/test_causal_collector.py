@@ -525,6 +525,70 @@ class CollectorDeltaTests(unittest.TestCase):
                 (receipt,),
             )
 
+    def test_verified_completed_receipts_require_contiguous_health_predecessor(self):
+        first_event = MarketEvent.from_dict(event_payload())
+        second_payload = event_payload(event_id="e2")
+        second_event = MarketEvent.from_dict(second_payload)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "canonical-application.json"
+            health_path = root / "health.json"
+            market_store = SQLiteMarketStore(root / "market.db")
+            application = CanonicalDesktopApplication(
+                MarketEventBus(market_store),
+                SourceHealthStore(health_path),
+                state_path,
+                clock=lambda: "2026-01-01T00:00:05+00:00",
+            )
+            first_delta = self.make_delta(
+                delta_id="d1",
+                cursor_position=1,
+                payload=first_event.to_dict(),
+            )
+            second_delta = self.make_delta(
+                delta_id="d2",
+                cursor_position=2,
+                payload=second_payload,
+            )
+            try:
+                first_receipt = application.apply(first_delta, first_event)
+                second_receipt = application.apply(second_delta, second_event)
+                self.assertEqual(
+                    application.verified_completed_receipts_for_source("source-x"),
+                    (first_receipt, second_receipt),
+                )
+            finally:
+                market_store.close()
+
+            corrupted = json.loads(state_path.read_text(encoding="utf-8"))
+            second_item = corrupted["applications"][second_delta.delta_id]
+            self.assertEqual(second_item["health_before"]["last_cursor"], "1")
+            second_item["health_before"]["last_cursor"] = "forged-prior-cursor"
+            state_path.write_text(
+                json.dumps(
+                    corrupted,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                    allow_nan=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            reopened = CanonicalDesktopApplication(
+                object(),
+                SourceHealthStore(health_path),
+                state_path,
+                clock=lambda: "2026-01-01T00:00:06+00:00",
+            )
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "health transition is not contiguous with durable history",
+            ):
+                reopened.verified_completed_receipts_for_source("source-x")
+
     def test_checkpoint_first_open_preserves_peer_state_created_at_lock_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "desktop.json"

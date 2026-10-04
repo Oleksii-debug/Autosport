@@ -585,6 +585,8 @@ class _CanonicalDesktopApplicationStore(_JsonAtomicStore):
             completed = _instant(completed_at, "completed_at")
             health_before = self._health_state(item.get("health_before"))
             health_after = self._health_state(item.get("health_after"))
+            health_before.validate()
+            health_after.validate()
             receipt = DesktopApplicationReceipt(
                 delta_id=delta_id,
                 canonical_event_digest=item.get("canonical_event_digest"),
@@ -880,13 +882,34 @@ class CanonicalDesktopApplication:
                     "completed canonical application receipt conflicts with journal evidence"
                 )
             expected_health = item.get("health_after")
-            if not any(
-                type(entry) is dict and entry.get("state") == expected_health
-                for entry in entries
-            ):
+            matching_history_indexes = [
+                index
+                for index, entry in enumerate(entries)
+                if type(entry) is dict and entry.get("state") == expected_health
+            ]
+            if len(matching_history_indexes) != 1:
                 raise ApplicationReceiptError(
-                    "completed canonical application lacks durable health history evidence"
+                    "completed canonical application lacks unique durable health history evidence"
                 )
+            history_index = matching_history_indexes[0]
+            expected_before = item.get("health_before")
+            if history_index == 0:
+                if (
+                    type(expected_before) is not dict
+                    or expected_before.get("poll_count") != 0
+                ):
+                    raise ApplicationReceiptError(
+                        "first completed canonical application does not start from pristine health history"
+                    )
+            else:
+                previous_entry = entries[history_index - 1]
+                if (
+                    type(previous_entry) is not dict
+                    or previous_entry.get("state") != expected_before
+                ):
+                    raise ApplicationReceiptError(
+                        "completed canonical application health transition is not contiguous with durable history"
+                    )
         return receipts
 
     @staticmethod

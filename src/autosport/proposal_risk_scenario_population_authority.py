@@ -2078,12 +2078,24 @@ def _make_public_operations(
     _issue_core,
     _resolve_core,
 ):
+    _bind_code = getattr(_bind_identity, "__code__", None)
+    _issue_core_code = getattr(_issue_core, "__code__", None)
+    _resolve_core_code = getattr(_resolve_core, "__code__", None)
+
     def issue(
         workspace: Path,
         precommit: ProductProposalRiskEvaluationPrecommit,
         terminal_population: ProductProposalTargetTerminalPopulation,
         members: tuple[CounterfactualScenarioMemberBinding, ...],
     ) -> ProductProposalRiskScenarioPopulation:
+        if (
+            getattr(_bind_identity, "__code__", None) is not _bind_code
+            or getattr(_issue_core, "__code__", None)
+            is not _issue_core_code
+        ):
+            raise ProductProposalRiskScenarioPopulationError(
+                "scenario population public issue closure changed"
+            )
         instance = _issue_core(
             workspace,
             precommit,
@@ -2098,6 +2110,14 @@ def _make_public_operations(
         precommit: ProductProposalRiskEvaluationPrecommit,
         terminal_population: ProductProposalTargetTerminalPopulation,
     ) -> ProductProposalRiskScenarioPopulation:
+        if (
+            getattr(_bind_identity, "__code__", None) is not _bind_code
+            or getattr(_resolve_core, "__code__", None)
+            is not _resolve_core_code
+        ):
+            raise ProductProposalRiskScenarioPopulationError(
+                "scenario population public resolve closure changed"
+            )
         instance = _resolve_core(
             workspace,
             precommit,

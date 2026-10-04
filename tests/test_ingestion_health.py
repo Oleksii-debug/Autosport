@@ -246,6 +246,46 @@ class IngestionHealthTests(unittest.TestCase):
             self.assertEqual(health.get("source").status, "degraded")
             store.close()
 
+    def test_missing_source_time_uses_observation_for_freshness_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, health = self._engine(tmp)
+            stale = ProviderQuote(
+                provider_event_id="event-1",
+                provider_market_id="winner",
+                provider_selection_id="stale",
+                decimal_odds=Decimal("2.0"),
+                observed_ts="2026-09-12T11:57:00+00:00",
+                sequence=1,
+                source_ts=None,
+            )
+            future = ProviderQuote(
+                provider_event_id="event-1",
+                provider_market_id="winner",
+                provider_selection_id="future",
+                decimal_odds=Decimal("2.0"),
+                observed_ts="2026-09-12T12:00:10+00:00",
+                sequence=2,
+                source_ts=None,
+            )
+            provider = StaticProvider(
+                "source",
+                [ProviderBatch("source", (stale, future))],
+            )
+
+            stats = engine.poll_once(provider, max_items=10)
+
+            self.assertEqual(stats.accepted, 2)
+            self.assertEqual(stats.rejected, 0)
+            self.assertEqual(
+                set(stats.quality_flags),
+                {"STALE_SOURCE", "FUTURE_CLOCK_SKEW"},
+            )
+            state = health.get("source")
+            self.assertEqual(state.status, "degraded")
+            self.assertIsNone(state.latest_source_ts)
+            self.assertEqual(len(store.events()), 2)
+            store.close()
+
     def test_source_time_regression_is_detected_without_lowering_high_water_mark(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine, store, health = self._engine(tmp)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -8,6 +9,10 @@ from threading import RLock
 
 from .domain import MarketEvent, _quote_identity
 from .storage import SQLiteMarketStore
+
+
+class MarketMirrorRevisionChanged(RuntimeError):
+    """The canonical mirror advanced past a decision's captured revision."""
 
 
 class MirrorUpdate(str, Enum):
@@ -48,6 +53,38 @@ class MarketMirror:
         self._latest: dict[tuple[str, str], MarketEvent] = {}
         self._revision = 0
         self._lock = RLock()
+        self._publication_revision_guard: int | None = None
+
+    @property
+    def revision(self) -> int:
+        """Return the exact current mirror revision without copying market state."""
+        with self._lock:
+            return self._revision
+
+    @contextmanager
+    def hold_revision(self, expected_revision: int) -> Iterator[None]:
+        """Linearize a short publication step against one captured mirror revision."""
+
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("expected_revision must be a non-negative integer")
+        with self._lock:
+            if self._publication_revision_guard is not None:
+                raise MarketMirrorRevisionChanged(
+                    "market mirror revision guard is already active"
+                )
+            if self._revision != expected_revision:
+                raise MarketMirrorRevisionChanged(
+                    "market mirror revision changed before decision publication"
+                )
+            self._publication_revision_guard = expected_revision
+            try:
+                yield
+                if self._revision != expected_revision:
+                    raise MarketMirrorRevisionChanged(
+                        "market mirror revision changed during decision publication"
+                    )
+            finally:
+                self._publication_revision_guard = None
 
     @staticmethod
     def _key(event: MarketEvent) -> tuple[str, str]:
@@ -120,6 +157,33 @@ class MarketMirror:
             raise ValueError("max_age must be non-negative")
         return as_of.astimezone(timezone.utc), max_age
 
+    @classmethod
+    def _decision_visible_event(
+        cls,
+        event: MarketEvent,
+        *,
+        boundary: datetime,
+        max_age: timedelta,
+    ) -> bool:
+        """Require provider freshness and local causal availability at one cutoff."""
+
+        if event.status not in cls._DECISION_ELIGIBLE_STATUSES:
+            return False
+        source_time = cls._utc_timestamp(event.source_ts or event.observed_ts)
+        observed_time = cls._utc_timestamp(event.observed_ts)
+        ingest_time = cls._utc_timestamp(event.ingest_ts)
+        if (
+            source_time is None
+            or observed_time is None
+            or ingest_time is None
+            or source_time > boundary
+            or observed_time > boundary
+            or ingest_time > boundary
+        ):
+            return False
+        age = boundary - source_time
+        return timedelta(0) <= age <= max_age
+
     def apply(self, event: MarketEvent) -> MirrorApplyResult:
         """Apply one event iff it advances source-local sequence state.
 
@@ -133,6 +197,10 @@ class MarketMirror:
 
         key = self._key(event)
         with self._lock:
+            if self._publication_revision_guard is not None:
+                raise MarketMirrorRevisionChanged(
+                    "market mirror mutation is blocked during decision publication"
+                )
             previous = self._latest.get(key)
             if previous is None:
                 self._latest[key] = self._snapshot_event(event)
@@ -195,8 +263,16 @@ class MarketMirror:
         if not isinstance(event, MarketEvent):
             raise TypeError("event must be a MarketEvent")
 
-        store.append(event)
-        return self.apply(event)
+        with self._lock:
+            if self._publication_revision_guard is not None:
+                raise MarketMirrorRevisionChanged(
+                    "market mirror persistence is blocked during decision publication"
+                )
+            # Keep durable append and live revision advance in one mirror critical
+            # section. A decision publication guard can therefore linearize before
+            # the append or after the applied revision, never between them.
+            store.append(event)
+            return self.apply(event)
 
     def view(
         self,
@@ -267,17 +343,16 @@ class MarketMirror:
             market_ids=market_ids,
             selection_ids=selection_ids,
         )
-        eligible: list[MarketEvent] = []
-        for event in captured.events:
-            if event.status not in self._DECISION_ELIGIBLE_STATUSES:
-                continue
-            timestamp = self._utc_timestamp(event.source_ts or event.observed_ts)
-            if timestamp is None:
-                continue
-            age = boundary - timestamp
-            if timedelta(0) <= age <= age_limit:
-                eligible.append(event)
-        return MirrorSnapshot(revision=captured.revision, events=tuple(eligible))
+        eligible = tuple(
+            event
+            for event in captured.events
+            if self._decision_visible_event(
+                event,
+                boundary=boundary,
+                max_age=age_limit,
+            )
+        )
+        return MirrorSnapshot(revision=captured.revision, events=eligible)
 
     def event_for_quote_key(
         self,
@@ -334,17 +409,16 @@ class MarketMirror:
                 if key in self._latest
             )
 
-        eligible: list[MarketEvent] = []
-        for event in events:
-            if event.status not in self._DECISION_ELIGIBLE_STATUSES:
-                continue
-            timestamp = self._utc_timestamp(event.source_ts or event.observed_ts)
-            if timestamp is None:
-                continue
-            age = boundary - timestamp
-            if timedelta(0) <= age <= age_limit:
-                eligible.append(event)
-        return MirrorSnapshot(revision=revision, events=tuple(eligible))
+        eligible = tuple(
+            event
+            for event in events
+            if self._decision_visible_event(
+                event,
+                boundary=boundary,
+                max_age=age_limit,
+            )
+        )
+        return MirrorSnapshot(revision=revision, events=eligible)
 
     def snapshot(self) -> tuple[MarketEvent, ...]:
         """Return a deterministic, ownership-isolated snapshot by source and quote."""
@@ -431,17 +505,20 @@ class MarketMirror:
 
     @classmethod
     def from_store(cls, store: SQLiteMarketStore) -> "MarketMirror":
-        """Restore latest source-specific mirror state from authoritative history.
+        """Restore latest source-specific state from the canonical current projection.
 
-        The canonical store remains the only writer/owner of durable market history.
-        Replaying ``store.events()`` reconstructs source-local sequence protection after
-        restart without letting this mirror mutate the store's shared current projection.
+        SQLiteMarketStore rebuilds and validates current_quotes from append-only history
+        when it opens. The mirror needs only the latest provider sequence for each
+        source/quote key to preserve stale-update protection after restart, so replaying
+        every historical observation here would add unbounded startup cost without
+        adding authority.
         """
         if not isinstance(store, SQLiteMarketStore):
             raise TypeError("store must be a SQLiteMarketStore")
         mirror = cls()
-        for event in store.events():
-            mirror.apply(event)
+        current = store.current_by_source()
+        for key in sorted(current):
+            mirror.apply(current[key])
         return mirror
 
     def __len__(self) -> int:

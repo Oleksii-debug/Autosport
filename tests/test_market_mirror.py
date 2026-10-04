@@ -3,9 +3,10 @@ from decimal import Decimal
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from autosport.domain import MarketEvent
-from autosport.market_mirror import MarketMirror, MirrorUpdate
+from autosport.market_mirror import MarketMirror, MarketMirrorRevisionChanged, MirrorUpdate
 from autosport.storage import SQLiteMarketStore
 
 
@@ -391,6 +392,56 @@ class MarketMirrorTests(unittest.TestCase):
             ("source-fresh",),
         )
 
+    def test_active_views_exclude_future_local_receipt_with_old_provider_time(self) -> None:
+        mirror = MarketMirror()
+        future_local = self.event(
+            selection="late-local",
+            observed_ts="2026-09-16T19:00:01+00:00",
+            source_ts="2026-09-16T18:59:30+00:00",
+            ingest_ts="2026-09-16T19:00:02+00:00",
+        )
+        mirror.apply(future_local)
+        boundary = datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc)
+
+        full = mirror.active_view(
+            as_of=boundary,
+            max_age=timedelta(minutes=5),
+        )
+        focused = mirror.active_view_for_keys(
+            ((future_local.source_id, future_local.quote_key),),
+            as_of=boundary,
+            max_age=timedelta(minutes=5),
+        )
+
+        self.assertEqual(full.events, ())
+        self.assertEqual(focused.events, ())
+        self.assertEqual(mirror.view().events, (future_local,))
+
+    def test_active_views_exclude_future_ingest_with_available_observation(self) -> None:
+        mirror = MarketMirror()
+        late_ingest = self.event(
+            selection="late-ingest",
+            observed_ts="2026-09-16T18:59:40+00:00",
+            source_ts="2026-09-16T18:59:30+00:00",
+            ingest_ts="2026-09-16T19:00:01+00:00",
+        )
+        mirror.apply(late_ingest)
+        boundary = datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc)
+
+        full = mirror.active_view(
+            as_of=boundary,
+            max_age=timedelta(minutes=5),
+        )
+        focused = mirror.active_view_for_keys(
+            ((late_ingest.source_id, late_ingest.quote_key),),
+            as_of=boundary,
+            max_age=timedelta(minutes=5),
+        )
+
+        self.assertEqual(full.events, ())
+        self.assertEqual(focused.events, ())
+        self.assertEqual(mirror.view().events, (late_ingest,))
+
     def test_active_snapshot_requires_aware_boundary_and_nonnegative_age(self) -> None:
         mirror = MarketMirror()
         mirror.apply(self.event())
@@ -462,6 +513,56 @@ class MarketMirrorTests(unittest.TestCase):
                 )
             finally:
                 reopened_store.close()
+
+    def test_from_store_uses_validated_current_projection_not_full_history_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                store.append_many(
+                    [
+                        self.event(sequence=1, odds="2.00"),
+                        self.event(sequence=2, odds="2.20"),
+                        self.event(
+                            source="provider-b",
+                            sequence=1,
+                            odds="1.80",
+                        ),
+                    ]
+                )
+                with patch.object(
+                    store,
+                    "events",
+                    side_effect=AssertionError(
+                        "restart mirror must not scan append-only history"
+                    ),
+                ):
+                    restored = MarketMirror.from_store(store)
+
+                self.assertEqual(len(restored), 2)
+                self.assertEqual(
+                    restored.get(
+                        "provider-a",
+                        "event-1",
+                        "market-1",
+                        "selection-1",
+                    ).sequence,
+                    2,
+                )
+                self.assertEqual(
+                    restored.get(
+                        "provider-b",
+                        "event-1",
+                        "market-1",
+                        "selection-1",
+                    ).sequence,
+                    1,
+                )
+                stale = restored.apply(
+                    self.event(sequence=1, odds="9.00")
+                )
+                self.assertEqual(stale.status, MirrorUpdate.STALE)
+            finally:
+                store.close()
 
     def test_from_store_reconstructs_multiple_providers_from_authoritative_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -617,6 +718,47 @@ class MarketMirrorTests(unittest.TestCase):
                     tuple(event.selection_id for event in replay.events),
                     ("wanted",),
                 )
+            finally:
+                store.close()
+
+
+    def test_revision_guard_blocks_reentrant_live_mutation(self) -> None:
+        mirror = MarketMirror()
+        first = self.event(sequence=1, odds="2.00")
+        second = self.event(sequence=2, odds="2.20")
+        mirror.apply(first)
+
+        with mirror.hold_revision(1):
+            with self.assertRaisesRegex(
+                MarketMirrorRevisionChanged,
+                "mutation is blocked during decision publication",
+            ):
+                mirror.apply(second)
+
+        self.assertEqual(mirror.revision, 1)
+        self.assertEqual(mirror.snapshot(), (first,))
+
+    def test_revision_guard_blocks_durable_append_before_it_can_outrun_mirror(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            mirror = MarketMirror()
+            first = self.event(sequence=1, odds="2.00")
+            second = self.event(sequence=2, odds="2.20")
+            try:
+                applied = mirror.persist_and_apply(store, first)
+                self.assertEqual(applied.status, MirrorUpdate.APPLIED)
+                self.assertEqual(len(store.events()), 1)
+
+                with mirror.hold_revision(1):
+                    with self.assertRaisesRegex(
+                        MarketMirrorRevisionChanged,
+                        "persistence is blocked during decision publication",
+                    ):
+                        mirror.persist_and_apply(store, second)
+
+                self.assertEqual(mirror.revision, 1)
+                self.assertEqual(mirror.snapshot(), (first,))
+                self.assertEqual(store.events(), [first])
             finally:
                 store.close()
 

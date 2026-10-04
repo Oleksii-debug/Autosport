@@ -986,7 +986,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             "dependency_index",
             "paper_book_path",
             "outcome_authority",
+            "_outcome_resolver",
             "settlement_learning_handoff",
+            "_settlement_prepare",
+            "_settlement_reconcile",
             "clock",
             "required_history",
             "max_invalidation_batches_per_tick",
@@ -1038,19 +1041,34 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             )
         if not isinstance(dependency_index, FocusedMirrorDependencyIndex):
             raise TypeError("dependency_index must be FocusedMirrorDependencyIndex")
-        if outcome_authority is not None and not callable(
-            getattr(outcome_authority, "resolve", None)
-        ):
+        outcome_resolver = (
+            None
+            if outcome_authority is None
+            else getattr(outcome_authority, "resolve", None)
+        )
+        if outcome_resolver is not None and not callable(outcome_resolver):
             raise TypeError("outcome_authority.resolve must be callable")
+        if outcome_authority is not None and outcome_resolver is None:
+            raise TypeError("outcome_authority.resolve must be callable")
+
+        settlement_prepare = None
+        settlement_reconcile = None
         if settlement_learning_handoff is not None:
-            if not callable(
-                getattr(settlement_learning_handoff, "reconcile_after_settlement", None)
-            ):
+            settlement_reconcile = getattr(
+                settlement_learning_handoff,
+                "reconcile_after_settlement",
+                None,
+            )
+            if not callable(settlement_reconcile):
                 raise TypeError(
                     "settlement_learning_handoff.reconcile_after_settlement must be callable"
                 )
-            prepare = getattr(settlement_learning_handoff, "prepare_settlement", None)
-            if prepare is not None and not callable(prepare):
+            settlement_prepare = getattr(
+                settlement_learning_handoff,
+                "prepare_settlement",
+                None,
+            )
+            if settlement_prepare is not None and not callable(settlement_prepare):
                 raise TypeError(
                     "settlement_learning_handoff.prepare_settlement must be callable"
                 )
@@ -1069,7 +1087,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             else Path(paper_book_path)
         )
         self.outcome_authority = outcome_authority
+        self._outcome_resolver = outcome_resolver
         self.settlement_learning_handoff = settlement_learning_handoff
+        self._settlement_prepare = settlement_prepare
+        self._settlement_reconcile = settlement_reconcile
         self.clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
         if isinstance(required_history, timedelta) and required_history.total_seconds() < 0:
             raise ValueError("required_history cannot be negative")
@@ -1215,7 +1236,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _settlement_resolution_type: type[SettlementResolution],
         _settlement_resolution_validate: Callable[..., None],
     ) -> tuple[SettlementResolution, ...]:
-        if self.outcome_authority is None:
+        if self._outcome_resolver is None:
             return ()
         resolutions: list[SettlementResolution] = []
         for record in self.lifecycle.records():
@@ -1226,7 +1247,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 continue
             if record.phase is not EventPhase.COMPLETED or record.settlement_ref is None:
                 continue
-            resolution = self.outcome_authority.resolve(record, as_of=as_of)
+            resolution = self._outcome_resolver(record, as_of=as_of)
             if resolution is None:
                 continue
             if type(resolution) is not _settlement_resolution_type:
@@ -1451,24 +1472,18 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             self._state.record_settlement_evidence(
                 settlement_evidence=resolutions
             )
-            if self.settlement_learning_handoff is not None:
-                prepare = getattr(
-                    self.settlement_learning_handoff,
-                    "prepare_settlement",
-                    None,
+            if self._settlement_prepare is not None:
+                self._settlement_prepare(
+                    paper_book_path=self.paper_book_path,
+                    resolutions=resolutions,
+                    at=now,
                 )
-                if prepare is not None:
-                    prepare(
-                        paper_book_path=self.paper_book_path,
-                        resolutions=resolutions,
-                        at=now,
-                    )
             settled, evidence_ids = self._settle(
                 resolutions=resolutions,
                 settled_at=now,
             )
-            if self.settlement_learning_handoff is not None:
-                self.settlement_learning_handoff.reconcile_after_settlement(
+            if self._settlement_reconcile is not None:
+                self._settlement_reconcile(
                     paper_book_path=self.paper_book_path,
                     resolutions=resolutions,
                     settled_ticket_ids=settled,

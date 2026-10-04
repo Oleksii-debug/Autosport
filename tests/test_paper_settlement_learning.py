@@ -2962,6 +2962,111 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 )
 
 
+    def test_reconcile_keeps_learner_bundle_frozen_to_prepared_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legs = (
+                TicketLeg(
+                    event_id="event-1",
+                    market_id="winner",
+                    selection_id="home",
+                    locked_odds=Decimal("2.00"),
+                    sport="table_tennis",
+                ),
+                TicketLeg(
+                    event_id="event-2",
+                    market_id="winner",
+                    selection_id="away",
+                    locked_odds=Decimal("1.80"),
+                    sport="table_tennis",
+                ),
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                _runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=legs)
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            prepared = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="result:prepared-loss",
+                quote_outcomes={legs[0].quote_key: "loss"},
+                evidence_id="prepared-loss-evidence",
+                evidence_sha256="1" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            self.assertEqual(
+                bridge.prepare_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(prepared,),
+                    at="2026-09-19T21:20:00+00:00",
+                ),
+                (ticket.ticket_id,),
+            )
+
+            book = PaperBook.load(root / "paper_book.json")
+            engine = SettlementEngine()
+            engine.record({legs[0].quote_key: "loss"})
+            self.assertEqual(engine.settle_ready(book), [ticket.ticket_id])
+            book.save(root / "paper_book.json")
+
+            later = SettlementResolution(
+                event_identity="provider-a:event-2",
+                settlement_ref="result:later-win",
+                quote_outcomes={legs[1].quote_key: "win"},
+                evidence_id="later-win-evidence",
+                evidence_sha256="2" * 64,
+                available_at="2026-09-19T21:19:45+00:00",
+            )
+            acknowledged = bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=(later,),
+                settled_ticket_ids=(ticket.ticket_id,),
+                at="2026-09-19T21:20:00+00:00",
+            )
+            self.assertEqual(len(acknowledged), 1)
+
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            binding = durable["bindings"][ticket.ticket_id]
+            intent = binding["settlement_intent"]
+            outbox = binding["outbox"]
+            self.assertEqual(
+                outbox["settlement_bundle_sha256"],
+                intent["settlement_bundle_sha256"],
+            )
+            self.assertEqual(
+                outbox["settlement_evidence"],
+                intent["settlement_evidence"],
+            )
+            self.assertEqual(
+                outbox["known_quote_outcomes"],
+                intent["known_quote_outcomes"],
+            )
+            self.assertEqual(
+                outbox["outcome"]["revealed_at"],
+                "2026-09-19T21:19:30Z",
+            )
+            self.assertEqual(
+                {item["evidence_id"] for item in outbox["settlement_evidence"]},
+                {"prepared-loss-evidence"},
+            )
+
     def test_prepared_settlement_resolutions_survive_restart_before_paperbook_commit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

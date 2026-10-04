@@ -33,6 +33,20 @@ class MirrorInvalidationBatch:
     has_more: bool
     semantic_refresh_keys: tuple[MirrorQuoteKey, ...] = ()
 
+    def __post_init__(self) -> None:
+        changed = frozenset(self.changed_keys)
+        semantic_refresh = frozenset(self.semantic_refresh_keys)
+        if not semantic_refresh.issubset(changed):
+            raise ValueError(
+                "semantic refresh keys must be a subset of changed invalidation keys"
+            )
+        if self.full_refresh_required and (
+            self.changed_keys or self.semantic_refresh_keys or self.has_more
+        ):
+            raise ValueError(
+                "full-refresh invalidation must not carry bounded key state"
+            )
+
 
 @dataclass(frozen=True, slots=True)
 class FocusedMirrorDependency:

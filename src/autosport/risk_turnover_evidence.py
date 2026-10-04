@@ -13,18 +13,63 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, DecimalException, Inexact, InvalidOperation, localcontext
+from pathlib import Path
+from types import FunctionType
 from typing import Final
 
 from .economic_goal_provenance import provenance_for
 from .economic_goal_store import EconomicGoalStore
 from .paper import PaperBook
 from .risk_day_window import ProductDayRiskWindow, ProductDayRiskWindowStore
+from ._paperbook_current_binding_verifier import (
+    seal_current_binding_consumer as _seal_current_binding_consumer,
+)
 
 
 _SCHEMA: Final = "autosport.risk.paper-day-turnover-evidence"
 _SCHEMA_VERSION: Final = 1
 _METRIC_CLASS: Final = "PAPER_ACCEPTED_TURNOVER"
 _SCOPE_CLASS: Final = "UTC_DAY"
+
+_TURNOVER_PATH_EXPANDUSER = Path.expanduser
+_TURNOVER_PATH_EXPANDUSER_CODE = getattr(_TURNOVER_PATH_EXPANDUSER, "__code__", None)
+_TURNOVER_PATH_RESOLVE = Path.resolve
+_TURNOVER_PATH_RESOLVE_CODE = getattr(_TURNOVER_PATH_RESOLVE, "__code__", None)
+_TURNOVER_PATH_TRUEDIV = Path.__truediv__
+_TURNOVER_PATH_TRUEDIV_CODE = getattr(_TURNOVER_PATH_TRUEDIV, "__code__", None)
+_TURNOVER_CANONICAL_PATH_TYPE = type(Path())
+
+
+def _require_turnover_path_dispatch() -> None:
+    for current, expected, expected_code in (
+        (
+            Path.expanduser,
+            _TURNOVER_PATH_EXPANDUSER,
+            _TURNOVER_PATH_EXPANDUSER_CODE,
+        ),
+        (Path.resolve, _TURNOVER_PATH_RESOLVE, _TURNOVER_PATH_RESOLVE_CODE),
+        (Path.__truediv__, _TURNOVER_PATH_TRUEDIV, _TURNOVER_PATH_TRUEDIV_CODE),
+    ):
+        if (
+            current is not expected
+            or getattr(current, "__code__", None) is not expected_code
+        ):
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "turnover workspace path authority changed"
+            )
+
+
+def _require_current_paper_book_binding(book: PaperBook, book_path) -> None:
+    """Consume only the existing sealed PaperBook generation/path authority."""
+
+    _REQUIRE_CURRENT_BINDING(book, book_path)
+
+
+_PAPERBOOK_REQUIRE_CURRENT = _seal_current_binding_consumer(
+    _require_current_paper_book_binding
+)
+del _require_current_paper_book_binding
+del _seal_current_binding_consumer
 
 
 class PaperDayTurnoverEvidenceError(RuntimeError):
@@ -377,7 +422,21 @@ class PaperDayTurnoverEvidence:
         return False
 
 
-class PaperDayTurnoverResolver:
+class _PaperDayTurnoverResolverMeta(type):
+    """Seal positive evidence resolver entrypoint descriptors."""
+
+    def __setattr__(cls, name: str, value: object) -> None:
+        if name in {"resolve", "require_current"} and name in cls.__dict__:
+            raise TypeError("canonical PaperDayTurnoverResolver authority method is sealed")
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name: str) -> None:
+        if name in {"resolve", "require_current"} and name in cls.__dict__:
+            raise TypeError("canonical PaperDayTurnoverResolver authority method is sealed")
+        super().__delattr__(name)
+
+
+class PaperDayTurnoverResolver(metaclass=_PaperDayTurnoverResolverMeta):
     """Derive and re-resolve read-only PAPER UTC-day turnover evidence."""
 
     @classmethod
@@ -389,6 +448,10 @@ class PaperDayTurnoverResolver:
         window_store: ProductDayRiskWindowStore,
         window_evidence: ProductDayRiskWindow,
     ) -> PaperDayTurnoverEvidence:
+        if cls is not PaperDayTurnoverResolver:
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "turnover resolver must be the canonical exact resolver class"
+            )
         if type(book) is not PaperBook:
             raise PaperDayTurnoverEvidenceIncompleteError(
                 "book must be canonical PaperBook"
@@ -405,16 +468,69 @@ class PaperDayTurnoverResolver:
             raise PaperDayTurnoverEvidenceIncompleteError(
                 "window_evidence must be canonical ProductDayRiskWindow"
             )
+        _require_turnover_path_dispatch()
         if (
-            goal_store.workspace.expanduser().resolve(strict=False)
-            != window_store.workspace
+            type(goal_store.workspace) is not _TURNOVER_CANONICAL_PATH_TYPE
+            or type(window_store.workspace) is not _TURNOVER_CANONICAL_PATH_TYPE
+            or type(goal_store.path) is not _TURNOVER_CANONICAL_PATH_TYPE
+            or type(window_store.state_path) is not _TURNOVER_CANONICAL_PATH_TYPE
+        ):
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "turnover workspace paths must use the canonical Path type"
+            )
+        goal_workspace = _TURNOVER_PATH_RESOLVE(
+            _TURNOVER_PATH_EXPANDUSER(goal_store.workspace),
+            strict=False,
+        )
+        window_workspace = _TURNOVER_PATH_RESOLVE(
+            _TURNOVER_PATH_EXPANDUSER(window_store.workspace),
+            strict=False,
+        )
+        if (
+            type(goal_workspace) is not _TURNOVER_CANONICAL_PATH_TYPE
+            or type(window_workspace) is not _TURNOVER_CANONICAL_PATH_TYPE
+            or goal_workspace != window_workspace
         ):
             raise PaperDayTurnoverEvidenceIncompleteError(
                 "economic goal and risk day authority must share one canonical workspace"
             )
+        expected_goal_path = _TURNOVER_PATH_TRUEDIV(
+            goal_workspace,
+            EconomicGoalStore.FILE_NAME,
+        )
+        if goal_store.path != expected_goal_path:
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "economic goal store path is not canonical for its workspace"
+            )
+        expected_day_path = _TURNOVER_PATH_TRUEDIV(
+            _TURNOVER_PATH_TRUEDIV(window_workspace, ".autosport"),
+            "risk_day_window.json",
+        )
+        if window_store.state_path != expected_day_path:
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "risk day store path is not canonical for its workspace"
+            )
+
+        book_path = _TURNOVER_PATH_TRUEDIV(goal_workspace, "paper_book.json")
+        try:
+            # Positive turnover evidence is a projection of the current durable
+            # workspace PaperBook generation, never a caller-selected in-memory
+            # history. Require the supplied object to carry the existing sealed
+            # path/generation binding, then load that exact durable authority and
+            # derive every monetary constituent from the loaded snapshot.
+            _PAPERBOOK_REQUIRE_CURRENT(book, book_path)
+            durable_book = _PAPERBOOK_LOAD(book_path)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "PaperBook is not current durable workspace authority"
+            ) from exc
+        book = durable_book
 
         try:
-            goal = goal_store.load()
+            # Exact-type checks above make direct class dispatch authoritative here.
+            # Do not let a mutable exact store instance shadow load and mint a
+            # different goal contract for turnover evidence.
+            goal = _ECONOMIC_GOAL_LOAD(goal_store)
             goal_provenance = provenance_for(goal)
         except (OSError, TypeError, ValueError) as exc:
             raise PaperDayTurnoverEvidenceIncompleteError(
@@ -422,14 +538,20 @@ class PaperDayTurnoverResolver:
             ) from exc
 
         try:
-            PaperBook._validate_loaded_state(book)
+            _PAPERBOOK_VALIDATE_LOADED_STATE(book)
         except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:
             raise PaperDayTurnoverEvidenceIncompleteError(
                 "PaperBook lifecycle is not canonical"
             ) from exc
 
         try:
-            current_window = window_store.require_current(window_evidence)
+            # Bypass mutable instance dispatch for the same reason as EconomicGoalStore
+            # above. A caller-owned require_current attribute is not product day
+            # authority even when the container itself has the exact store type.
+            current_window = _RISK_DAY_REQUIRE_CURRENT(
+                window_store,
+                window_evidence,
+            )
         except Exception as exc:
             raise PaperDayTurnoverEvidenceIncompleteError(
                 "UTC day-window evidence is not current product authority"
@@ -545,11 +667,15 @@ class PaperDayTurnoverResolver:
         window_store: ProductDayRiskWindowStore,
         window_evidence: ProductDayRiskWindow,
     ) -> PaperDayTurnoverEvidence:
+        if cls is not PaperDayTurnoverResolver:
+            raise PaperDayTurnoverEvidenceMismatchError(
+                "turnover resolver must be the canonical exact resolver class"
+            )
         if type(candidate) is not PaperDayTurnoverEvidence:
             raise PaperDayTurnoverEvidenceMismatchError(
                 "candidate must be canonical PaperDayTurnoverEvidence"
             )
-        current = cls.resolve(
+        current = _RISK_TURNOVER_RESOLVE_BOUND(
             book=book,
             goal_store=goal_store,
             window_store=window_store,
@@ -560,3 +686,122 @@ class PaperDayTurnoverResolver:
                 "turnover evidence does not match current canonical PAPER state"
             )
         return current
+
+
+# Positive evidence resolution consumes existing canonical authorities through exact
+# captured callables. Their implementations remain owned by their source modules.
+_ECONOMIC_GOAL_LOAD = EconomicGoalStore.load
+_PAPERBOOK_VALIDATE_LOADED_STATE = PaperBook._validate_loaded_state
+_PAPERBOOK_LOAD = PaperBook.load
+_RISK_DAY_REQUIRE_CURRENT = ProductDayRiskWindowStore.require_current
+
+
+def _freeze_turnover_module_globals() -> dict[str, object]:
+    source = globals()
+    frozen: dict[str, object] = dict(source)
+    function_type = FunctionType
+    for name, value in tuple(source.items()):
+        if type(value) is not function_type or value.__globals__ is not source:
+            continue
+        clone = function_type(
+            value.__code__,
+            frozen,
+            name=value.__name__,
+            argdefs=value.__defaults__,
+            closure=value.__closure__,
+        )
+        if value.__kwdefaults__ is not None:
+            clone.__kwdefaults__ = dict(value.__kwdefaults__)
+        clone.__qualname__ = value.__qualname__
+        clone.__doc__ = value.__doc__
+        clone.__annotations__ = dict(value.__annotations__)
+        frozen[name] = clone
+    frozen["_ECONOMIC_GOAL_LOAD"] = _ECONOMIC_GOAL_LOAD
+    frozen["_PAPERBOOK_VALIDATE_LOADED_STATE"] = _PAPERBOOK_VALIDATE_LOADED_STATE
+    frozen["_PAPERBOOK_LOAD"] = _PAPERBOOK_LOAD
+    frozen["_PAPERBOOK_REQUIRE_CURRENT"] = _PAPERBOOK_REQUIRE_CURRENT
+    frozen["_RISK_DAY_REQUIRE_CURRENT"] = _RISK_DAY_REQUIRE_CURRENT
+    if "_RISK_TURNOVER_RESOLVE_BOUND" in source:
+        frozen["_RISK_TURNOVER_RESOLVE_BOUND"] = source[
+            "_RISK_TURNOVER_RESOLVE_BOUND"
+        ]
+    return frozen
+
+
+def _seal_turnover_resolver_method(
+    function: FunctionType,
+    frozen_globals: dict[str, object],
+) -> FunctionType:
+    if type(function) is not FunctionType:
+        raise TypeError("turnover resolver authority method must be a Python function")
+    function_type = FunctionType
+    code = function.__code__
+    defaults = function.__defaults__
+    kwdefaults = (
+        None if function.__kwdefaults__ is None else dict(function.__kwdefaults__)
+    )
+    closure = function.__closure__
+    name = function.__name__
+    qualname = function.__qualname__
+    doc = function.__doc__
+    annotations = dict(function.__annotations__)
+
+    def sealed(*args, **kwargs):
+        if type(function) is not function_type or function.__code__ is not code:
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "canonical turnover resolver executable authority changed"
+            )
+        delegate = function_type(
+            code,
+            frozen_globals,
+            name=name,
+            argdefs=defaults,
+            closure=closure,
+        )
+        if kwdefaults is not None:
+            delegate.__kwdefaults__ = dict(kwdefaults)
+        return delegate(*args, **kwargs)
+
+    sealed.__name__ = name
+    sealed.__qualname__ = qualname
+    sealed.__doc__ = doc
+    sealed.__annotations__ = annotations
+    return sealed
+
+
+_raw_resolve_descriptor = PaperDayTurnoverResolver.__dict__["resolve"]
+if type(_raw_resolve_descriptor) is not classmethod:
+    raise RuntimeError("canonical turnover resolve classmethod is unavailable")
+_resolve_globals = _freeze_turnover_module_globals()
+type.__setattr__(
+    PaperDayTurnoverResolver,
+    "resolve",
+    classmethod(
+        _seal_turnover_resolver_method(
+            _raw_resolve_descriptor.__func__,
+            _resolve_globals,
+        )
+    ),
+)
+_RISK_TURNOVER_RESOLVE_BOUND = PaperDayTurnoverResolver.resolve
+
+_raw_require_descriptor = PaperDayTurnoverResolver.__dict__["require_current"]
+if type(_raw_require_descriptor) is not classmethod:
+    raise RuntimeError("canonical turnover require_current classmethod is unavailable")
+_require_globals = _freeze_turnover_module_globals()
+type.__setattr__(
+    PaperDayTurnoverResolver,
+    "require_current",
+    classmethod(
+        _seal_turnover_resolver_method(
+            _raw_require_descriptor.__func__,
+            _require_globals,
+        )
+    ),
+)
+
+del _raw_resolve_descriptor
+del _resolve_globals
+del _raw_require_descriptor
+del _require_globals
+del _RISK_TURNOVER_RESOLVE_BOUND

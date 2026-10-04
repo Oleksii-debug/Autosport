@@ -1630,6 +1630,15 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     tuple(event.dedupe_key for event in migrated.events()),
                     (legacy_event.dedupe_key,),
                 )
+                baseline_current = (
+                    migrated.current_by_source_with_append_generation()
+                )
+                self.assertEqual(
+                    baseline_current[
+                        (legacy_event.source_id, legacy_event.quote_key)
+                    ],
+                    (legacy_event, 0),
+                )
                 restored = MarketMirror.from_store(migrated)
                 self.assertEqual(
                     tuple(event.dedupe_key for event in restored.snapshot()),
@@ -1664,6 +1673,20 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     "ORDER BY append_generation, dedupe_key"
                 ).fetchall()
                 self.assertEqual(generations, [(0,), (1,)])
+                positive_event = self.event(
+                    sequence=2,
+                    odds="2.20",
+                    observed_ts="2026-09-16T19:00:02+00:00",
+                )
+                positive_current = (
+                    migrated.current_by_source_with_append_generation()
+                )
+                self.assertEqual(
+                    positive_current[
+                        (positive_event.source_id, positive_event.quote_key)
+                    ],
+                    (positive_event, 1),
+                )
 
                 index_terms = migrated.connection.execute(
                     'PRAGMA index_xinfo("idx_market_event_commit_generation")'

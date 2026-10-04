@@ -1178,27 +1178,16 @@ class ManualNvdaAcceptanceLedger:
                 "manual NVDA ledger writer authority is invalid"
             ) from exc
 
-    def record_decision(
+    def _record_structural_decision(
         self,
         *,
-        transcript: object,
-        expected_artifact_sha256: str,
-        expected_source_sha: str,
-        expected_webview2_runtime_witness_sha256: str,
+        structural: object,
         reviewer_ref: str,
         reviewer_attestation: str,
         reviewed_at: str,
         decision: ManualNvdaDecision,
         protocol_version: str = PROTOCOL_VERSION,
     ) -> ManualNvdaDecisionRecord:
-        structural = _structural_result(
-            transcript,
-            expected_artifact_sha256=expected_artifact_sha256,
-            expected_source_sha=expected_source_sha,
-            expected_webview2_runtime_witness_sha256=(
-                expected_webview2_runtime_witness_sha256
-            ),
-        )
         payload = _decision_payload(
             structural=structural,
             decision=decision,
@@ -1306,6 +1295,72 @@ class ManualNvdaAcceptanceLedger:
         object.__setattr__(resolution, "real_money_execution", False)
         object.__setattr__(resolution, "whole_product_complete", False)
         return resolution
+
+
+def _install_record_decision_authority() -> None:
+    ledger_type = ManualNvdaAcceptanceLedger
+    implementation = ledger_type._record_structural_decision
+    implementation_code = implementation.__code__
+    structural_result = _structural_result
+    structural_result_code = structural_result.__code__
+
+    def record_decision(
+        self,
+        *,
+        transcript: object,
+        expected_artifact_sha256: str,
+        expected_source_sha: str,
+        expected_webview2_runtime_witness_sha256: str,
+        reviewer_ref: str,
+        reviewer_attestation: str,
+        reviewed_at: str,
+        decision: ManualNvdaDecision,
+        protocol_version: str = PROTOCOL_VERSION,
+    ) -> ManualNvdaDecisionRecord:
+        if (
+            type(self) is not ledger_type
+            or ledger_type._record_structural_decision is not implementation
+            or getattr(implementation, "__code__", None) is not implementation_code
+            or _structural_result is not structural_result
+            or getattr(structural_result, "__code__", None)
+            is not structural_result_code
+            or "record_decision" in vars(self)
+            or "_record_structural_decision" in vars(self)
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA decision issuance authority changed"
+            )
+        structural = structural_result(
+            transcript,
+            expected_artifact_sha256=expected_artifact_sha256,
+            expected_source_sha=expected_source_sha,
+            expected_webview2_runtime_witness_sha256=(
+                expected_webview2_runtime_witness_sha256
+            ),
+        )
+        if (
+            _structural_result is not structural_result
+            or getattr(structural_result, "__code__", None)
+            is not structural_result_code
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA decision issuance authority changed"
+            )
+        return implementation(
+            self,
+            structural=structural,
+            reviewer_ref=reviewer_ref,
+            reviewer_attestation=reviewer_attestation,
+            reviewed_at=reviewed_at,
+            decision=decision,
+            protocol_version=protocol_version,
+        )
+
+    ledger_type.record_decision = record_decision
+
+
+_install_record_decision_authority()
+del _install_record_decision_authority
 
 
 def _seal_resolution_issuance(register_witness) -> None:

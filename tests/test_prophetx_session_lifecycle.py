@@ -1609,6 +1609,100 @@ def test_refresh_success_wait_evidence_cannot_carry_failure_history(
         )
 
 
+@pytest.mark.parametrize(
+    ("state", "login_failure", "renewal_failure", "slot_wait"),
+    [
+        (
+            ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
+            ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE,
+            None,
+            False,
+        ),
+        (
+            ProphetXSessionState.PROVIDER_UNAVAILABLE,
+            None,
+            ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE,
+            False,
+        ),
+        (
+            ProphetXSessionState.SESSION_POOL_EXHAUSTED,
+            ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED,
+            None,
+            True,
+        ),
+        (
+            ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+            None,
+            ProphetXRenewalFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+            True,
+        ),
+    ],
+)
+def test_transient_failure_evidence_requires_positive_failure_count(
+    state,
+    login_failure,
+    renewal_failure,
+    slot_wait,
+):
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="transient failure evidence requires a positive failure count",
+    ):
+        ProphetXSessionSnapshot(
+            state=state,
+            generation=6,
+            credential_revision="rev-1",
+            integration_role="market-maker-primary",
+            last_transition_at=NOW,
+            slot_hold_started_at=NOW if slot_wait else None,
+            slot_hold_until=(
+                NOW + CONSERVATIVE_SESSION_SLOT_HOLD
+                if slot_wait
+                else None
+            ),
+            retry_not_before=(
+                None if slot_wait else NOW + timedelta(seconds=5)
+            ),
+            transient_failures=0,
+            last_failure_class=login_failure,
+            last_renewal_failure_class=renewal_failure,
+        )
+
+
+def test_renewal_credential_rejection_does_not_increment_transient_count(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
+    first = lifecycle.begin_renewal(
+        now=due_at,
+        refresh_token_lineage_id=active.session_lineage_id,
+    )
+    failed = lifecycle.complete_renewal_failure(
+        attempt_id=first.attempt_id,
+        now=due_at + timedelta(seconds=1),
+        failure=ProphetXRenewalFailureClass.RETRYABLE,
+    )
+    assert failed.transient_failures == 1
+
+    second = lifecycle.begin_renewal(
+        now=failed.retry_not_before,
+        refresh_token_lineage_id=active.session_lineage_id,
+    )
+    rejected = lifecycle.complete_renewal_failure(
+        attempt_id=second.attempt_id,
+        now=failed.retry_not_before + timedelta(seconds=1),
+        failure=ProphetXRenewalFailureClass.CREDENTIAL_REJECTED,
+    )
+
+    assert rejected.state is ProphetXSessionState.CREDENTIAL_REJECTED
+    assert rejected.transient_failures == failed.transient_failures
+
+
 def test_renewal_persisted_state_remains_secret_free(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)

@@ -323,15 +323,25 @@ def test_provider_unavailable_is_not_bad_credentials(tmp_path):
     assert blocked.action is ProphetXLoginAdmissionAction.RETRY_LATER
 
 
-def test_credential_rotation_cannot_bypass_provider_outage_backoff(tmp_path):
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE,
+        ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION,
+    ],
+)
+def test_credential_rotation_cannot_bypass_transient_auth_backoff(
+    tmp_path,
+    failure,
+):
     original = _lifecycle(tmp_path, revision="rev-1")
     admitted = original.begin_login(now=NOW, access_token_available=False)
-    unavailable = original.complete_login_failure(
+    degraded = original.complete_login_failure(
         attempt_id=admitted.attempt_id,
         now=NOW + timedelta(seconds=1),
-        failure=ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION,
+        failure=failure,
     )
-    assert unavailable.retry_not_before is not None
+    assert degraded.retry_not_before is not None
 
     rotated = _lifecycle(tmp_path, revision="rev-2")
     blocked = rotated.begin_login(
@@ -339,12 +349,12 @@ def test_credential_rotation_cannot_bypass_provider_outage_backoff(tmp_path):
         access_token_available=False,
     )
     assert blocked.action is ProphetXLoginAdmissionAction.RETRY_LATER
-    assert blocked.retry_at == unavailable.retry_not_before
-    assert blocked.snapshot == unavailable
+    assert blocked.retry_at == degraded.retry_not_before
+    assert blocked.snapshot == degraded
     assert blocked.login_authorized is False
 
     recovered = rotated.begin_login(
-        now=unavailable.retry_not_before,
+        now=degraded.retry_not_before,
         access_token_available=False,
     )
     assert recovered.action is ProphetXLoginAdmissionAction.CREATE_LOGIN

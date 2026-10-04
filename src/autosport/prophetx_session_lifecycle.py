@@ -1174,13 +1174,17 @@ class ProphetXSessionLifecycle:
 
         if current.credential_revision != self.scope.credential_revision:
             if (
-                current.state is ProphetXSessionState.PROVIDER_UNAVAILABLE
+                current.state
+                in {
+                    ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
+                    ProphetXSessionState.PROVIDER_UNAVAILABLE,
+                }
                 and current.retry_not_before is not None
                 and now < current.retry_not_before
             ):
-                # Credential rotation must not launder a provider-wide outage into a
-                # fresh login attempt. The health/backoff horizon belongs to the shared
-                # provider pool, not to one credential revision.
+                # Credential rotation must not launder transient transport/provider
+                # health backoff into a fresh login attempt. Only an explicit
+                # credential-rejection path is recoverable merely by rotating secrets.
                 return ProphetXLoginAdmission(
                     action=ProphetXLoginAdmissionAction.RETRY_LATER,
                     snapshot=current,

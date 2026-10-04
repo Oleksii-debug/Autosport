@@ -43,6 +43,41 @@ from autosport.run_transaction import RunTransaction
 RUN_ID = "run-001"
 
 
+def _canonical(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _sha_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+SAMPLING_FRAME_JSON = _canonical(
+    {
+        "schema": "AUTOSPORT_RISK_IID_SAMPLING_FRAME_V1",
+        "units": [
+            {
+                "payload_sha256": "8" * 64,
+                "unit_id": "sample-001",
+            }
+        ],
+    }
+)
+HORIZON_JSON = _canonical(
+    {
+        "draw_count": 1,
+        "schema": "AUTOSPORT_RISK_IID_FIXED_DRAW_HORIZON_V1",
+    }
+)
+SAMPLING_FRAME_SHA256 = _sha_text(SAMPLING_FRAME_JSON)
+HORIZON_SHA256 = _sha_text(HORIZON_JSON)
+
+
 def _membership() -> ResolvedFixedNRiskMembership:
     return ResolvedFixedNRiskMembership(
         research_protocol_id="risk-fixed-n-protocol",
@@ -55,7 +90,7 @@ def _membership() -> ResolvedFixedNRiskMembership:
         outcome_reveal_after="2026-09-10T00:00:00+00:00",
         precommitted_at="2026-09-02T12:05:00+00:00",
         planned_run_ids=(RUN_ID,),
-        sampling_frame_sha256="4" * 64,
+        sampling_frame_sha256=SAMPLING_FRAME_SHA256,
         design_sha256="1" * 64,
     )
 
@@ -74,14 +109,14 @@ def _sampling_manifest(*, randomization_root_sha256: str) -> str:
         "protocol_sha256": "2" * 64,
         "dataset_snapshot_id": "risk-fixed-n-dataset",
         "dataset_manifest_sha256": "3" * 64,
-        "sampling_frame_sha256": "4" * 64,
+        "sampling_frame_sha256": SAMPLING_FRAME_SHA256,
         "initial_capital_state_sha256": "5" * 64,
         "stake_policy_sha256": "6" * 64,
-        "horizon_sha256": "7" * 64,
+        "horizon_sha256": HORIZON_SHA256,
         "sampler_kind": "IID_RESAMPLE_WITH_REPLACEMENT_V1",
         "with_replacement": True,
-        "rng_algorithm": "PCG64",
-        "rng_version": "numpy-compatible-contract-v1",
+        "rng_algorithm": "AUTOSPORT_SHA256_REJECTION_V1",
+        "rng_version": "1",
         "randomization_root_sha256": randomization_root_sha256,
         "planned_n": 1,
         "planned_member_ids": [RUN_ID],
@@ -370,6 +405,8 @@ def test_product_run_capital_path_re_resolves_completed_settlement(
         membership=membership,
         registry_path=registry_path,
         sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
         settlement_bridge=bridge,
         authority_root=authority_root,
     )
@@ -381,6 +418,10 @@ def test_product_run_capital_path_re_resolves_completed_settlement(
     assert evidence.outcome_available_at == "2026-09-03T10:00:30+00:00"
     assert evidence.product_precommit_bound is True
     assert evidence.run_path_ancestry_proven is True
+    assert evidence.sampling_frame_materialized is True
+    assert evidence.expected_draw_product_derived is True
+    assert len(evidence.expected_draw_plan_sha256) == 64
+    assert len(evidence.expected_draw_transcript_sha256) == 64
     assert evidence.sampling_occurrence_ancestry_proven is False
     assert evidence.iid_qualified is False
     assert evidence.grants_real_money_authority is False
@@ -433,6 +474,8 @@ def test_forged_randomization_root_cannot_rebind_path_member(
             membership=membership,
             registry_path=registry_path,
             sampling_manifest_json=forged,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
             settlement_bridge=bridge,
             authority_root=authority_root,
         )
@@ -597,6 +640,8 @@ def test_object_new_forgery_cannot_pass_canonical_evidence_verifier(
         membership=membership,
         registry_path=registry_path,
         sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
         settlement_bridge=bridge,
         authority_root=authority_root,
     )
@@ -611,6 +656,8 @@ def test_object_new_forgery_cannot_pass_canonical_evidence_verifier(
         "changed_ticket_ids",
         "minimum_equity",
         "outcome_available_at",
+        "expected_draw_plan_sha256",
+        "expected_draw_transcript_sha256",
         "settlement_effects_sha256",
         "replay_source_evidence_sha256",
         "source_evidence_sha256",
@@ -690,6 +737,8 @@ def test_verifier_rejects_resolver_rebinding_before_attacker_executes(
         membership=membership,
         registry_path=registry_path,
         sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
         settlement_bridge=bridge,
         authority_root=authority_root,
     )

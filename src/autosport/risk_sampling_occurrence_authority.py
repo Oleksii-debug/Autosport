@@ -59,6 +59,13 @@ _REPLAY_MULTISET_DIGEST_CODE = getattr(_REPLAY_MULTISET_DIGEST, "__code__", None
 _REPLAY_PAYLOAD_DIGEST = market_event_payload_sha256
 _REPLAY_PAYLOAD_DIGEST_CODE = getattr(_REPLAY_PAYLOAD_DIGEST, "__code__", None)
 _MARKET_EVENT_TYPE = MarketEvent
+_MARKET_EVENT_FROM_DICT_DESCRIPTOR = MarketEvent.__dict__.get("from_dict")
+_MARKET_EVENT_FROM_DICT = getattr(
+    _MARKET_EVENT_FROM_DICT_DESCRIPTOR,
+    "__func__",
+    None,
+)
+_MARKET_EVENT_TO_DICT = MarketEvent.__dict__.get("to_dict")
 
 
 class ProductIidDrawPlanError(RuntimeError):
@@ -252,6 +259,15 @@ def _require_replay_payload_digest_dispatch() -> None:
         or getattr(_REPLAY_PAYLOAD_DIGEST, "__code__", None)
         is not _REPLAY_PAYLOAD_DIGEST_CODE
         or MarketEvent is not _MARKET_EVENT_TYPE
+        or MarketEvent.__dict__.get("from_dict")
+        is not _MARKET_EVENT_FROM_DICT_DESCRIPTOR
+        or getattr(
+            _MARKET_EVENT_FROM_DICT_DESCRIPTOR,
+            "__func__",
+            None,
+        )
+        is not _MARKET_EVENT_FROM_DICT
+        or MarketEvent.__dict__.get("to_dict") is not _MARKET_EVENT_TO_DICT
     ):
         raise ProductIidDrawPlanError(
             "replay payload digest authority dispatch changed"
@@ -352,8 +368,13 @@ def materialize_product_iid_member_market_events(
                 "sampling corpus contains a non-canonical MarketEvent type"
             )
         try:
-            snapshot = _MARKET_EVENT_TYPE.from_dict(
-                _MARKET_EVENT_TYPE.to_dict(event)
+            if _MARKET_EVENT_FROM_DICT is None or _MARKET_EVENT_TO_DICT is None:
+                raise ProductIidDrawPlanError(
+                    "canonical MarketEvent serializer authority is unavailable"
+                )
+            snapshot = _MARKET_EVENT_FROM_DICT(
+                _MARKET_EVENT_TYPE,
+                _MARKET_EVENT_TO_DICT(event),
             )
             digest = _REPLAY_PAYLOAD_DIGEST(snapshot)
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
@@ -375,8 +396,9 @@ def materialize_product_iid_member_market_events(
 
     draw = plan.member_draws[member_index]
     materialized = tuple(
-        _MARKET_EVENT_TYPE.from_dict(
-            _MARKET_EVENT_TYPE.to_dict(by_payload[payload])
+        _MARKET_EVENT_FROM_DICT(
+            _MARKET_EVENT_TYPE,
+            _MARKET_EVENT_TO_DICT(by_payload[payload]),
         )
         for payload in draw.draw_payload_sha256
     )

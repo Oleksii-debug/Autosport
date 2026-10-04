@@ -130,9 +130,8 @@ class PortfolioAwareCandidateOptimizer:
 
         quote_to_group = _quote_group_map(scenario_groups)
         open_existing = _snapshot_open_tickets_for_analysis(existing_tickets)
-        scenario_reports_authoritative = type(self.scenario_engine) is ScenarioSearchEngine
         base_floor, base_ceiling = _scenario_conservative_bounds(open_existing)
-        base_report = _analyse_scenario_engine(
+        base_report, scenario_reports_authoritative = _analyse_scenario_engine(
             self.scenario_engine,
             _snapshot_open_tickets_for_analysis(open_existing),
             list(scenario_groups),
@@ -158,11 +157,13 @@ class PortfolioAwareCandidateOptimizer:
             dependent = _dependent_existing_ticket_ids(open_existing, touched_groups, quote_to_group)
             with_candidate_tickets = open_existing + [synthetic]
             with_floor, with_ceiling = _scenario_conservative_bounds(with_candidate_tickets)
-            with_report = _analyse_scenario_engine(
+            with_report, with_report_authoritative = _analyse_scenario_engine(
                 self.scenario_engine,
                 _snapshot_open_tickets_for_analysis(with_candidate_tickets),
                 list(scenario_groups),
             )
+            if with_report_authoritative is not scenario_reports_authoritative:
+                raise ValueError("scenario engine authority changed during evaluation")
             _validate_scenario_report(
                 with_report,
                 canonical_floor=with_floor,
@@ -435,8 +436,8 @@ def _analyse_scenario_engine(
     groups: list[ScenarioGroup],
     _engine_type=ScenarioSearchEngine,
     _canonical_analyse=ScenarioSearchEngine.analyse,
-) -> ScenarioSearchReport:
-    """Use a reconstructed canonical engine for authority-bearing exact instances."""
+) -> tuple[ScenarioSearchReport, bool]:
+    """Return one report plus authority derived from the captured canonical engine type."""
 
     if type(engine) is _engine_type:
         canonical = _engine_type(
@@ -445,8 +446,8 @@ def _analyse_scenario_engine(
             sample_count=engine.sample_count,
             seed=engine.seed,
         )
-        return _canonical_analyse(canonical, tickets, groups)
-    return engine.analyse(tickets, groups)
+        return _canonical_analyse(canonical, tickets, groups), True
+    return engine.analyse(tickets, groups), False
 
 
 def _validate_scenario_report(

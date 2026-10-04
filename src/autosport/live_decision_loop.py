@@ -3201,62 +3201,58 @@ class PersistentLiveDecisionLoop:
                 )
             risk_context = intent_item.get("risk_context")
             opportunity = intent_item.get("opportunity")
-            attempt = attempt_by_action.get(action_id)
             if (
                 type(risk_context) is not dict
                 or type(opportunity) is not dict
-                or attempt is None
                 or type(opportunity.get("quotes")) is not list
             ):
                 raise DecisionLedgerIntegrityError(
                     "committed live decision execution evidence is incomplete"
                 )
-            matching_quotes = tuple(
-                quote
-                for quote in opportunity["quotes"]
-                if type(quote) is dict
-                and quote.get("market_event_hash")
-                == attempt.decision_quote_id
-            )
-            if len(matching_quotes) != 1:
-                raise DecisionLedgerIntegrityError(
-                    "committed live decision execution quote is ambiguous"
-                )
-            quote = matching_quotes[0]
-            provider_accounts = risk_context.get("provider_accounts")
-            expected_account = [quote.get("source_id"), attempt.account_id]
-            if (
-                type(provider_accounts) is not list
-                or provider_accounts != [expected_account]
-                or attempt.bookmaker_id != quote.get("source_id")
-                or attempt.event_id != quote.get("event_id")
-                or attempt.market_id != quote.get("market_id")
-                or attempt.selection_id != quote.get("selection_id")
-                or str(attempt.decision_odds) != quote.get("decimal_odds")
-                or attempt.requested_stake != stake
-                or attempt.side != "BACK"
-            ):
-                raise DecisionLedgerIntegrityError(
-                    "committed live decision #623 attempt conflicts with "
-                    "canonical intent evidence"
-                )
 
-            expected_action_id = "paper-action-v1-" + _canonical_json_sha256(
-                {
-                    "decision_id": progress.decision_id,
-                    "intent_id": intent_item.get("intent_id"),
-                    "intent_sha256": intent_item.get("intent_sha256"),
-                    "quote_market_event_hash": quote.get(
-                        "market_event_hash"
-                    ),
-                    "stake": str(stake),
-                    "index": original_index,
-                }
-            )
-            if action_id != expected_action_id:
+            candidate_quotes: list[dict[str, object]] = []
+            for quote in opportunity["quotes"]:
+                if type(quote) is not dict:
+                    continue
+                candidate_action_id = (
+                    "paper-action-v1-"
+                    + _canonical_json_sha256(
+                        {
+                            "decision_id": progress.decision_id,
+                            "intent_id": intent_item.get("intent_id"),
+                            "intent_sha256": intent_item.get(
+                                "intent_sha256"
+                            ),
+                            "quote_market_event_hash": quote.get(
+                                "market_event_hash"
+                            ),
+                            "stake": str(stake),
+                            "index": original_index,
+                        }
+                    )
+                )
+                if candidate_action_id == action_id:
+                    candidate_quotes.append(quote)
+            if len(candidate_quotes) != 1:
                 raise DecisionLedgerIntegrityError(
                     "committed live decision #623 action identity is invalid"
                 )
+            quote = candidate_quotes[0]
+
+            provider_accounts = risk_context.get("provider_accounts")
+            if (
+                type(provider_accounts) is not list
+                or len(provider_accounts) != 1
+                or type(provider_accounts[0]) is not list
+                or len(provider_accounts[0]) != 2
+                or provider_accounts[0][0] != quote.get("source_id")
+                or type(provider_accounts[0][1]) is not str
+                or not provider_accounts[0][1]
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision execution account evidence is invalid"
+                )
+            account_id = provider_accounts[0][1]
 
             try:
                 quote_clock = quote.get("source_ts") or quote.get(
@@ -3268,15 +3264,15 @@ class PersistentLiveDecisionLoop:
                 )
                 action = ExecutionAction(
                     action_id=action_id,
-                    bookmaker_id=attempt.bookmaker_id,
-                    account_id=attempt.account_id,
-                    event_id=attempt.event_id,
-                    market_id=attempt.market_id,
-                    selection_id=attempt.selection_id,
+                    bookmaker_id=quote.get("source_id"),
+                    account_id=account_id,
+                    event_id=quote.get("event_id"),
+                    market_id=quote.get("market_id"),
+                    selection_id=quote.get("selection_id"),
                     side="BACK",
-                    requested_odds=attempt.decision_odds,
+                    requested_odds=quote.get("decimal_odds"),
                     requested_stake=stake,
-                    quote_id=attempt.decision_quote_id,
+                    quote_id=quote.get("market_event_hash"),
                     quote_observed_at=quote_time.isoformat(
                         timespec="microseconds"
                     ),
@@ -3294,6 +3290,23 @@ class PersistentLiveDecisionLoop:
                 raise DecisionLedgerIntegrityError(
                     "committed live decision execution action is invalid"
                 ) from exc
+
+            attempt = attempt_by_action.get(action_id)
+            if attempt is not None and (
+                attempt.bookmaker_id != action.bookmaker_id
+                or attempt.account_id != action.account_id
+                or attempt.event_id != action.event_id
+                or attempt.market_id != action.market_id
+                or attempt.selection_id != action.selection_id
+                or attempt.side != action.side
+                or attempt.decision_quote_id != action.quote_id
+                or attempt.decision_odds != action.requested_odds
+                or attempt.requested_stake != action.requested_stake
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision #623 attempt conflicts with "
+                    "canonical intent evidence"
+                )
 
             if binding_raw != {
                 "action_id": binding.action_id,

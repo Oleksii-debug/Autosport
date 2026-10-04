@@ -261,14 +261,15 @@ class FocusedMirrorDependencyIndex:
             )
         material_keys = changed_keys - refresh_keys
 
-        events: dict[MirrorQuoteKey, MarketEvent] = {}
-        for key in changed_keys:
-            event = self._mirror.event_for_quote_key(*key)
-            if event is None:
-                # Positive refresh-only classification must fail closed when current
-                # mirror truth cannot resolve every changed identity in the batch.
-                return ()
-            events[key] = event
+        captured = self._mirror.view_for_keys(changed_keys)
+        events = {
+            (event.source_id, event.quote_key): event
+            for event in captured.events
+        }
+        if len(events) != len(changed_keys):
+            # Positive refresh-only classification must fail closed when one coherent
+            # mirror revision cannot resolve every changed identity in the batch.
+            return ()
 
         with self._lock:
             dependencies = tuple(self._dependencies.values())

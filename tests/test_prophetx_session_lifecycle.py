@@ -1493,6 +1493,66 @@ def test_login_failure_state_rejects_renewal_failure_evidence(state, failure):
         ProphetXSessionSnapshot(**kwargs)
 
 
+
+@pytest.mark.parametrize(
+    "last_login_failure,last_renewal_failure",
+    [
+        (None, None),
+        (
+            ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE,
+            None,
+        ),
+        (
+            None,
+            ProphetXRenewalFailureClass.RETRYABLE,
+        ),
+        (
+            ProphetXLoginFailureClass.CREDENTIAL_REJECTED,
+            ProphetXRenewalFailureClass.CREDENTIAL_REJECTED,
+        ),
+    ],
+)
+def test_credential_rejected_state_requires_exact_single_rejection_cause(
+    last_login_failure,
+    last_renewal_failure,
+):
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="credential-rejected state requires exact rejection evidence",
+    ):
+        ProphetXSessionSnapshot(
+            state=ProphetXSessionState.CREDENTIAL_REJECTED,
+            generation=1,
+            credential_revision="rev-1",
+            integration_role="market-maker-primary",
+            last_transition_at=NOW,
+            last_failure_class=last_login_failure,
+            last_renewal_failure_class=last_renewal_failure,
+        )
+
+
+def test_credential_rejected_state_accepts_login_or_renewal_rejection():
+    login_rejected = ProphetXSessionSnapshot(
+        state=ProphetXSessionState.CREDENTIAL_REJECTED,
+        generation=1,
+        credential_revision="rev-1",
+        integration_role="market-maker-primary",
+        last_transition_at=NOW,
+        last_failure_class=ProphetXLoginFailureClass.CREDENTIAL_REJECTED,
+    )
+    renewal_rejected = ProphetXSessionSnapshot(
+        state=ProphetXSessionState.CREDENTIAL_REJECTED,
+        generation=2,
+        credential_revision="rev-1",
+        integration_role="market-maker-primary",
+        last_transition_at=NOW,
+        last_renewal_failure_class=ProphetXRenewalFailureClass.CREDENTIAL_REJECTED,
+    )
+
+    assert login_rejected.state is ProphetXSessionState.CREDENTIAL_REJECTED
+    assert renewal_rejected.state is ProphetXSessionState.CREDENTIAL_REJECTED
+
+
 def test_provider_slot_wait_rejects_nonfuture_hold(tmp_path, state):
     lifecycle = _lifecycle(tmp_path)
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)

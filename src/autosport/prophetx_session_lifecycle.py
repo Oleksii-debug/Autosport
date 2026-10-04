@@ -275,6 +275,20 @@ class ProphetXSessionSnapshot:
                     "login failure state cannot carry renewal failure evidence"
                 )
 
+        if self.state is ProphetXSessionState.CREDENTIAL_REJECTED:
+            login_rejected = (
+                self.last_failure_class
+                is ProphetXLoginFailureClass.CREDENTIAL_REJECTED
+            )
+            renewal_rejected = (
+                self.last_renewal_failure_class
+                is ProphetXRenewalFailureClass.CREDENTIAL_REJECTED
+            )
+            if login_rejected == renewal_rejected:
+                raise ProphetXSessionLifecycleError(
+                    "credential-rejected state requires exact rejection evidence"
+                )
+
         if self.state in {
             ProphetXSessionState.LOGIN_IN_FLIGHT,
             ProphetXSessionState.RENEWING,

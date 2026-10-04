@@ -379,3 +379,46 @@ def test_continuous_observation_rejects_health_rollback_before_provider_io(
         )
 
     assert provider.calls == 0
+
+
+def test_same_transition_can_retry_after_pre_publish_abort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path, monkeypatch, "abort-retry-target")
+    _record_success(store)
+    observed = _sha256(store.path.read_bytes())
+
+    future = _store(tmp_path, monkeypatch, "abort-retry-future")
+    _record_success(future)
+    _record_provider_failure(future)
+    intended = _sha256(future.path.read_bytes())
+
+    authority = store._monotonic_authority()
+    binding = store._authority_binding(observed, intended, kind="PUBLISH")
+    first_tx_id = store._next_authority_tx_id(authority, observed, intended)
+    authority.prepare(
+        tx_id=first_tx_id,
+        observed_state_sha256=observed,
+        intended_state_sha256=intended,
+        semantic_binding_sha256=binding,
+    )
+
+    # Crash before local replace: reopening/repair observes the previous committed
+    # image and therefore terminates the prepared generation with ABORT.
+    recovery = authority.recover(observed_state_sha256=observed)
+    assert recovery.record is not None
+    assert recovery.record.phase is AuthorityPhase.ABORT
+
+    state = store.record_failure(
+        "provider-a",
+        now=T1,
+        error=RuntimeError("provider unavailable"),
+        failure_kind="provider_unavailable",
+    )
+    assert state.status == "failed"
+
+    history = authority.read_history()
+    assert history[-1].phase is AuthorityPhase.COMMIT
+    assert history[-1].intended_state_sha256 == intended
+    assert history[-1].tx_id != first_tx_id

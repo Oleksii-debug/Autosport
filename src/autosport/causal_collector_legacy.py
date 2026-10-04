@@ -756,7 +756,7 @@ class CanonicalDesktopApplication:
             raise ApplicationReceiptError(
                 "completed canonical application lacks canonical journal authority"
             )
-        receipt = _state_receipt(self._state, delta)
+        receipt = _state_receipt(state, delta)
         if receipt is None:
             return None
 
@@ -764,7 +764,7 @@ class CanonicalDesktopApplication:
             raise ApplicationReceiptError(
                 "completed canonical application lacks canonical market bus authority"
             )
-        market_store = getattr(self.market_bus, "store", None)
+        market_store = getattr(market_bus, "store", None)
         if type(market_store) is not _market_store_type:
             raise ApplicationReceiptError(
                 "completed canonical application lacks canonical market storage authority"
@@ -804,7 +804,7 @@ class CanonicalDesktopApplication:
             raise ApplicationReceiptError(
                 "completed canonical application lacks canonical health authority"
             )
-        expected_health = _state_health_after(self._state, delta)
+        expected_health = _state_health_after(state, delta)
         try:
             actual_health = _health_get(self.health_store, delta.source_id)
         except Exception as exc:
@@ -919,9 +919,15 @@ class CanonicalDesktopApplication:
         *,
         _market_event_type,
         _canonical_digest,
+        _market_bus_type,
+        _market_publish,
         _market_store_type,
         _market_events,
         _dedupe_getter,
+        _health_store_type,
+        _health_get,
+        _record_health,
+        _outcome_builder,
         _application_store_type,
         _state_progress,
         _state_prepare,
@@ -933,9 +939,25 @@ class CanonicalDesktopApplication:
         _state_receipt,
     ) -> DesktopApplicationReceipt:
         delta.validate()
-        if type(self._state) is not _application_store_type:
+        state = self._state
+        market_bus = self.market_bus
+        health_store = self.health_store
+        application_clock = self.clock
+        if type(state) is not _application_store_type:
             raise ApplicationReceiptError(
                 "canonical application lacks canonical journal authority"
+            )
+        if type(market_bus) is not _market_bus_type:
+            raise ApplicationReceiptError(
+                "canonical application lacks canonical market bus authority"
+            )
+        if type(health_store) is not _health_store_type:
+            raise ApplicationReceiptError(
+                "canonical application lacks canonical health authority"
+            )
+        if not callable(application_clock):
+            raise ApplicationReceiptError(
+                "canonical application clock authority is unavailable"
             )
         if type(event) is not _market_event_type:
             raise DeltaConflictError(
@@ -951,32 +973,32 @@ class CanonicalDesktopApplication:
         if digest != delta.canonical_event_digest:
             raise DeltaConflictError("canonical market event digest conflicts with collector delta")
 
-        progress = _state_progress(self._state, delta)
+        progress = _state_progress(state, delta)
         if progress is None:
-            prepared_at = self.clock()
+            prepared_at = application_clock()
             prepared = _instant(prepared_at, "prepared_at")
             if prepared < _instant(delta.desktop_available_at, "desktop_available_at"):
                 raise ApplicationReceiptError(
                     "canonical application cannot predate desktop availability"
                 )
-            health_before = self.health_store.get(delta.source_id)
-            outcome = self._outcome(
+            health_before = _health_get(health_store, delta.source_id)
+            outcome = _outcome_builder(
                 delta,
                 event,
                 applied_at=prepared_at,
                 health_before=health_before,
             )
             health_after = outcome.health_before.after_success(outcome).to_state()
-            progress = _state_prepare(self._state,
+            progress = _state_prepare(state,
                 delta,
                 prepared_at=prepared_at,
                 health_before=health_before,
                 health_after=health_after,
             )
 
-        expected_before = _state_health_before(self._state, delta)
+        expected_before = _state_health_before(state, delta)
         expected_after = _state_health_after(self._state, delta)
-        reproved_outcome = self._outcome(
+        reproved_outcome = _outcome_builder(
             delta,
             event,
             applied_at=progress["prepared_at"],
@@ -999,12 +1021,12 @@ class CanonicalDesktopApplication:
                 raise DeltaConflictError(
                     "canonical market event changed during desktop application"
                 )
-            self.market_bus.publish(event)
+            _market_publish(market_bus, event)
             if _canonical_digest(event) != digest:
                 raise DeltaConflictError(
                     "canonical market event changed during market persistence"
                 )
-            market_store = getattr(self.market_bus, "store", None)
+            market_store = getattr(market_bus, "store", None)
             if type(market_store) is not _market_store_type:
                 raise ApplicationReceiptError(
                     "canonical application cannot prove durable market storage"
@@ -1038,39 +1060,39 @@ class CanonicalDesktopApplication:
                 raise ApplicationReceiptError(
                     "canonical application market effect is not durably provable"
                 )
-            _state_mark_market_applied(self._state, delta)
-            progress = _state_progress(self._state, delta)
+            _state_mark_market_applied(state, delta)
+            progress = _state_progress(state, delta)
             if progress is None:
                 raise ApplicationReceiptError("canonical application progress disappeared")
 
         if not progress.get("health_applied"):
-            current = self.health_store.get(delta.source_id)
+            current = _health_get(health_store, delta.source_id)
             if current == expected_after:
-                _state_mark_health_applied(self._state, delta)
+                _state_mark_health_applied(state, delta)
             elif current == expected_before:
-                recorded = reproved_outcome.record_health(self.health_store)
+                recorded = _record_health(reproved_outcome, health_store)
                 if recorded != expected_after:
                     raise ApplicationReceiptError(
                         "canonical health authority returned an unexpected post-state"
                     )
-                _state_mark_health_applied(self._state, delta)
+                _state_mark_health_applied(state, delta)
             else:
                 raise ApplicationReceiptError(
                     "canonical source health changed during desktop application; refusing ambiguous retry"
                 )
         else:
-            current = self.health_store.get(delta.source_id)
+            current = _health_get(health_store, delta.source_id)
             if current != expected_after:
                 raise ApplicationReceiptError(
                     "canonical application health marker lacks its durable post-state"
                 )
 
-        completed_at = self.clock()
+        completed_at = application_clock()
         if _canonical_digest(event) != digest:
             raise DeltaConflictError(
                 "canonical market event changed before application completion"
             )
-        current = self.health_store.get(delta.source_id)
+        current = _health_get(health_store, delta.source_id)
         if current != expected_after:
             raise ApplicationReceiptError(
                 "canonical health effect changed before application completion"
@@ -1110,7 +1132,7 @@ class CanonicalDesktopApplication:
                 "canonical market effect changed before application completion"
             )
 
-        _state_mark_complete(self._state, delta, completed_at=completed_at)
+        _state_mark_complete(state, delta, completed_at=completed_at)
         receipt = _state_receipt(self._state, delta)
         if receipt is None:
             raise ApplicationReceiptError("canonical application did not reach durable completion")
@@ -1120,13 +1142,22 @@ class CanonicalDesktopApplication:
 def _bind_canonical_desktop_application_apply(implementation):
     """Seal the exact market-event type and digest authority for desktop application."""
 
+    from .ingestion import CommittedIngestionOutcome
+    from .ingestion_health import SourceHealthStore
+    from .market_bus import MarketEventBus
     from .storage import SQLiteMarketStore
 
     market_event_type = MarketEvent
     canonical_digest = canonical_event_digest
+    market_bus_type = MarketEventBus
+    market_publish = MarketEventBus.publish
     market_store_type = SQLiteMarketStore
     market_events = SQLiteMarketStore.events
     dedupe_getter = MarketEvent.dedupe_key.fget
+    health_store_type = SourceHealthStore
+    health_get = SourceHealthStore.get
+    record_health = CommittedIngestionOutcome.record_health
+    outcome_builder = CanonicalDesktopApplication._outcome
     application_store_type = _CanonicalDesktopApplicationStore
     state_progress = _CanonicalDesktopApplicationStore.progress
     state_prepare = _CanonicalDesktopApplicationStore.prepare
@@ -1148,9 +1179,15 @@ def _bind_canonical_desktop_application_apply(implementation):
             event,
             _market_event_type=market_event_type,
             _canonical_digest=canonical_digest,
+            _market_bus_type=market_bus_type,
+            _market_publish=market_publish,
             _market_store_type=market_store_type,
             _market_events=market_events,
             _dedupe_getter=dedupe_getter,
+            _health_store_type=health_store_type,
+            _health_get=health_get,
+            _record_health=record_health,
+            _outcome_builder=outcome_builder,
             _application_store_type=application_store_type,
             _state_progress=state_progress,
             _state_prepare=state_prepare,

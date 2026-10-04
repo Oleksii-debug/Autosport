@@ -1263,3 +1263,36 @@ def test_public_settlement_evidence_order_matches_v2_contract_after_append() -> 
         assert evidence_ids == tuple(sorted(evidence_ids))
         assert evidence_ids[0] == "aaa-receipt-new"
 
+        journal = Path(directory) / "continuous_session.settlement-evidence"
+        records = sorted(
+            (
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in journal.iterdir()
+                if path.suffix == ".json"
+            ),
+            key=lambda item: item["sequence"],
+        )
+        assert len(records) == _SMALL_HISTORY + 1
+        assert all(
+            record["schema_version"] == 1
+            and "quote_outcomes_sha256" not in record
+            for record in records[:_SMALL_HISTORY]
+        )
+        assert records[-1]["schema_version"] == 2
+        assert len(records[-1]["quote_outcomes_sha256"]) == 64
+
+        restarted = continuous_session._ContinuousSessionState(
+            Path(directory) / "continuous_session.json",
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        restarted_ids = tuple(
+            item["evidence_id"]
+            for item in restarted.snapshot().settlement_evidence
+        )
+        assert restarted_ids == evidence_ids
+        assert restarted.operational_snapshot().settlement_evidence_count == (
+            _SMALL_HISTORY + 1
+        )
+

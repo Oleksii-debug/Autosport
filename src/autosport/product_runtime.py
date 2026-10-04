@@ -1521,6 +1521,76 @@ class AutonomousProductRuntime:
         self._runtime_lease.release()
 
 
+def _build_product_runtime_type(
+    base_type: type[AutonomousProductRuntime],
+    error_type: type[ProductCompositionError],
+):
+    """Freeze the top-level product runtime graph outside caller-writable slots."""
+
+    from weakref import WeakKeyDictionary
+
+    snapshots = WeakKeyDictionary()
+    snapshot_fields = (
+        "workspace",
+        "manifest",
+        "coordinator",
+        "collector",
+        "market_store",
+        "lifecycle",
+        "mirror",
+        "invalidations",
+        "dependencies",
+        "_runtime_lease",
+        "_start_transition_store",
+        "_operation_fence",
+    )
+    entry_methods = ("start", "pause", "resume", "stop", "status", "tick", "close")
+    base_methods = {name: getattr(base_type, name) for name in entry_methods}
+
+    class ProductAutonomousProductRuntime(base_type):
+        __slots__ = ("__weakref__",)
+        __hash__ = object.__hash__
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            snapshots[self] = tuple(
+                (name, object.__getattribute__(self, name))
+                for name in snapshot_fields
+            )
+
+        def __getattribute__(self, name: str):
+            snapshot = snapshots.get(self)
+            if snapshot is not None:
+                if name in entry_methods:
+                    return base_methods[name].__get__(self, type(self))
+                if name in snapshot_fields:
+                    for field_name, expected in snapshot:
+                        if field_name == name:
+                            return expected
+            return object.__getattribute__(self, name)
+
+        def __setattr__(self, name: str, value: object) -> None:
+            snapshot = snapshots.get(self)
+            if snapshot is not None and (
+                name in snapshot_fields
+                or name in entry_methods
+                or name == "__class__"
+            ):
+                raise error_type(
+                    f"product runtime authority field {name!r} is immutable"
+                )
+            object.__setattr__(self, name, value)
+
+    return ProductAutonomousProductRuntime
+
+
+_ProductAutonomousProductRuntime = _build_product_runtime_type(
+    AutonomousProductRuntime,
+    ProductCompositionError,
+)
+del _build_product_runtime_type
+
+
 def _build_autonomous_product_runtime_impl(
     *,
     workspace: str | Path,
@@ -1537,6 +1607,7 @@ def _build_autonomous_product_runtime_impl(
     _canonical_application_apply,
     _canonical_application_lookup,
     _paper_book_type,
+    _runtime_type,
     _runtime_lease_type,
     _source_resolver_identity_fn,
     _settlement_authority_identity_fn,
@@ -1825,7 +1896,7 @@ def _build_autonomous_product_runtime_impl(
             clock=resolved_clock,
             initial_bankroll=manifest.initial_bankroll,
         )
-        runtime = AutonomousProductRuntime(
+        runtime = _runtime_type(
             workspace=root,
             manifest=manifest,
             coordinator=coordinator,
@@ -1855,6 +1926,7 @@ def _bind_autonomous_product_runtime_builder(
     canonical_application_apply,
     canonical_application_lookup,
     paper_book_type,
+    runtime_type,
     runtime_lease_type,
     source_resolver_identity_fn,
     settlement_authority_identity_fn,
@@ -1899,6 +1971,7 @@ def _bind_autonomous_product_runtime_builder(
             _canonical_application_apply=canonical_application_apply,
             _canonical_application_lookup=canonical_application_lookup,
             _paper_book_type=paper_book_type,
+            _runtime_type=runtime_type,
             _runtime_lease_type=runtime_lease_type,
             _source_resolver_identity_fn=source_resolver_identity_fn,
             _settlement_authority_identity_fn=settlement_authority_identity_fn,
@@ -1930,6 +2003,7 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
     CanonicalDesktopApplication.apply,
     CanonicalDesktopApplication.lookup_receipt,
     PaperBook,
+    _ProductAutonomousProductRuntime,
     _ProductRuntimeLease,
     _source_resolver_identity,
     _settlement_authority_identity,
@@ -1949,6 +2023,7 @@ build_autonomous_product_runtime = _bind_autonomous_product_runtime_builder(
 )
 del _ProductDesktopDeltaConsumer
 del _ProductContinuousSessionCoordinator
+del _ProductAutonomousProductRuntime
 del _build_autonomous_product_runtime_impl
 del _desktop_applied_current_for_source
 del _desktop_applied_event_for_receipt

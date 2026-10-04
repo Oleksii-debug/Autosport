@@ -316,7 +316,7 @@ def test_incompatible_market_definition_revision_invalidates_old_generation_and_
         is BetfairPriceLadderAdmissionState.PRICE_LADDER_ADMISSIBLE
     )
     assert first_result.admissible is False
-    with pytest.raises(BetfairReadOnlyError, match="current canonical"):
+    with pytest.raises(BetfairReadOnlyError, match="canonical direct Betfair provider IO origin"):
         _assess(first_receipt, Decimal("2.00"))
 
     transport.ladder_type = "CLASSIC"
@@ -326,9 +326,9 @@ def test_incompatible_market_definition_revision_invalidates_old_generation_and_
 
     assert first_result.admissible is False
     assert second_result.admissible is False
-    with pytest.raises(BetfairReadOnlyError, match="current canonical"):
+    with pytest.raises(BetfairReadOnlyError, match="canonical direct Betfair provider IO origin"):
         _assess(first_receipt, Decimal("2.00"))
-    with pytest.raises(BetfairReadOnlyError, match="current canonical"):
+    with pytest.raises(BetfairReadOnlyError, match="canonical direct Betfair provider IO origin"):
         _assess(second_receipt, Decimal("2.01"))
 
 
@@ -352,7 +352,7 @@ def test_line_range_metadata_revision_invalidates_prior_receipt():
         is BetfairPriceLadderAdmissionState.UNSUPPORTED_LADDER_SEMANTICS
     )
 
-    with pytest.raises(BetfairReadOnlyError, match="current canonical"):
+    with pytest.raises(BetfairReadOnlyError, match="canonical direct Betfair provider IO origin"):
         _assess(first_receipt, Decimal("2.0"))
 
 

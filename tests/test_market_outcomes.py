@@ -203,6 +203,16 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
         self.assertEqual(restored.authority_sha256, authority.authority_sha256)
         self.assertFalse(restored.terminal_space_exact)
 
+        copied_reverified = copy.copy(reverified)
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires separately verified source authority",
+        ):
+            MarketSettlementOutcomeAuthority.from_dict(
+                raw,
+                verified_authority=copied_reverified,
+            )
+
         tampered_count = copy.deepcopy(raw)
         tampered_count["terminal_state_count"] += 1
         with self.assertRaisesRegex(
@@ -417,26 +427,8 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
                 decision_as_of=self.DECISION_AS_OF,
             )
 
-    def test_cross_provider_rule_disagreement_cannot_share_state_axis(self):
-        authority_a = self._authority(("away", "home"))
-        authority_b = copy.copy(authority_a)
-        object.__setattr__(
-            authority_b,
-            "identity",
-            MarketOutcomeIdentity(
-                sport="table_tennis",
-                event_id="event-1",
-                market_id="match_odds",
-                source_id="provider-b",
-                market_type=MarketType.WINNER,
-            ),
-        )
-        object.__setattr__(
-            authority_b,
-            "settlement_rules_sha256",
-            "d" * 64,
-        )
-
+    def test_copied_or_mutated_authority_cannot_enter_terminal_proof(self):
+        authority = self._authority(("away", "home"))
         book = PaperBook("100")
         home = TicketLeg(
             "event-1",
@@ -448,13 +440,26 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
         ticket = book.open_ticket(
             [home], "10", provider_source_ids=(self.SOURCE_ID,)
         )
+
+        copied = copy.copy(authority)
         with self.assertRaisesRegex(
             ValueError,
-            "provider authorities disagree on canonical settlement rules",
+            "not issued by the canonical provider verifier",
         ):
             ScenarioSearchEngine().analyse_authoritative(
                 [ticket],
-                [authority_a, authority_b],
+                [copied],
+                decision_as_of=self.DECISION_AS_OF,
+            )
+
+        object.__setattr__(authority, "selection_ids", ("away", "home", "other"))
+        with self.assertRaisesRegex(
+            ValueError,
+            "changed after issuance",
+        ):
+            ScenarioSearchEngine().analyse_authoritative(
+                [ticket],
+                [authority],
                 decision_as_of=self.DECISION_AS_OF,
             )
 

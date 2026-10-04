@@ -374,6 +374,20 @@ def test_line_range_is_explicitly_unsupported_even_with_complete_metadata():
     assert result.reasons == ("LINE_RANGE_EXECUTION_SEMANTICS_UNBOUND",)
 
 
+def test_line_range_without_metadata_is_explicitly_unsupported():
+    receipt, client = _canonical_receipt(PriceLadderTransport("LINE_RANGE"))
+
+    result = _assess(receipt, Decimal("2.0"))
+
+    assert (
+        result.state
+        is BetfairPriceLadderAdmissionState.UNSUPPORTED_LADDER_SEMANTICS
+    )
+    assert result.admissible is False
+    assert result.reasons == ("LINE_RANGE_EXECUTION_SEMANTICS_UNBOUND",)
+    assert client is not None
+
+
 def test_unknown_future_ladder_type_never_defaults_to_classic():
     receipt, client = _canonical_receipt(
         PriceLadderTransport("FUTURE_PROVIDER_LADDER")
@@ -545,6 +559,32 @@ def test_provider_identity_failure_outranks_unsupported_ladder_classification():
     assert result.admissible is False
     assert "PROVIDER_ID_MISMATCH" in result.reasons
     assert "UNSUPPORTED_PRICE_LADDER_TYPE" in result.reasons
+
+
+def test_missing_price_ladder_description_fails_at_provider_acquisition():
+    class MissingPriceLadderDescriptionTransport(PriceLadderTransport):
+        def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            body: bytes,
+            timeout_seconds: float,
+        ) -> bytes:
+            request = json.loads(body.decode("utf-8"))
+            return (
+                '{"jsonrpc":"2.0","id":'
+                + str(request["id"])
+                + ',"result":[{"marketId":"1.234","description":{}}]}'
+            ).encode("utf-8")
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="priceLadderDescription must be a JSON object",
+    ):
+        _canonical_receipt(
+            MissingPriceLadderDescriptionTransport("CLASSIC")
+        )
 
 
 def test_partial_line_range_metadata_fails_at_provider_acquisition():

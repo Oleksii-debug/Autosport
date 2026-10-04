@@ -5,8 +5,9 @@ from decimal import Decimal
 from pathlib import Path
 
 from autosport.decision_ledger import JsonlDecisionLedger
-from autosport.domain import TicketLeg
+from autosport.domain import MarketEvent, TicketLeg
 from autosport.integrity import sha256_file
+from autosport.replay import ReplayEngine, ReplayExecutionReceipt
 from autosport.paper import PaperBook
 from autosport.run_registry import RunRegistry
 from autosport.run_transaction import RunTransaction, RunTransactionError
@@ -18,6 +19,7 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
         root: Path,
         sampling_draw_admission_receipt_sha256: str | None = None,
         summary_overrides: dict[str, object] | None = None,
+        replay_execution_receipt: ReplayExecutionReceipt | None = None,
     ):
         registry = RunRegistry.initialize_pristine(root / "run_registry.json")
         book_path = root / "paper_book.json"
@@ -83,7 +85,10 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
         }
         if summary_overrides:
             summary_payload.update(summary_overrides)
-        summary = tx.precommit(summary_payload)
+        summary = tx.precommit(
+            summary_payload,
+            replay_execution_receipt=replay_execution_receipt,
+        )
         summary_path = tx.commit()
         return tx, registry, experiment_key, summary, summary_path
 
@@ -143,19 +148,36 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
                 admission,
             )
 
+    @staticmethod
+    def _product_replay_receipt(
+        *,
+        run_id: str = "terminal-completion-run",
+    ) -> ReplayExecutionReceipt:
+        event = MarketEvent.from_dict(
+            {
+                "event_id": "receipt-event",
+                "market_id": "winner",
+                "selection_id": "home",
+                "decimal_odds": "2.0",
+                "observed_ts": "2026-01-01T00:00:00+00:00",
+                "source_id": "receipt-source",
+                "sequence": 1,
+            }
+        )
+        receipt = ReplayEngine([event]).run(
+            lambda _event: None,
+            run_id=run_id,
+        ).execution_receipt
+        assert type(receipt) is ReplayExecutionReceipt
+        return receipt
+
     def test_replay_payload_evidence_survives_terminal_readback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            replay_evidence = {
-                "event_count": 3,
-                "replay_input_event_payload_sequence_sha256": "1" * 64,
-                "replay_consumed_event_payload_sequence_sha256": "2" * 64,
-                "replay_applied_event_payload_sequence_sha256": "3" * 64,
-                "replay_consumed_event_payload_multiset_sha256": "4" * 64,
-            }
+            receipt = self._product_replay_receipt()
             tx, registry, key, summary, summary_path = self._prepare_canonical_commit(
                 root,
-                summary_overrides=replay_evidence,
+                replay_execution_receipt=receipt,
             )
             registry.reconcile_completed_summary(
                 key,
@@ -165,56 +187,76 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
             RunTransaction(root, tx.run_id).mark_registry_completed()
             verified, _sha = registry.verified_completed_summary_for_run(tx.run_id)
 
-            for field_name, expected in replay_evidence.items():
-                self.assertEqual(summary[field_name], expected)
-                self.assertEqual(verified[field_name], expected)
+            expected = {
+                "replay_dataset_hash": receipt.dataset_hash,
+                "event_count": receipt.event_count,
+                "replay_input_event_payload_sequence_sha256": (
+                    receipt.input_event_payload_sequence_sha256
+                ),
+                "replay_consumed_event_payload_sequence_sha256": (
+                    receipt.consumed_event_payload_sequence_sha256
+                ),
+                "replay_applied_event_payload_sequence_sha256": (
+                    receipt.applied_event_payload_sequence_sha256
+                ),
+                "replay_consumed_event_payload_multiset_sha256": (
+                    receipt.consumed_event_payload_multiset_sha256
+                ),
+                "replay_execution_receipt_sha256": receipt.receipt_sha256,
+            }
+            for field_name, expected_value in expected.items():
+                self.assertEqual(summary[field_name], expected_value)
+                self.assertEqual(verified[field_name], expected_value)
 
-    def test_precommit_rejects_partial_replay_payload_evidence(self):
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                manifest["replay_execution_receipt_sha256"],
+                receipt.receipt_sha256,
+            )
+
+    def test_precommit_rejects_caller_minted_replay_hashes_without_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(
                 RunTransactionError,
-                "replay_event_payload_evidence",
+                "requires product-issued ReplayExecutionReceipt",
             ):
                 self._prepare_canonical_commit(
                     Path(tmp),
                     summary_overrides={
                         "event_count": 1,
+                        "replay_dataset_hash": "0" * 64,
                         "replay_input_event_payload_sequence_sha256": "1" * 64,
-                    },
-                )
-
-    def test_precommit_rejects_noncanonical_replay_payload_digest(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(
-                RunTransactionError,
-                "replay_input_event_payload_sequence_sha256",
-            ):
-                self._prepare_canonical_commit(
-                    Path(tmp),
-                    summary_overrides={
-                        "event_count": 1,
-                        "replay_input_event_payload_sequence_sha256": "A" * 64,
                         "replay_consumed_event_payload_sequence_sha256": "2" * 64,
                         "replay_applied_event_payload_sequence_sha256": "3" * 64,
                         "replay_consumed_event_payload_multiset_sha256": "4" * 64,
                     },
                 )
 
-    def test_precommit_rejects_boolean_replay_event_count(self):
+    def test_precommit_rejects_replay_receipt_for_different_run(self):
         with tempfile.TemporaryDirectory() as tmp:
+            receipt = self._product_replay_receipt(run_id="different-run")
             with self.assertRaisesRegex(
                 RunTransactionError,
-                "event_count",
+                "run identity mismatch",
+            ):
+                self._prepare_canonical_commit(
+                    Path(tmp),
+                    replay_execution_receipt=receipt,
+                )
+
+    def test_precommit_rejects_caller_replay_evidence_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt = self._product_replay_receipt()
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "caller replay evidence differs",
             ):
                 self._prepare_canonical_commit(
                     Path(tmp),
                     summary_overrides={
-                        "event_count": True,
-                        "replay_input_event_payload_sequence_sha256": "1" * 64,
-                        "replay_consumed_event_payload_sequence_sha256": "2" * 64,
-                        "replay_applied_event_payload_sequence_sha256": "3" * 64,
-                        "replay_consumed_event_payload_multiset_sha256": "4" * 64,
+                        "replay_consumed_event_payload_multiset_sha256": "0" * 64,
                     },
+                    replay_execution_receipt=receipt,
                 )
 
     def test_transaction_start_rejects_draw_admission_mismatch(self):

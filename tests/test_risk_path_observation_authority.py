@@ -806,11 +806,82 @@ def test_product_run_capital_path_re_resolves_completed_settlement(
         == evidence.base_snapshot_sha256
     )
     assert evidence.executed_stake_policy_sha256 == bridge.risk_fingerprint
+    frozen_manifest = json.loads(manifest)
+    assert (
+        evidence.executed_initial_capital_state_sha256
+        == frozen_manifest["initial_capital_state_sha256"]
+    )
+    assert (
+        evidence.executed_stake_policy_sha256
+        == frozen_manifest["stake_policy_sha256"]
+    )
     assert evidence.run_admission_bound is True
     assert evidence.execution_consumption_proven is True
     assert evidence.sampling_occurrence_ancestry_proven is True
     assert evidence.iid_qualified is False
     assert evidence.grants_real_money_authority is False
+
+
+def test_run_initial_capital_must_match_frozen_iid_design(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(
+            tmp_path,
+            monkeypatch,
+            initial_capital_state_sha256="5" * 64,
+        )
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
+
+    with pytest.raises(
+        ProductRunCapitalPathError,
+        match="initial-capital state differs from frozen IID design",
+    ):
+        resolve_product_run_capital_path_evidence(
+            workspace=workspace,
+            run_id=RUN_ID,
+            member_index=0,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridge=bridge,
+            authority_root=authority_root,
+        )
+
+
+def test_run_stake_policy_must_match_frozen_iid_design(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(
+            tmp_path,
+            monkeypatch,
+            stake_policy_sha256="6" * 64,
+        )
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
+
+    with pytest.raises(
+        ProductRunCapitalPathError,
+        match="stake policy differs from frozen IID design",
+    ):
+        resolve_product_run_capital_path_evidence(
+            workspace=workspace,
+            run_id=RUN_ID,
+            member_index=0,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridge=bridge,
+            authority_root=authority_root,
+        )
 
 
 def test_run_suffix_replacement_cannot_mint_path_ancestry(

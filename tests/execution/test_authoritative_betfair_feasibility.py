@@ -843,6 +843,71 @@ def test_assessment_helper_rebind_cannot_mint_authoritative_result(
             )
 
 
+def test_ledger_subclass_cannot_supply_decision_epoch() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+
+    class ForgedLedger(RealExecutionLedger):
+        def verified_snapshot(self):
+            raise AssertionError(
+                "subclass-dispatched verified_snapshot must not execute"
+            )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = ForgedLedger(Path(tmp) / "real.jsonl")
+        with pytest.raises(TypeError, match="exact RealExecutionLedger"):
+            assess_authoritative_betfair_execution_feasibility(
+                ledger,
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+def test_bound_plan_subclass_cannot_override_authority_resolution() -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    original = _bound(datetime.now(timezone.utc))
+
+    class ForgedBound(BoundSupervisedExecutionPlan):
+        def verify_binding(self) -> None:
+            return None
+
+        def action_for(self, action_id: str):
+            raise AssertionError("subclass action resolution must not execute")
+
+        def profile_for(self, venue_id: str, account_id: str):
+            raise AssertionError("subclass profile resolution must not execute")
+
+    forged = ForgedBound(
+        execution_plan=original.execution_plan,
+        portfolio_plan_sha256=original.portfolio_plan_sha256,
+        economic_goal_contract_sha256=original.economic_goal_contract_sha256,
+        intent_id=original.intent_id,
+        intent_sha256=original.intent_sha256,
+        approval_fingerprint=original.approval_fingerprint,
+        profile_bindings=original.profile_bindings,
+        constraints=original.constraints,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(
+            TypeError,
+            match="exact BoundSupervisedExecutionPlan",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                _reserved_ledger(tmp, original),
+                forged,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
 def test_instance_plan_view_substitution_cannot_choose_decision_epoch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

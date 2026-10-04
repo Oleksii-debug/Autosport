@@ -197,7 +197,10 @@ def _load_with_authority(registry, store, policy, *, as_of=PROMOTED_AT, **overri
 def test_policy_payload_round_trip_preserves_exact_identity_and_decimal():
     _, successor, _ = _policy_successor()
 
-    restored = BanditPolicyState.from_payload(successor.to_payload())
+    restored = BanditPolicyState.from_payload(
+        successor.to_payload(),
+        expected_policy_id=successor.policy_id,
+    )
 
     assert restored == successor
     assert restored.policy_id == successor.policy_id
@@ -211,7 +214,10 @@ def test_policy_payload_rejects_nonfinite_or_noncanonical_decimal(reward_text):
     payload["estimates"][-1]["reward_sum"] = reward_text
 
     with pytest.raises(ValueError, match="finite canonical Decimal"):
-        BanditPolicyState.from_payload(payload)
+        BanditPolicyState.from_payload(
+            payload,
+            expected_policy_id=successor.policy_id,
+        )
 
 
 def test_promoted_policy_restarts_and_changes_next_episode_choice(tmp_path):
@@ -289,6 +295,21 @@ def test_future_or_missing_champion_fails_closed(tmp_path):
                 config_sha256=CONFIG_SHA256,
                 admissible_actions=frozenset({"PAPER_PROPOSAL", "WAIT"}),
             )
+
+
+def test_champion_restart_rejects_rewritten_replay_history_against_promoted_identity(tmp_path):
+    _, successor, _ = _policy_successor()
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    persist_policy_state(store, successor)
+    path = store.path_for_testing(POLICY_ARTIFACT_KIND, successor.policy_id)
+    artifact = json.loads(path.read_text(encoding="utf-8"))
+    artifact["policy"]["applied_action_ids"] = ["1" * 64]
+    artifact["policy"]["applied_reward_ids"] = ["2" * 64]
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    with pytest.raises(ChampionPolicyError, match="payload is invalid"):
+        _load_with_authority(registry, store, successor)
 
 
 def test_missing_or_tampered_champion_artifact_fails_closed(tmp_path):

@@ -150,3 +150,20 @@ class MarketEventBus:
                 failures,
                 accepted_events,
             )
+
+def _seal_live_bus_authority_call_surface() -> None:
+    """Keep sealed live-publish dependencies internal to the canonical bus method."""
+
+    live_publish_impl = MarketEventBus._publish_many_live_ingestion
+
+    def _publish_many_live_ingestion(
+        self: MarketEventBus,
+        events: Iterable[MarketEvent],
+    ) -> int:
+        return live_publish_impl(self, events)
+
+    MarketEventBus._publish_many_live_ingestion = _publish_many_live_ingestion
+
+
+_seal_live_bus_authority_call_surface()
+del _seal_live_bus_authority_call_surface

@@ -922,6 +922,38 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_product_coordinator_rejects_cached_settlement_authority_bypass(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_autonomous_product_runtime(
+                workspace=Path(directory),
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            coordinator = runtime.coordinator
+            try:
+                for name in (
+                    "_outcome_resolver",
+                    "_settlement_prepare",
+                    "_settlement_reconcile",
+                    "_settlement_prepared_resolutions",
+                    "_settlement_source_id",
+                ):
+                    original = object.__getattribute__(coordinator, name)
+                    try:
+                        object.__setattr__(coordinator, name, object())
+                        with self.assertRaisesRegex(
+                            ProductCompositionError,
+                            f"product coordinator authority field {name!r} changed after composition",
+                        ):
+                            getattr(coordinator, "status")
+                    finally:
+                        object.__setattr__(coordinator, name, original)
+                self.assertEqual(runtime.status().source_id, "provider-a")
+            finally:
+                runtime.close()
+
     def test_runtime_and_collector_type_dispatch_are_immutable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_autonomous_product_runtime(

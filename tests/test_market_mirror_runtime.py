@@ -12,6 +12,7 @@ from autosport.market_state_identity import PROPHETX_REST_MARKET_STATE_CONTRACT
 from autosport.market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependencyIndex,
+    MirrorInvalidationBatch,
 )
 from autosport.storage import SQLiteMarketStore
 
@@ -173,6 +174,55 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertTrue(batch.full_refresh_required)
         self.assertEqual(batch.changed_keys, ())
         self.assertEqual(batch.semantic_refresh_keys, ())
+
+    def test_refresh_only_routing_excludes_inputs_with_material_changes(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("refresh-only", source_ids="prophetx:sandbox")
+        dependencies.register("material-only", source_ids="provider-b")
+        dependencies.register("mixed")
+
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+        runtime.accept_persisted(first)
+        runtime.drain()
+
+        runtime.accept_persisted(refresh)
+        runtime.accept_persisted(
+            self.event(
+                source_id="provider-b",
+                selection="selection-b",
+                sequence=1,
+            )
+        )
+        batch = runtime.drain()
+
+        self.assertEqual(
+            dependencies.semantic_refresh_only_inputs(batch),
+            ("refresh-only",),
+        )
+        self.assertEqual(
+            dependencies.affected_inputs(batch),
+            ("refresh-only", "material-only", "mixed"),
+        )
+
+    def test_refresh_only_routing_rejects_non_subset_metadata(self) -> None:
+        mirror = MarketMirror()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision")
+        invalid = MirrorInvalidationBatch(
+            changed_keys=(("provider-a", "quote-a"),),
+            full_refresh_required=False,
+            has_more=False,
+            semantic_refresh_keys=(("provider-b", "quote-b"),),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "semantic refresh keys must be a subset",
+        ):
+            dependencies.semantic_refresh_only_inputs(invalid)
 
     def test_market_bus_persists_before_mirror_subscriber_runs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

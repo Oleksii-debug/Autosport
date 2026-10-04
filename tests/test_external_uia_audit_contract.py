@@ -331,3 +331,39 @@ def test_windows_candidate_requires_external_uia_normal_close_evidence() -> None
     assert "[int]$external.normal_close_exit_code -ne 0" in step
     assert "External UIA evidence did not prove ordinary packaged close/teardown" in step
     assert "extracted_external_uia_normal_close_status" in step
+
+
+def test_external_uia_audit_binds_packaged_session_to_actual_runtime_witness() -> None:
+    audit = _audit()
+
+    assert "[string]$Workspace = ''" in audit
+    assert "runtime_witness_status = 'NOT_REQUESTED'" in audit
+    assert "runtime_witness_path = $null" in audit
+    assert "runtime_browser_version = $null" in audit
+    assert "webview2-runtime-witness.json" in audit
+    assert "native_core_webview2_environment" in audit
+    assert "$runtimeWitness.schema_version -ne 1" in audit
+    assert "[string]$runtimeWitness.renderer -ne 'edgechromium'" in audit
+    assert "$runtimeWitness.real_money_execution -ne $false" in audit
+    assert "$runtimeWitness.human_tested -ne $false" in audit
+    assert "$runtimeWitness.nvda_verified -ne $false" in audit
+    assert "$runtimeWitness.whole_product_complete -ne $false" in audit
+    assert "$report.runtime_browser_version = $browserVersion" in audit
+    assert "$report.runtime_witness_status = 'PASS'" in audit
+
+
+def test_windows_candidate_requires_packaged_runtime_witness_binding() -> None:
+    workflow = _windows_workflow()
+    step_start = workflow.index("- name: External UIA fresh-extraction gate")
+    step_end = workflow.index("- name: Upload external UIA failure evidence", step_start)
+    step = workflow[step_start:step_end]
+
+    assert "$expectedWorkspace = [System.IO.Path]::GetFullPath(" in step
+    assert "(Join-Path $env:LOCALAPPDATA 'Autosport/workspace')" in step
+    assert "-Workspace $expectedWorkspace" in step
+    assert "$external.runtime_witness_status -ne 'PASS'" in step
+    assert "$external.runtime_browser_version" in step
+    assert "webview2-runtime-witness.json" in step
+    assert "External UIA evidence did not bind the packaged session" in step
+    assert "extracted_external_uia_runtime_witness_status" in step
+    assert "extracted_external_uia_runtime_browser_version" in step

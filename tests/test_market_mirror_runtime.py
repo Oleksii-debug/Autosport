@@ -90,6 +90,10 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         expected_key = ("prophetx:sandbox", refresh.quote_key)
         self.assertEqual(batch.changed_keys, (expected_key,))
         self.assertEqual(batch.semantic_refresh_keys, (expected_key,))
+        self.assertEqual(
+            batch.semantic_refresh_identities,
+            ((expected_key, refresh.sequence),),
+        )
         self.assertEqual(mirror.snapshot(), (refresh,))
 
     def test_material_update_is_not_classified_as_semantic_refresh(self) -> None:
@@ -275,9 +279,66 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             full_refresh_required=False,
             has_more=False,
             semantic_refresh_keys=(("prophetx:sandbox", event.quote_key),),
+            semantic_refresh_identities=(
+                (("prophetx:sandbox", event.quote_key), event.sequence),
+            ),
         )
 
         self.assertEqual(dependencies.semantic_refresh_only_inputs(batch), ())
+
+    def test_repeated_refresh_coalescing_tracks_latest_acquisition_sequence(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh_two = self.prophetx_refresh_event(sequence=2)
+        refresh_three = self.prophetx_refresh_event(sequence=3)
+
+        runtime.accept_persisted(first)
+        runtime.drain()
+        self.assertEqual(
+            runtime.accept_persisted(refresh_two).status,
+            MirrorUpdate.SEMANTIC_REFRESH,
+        )
+        self.assertEqual(
+            runtime.accept_persisted(refresh_three).status,
+            MirrorUpdate.SEMANTIC_REFRESH,
+        )
+
+        batch = runtime.drain()
+        key = ("prophetx:sandbox", refresh_three.quote_key)
+        self.assertEqual(batch.changed_keys, (key,))
+        self.assertEqual(batch.semantic_refresh_keys, (key,))
+        self.assertEqual(batch.semantic_refresh_identities, ((key, 3),))
+
+    def test_stale_refresh_batch_cannot_classify_newer_material_state(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="prophetx:sandbox")
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+        material = self.prophetx_refresh_event(sequence=3, odds="2.20")
+
+        runtime.accept_persisted(first)
+        runtime.drain()
+        self.assertEqual(
+            runtime.accept_persisted(refresh).status,
+            MirrorUpdate.SEMANTIC_REFRESH,
+        )
+        stale_batch = runtime.drain()
+        self.assertEqual(
+            runtime.accept_persisted(material).status,
+            MirrorUpdate.APPLIED,
+        )
+
+        self.assertEqual(
+            dependencies.semantic_refresh_only_inputs(stale_batch),
+            (),
+        )
+        self.assertEqual(
+            dependencies.affected_inputs(stale_batch),
+            ("decision",),
+        )
 
     def test_refresh_only_routing_excludes_inputs_with_material_changes(self) -> None:
         mirror = MarketMirror()
@@ -321,6 +382,42 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
                 full_refresh_required=False,
                 has_more=False,
                 semantic_refresh_keys=(("provider-b", "quote-b"),),
+                semantic_refresh_identities=((("provider-b", "quote-b"), 1),),
+            )
+
+    def test_invalidation_batch_requires_exact_refresh_sequence_binding(self) -> None:
+        key = ("provider-a", "quote-a")
+        with self.assertRaisesRegex(
+            ValueError,
+            "semantic refresh identities must exactly bind",
+        ):
+            MirrorInvalidationBatch(
+                changed_keys=(key,),
+                full_refresh_required=False,
+                has_more=False,
+                semantic_refresh_keys=(key,),
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "semantic refresh identity must bind",
+        ):
+            MirrorInvalidationBatch(
+                changed_keys=(key,),
+                full_refresh_required=False,
+                has_more=False,
+                semantic_refresh_keys=(key,),
+                semantic_refresh_identities=((key, 0),),
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "semantic refresh identities must have unique keys",
+        ):
+            MirrorInvalidationBatch(
+                changed_keys=(key,),
+                full_refresh_required=False,
+                has_more=False,
+                semantic_refresh_keys=(key,),
+                semantic_refresh_identities=((key, 1), (key, 2)),
             )
 
     def test_invalidation_batch_rejects_malformed_key_collections(self) -> None:
@@ -345,6 +442,10 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
                         full_refresh_required=False,
                         has_more=False,
                         semantic_refresh_keys=state["semantic_refresh_keys"],
+                        semantic_refresh_identities=state.get(
+                            "semantic_refresh_identities",
+                            (),
+                        ),
                     )
 
     def test_invalidation_batch_rejects_malformed_quote_keys(self) -> None:
@@ -416,16 +517,21 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             {
                 "changed_keys": (("provider-a", "quote-a"),),
                 "semantic_refresh_keys": (),
+                "semantic_refresh_identities": (),
                 "has_more": False,
             },
             {
                 "changed_keys": (),
                 "semantic_refresh_keys": (("provider-a", "quote-a"),),
+                "semantic_refresh_identities": (
+                    (("provider-a", "quote-a"), 1),
+                ),
                 "has_more": False,
             },
             {
                 "changed_keys": (),
                 "semantic_refresh_keys": (),
+                "semantic_refresh_identities": (),
                 "has_more": True,
             },
         )
@@ -450,6 +556,7 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         )
         self.assertEqual(batch.changed_keys, ())
         self.assertEqual(batch.semantic_refresh_keys, ())
+        self.assertEqual(batch.semantic_refresh_identities, ())
         self.assertFalse(batch.has_more)
 
     def test_market_bus_persists_before_mirror_subscriber_runs(self) -> None:

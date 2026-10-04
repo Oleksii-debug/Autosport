@@ -277,11 +277,20 @@ class IngestionEngine:
         _publish=_publish_normalized_live_batch,
         _parse_timestamp=parse_source_timestamp,
     ) -> IngestionStats:
+        # Freeze one operator-owned dependency snapshot before provider-controlled
+        # acquisition. Reentrant provider code must not be able to swap receive-time,
+        # normalization, publication, policy or health authority mid-poll.
+        bus = self.bus
+        normalizer = self.normalizer
+        policy = self.policy
+        health_store = self.health_store
+        poll_clock = self.clock
+
         if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0:
             raise ValueError("max_items must be a positive integer")
-        if max_items > self.policy.max_batch_size:
+        if max_items > policy.max_batch_size:
             raise ValueError(
-                f"requested batch {max_items} exceeds backpressure limit {self.policy.max_batch_size}"
+                f"requested batch {max_items} exceeds backpressure limit {policy.max_batch_size}"
             )
         started = perf_counter()
 
@@ -299,11 +308,11 @@ class IngestionEngine:
                     f"provider returned {len(batch.quotes)} quotes above requested batch bound {max_items}"
                 )
         except Exception as exc:
-            if self.health_store is not None and provider_source_id is not None:
+            if health_store is not None and provider_source_id is not None:
                 try:
-                    self.health_store.record_failure(
+                    health_store.record_failure(
                         provider_source_id,
-                        now=self.clock(),
+                        now=poll_clock(),
                         error=exc,
                         failure_kind=(
                             "provider_unavailable"
@@ -322,13 +331,13 @@ class IngestionEngine:
         # One post-acquisition evidence instant governs both quote-age truth and this
         # poll's health transition. Equal instants remain distinct via durable
         # transition_order; genuinely older direct evidence still fails closed.
-        now = self.clock()
+        now = poll_clock()
 
         health_before = None
         previous_source_ts = None
-        if self.health_store is not None:
+        if health_store is not None:
             health_before = _SourceHealthSnapshot.from_state(
-                self.health_store.get(batch.source_id)
+                health_store.get(batch.source_id)
             )
             previous_source_ts = health_before.latest_source_ts
 
@@ -346,7 +355,7 @@ class IngestionEngine:
                     rejected += 1
                     continue
             try:
-                event = self.normalizer.normalize(batch.source_id, quote)
+                event = normalizer.normalize(batch.source_id, quote)
                 # Provider/adaptor observation clocks remain evidence fields.
                 # Durable ingestion time is owned by this post-acquisition
                 # product clock, never by provider-controlled quote payloads.
@@ -371,9 +380,9 @@ class IngestionEngine:
                 source_point if source_point is not None else observed_point
             )
             age_seconds = (now_point - freshness_point).total_seconds()
-            if age_seconds > self.policy.stale_after_seconds:
+            if age_seconds > policy.stale_after_seconds:
                 flags.add("STALE_SOURCE")
-            if age_seconds < -self.policy.max_future_skew_seconds:
+            if age_seconds < -policy.max_future_skew_seconds:
                 flags.add("FUTURE_CLOCK_SKEW")
 
             normalized.append(event)
@@ -392,7 +401,7 @@ class IngestionEngine:
         # acquisition/validation/normalization already succeeded.
         ordered_flags = tuple(sorted(flags))
         try:
-            accepted = _publish(self.bus, normalized)
+            accepted = _publish(bus, normalized)
         except MarketEventDeliveryError as delivery_error:
             # MarketEventDeliveryError can only be raised after transactional
             # persistence succeeds. Preserve the exact storage-derived outcome in
@@ -409,9 +418,9 @@ class IngestionEngine:
                 quality_flags=ordered_flags,
                 health_before=health_before,
             )
-            if self.health_store is not None:
+            if health_store is not None:
                 try:
-                    outcome._record_health_once(self.health_store)
+                    outcome._record_health_once(health_store)
                 except Exception as health_error:
                     raise CommittedIngestionHealthError(
                         outcome,
@@ -432,9 +441,9 @@ class IngestionEngine:
             health_before=health_before,
         )
         health_status = "degraded" if ordered_flags else "healthy"
-        if self.health_store is not None:
+        if health_store is not None:
             try:
-                state = outcome._record_health_once(self.health_store)
+                state = outcome._record_health_once(health_store)
             except Exception as health_error:
                 raise CommittedIngestionHealthError(outcome) from health_error
             health_status = state.status

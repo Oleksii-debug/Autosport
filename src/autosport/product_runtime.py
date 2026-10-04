@@ -55,10 +55,16 @@ class ProductCompositionError(RuntimeError):
     """The durable product composition cannot be verified safely."""
 
 
-class _ProductDesktopDeltaConsumer(DesktopDeltaConsumer):
-    """Freeze and continuously re-prove the product-owned desktop authority graph."""
+def _build_product_desktop_consumer_type(
+    base_type: type[DesktopDeltaConsumer],
+    error_type: type[ProductCompositionError],
+):
+    """Build one product consumer whose authority snapshot is not instance-writable."""
 
-    _PROTECTED_AUTHORITY_FIELDS = frozenset(
+    from weakref import WeakKeyDictionary
+
+    snapshots = WeakKeyDictionary()
+    protected_fields = frozenset(
         {
             "collector",
             "checkpoint",
@@ -72,11 +78,12 @@ class _ProductDesktopDeltaConsumer(DesktopDeltaConsumer):
             "__class__",
             "__dict__",
             "_PROTECTED_AUTHORITY_FIELDS",
+            "_SNAPSHOT_FIELDS",
             "_product_authority_snapshot",
             "_product_authority_sealed",
         }
     )
-    _SNAPSHOT_FIELDS = (
+    snapshot_fields = (
         "collector",
         "checkpoint",
         "resolve_event",
@@ -85,44 +92,69 @@ class _ProductDesktopDeltaConsumer(DesktopDeltaConsumer):
         "_acknowledgement_clock",
         "_on_application_receipt",
     )
+    base_drain = base_type.drain
+    missing = object()
 
-    def __init__(self, *args, **kwargs) -> None:
-        object.__setattr__(self, "_product_authority_sealed", False)
-        super().__init__(*args, **kwargs)
-        object.__setattr__(
-            self,
-            "_product_authority_snapshot",
-            tuple(
-                (name, object.__getattribute__(self, name))
-                for name in self._SNAPSHOT_FIELDS
-            ),
-        )
-        object.__setattr__(self, "_product_authority_sealed", True)
-
-    def __setattr__(self, name: str, value: object) -> None:
-        if (
-            getattr(self, "_product_authority_sealed", False)
-            and name in self._PROTECTED_AUTHORITY_FIELDS
-        ):
-            raise ProductCompositionError(
-                f"product desktop authority field {name!r} is immutable"
-            )
-        object.__setattr__(self, name, value)
-
-    def drain(
+    def sealed_drain(
         self,
         *,
         as_of: str,
         view: CausalView = CausalView.AS_KNOWN_AT_DECISION,
     ) -> tuple[str, ...]:
-        snapshot = object.__getattribute__(self, "_product_authority_snapshot")
+        snapshot = snapshots.get(self)
+        if snapshot is None:
+            raise error_type("product desktop authority snapshot is unavailable")
+        raw = object.__getattribute__(self, "__dict__")
+        if "drain" in raw:
+            raise error_type("product desktop drain authority changed after composition")
         for name, expected in snapshot:
-            if object.__getattribute__(self, name) is not expected:
-                raise ProductCompositionError(
+            if raw.get(name, missing) is not expected:
+                raise error_type(
                     f"product desktop authority field {name!r} changed after composition"
                 )
-        return super().drain(as_of=as_of, view=view)
+        return base_drain(self, as_of=as_of, view=view)
 
+    class ProductDesktopDeltaConsumer(base_type):
+        """Freeze and continuously re-prove the product-owned desktop authority graph."""
+
+        _PROTECTED_AUTHORITY_FIELDS = protected_fields
+        _SNAPSHOT_FIELDS = snapshot_fields
+        _product_authority_snapshot = None
+        _product_authority_sealed = True
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            snapshots[self] = tuple(
+                (name, object.__getattribute__(self, name))
+                for name in snapshot_fields
+            )
+
+        def __getattribute__(self, name: str):
+            snapshot = snapshots.get(self)
+            if snapshot is not None:
+                if name == "drain":
+                    return sealed_drain.__get__(self, type(self))
+                if name in snapshot_fields:
+                    for field_name, expected in snapshot:
+                        if field_name == name:
+                            return expected
+            return object.__getattribute__(self, name)
+
+        def __setattr__(self, name: str, value: object) -> None:
+            if snapshots.get(self) is not None and name in protected_fields:
+                raise error_type(
+                    f"product desktop authority field {name!r} is immutable"
+                )
+            object.__setattr__(self, name, value)
+
+    return ProductDesktopDeltaConsumer
+
+
+_ProductDesktopDeltaConsumer = _build_product_desktop_consumer_type(
+    DesktopDeltaConsumer,
+    ProductCompositionError,
+)
+del _build_product_desktop_consumer_type
 
 def _serialized_runtime_operation(method):
     """Hold one runtime-local fence across an admitted public lifecycle operation."""

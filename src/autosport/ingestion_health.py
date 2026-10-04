@@ -357,6 +357,11 @@ class SourceHealthStore:
                 _, observed = self._read_snapshot(verify_authority=False)
                 self._recover_or_bootstrap_authority(observed)
 
+            # Do not return an initialized store from a stale recovery snapshot.
+            # Re-read the final bytes under the same product writer lock and require
+            # both semantic validity and current independent authority.
+            self._read()
+
     def _monotonic_authority(self) -> MonotonicWorkspaceAuthority:
         return MonotonicWorkspaceAuthority(
             workspace=self.path.parent.resolve(strict=False),

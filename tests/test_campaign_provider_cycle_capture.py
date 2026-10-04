@@ -1480,6 +1480,25 @@ def test_cycle_bound_forward_verification_drives_durable_paper_admission(
         == cycle_receipt.receipt_sha256
     )
 
+    reservation = next(
+        event
+        for event in fixture.execution_runtime.ledger.events(
+            fixture.execution_run_id
+        )
+        if event["event_type"] == "RUN_RESERVED"
+    )
+    durable_learning = reservation["payload"]["decision_origin"][
+        "learning_observation"
+    ]
+    durable_learning_evidence = dict(
+        tuple(item) for item in durable_learning["evidence"]
+    )
+    assert (
+        durable_learning_evidence["campaign_forward_cycle_receipt_sha256"]
+        == cycle_receipt.receipt_sha256
+    )
+    resumed_coordinator = fixture.coordinator(resumed=True)
+
     retroactive_observation = Observation(
         environment_id=fixture.observation.environment_id,
         observed_at="2100-01-01T06:00:00.100000+00:00",
@@ -1491,7 +1510,7 @@ def test_cycle_bound_forward_verification_drives_durable_paper_admission(
         match="predates bound provider cycle evidence",
     ):
         admit_forward_verified(
-            coordinator,
+            resumed_coordinator,
             precommit_locator=locator,
             collector_store=store,
             source_spec=spec,
@@ -1578,7 +1597,7 @@ def test_cycle_bound_forward_verification_drives_durable_paper_admission(
     )["admissions"] == {}
 
     receipt = admit_forward_verified(
-        coordinator,
+        resumed_coordinator,
         precommit_locator=locator,
         collector_store=store,
         source_spec=spec,

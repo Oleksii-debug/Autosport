@@ -245,6 +245,39 @@ class LiveObservationTests(unittest.TestCase):
                 },
             )
 
+    def test_open_store_poll_rejects_buffer_bound_to_other_workspace_before_provider_io(self):
+        with tempfile.TemporaryDirectory() as first_tmp, tempfile.TemporaryDirectory() as second_tmp:
+            first_store = SQLiteMarketStore(Path(first_tmp) / "market.db")
+            second_store = SQLiteMarketStore(Path(second_tmp) / "market.db")
+            try:
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror())
+                updates.reconcile_trusted_store(first_store)
+                second_health = SourceHealthStore(Path(second_tmp) / "source_health.json")
+
+                with patch(
+                    "autosport.live_observation._drain_snapshot",
+                    side_effect=AssertionError(
+                        "provider I/O must not start for a cross-workspace buffer"
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "different market store",
+                    ):
+                        poll_open_market_store_once(
+                            second_store,
+                            second_health,
+                            self._provider(),
+                            mirror_updates=updates,
+                            max_items=10,
+                            clock=lambda: _RECEIVE_TIME,
+                        )
+
+                self.assertEqual(second_store.events(), [])
+            finally:
+                first_store.close()
+                second_store.close()
+
     def test_live_ingestion_receipt_time_fences_historical_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._observe(tmp)

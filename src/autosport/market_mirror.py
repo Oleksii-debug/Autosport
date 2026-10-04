@@ -193,8 +193,28 @@ class MarketMirror:
         if not isinstance(event, MarketEvent):
             raise TypeError("event must be a MarketEvent")
 
-        store.append(event)
-        return self.apply(event)
+        accepted = store.append(event)
+        if accepted:
+            return self.apply(event)
+
+        # Storage intentionally treats a retry of one source-local sequence as the
+        # same provider observation even when local receipt clocks changed. On a
+        # fresh/incomplete mirror, applying the caller's retry object would expose
+        # local timestamps that are not the durable canonical history. Re-read the
+        # independently trusted persisted event before mutating live state.
+        canonical = next(
+            (
+                persisted
+                for persisted in store.events(event.event_id)
+                if persisted.dedupe_key == event.dedupe_key
+            ),
+            None,
+        )
+        if canonical is None:
+            raise RuntimeError(
+                "duplicate market event disappeared from canonical history"
+            )
+        return self.apply(canonical)
 
     def view(
         self,

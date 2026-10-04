@@ -1077,21 +1077,24 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             raise ContinuousSessionError(
                 "settlement event source is outside continuous session authority"
             )
-        parts = {event_identity, record.event_id}
         return {
             leg.quote_key
             for ticket in book.tickets.values()
             if ticket.status.value == "open"
-            # Legacy/unscoped PAPER tickets remain readable, but once explicit
-            # provider provenance exists a different provider's settlement
-            # authority must never mutate this ticket's economics.
-            if not ticket.provider_source_ids or source_id in ticket.provider_source_ids
+            # Settlement is an economic mutation, not merely a compatibility read.
+            # Legacy tickets without provider provenance remain loadable, but they
+            # cannot safely consume provider-scoped outcome truth.  A multi-provider
+            # ticket is likewise ambiguous because PaperTicket provenance is
+            # ticket-level rather than leg-level; fail closed until every leg can be
+            # bound to one provider explicitly.
+            if ticket.provider_source_ids == (source_id,)
             for leg in ticket.legs
-            if leg.event_id in parts
-            # Explicit sport semantics are authoritative. Legacy legs without a
-            # sport remain readable, but a different declared sport cannot consume
-            # this lifecycle record's settlement evidence.
-            if leg.sport is None or leg.sport == record.sport
+            # Canonical product tickets store the provider-native event id and sport
+            # on every leg.  Historical full-identity aliases and sport-less legs
+            # remain readable, but cannot authorize P&L because either shape can
+            # collide across provider/sport namespaces.
+            if leg.event_id == record.event_id
+            if leg.sport == record.sport
         }
 
     def tick(self) -> ContinuousTickResult:

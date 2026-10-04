@@ -23,6 +23,7 @@ from enum import Enum
 from hashlib import blake2b, sha256
 import hmac
 import json
+from operator import attrgetter
 import urllib.request as _urllib_request
 from secrets import token_bytes, token_hex
 from threading import RLock
@@ -93,8 +94,61 @@ def _identity_projection_material(
     return bytes(encoded)
 
 
+def _build_account_identity_meta():
+    """Seal public K07 identity semantics after dataclass construction."""
+
+    sealed_classes: set[type] = set()
+    protected_names = frozenset(
+        {
+            "venue_id",
+            "mode",
+            "identity_scope",
+            "session_context_id",
+            "currency_code",
+            "account_details_sha256",
+            "observed_at",
+            "remote_provider_origin_proven",
+            "provider_account_details_origin_proven",
+            "stable_account_identity_proven",
+            "stable_account_id",
+            "cross_session_equivalence_proven",
+            "identity_id",
+            "_remote_provider_origin_proven_constant",
+            "_provider_account_details_origin_proven_constant",
+            "_stable_account_identity_proven_constant",
+            "_stable_account_id_constant",
+            "_cross_session_equivalence_proven_constant",
+        }
+    )
+
+    class _BetfairAccountIdentityMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "Betfair account identity authority surface is sealed: " + name
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name: str) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "Betfair account identity authority surface is sealed: " + name
+                )
+            super().__delattr__(name)
+
+        @classmethod
+        def seal(mcls, cls: type) -> None:
+            sealed_classes.add(cls)
+
+    return _BetfairAccountIdentityMeta
+
+
+_BetfairAccountIdentityMeta = _build_account_identity_meta()
+del _build_account_identity_meta
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True)
-class BetfairAuthenticatedAccountIdentity:
+class BetfairAuthenticatedAccountIdentity(metaclass=_BetfairAccountIdentityMeta):
     """Ephemeral process-issued identity for one exact authenticated session context."""
 
     venue_id: str
@@ -128,27 +182,25 @@ class BetfairAuthenticatedAccountIdentity:
         _sha256_hex(self.account_details_sha256, "account_details_sha256")
         _canonical_timestamp(self.observed_at)
 
-    @property
-    def remote_provider_origin_proven(self) -> bool:
-        """K07 alone does not prove below-process remote Betfair transport origin."""
-        return False
+    _remote_provider_origin_proven_constant = False
+    _provider_account_details_origin_proven_constant = False
+    _stable_account_identity_proven_constant = False
+    _stable_account_id_constant = None
+    _cross_session_equivalence_proven_constant = False
 
-    @property
-    def provider_account_details_origin_proven(self) -> bool:
-        """Account-details bytes are not independently attested as remote-provider bytes."""
-        return False
-
-    @property
-    def stable_account_identity_proven(self) -> bool:
-        return False
-
-    @property
-    def stable_account_id(self) -> None:
-        return None
-
-    @property
-    def cross_session_equivalence_proven(self) -> bool:
-        return False
+    remote_provider_origin_proven = property(
+        attrgetter("_remote_provider_origin_proven_constant")
+    )
+    provider_account_details_origin_proven = property(
+        attrgetter("_provider_account_details_origin_proven_constant")
+    )
+    stable_account_identity_proven = property(
+        attrgetter("_stable_account_identity_proven_constant")
+    )
+    stable_account_id = property(attrgetter("_stable_account_id_constant"))
+    cross_session_equivalence_proven = property(
+        attrgetter("_cross_session_equivalence_proven_constant")
+    )
 
     @property
     def identity_id(self) -> str:
@@ -165,6 +217,8 @@ class BetfairAuthenticatedAccountIdentity:
         )
         return sha256(material).hexdigest()
 
+
+_BetfairAccountIdentityMeta.seal(BetfairAuthenticatedAccountIdentity)
 
 @dataclass(frozen=True, slots=True)
 class _CanonicalClientOrigin:
@@ -775,35 +829,50 @@ def _make_account_identity_authority():
             record = issued.get(id(value))
             if record is None or record.value_ref() is not value:
                 return False
-            try:
-                current_identity_digest = issued_identity_digest(value)
-                expected_public_id = public_identity_digest(value)
-                current_public_id = value.identity_id
-            except (identity_error_type, AttributeError, TypeError, ValueError):
-                return False
-            if not identity_projection_dependencies_are_current():
-                return False
-            if not hmac_compare_digest(record.identity_id, current_identity_digest):
-                return False
-            if not hmac_compare_digest(expected_public_id, current_public_id):
-                return False
-            issued_client = record.client_ref()
-            if issued_client is None:
-                return False
-            if client is not None and issued_client is not client:
-                return False
-            context = client_contexts.get(id(issued_client))
-            if (
-                context is None
-                or context.client_ref() is not issued_client
-                or context.session_context_id != record.session_context_id
-            ):
-                return False
-            return context_is_current(
-                context,
-                issued_client,
-                revoke_on_failure=True,
-            )
+
+        def revoke() -> None:
+            with lock:
+                current = issued.get(id(value))
+                if current is record:
+                    issued.pop(id(value), None)
+
+        try:
+            current_identity_digest = issued_identity_digest(value)
+            expected_public_id = public_identity_digest(value)
+            current_public_id = value.identity_id
+        except (identity_error_type, AttributeError, TypeError, ValueError):
+            revoke()
+            return False
+        if not identity_projection_dependencies_are_current():
+            return False
+        if not hmac_compare_digest(record.identity_id, current_identity_digest):
+            revoke()
+            return False
+        if not hmac_compare_digest(expected_public_id, current_public_id):
+            revoke()
+            return False
+        issued_client = record.client_ref()
+        if issued_client is None:
+            revoke()
+            return False
+        if client is not None and issued_client is not client:
+            return False
+        context = client_contexts.get(id(issued_client))
+        if (
+            context is None
+            or context.client_ref() is not issued_client
+            or context.session_context_id != record.session_context_id
+        ):
+            revoke()
+            return False
+        valid = context_is_current(
+            context,
+            issued_client,
+            revoke_on_failure=True,
+        )
+        if not valid:
+            revoke()
+        return valid
 
     def require_authoritative(
         value: object,

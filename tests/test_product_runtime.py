@@ -109,6 +109,18 @@ class _MutatingResolverSource(_Source):
         return event
 
 
+class _MutatingCatalogEpochSource(_Source):
+    def fetch_catalog_page(self, checkpoint):
+        self.stream_epoch = "epoch-2"
+        return _Source.fetch_catalog_page(self, checkpoint)
+
+
+class _MutatingDeltaEpochSource(_Source):
+    def fetch_deltas(self, checkpoint, records, max_items):
+        self.stream_epoch = "epoch-2"
+        return ()
+
+
 def _replacement_source_resolve_event(self, delta):
     if delta.event_id == "never":
         raise AssertionError("replacement resolver executable semantics")
@@ -1057,6 +1069,57 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 ):
                     runtime.collector.source.fetch_deltas(None, (), 10)
 
+                self.assertEqual(
+                    runtime.collector.delta_store.deltas_after_commit(
+                        source_id=source.source_id,
+                    ),
+                    (),
+                )
+            finally:
+                runtime.close()
+
+    def test_catalog_page_is_not_released_if_stream_epoch_changes_during_fetch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = _MutatingCatalogEpochSource()
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "source stream_epoch changed during catalog acquisition",
+                ):
+                    runtime.tick()
+                self.assertEqual(runtime.lifecycle.records(), ())
+            finally:
+                runtime.close()
+
+    def test_delta_result_is_not_released_if_stream_epoch_changes_during_fetch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = _MutatingDeltaEpochSource()
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "source stream_epoch changed during delta acquisition",
+                ):
+                    runtime.collector.source.fetch_deltas(None, (), 10)
                 self.assertEqual(
                     runtime.collector.delta_store.deltas_after_commit(
                         source_id=source.source_id,

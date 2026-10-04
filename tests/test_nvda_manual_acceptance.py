@@ -1261,6 +1261,90 @@ def test_active_writer_lock_fails_closed(tmp_path):
             _record(ledger, transcript)
 
 
+def test_crash_after_pending_before_ledger_drops_uncommitted_manual_decision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+
+    def crash_before_ledger(_event):
+        raise RuntimeError("crash after pending before ledger")
+
+    monkeypatch.setattr(ledger, "_publish_ledger_event", crash_before_ledger)
+    with pytest.raises(RuntimeError, match="crash after pending before ledger"):
+        _record(ledger, transcript)
+
+    assert ledger._pending_path.exists()
+    assert not ledger.path.exists()
+
+    restarted = ManualNvdaAcceptanceLedger(ledger.path)
+    assert restarted.events() == ()
+    assert not restarted._pending_path.exists()
+
+    record = _record(restarted, transcript)
+    assert record.sequence == 0
+
+
+def test_crash_after_ledger_before_anchor_recovers_committed_manual_decision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+
+    def crash_before_anchor(*, event_count, root):
+        del event_count, root
+        raise RuntimeError("crash after ledger before anchor")
+
+    monkeypatch.setattr(ledger, "_write_anchor", crash_before_anchor)
+    with pytest.raises(RuntimeError, match="crash after ledger before anchor"):
+        _record(ledger, transcript)
+
+    assert ledger._pending_path.exists()
+    assert ledger.path.exists()
+    assert not ledger._anchor_path.exists()
+
+    restarted = ManualNvdaAcceptanceLedger(ledger.path)
+    records = restarted.events()
+    assert len(records) == 1
+    assert records[0].decision is ManualNvdaDecision.ACCEPT_PHYSICAL_NVDA
+    assert restarted._anchor_path.exists()
+    assert not restarted._pending_path.exists()
+
+
+def test_crash_after_anchor_before_pending_retirement_recovers_idempotently(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+
+    def crash_before_retirement():
+        raise RuntimeError("crash after anchor before pending retirement")
+
+    monkeypatch.setattr(ledger, "_remove_pending", crash_before_retirement)
+    with pytest.raises(
+        RuntimeError,
+        match="crash after anchor before pending retirement",
+    ):
+        _record(ledger, transcript)
+
+    assert ledger.path.exists()
+    assert ledger._anchor_path.exists()
+    assert ledger._pending_path.exists()
+
+    restarted = ManualNvdaAcceptanceLedger(ledger.path)
+    records = restarted.events()
+    assert len(records) == 1
+    assert records[0].decision is ManualNvdaDecision.ACCEPT_PHYSICAL_NVDA
+    assert not restarted._pending_path.exists()
+
+    retried = _record(restarted, transcript)
+    assert retried == records[0]
+    assert len(restarted.events()) == 1
+
+
 def test_stale_writer_lock_path_does_not_block_restart(tmp_path):
     transcript = _transcript()
     ledger = _ledger(tmp_path)

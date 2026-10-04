@@ -202,6 +202,56 @@ class FocusedMirrorDependencyIndex:
                     affected.append(dependency.input_id)
         return tuple(affected)
 
+    def semantic_refresh_only_inputs(
+        self,
+        batch: MirrorInvalidationBatch,
+    ) -> tuple[str, ...]:
+        """Return inputs touched only by proven semantic-refresh keys in this batch.
+
+        This is routing metadata only. It does not make cached intents executable
+        against a newer acquisition and must not be used to suppress recomputation
+        until the consumer independently rebinds every evidence authority.
+        """
+
+        if not isinstance(batch, MirrorInvalidationBatch):
+            raise TypeError("batch must be a MirrorInvalidationBatch")
+        if batch.full_refresh_required or not batch.semantic_refresh_keys:
+            return ()
+
+        changed_keys = frozenset(batch.changed_keys)
+        refresh_keys = frozenset(batch.semantic_refresh_keys)
+        if not refresh_keys.issubset(changed_keys):
+            raise ValueError(
+                "semantic refresh keys must be a subset of changed invalidation keys"
+            )
+        material_keys = changed_keys - refresh_keys
+
+        events: dict[MirrorQuoteKey, MarketEvent] = {}
+        for key in changed_keys:
+            event = self._mirror.event_for_quote_key(*key)
+            if event is None:
+                # Positive refresh-only classification must fail closed when current
+                # mirror truth cannot resolve every changed identity in the batch.
+                return ()
+            events[key] = event
+
+        with self._lock:
+            dependencies = tuple(self._dependencies.values())
+
+        refresh_only: list[str] = []
+        for dependency in dependencies:
+            refresh_matches = any(
+                dependency.matches(events[key]) for key in refresh_keys
+            )
+            if not refresh_matches:
+                continue
+            material_matches = any(
+                dependency.matches(events[key]) for key in material_keys
+            )
+            if not material_matches:
+                refresh_only.append(dependency.input_id)
+        return tuple(refresh_only)
+
     @staticmethod
     def _selectors(dependency: FocusedMirrorDependency) -> dict[str, frozenset[str] | None]:
         return {

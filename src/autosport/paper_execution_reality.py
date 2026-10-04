@@ -154,13 +154,60 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
 
     def _load_unlocked(self) -> list[dict[str, Any]]:
         events = super()._load_unlocked()
-        if any(
-            event.get("event_type") not in self._ALLOWED_EVENT_TYPES
-            for event in events
-        ):
-            raise PaperExecutionIntegrityError(
-                "PAPER execution ledger contains unsupported event_type"
-            )
+        for event in events:
+            event_type = event.get("event_type")
+            if event_type not in self._ALLOWED_EVENT_TYPES:
+                raise PaperExecutionIntegrityError(
+                    "PAPER execution ledger contains unsupported event_type"
+                )
+            try:
+                run_id = _impl._text(event.get("run_id"), "ledger run_id")
+            except (TypeError, ValueError) as exc:
+                raise PaperExecutionIntegrityError(
+                    "PAPER execution ledger run_id is invalid"
+                ) from exc
+            event_key = event.get("event_key")
+            if event_type == "OBSERVATION_EVIDENCE_REGISTERED":
+                payload = event.get("payload")
+                evidence_id = (
+                    payload.get("evidence_id")
+                    if type(payload) is dict
+                    else None
+                )
+                if (
+                    type(evidence_id) is not str
+                    or not evidence_id
+                    or run_id != evidence_id
+                    or event_key != f"evidence:{evidence_id}"
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER execution evidence event identity is invalid"
+                    )
+            elif event_type == "PAPER_EXPOSURE_SCOPE_BOUND":
+                if event_key != f"{run_id}:exposure-scope":
+                    raise PaperExecutionIntegrityError(
+                        "PAPER exposure-scope event identity is invalid"
+                    )
+            elif event_type == "RUN_RESERVED":
+                if event_key != f"{run_id}:reserve":
+                    raise PaperExecutionIntegrityError(
+                        "PAPER reservation event identity is invalid"
+                    )
+            elif event_type == "ATTEMPT_RECORDED":
+                attempt = PaperLegAttempt.from_dict(event.get("payload"))
+                if (
+                    attempt.run_id != run_id
+                    or event_key
+                    != f"{run_id}:attempt:{attempt.sequence}"
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER attempt event identity is invalid"
+                    )
+            elif event_type == "RUN_COMPLETED":
+                if event_key != f"{run_id}:complete":
+                    raise PaperExecutionIntegrityError(
+                        "PAPER completion event identity is invalid"
+                    )
         return events
 
     @staticmethod

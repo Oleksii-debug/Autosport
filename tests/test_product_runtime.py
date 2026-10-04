@@ -691,6 +691,9 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 "_ProductRuntimeLease": forged("_ProductRuntimeLease"),
                 "_source_resolver_identity": forged("_source_resolver_identity"),
                 "_settlement_authority_identity": forged("_settlement_authority_identity"),
+                "_settlement_learning_handoff_identity": forged(
+                    "_settlement_learning_handoff_identity"
+                ),
                 "_ManifestStore": forged("_ManifestStore"),
                 "ContinuousEventLifecycle": forged("ContinuousEventLifecycle"),
                 "SQLiteMarketStore": forged("SQLiteMarketStore"),

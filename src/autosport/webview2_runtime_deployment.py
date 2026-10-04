@@ -11,7 +11,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .webview2_runtime_preflight import WebView2RuntimePreflight, probe_webview2_runtime
+from .webview2_runtime_preflight import (
+    WebView2RuntimePreflight,
+    probe_webview2_runtime,
+    require_webview2_release_environment,
+)
 
 
 WEBVIEW2_DEPLOYMENT_MODE = "EVERGREEN_ONLINE_BOOTSTRAPPER"
@@ -213,6 +217,7 @@ def ensure_webview2_runtime() -> WebView2RuntimePreflight:
     AVAILABLE again after installation.
     """
 
+    require_webview2_release_environment()
     initial = probe_webview2_runtime()
     if initial.available is True:
         return initial

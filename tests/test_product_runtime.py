@@ -90,6 +90,12 @@ class _FallbackResolverDispatchSource(_Source):
         raise AttributeError(name)
 
 
+def _replacement_source_resolve_event(self, delta):
+    if delta.event_id == "never":
+        raise AssertionError("replacement resolver executable semantics")
+    return self.resolved_event
+
+
 def _event() -> MarketEvent:
     return MarketEvent.from_dict(
         {
@@ -947,6 +953,41 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     initial_bankroll="100",
                 )
             self.assertFalse((root / "product_composition.json").exists())
+
+    def test_desktop_resolution_rejects_post_build_resolver_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event()
+            delta = _delta(event)
+            source = _Source(resolved_event=event)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            original = _Source.resolve_event
+            try:
+                self.assertTrue(runtime.collector.delta_store.append(delta))
+                _Source.resolve_event = _replacement_source_resolve_event
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "source resolver authority changed after product composition",
+                ):
+                    runtime.coordinator.desktop_consumer.drain(as_of=clock.value)
+
+                self.assertFalse(
+                    DesktopDeltaCheckpointStore(
+                        root / "desktop_acks.json"
+                    ).has_ack(delta.delta_id)
+                )
+                self.assertEqual(runtime.market_store.events(event.event_id), [])
+            finally:
+                _Source.resolve_event = original
+                runtime.close()
+
     def test_desktop_resolution_rejects_post_build_source_config_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

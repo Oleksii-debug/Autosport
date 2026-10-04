@@ -119,6 +119,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
         *,
         as_of: datetime,
         max_generation: int,
+        tx_id: str | None = None,
     ) -> MonotonicWorkspaceAuthority:
         canonical_as_of = storage_module._canonical_replay_cutoff(as_of.isoformat())
         cutoff_id = storage_module._replay_cutoff_id(canonical_as_of)
@@ -139,9 +140,9 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
         self_rows = store._validated_replay_cutoff_rows()
         if self_rows:
             raise AssertionError("direct first-cutoff helper requires an empty cutoff table")
-        tx_id = f"{cutoff_id[:32]}-{'0' * 32}"
+        resolved_tx_id = tx_id or f"{cutoff_id[:32]}-{'0' * 32}"
         authority.prepare(
-            tx_id=tx_id,
+            tx_id=resolved_tx_id,
             observed_state_sha256=None,
             intended_state_sha256=intended_state_sha256,
             semantic_binding_sha256=binding_sha256,
@@ -155,7 +156,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
         store.connection.commit()
         authority.recover(
             observed_state_sha256=intended_state_sha256,
-            tx_id=tx_id,
+            tx_id=resolved_tx_id,
             semantic_binding_sha256=binding_sha256,
         )
         return authority
@@ -3755,6 +3756,25 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
                     "cutoff exceeds independently committed append authority",
+                ):
+                    self.replay(store)
+            finally:
+                store.close()
+
+    def test_committed_cutoff_with_noncanonical_transaction_id_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                self.direct_issue_first_cutoff_authority(
+                    store,
+                    as_of=self.CUTOFF,
+                    max_generation=0,
+                    tx_id="legacy-manual-cutoff",
+                )
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "committed transaction identity is invalid",
                 ):
                     self.replay(store)
             finally:

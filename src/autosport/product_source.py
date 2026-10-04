@@ -769,6 +769,7 @@ class ParlayApiProductSource:
             "score_state": quote.score_state,
             "metadata": quote.metadata,
             "sport": quote.sport,
+            "exchange_side": quote.exchange_side,
         }
         try:
             return json.dumps(

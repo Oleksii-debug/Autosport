@@ -38,7 +38,12 @@ class _Provider:
         return self.batches.pop(0)
 
 
-def _quote(*, odds: str = "1.80", sequence: int = 1) -> ProviderQuote:
+def _quote(
+    *,
+    odds: str = "1.80",
+    sequence: int = 1,
+    exchange_side: str | None = None,
+) -> ProviderQuote:
     return ProviderQuote(
         provider_event_id="event-1",
         provider_market_id="book:h2h",
@@ -59,6 +64,7 @@ def _quote(*, odds: str = "1.80", sequence: int = 1) -> ProviderQuote:
             "market_key": "h2h",
         },
         sport="table_tennis",
+        exchange_side=exchange_side,
     )
 
 
@@ -91,6 +97,15 @@ def _stream_checkpoint(delta) -> StreamCheckpoint:
 
 
 class ParlayApiProductSourceTests(unittest.TestCase):
+    def test_source_payload_evidence_binds_exchange_side(self) -> None:
+        back = _quote(exchange_side="back")
+        lay = _quote(exchange_side="lay")
+
+        self.assertNotEqual(
+            ParlayApiProductSource._quote_payload_bytes(back),
+            ParlayApiProductSource._quote_payload_bytes(lay),
+        )
+
     def test_snapshot_becomes_restart_safe_catalog_delta_and_event(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"

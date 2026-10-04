@@ -1205,7 +1205,6 @@ class _ContinuousSessionState:
                     "recovered settlement evidence is no longer pending for recovery"
                 )
 
-
     def complete_pending_settlement_commit(
         self,
         *,
@@ -1234,10 +1233,18 @@ class _ContinuousSessionState:
             )
 
         def mutate(raw: dict[str, Any]) -> None:
+            pending_before = {
+                item["evidence_id"]
+                for item in raw["pending_settlement_resolutions"]
+            }
             evidence, outcome_digests, pending = self._merge_settlement_evidence(
                 raw,
                 settlement_evidence,
             )
+            if not processed.issubset(pending_before):
+                raise ContinuousSessionError(
+                    "settlement completion references evidence that is not pending"
+                )
             raw["settlement_evidence"] = evidence
             raw["settlement_outcome_digests"] = outcome_digests
             raw["pending_settlement_resolutions"] = [
@@ -1329,16 +1336,25 @@ class _ContinuousSessionState:
             )
 
         def mutate(raw: dict[str, Any]) -> None:
+            pending_before = {
+                item["evidence_id"]
+                for item in raw["pending_settlement_resolutions"]
+            }
+            evidence, outcome_digests, pending = self._merge_settlement_evidence(
+                raw,
+                settlement_evidence,
+            )
+            if not processed.issubset(pending_before):
+                raise ContinuousSessionError(
+                    "successful settlement references evidence that is not pending"
+                )
+
             raw["cycles_completed"] = int(raw["cycles_completed"]) + 1
             raw["last_success_at"] = timestamp.isoformat()
             raw["last_error_code"] = None
             if full_refresh:
                 raw["last_full_refresh_at"] = timestamp.isoformat()
 
-            evidence, outcome_digests, pending = self._merge_settlement_evidence(
-                raw,
-                settlement_evidence,
-            )
             raw["settlement_evidence"] = evidence
             raw["settlement_outcome_digests"] = outcome_digests
             raw["pending_settlement_resolutions"] = [

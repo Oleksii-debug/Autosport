@@ -839,6 +839,81 @@ def test_empty_success_does_not_scan_settlement_history() -> None:
             )
 
 
+def test_wave_m_v3_migration_recovers_from_partial_journal_publication() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        embedded = _checkpoint_payload(_SMALL_HISTORY)
+        embedded["schema_version"] = 3
+        for index, item in enumerate(embedded["settlement_evidence"]):
+            item["quote_outcomes_sha256"] = (
+                continuous_session._settlement_quote_outcomes_sha256(
+                    {
+                        f"provider-a:event-{index}:winner:home": (
+                            "win" if index % 2 == 0 else "loss"
+                        )
+                    }
+                )
+            )
+        original_checkpoint = json.dumps(embedded, sort_keys=True)
+        path.write_text(original_checkpoint, encoding="utf-8")
+
+        state_type = continuous_session._ContinuousSessionState
+        original_write = state_type._write_evidence_record
+        calls = 0
+
+        def crash_during_migration(self, record):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise OSError("synthetic Wave M migration crash")
+            return original_write(self, record)
+
+        with patch.object(
+            state_type,
+            "_write_evidence_record",
+            crash_during_migration,
+        ):
+            try:
+                state_type(
+                    path,
+                    session_id="session-history-scaling",
+                    source_id="provider-a",
+                    clock=lambda: _AT,
+                )
+            except OSError:
+                pass
+            else:
+                raise AssertionError(
+                    "synthetic Wave M migration crash did not interrupt"
+                )
+
+        interrupted = json.loads(path.read_text(encoding="utf-8"))
+        assert interrupted["schema_version"] == 3
+        partial = _journal_snapshot(root)
+        assert 0 < len(partial) < _SMALL_HISTORY
+        for payload in partial.values():
+            record = json.loads(payload)
+            assert record["schema_version"] == 2
+            assert len(record["quote_outcomes_sha256"]) == 64
+
+        restarted = state_type(
+            path,
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+        checkpoint = json.loads(path.read_text(encoding="utf-8"))
+        assert checkpoint["schema_version"] == 4
+        assert checkpoint["settlement_evidence_count"] == _SMALL_HISTORY
+        evidence = restarted.snapshot().settlement_evidence
+        assert len(evidence) == _SMALL_HISTORY
+        assert all(
+            item["quote_outcomes_sha256"] is not None
+            for item in evidence
+        )
+
+
 def test_legacy_migration_recovers_from_partial_journal_publication() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

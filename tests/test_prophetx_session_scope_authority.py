@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 
@@ -10,14 +11,7 @@ from autosport.prophetx_session_lifecycle import (
 )
 
 
-NOW = __import__("datetime").datetime(
-    2026,
-    10,
-    4,
-    9,
-    0,
-    tzinfo=__import__("datetime").timezone.utc,
-)
+NOW = datetime(2026, 10, 4, 9, 0, tzinfo=timezone.utc)
 
 
 def _scope(

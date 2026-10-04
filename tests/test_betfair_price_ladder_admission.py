@@ -417,6 +417,90 @@ def test_out_of_order_incompatible_definition_reads_fail_closed_until_fresh_read
         _assess(newer, Decimal("2.01"))
 
 
+def test_out_of_order_same_definition_reads_fail_closed_until_fresh_read():
+    class OutOfOrderSameDefinitionTransport(PriceLadderTransport):
+        def __init__(self) -> None:
+            super().__init__("CLASSIC")
+            self.first_started = Event()
+            self.release_first = Event()
+            self.second_returned = Event()
+
+        def post(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+            body: bytes,
+            timeout_seconds: float,
+        ) -> bytes:
+            request = json.loads(body.decode("utf-8"))
+            if request["id"] == 1:
+                self.first_started.set()
+                if not self.release_first.wait(timeout=5):
+                    raise AssertionError("timed out waiting to release first read")
+            payload = super().post(
+                url,
+                headers=headers,
+                body=body,
+                timeout_seconds=timeout_seconds,
+            )
+            if request["id"] == 2:
+                self.second_returned.set()
+            return payload
+
+    transport = OutOfOrderSameDefinitionTransport()
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-key", "session-token"),
+        venue_id="betfair",
+        account_id="acct-1",
+    )
+    receipts: dict[str, object] = {}
+    errors: list[BaseException] = []
+
+    def read(name: str) -> None:
+        try:
+            receipts[name] = client.read_market_price_ladder("1.234")
+        except BaseException as exc:
+            errors.append(exc)
+
+    original_opener = urllib_request._opener
+    first = Thread(target=read, args=("older",))
+    second = Thread(target=read, args=("newer",))
+    try:
+        urllib_request._opener = _CanonicalUrlOpenerHarness(transport)
+        first.start()
+        assert transport.first_started.wait(timeout=5)
+        second.start()
+        assert transport.second_returned.wait(timeout=5)
+        second.join(timeout=5)
+        assert not second.is_alive()
+        transport.release_first.set()
+        first.join(timeout=5)
+        assert not first.is_alive()
+    finally:
+        transport.release_first.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        urllib_request._opener = original_opener
+
+    assert errors == []
+    for receipt in (receipts["older"], receipts["newer"]):
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="lacks canonical direct Betfair provider IO origin",
+        ):
+            _assess(receipt, Decimal("2.00"))
+
+    fresh = _canonical_read(client, transport)
+    assert _assess(fresh, Decimal("2.00")).admissible is True
+    for receipt in (receipts["older"], receipts["newer"]):
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="lacks canonical direct Betfair provider IO origin",
+        ):
+            _assess(receipt, Decimal("2.00"))
+
+
 def test_cached_positive_admission_expires_and_reread_cannot_rejuvenate_it():
     transport = PriceLadderTransport("CLASSIC")
     receipt, client = _canonical_receipt(transport)
@@ -696,6 +780,15 @@ def test_failed_same_market_refresh_revokes_prior_positive_authority():
     ):
         _canonical_read(client, FailingTransport("CLASSIC"))
 
+    assert result.admissible is False
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="lacks canonical direct Betfair provider IO origin",
+    ):
+        _assess(receipt, Decimal("2.00"))
+
+    fresh = _canonical_read(client, PriceLadderTransport("CLASSIC"))
+    assert _assess(fresh, Decimal("2.00")).admissible is True
     assert result.admissible is False
     with pytest.raises(
         BetfairReadOnlyError,

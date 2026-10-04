@@ -503,7 +503,10 @@ class BoundedMirrorInvalidationBuffer:
                 event,
                 decision_causal=decision_causal,
             )
-            if result.status is not MirrorUpdate.APPLIED:
+            if result.status not in {
+                MirrorUpdate.APPLIED,
+                MirrorUpdate.SEMANTIC_REFRESH,
+            }:
                 return result
 
             if self._full_refresh_required:

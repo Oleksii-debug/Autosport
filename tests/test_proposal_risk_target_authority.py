@@ -573,6 +573,17 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             proposal_target_authority._context_payload(context)
             for context in self._contexts()
         )
+        expected_context_json = tuple(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            for payload in expected_context_payloads
+        )
+        self.assertEqual(issued.candidate_context_json, expected_context_json)
         self.assertEqual(
             tuple(json.loads(value) for value in issued.candidate_context_json),
             expected_context_payloads,
@@ -961,6 +972,23 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             ):
                 self._issue()
 
+    def test_sha256_captured_root_cannot_be_rebound_with_live_dispatch(self) -> None:
+        original = proposal_target_authority.hashlib.sha256
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        proposal_target_authority._require_dispatch()
+        with (
+            patch.object(proposal_target_authority, "_HASHLIB_SHA256", fake),
+            patch.object(proposal_target_authority.hashlib, "sha256", fake),
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "SHA-256 implementation",
+            ):
+                proposal_target_authority._digest({"safe": True})
+
     def test_canonical_json_dispatch_rebinding_fails_closed(self) -> None:
         original = proposal_target_authority.json.dumps
 
@@ -973,6 +1001,45 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
                 "canonical JSON serializer",
             ):
                 self._issue()
+
+    def test_canonical_json_captured_root_cannot_be_rebound_with_live_dispatch(
+        self,
+    ) -> None:
+        original = proposal_target_authority.json.dumps
+
+        def fake(*args: object, **kwargs: object) -> object:
+            return original(*args, **kwargs)
+
+        proposal_target_authority._require_dispatch()
+        with (
+            patch.object(proposal_target_authority, "_JSON_DUMPS", fake),
+            patch.object(proposal_target_authority.json, "dumps", fake),
+        ):
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "canonical JSON serializer",
+            ):
+                proposal_target_authority._canonical_json({"safe": True})
+
+    def test_canonical_json_in_place_code_mutation_after_dispatch_fails_closed(
+        self,
+    ) -> None:
+        serializer = proposal_target_authority.json.dumps
+        original_code = serializer.__code__
+
+        def forged(*args: object, **kwargs: object) -> str:
+            return '{"forged":true}'
+
+        proposal_target_authority._require_dispatch()
+        try:
+            serializer.__code__ = forged.__code__
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "canonical JSON serializer",
+            ):
+                proposal_target_authority._canonical_json({"safe": True})
+        finally:
+            serializer.__code__ = original_code
 
     def test_nested_decision_ledger_snapshot_rebinding_fails_closed(self) -> None:
         original = JsonlDecisionLedger.verified_snapshot

@@ -1051,6 +1051,11 @@ class _ContinuousSessionState:
             self._verify_evidence_tip(state)
             return state
         pending = self._validate_pending(pending, state)
+        # Recovery crosses a durability boundary: validate the entire committed
+        # base journal before publishing any prepared tail. This path is
+        # exceptional, so O(history) verification here does not reintroduce
+        # history-proportional work into ordinary operational checkpoints.
+        self._load_evidence_history(state)
         for record in pending["records"]:
             self._write_evidence_record(record)
         final = dict(state)

@@ -399,11 +399,15 @@ def observe_workspace_once(
             if not isinstance(mirror_updates, BoundedMirrorInvalidationBuffer):
                 raise TypeError("mirror_updates must be a BoundedMirrorInvalidationBuffer")
             mirror = mirror_updates.mirror
-            # Reconcile the non-durable mirror from canonical append-only history at
-            # each observation boundary. Re-applying identical/stale events is
-            # idempotent and deliberately does not enqueue downstream invalidations.
-            for persisted_event in store.events():
-                mirror.apply(persisted_event)
+            # Reconcile the non-durable mirror from independently proven canonical
+            # append history at each observation boundary. Preserve generation-zero
+            # migration rows only as audit/sequence fences; only positive product-issued
+            # appends may become decision-causal live state.
+            for persisted_event, append_generation in store.events_with_append_generation():
+                mirror._apply_with_causal_authority(
+                    persisted_event,
+                    decision_causal=append_generation > 0,
+                )
 
         bus = MarketEventBus(store)
         bus.subscribe(mirror_updates.accept_persisted)

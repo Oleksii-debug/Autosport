@@ -2180,6 +2180,7 @@ def persist_portfolio_plan_decision(
             restored = PortfolioPlan.from_dict(
                 json.loads(existing.payload[_PORTFOLIO_PLAN_JSON_PAYLOAD_KEY]),
                 verified_outcome_authorities=verified_outcome_authorities,
+                verified_terminal_economics=plan.terminal_economics,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise PortfolioPlanReconciliationRequired(

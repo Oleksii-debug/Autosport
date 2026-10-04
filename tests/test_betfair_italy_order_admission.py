@@ -1,4 +1,5 @@
 from decimal import Decimal, localcontext
+import pickle
 
 import pytest
 
@@ -474,3 +475,21 @@ def test_ruleset_match_does_not_mint_price_ladder_authority():
     assert result.current_provider_rules_proven is False
     assert result.execution_authorized is False
     assert result.real_money_execution is False
+
+
+def test_instruction_and_result_pickle_round_trip():
+    instruction = I(side="LAY", size="0.50", price="3.00")
+    restored_instruction = pickle.loads(pickle.dumps(instruction))
+    assert type(restored_instruction) is ItalianLimitInstruction
+    assert restored_instruction == instruction
+    assert restored_instruction.side == "LAY"
+    assert restored_instruction.size == Decimal("0.50")
+
+    result = evaluate_italian_limit_batch((instruction,))
+    restored_result = pickle.loads(pickle.dumps(result))
+    assert type(restored_result) is ItalianLimitBatchAdmission
+    assert restored_result == result
+    assert restored_result.state is ItalianLimitAdmissionState.RULESET_SATISFIED_UNBOUND
+    assert restored_result.admissible is False
+    assert restored_result.execution_authorized is False
+    assert restored_result.real_money_execution is False

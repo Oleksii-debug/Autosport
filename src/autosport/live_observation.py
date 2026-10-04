@@ -358,6 +358,10 @@ def poll_open_market_store_once(
     if not isinstance(mirror_updates, BoundedMirrorInvalidationBuffer):
         raise TypeError("mirror_updates must be a BoundedMirrorInvalidationBuffer")
 
+    # A prior subscriber failure may have happened after the live receipt commit.
+    # Repair that durable/non-durable split before the provider can advance again.
+    mirror_updates.reconcile_pending()
+
     bus = MarketEventBus(store)
     bus.subscribe(mirror_updates.accept_persisted)
     engine = IngestionEngine(
@@ -399,11 +403,13 @@ def observe_workspace_once(
             if not isinstance(mirror_updates, BoundedMirrorInvalidationBuffer):
                 raise TypeError("mirror_updates must be a BoundedMirrorInvalidationBuffer")
             mirror = mirror_updates.mirror
-            # Reconcile the non-durable mirror from canonical append-only history at
-            # each observation boundary. Re-applying identical/stale events is
-            # idempotent and deliberately does not enqueue downstream invalidations.
+            # First repair exact post-commit subscriber failures retained by the
+            # long-lived buffer. Then reconcile any other receipt-authoritative rows
+            # from durable history. Missing material rows must enter the invalidation
+            # protocol; duplicates/stale rows remain idempotent and enqueue nothing.
+            mirror_updates.reconcile_pending()
             for persisted_event in store.trusted_live_events():
-                mirror.apply(persisted_event)
+                mirror_updates.accept_persisted(persisted_event)
 
         bus = MarketEventBus(store)
         bus.subscribe(mirror_updates.accept_persisted)

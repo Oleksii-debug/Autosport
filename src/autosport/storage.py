@@ -2772,7 +2772,9 @@ class SQLiteMarketStore:
                         )
                     else:
                         self._validate_causal_replay_state()
-                    cutoff_rows = self._validated_replay_cutoff_rows()
+                    cutoff_rows = self._validated_replay_cutoff_rows(
+                        require_current_append_head=not preexisting_cutoff
+                    )
                     observed_state_sha256 = (
                         self._replay_cutoff_authority_state_sha256(cutoff_rows)
                     )

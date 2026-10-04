@@ -291,8 +291,8 @@ class BetfairProviderConstraintObservation(
         _decimal_text_fn=_decimal_text,
         _error_type=BetfairProviderConstraintError,
     ):
-        if provider_id != _provider_id:
-            raise _error_type("provider_id must be canonical betfair")
+        if type(provider_id) is not str or provider_id != _provider_id:
+            raise _error_type("provider_id must be exact canonical betfair text")
         _scope_fn(jurisdiction_scope)
         _currency_fn(currency_code)
         _positive_decimal_fn(min_standard_size, "min_standard_size")
@@ -330,8 +330,10 @@ class BetfairProviderConstraintObservation(
                 raise _error_type(
                     "effective_until must be after effective_from"
                 )
-        if order_family != _order_family:
-            raise _error_type("order_family must be LIMIT_STANDARD_SIZE")
+        if type(order_family) is not str or order_family != _order_family:
+            raise _error_type(
+                "order_family must be exact LIMIT_STANDARD_SIZE text"
+            )
         if type(schema_version) is not int or schema_version != _schema_version:
             raise _error_type(
                 "schema_version must be the product-owned current version"
@@ -475,8 +477,8 @@ class BetfairProviderConstraintResolution(
             raise _error_type(
                 "state must be exact BetfairConstraintResolutionState"
             )
-        if provider_id != _provider_id:
-            raise _error_type("provider_id must be canonical betfair")
+        if type(provider_id) is not str or provider_id != _provider_id:
+            raise _error_type("provider_id must be exact canonical betfair text")
         _scope_fn(jurisdiction_scope)
         _currency_fn(currency_code)
         current = _utc_fn(as_of, "as_of")

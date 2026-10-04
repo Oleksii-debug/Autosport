@@ -13,6 +13,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from .workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockBusyError,
+    WorkspaceEconomicLockError,
+)
+
 
 SCHEMA_VERSION = 1
 _MAX_EXECUTION_DECIMAL_TEXT_LENGTH = 8192
@@ -574,22 +580,21 @@ class RealExecutionLedger:
 
     def _mutate(self, operation: Callable[[], _T]) -> _T:
         with self._thread_lock:
+            lock = WorkspaceEconomicLock(
+                self.path.parent,
+                file_name=self._lock_path.name,
+            )
             try:
-                fd = os.open(
-                    self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
-                )
-            except FileExistsError as exc:
+                with lock:
+                    return operation()
+            except WorkspaceEconomicLockBusyError as exc:
                 raise ExecutionLedgerBusyError(
-                    "writer lock exists; fail closed until writer/crash ownership is resolved"
+                    "writer lock is owned by another process; fail closed until release"
                 ) from exc
-            try:
-                return operation()
-            finally:
-                os.close(fd)
-                try:
-                    self._lock_path.unlink()
-                except FileNotFoundError:
-                    pass
+            except WorkspaceEconomicLockError as exc:
+                raise ExecutionLedgerIntegrityError(
+                    "execution ledger crash-releasing writer lock failed"
+                ) from exc
 
     @classmethod
     def _validate_event(

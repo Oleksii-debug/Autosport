@@ -609,41 +609,50 @@ def _source_resolver_identity_impl(
             "product source cannot define fallback attribute dispatch"
         )
     instance_dict = getattr(source, "__dict__", None)
-    if type(instance_dict) is dict and "resolve_event" in instance_dict:
-        raise _error_type(
-            "product source forbids per-instance resolve_event shadowing"
-        )
-    resolver = getattr(type(source), "resolve_event", None)
-    if type(resolver) is not _function_type:
-        raise _error_type(
-            "product source must use a concrete class resolve_event method"
-        )
-    bound_resolver = getattr(source, "resolve_event", None)
-    if (
-        type(bound_resolver) is not _method_type
-        or bound_resolver.__self__ is not source
-        or bound_resolver.__func__ is not resolver
-    ):
-        raise _error_type(
-            "product source resolve_event instance dispatch is not canonical"
-        )
-    if resolver.__defaults__ is not None or resolver.__kwdefaults__ not in (None, {}):
-        raise _error_type(
-            "product source resolve_event cannot use mutable call defaults"
-        )
-    if resolver.__closure__ is not None:
-        raise _error_type(
-            "product source resolve_event cannot close over mutable authority"
-        )
-    try:
-        resolver_semantic_sha256 = _semantic_sha256(
-            resolver,
-            runtime_owner=type(source),
-        )
-    except _semantic_error_type as exc:
-        raise _error_type(
-            "product source resolve_event semantics cannot be fingerprinted safely"
-        ) from exc
+    source_methods: dict[str, tuple[FunctionType, str]] = {}
+    for method_name in ("resolve_event", "fetch_catalog_page", "fetch_deltas"):
+        if type(instance_dict) is dict and method_name in instance_dict:
+            raise _error_type(
+                f"product source forbids per-instance {method_name} shadowing"
+            )
+        method = getattr(source_type, method_name, None)
+        if type(method) is not _function_type:
+            raise _error_type(
+                f"product source must use a concrete class {method_name} method"
+            )
+        bound_method = getattr(source, method_name, None)
+        if (
+            type(bound_method) is not _method_type
+            or bound_method.__self__ is not source
+            or bound_method.__func__ is not method
+        ):
+            raise _error_type(
+                f"product source {method_name} instance dispatch is not canonical"
+            )
+        if method.__defaults__ is not None or method.__kwdefaults__ not in (None, {}):
+            raise _error_type(
+                f"product source {method_name} cannot use mutable call defaults"
+            )
+        if method.__closure__ is not None:
+            raise _error_type(
+                f"product source {method_name} cannot close over mutable authority"
+            )
+        try:
+            semantic_sha256 = _semantic_sha256(
+                method,
+                runtime_owner=source_type,
+            )
+        except _semantic_error_type as exc:
+            raise _error_type(
+                f"product source {method_name} semantics cannot be fingerprinted safely"
+            ) from exc
+        source_methods[method_name] = (method, semantic_sha256)
+
+    resolver, resolver_semantic_sha256 = source_methods["resolve_event"]
+    catalog_fetch, catalog_fetch_semantic_sha256 = source_methods[
+        "fetch_catalog_page"
+    ]
+    delta_fetch, delta_fetch_semantic_sha256 = source_methods["fetch_deltas"]
 
     def optional_text(name: str) -> str | None:
         value = None
@@ -688,6 +697,12 @@ def _source_resolver_identity_impl(
         "implementation": f"{type(source).__module__}.{type(source).__qualname__}",
         "resolver_owner": f"{resolver.__module__}.{resolver.__qualname__}",
         "resolver_semantic_sha256": resolver_semantic_sha256,
+        "catalog_fetch_owner": (
+            f"{catalog_fetch.__module__}.{catalog_fetch.__qualname__}"
+        ),
+        "catalog_fetch_semantic_sha256": catalog_fetch_semantic_sha256,
+        "delta_fetch_owner": f"{delta_fetch.__module__}.{delta_fetch.__qualname__}",
+        "delta_fetch_semantic_sha256": delta_fetch_semantic_sha256,
         "configuration_sha256": explicit_configuration,
         "authority_binding_sha256": authority_binding,
         "lawful_terms_ref": optional_text("lawful_terms_ref"),

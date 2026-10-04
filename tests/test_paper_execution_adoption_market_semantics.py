@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from autosport.domain import MarketEvent
+from autosport.domain import MarketEvent, TicketLeg
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
+    PaperExecutionAdoptionError,
     PaperExecutionAdoptionRuntime,
     PaperExposureBinding,
 )
@@ -95,6 +96,26 @@ def test_exposure_binding_rejects_noncanonical_market_semantics(identity: str) -
             currency="EUR",
             market_semantics_id=identity,
         )
+
+
+def test_leg_quote_identity_rejects_semantics_substitution() -> None:
+    event = _event(_S2)
+    leg = TicketLeg(
+        event.event_id,
+        event.market_id,
+        event.selection_id,
+        event.decimal_odds,
+        sport=event.sport,
+        exchange_side=event.exchange_side,
+        market_semantics_id=_S1,
+    )
+    assert leg.quote_key == event.quote_key
+
+    with pytest.raises(
+        PaperExecutionAdoptionError,
+        match="ticket leg identity does not match canonical execution quote",
+    ):
+        PaperExecutionAdoptionRuntime._require_leg_quote_identity(leg, event)
 
 
 def test_paper_value_prepared_binding_carries_market_semantics(tmp_path) -> None:

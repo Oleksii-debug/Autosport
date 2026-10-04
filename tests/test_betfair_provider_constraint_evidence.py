@@ -527,3 +527,17 @@ def test_observation_digests_use_non_python_immutable_getters() -> None:
         object.__setattr__(item, "generation_sha256", "0" * 64)
     assert item.semantic_sha256 == semantic_before
     assert item.generation_sha256 == generation_before
+
+def test_observation_type_rejects_subclass_authority_laundering() -> None:
+    with pytest.raises(TypeError, match="authority surface classes are final"):
+        class ForgedObservation(BetfairProviderConstraintObservation):
+            _current_constraint_authority_constant = True
+
+
+def test_resolution_type_rejects_subclass_authority_laundering() -> None:
+    resolution_type = type(resolve(observation()))
+
+    with pytest.raises(TypeError, match="authority surface classes are final"):
+        class ForgedResolution(resolution_type):
+            execution_authorized = property(lambda _self: True)
+

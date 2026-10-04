@@ -78,6 +78,37 @@ _LEDGER_VERIFY = JsonlDecisionLedger.verify_integrity
 _LEDGER_VERIFY_CODE = getattr(_LEDGER_VERIFY, "__code__", None)
 _RECORD_TYPE = DecisionRecord
 _LOCK_TYPE = WorkspaceEconomicLock
+_LOCK_METHOD_WITNESSES = tuple(
+    (
+        name,
+        WorkspaceEconomicLock.__dict__[name],
+        getattr(
+            getattr(
+                WorkspaceEconomicLock.__dict__[name],
+                "__func__",
+                WorkspaceEconomicLock.__dict__[name],
+            ),
+            "__code__",
+            None,
+        ),
+    )
+    for name in (
+        "__init__",
+        "acquire",
+        "release",
+        "__enter__",
+        "__exit__",
+        "_open_lock_handle",
+        "_open_new_lock_handle",
+        "_validate_existing_lock_path",
+        "_validate_open_handle_identity",
+        "_require_regular_file",
+        "_require_single_link",
+        "_lock_handle",
+        "_unlock_handle",
+    )
+)
+_LOCK_METHOD_WITNESSES_EXPECTED = _LOCK_METHOD_WITNESSES
 _ENSURE_DURABLE_FILE = ensure_durable_file
 _ENSURE_DURABLE_FILE_CODE = getattr(_ENSURE_DURABLE_FILE, "__code__", None)
 
@@ -426,6 +457,7 @@ def _require_dispatch() -> None:
         or getattr(_LEDGER_VERIFY, "__code__", None) is not _LEDGER_VERIFY_CODE
         or DecisionRecord is not _RECORD_TYPE
         or WorkspaceEconomicLock is not _LOCK_TYPE
+        or _LOCK_METHOD_WITNESSES is not _LOCK_METHOD_WITNESSES_EXPECTED
         or ensure_durable_file is not _ENSURE_DURABLE_FILE
         or getattr(_ENSURE_DURABLE_FILE, "__code__", None)
         is not _ENSURE_DURABLE_FILE_CODE
@@ -437,6 +469,18 @@ def _require_dispatch() -> None:
         raise ProductProposalRiskEvaluationPrecommitError(
             "proposal risk evaluation precommit authority dispatch changed"
         )
+
+    for name, expected, code in _LOCK_METHOD_WITNESSES_EXPECTED:
+        current = WorkspaceEconomicLock.__dict__.get(name)
+        current_function = getattr(current, "__func__", current)
+        if (
+            current is not expected
+            or getattr(current_function, "__code__", None) is not code
+        ):
+            raise ProductProposalRiskEvaluationPrecommitError(
+                "proposal risk evaluation precommit WorkspaceEconomicLock "
+                f"authority changed: {name}"
+            )
 
     for name, expected, code in _LEDGER_INTERNAL_METHOD_WITNESSES:
         current = JsonlDecisionLedger.__dict__.get(name)

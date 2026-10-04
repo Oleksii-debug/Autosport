@@ -34,9 +34,28 @@ _HEX = frozenset("0123456789abcdef")
 _MAX_AUTHORITIES = 256
 _PATH_TYPE = type(Path("."))
 _TARGET_TYPE = ProductProposalRiskTarget
+_TARGET_RESOLVER = resolve_product_proposal_risk_target
+_TARGET_RESOLVER_CODE = getattr(_TARGET_RESOLVER, "__code__", None)
 _AUTHORITY_TYPE = MarketSettlementOutcomeAuthority
+_AUTHORITY_TO_DICT = MarketSettlementOutcomeAuthority.to_dict
+_AUTHORITY_TO_DICT_CODE = getattr(_AUTHORITY_TO_DICT, "__code__", None)
+_AUTHORITY_AS_OF = MarketSettlementOutcomeAuthority.assert_available_as_of
+_AUTHORITY_AS_OF_CODE = getattr(_AUTHORITY_AS_OF, "__code__", None)
+_AUTHORITY_SHA_GETTER = MarketSettlementOutcomeAuthority.authority_sha256.fget
+_AUTHORITY_SHA_GETTER_CODE = getattr(_AUTHORITY_SHA_GETTER, "__code__", None)
+_GOAL_STORE_TYPE = EconomicGoalStore
+_GOAL_LOAD = EconomicGoalStore.load
+_GOAL_LOAD_CODE = getattr(_GOAL_LOAD, "__code__", None)
+_POLICY_TYPE = PaperRiskPolicy
 _LEDGER_TYPE = JsonlDecisionLedger
+_LEDGER_APPEND = JsonlDecisionLedger.append_economic
+_LEDGER_APPEND_CODE = getattr(_LEDGER_APPEND, "__code__", None)
+_LEDGER_RESOLVE = JsonlDecisionLedger.verified_economic_decision_for_material_action
+_LEDGER_RESOLVE_CODE = getattr(_LEDGER_RESOLVE, "__code__", None)
+_LEDGER_VERIFY = JsonlDecisionLedger.verify_integrity
+_LEDGER_VERIFY_CODE = getattr(_LEDGER_VERIFY, "__code__", None)
 _RECORD_TYPE = DecisionRecord
+_LOCK_TYPE = WorkspaceEconomicLock
 
 
 class ProductProposalTargetTerminalPopulationError(RuntimeError):
@@ -145,6 +164,41 @@ class ProductProposalTargetTerminalPopulation:
 
 
 _POPULATION_TYPE = ProductProposalTargetTerminalPopulation
+
+
+def _require_dispatch() -> None:
+    if (
+        ProductProposalRiskTarget is not _TARGET_TYPE
+        or resolve_product_proposal_risk_target is not _TARGET_RESOLVER
+        or getattr(_TARGET_RESOLVER, "__code__", None) is not _TARGET_RESOLVER_CODE
+        or MarketSettlementOutcomeAuthority is not _AUTHORITY_TYPE
+        or MarketSettlementOutcomeAuthority.to_dict is not _AUTHORITY_TO_DICT
+        or getattr(_AUTHORITY_TO_DICT, "__code__", None) is not _AUTHORITY_TO_DICT_CODE
+        or MarketSettlementOutcomeAuthority.assert_available_as_of is not _AUTHORITY_AS_OF
+        or getattr(_AUTHORITY_AS_OF, "__code__", None) is not _AUTHORITY_AS_OF_CODE
+        or MarketSettlementOutcomeAuthority.authority_sha256.fget is not _AUTHORITY_SHA_GETTER
+        or getattr(_AUTHORITY_SHA_GETTER, "__code__", None) is not _AUTHORITY_SHA_GETTER_CODE
+        or EconomicGoalStore is not _GOAL_STORE_TYPE
+        or EconomicGoalStore.load is not _GOAL_LOAD
+        or getattr(_GOAL_LOAD, "__code__", None) is not _GOAL_LOAD_CODE
+        or PaperRiskPolicy is not _POLICY_TYPE
+        or JsonlDecisionLedger is not _LEDGER_TYPE
+        or JsonlDecisionLedger.append_economic is not _LEDGER_APPEND
+        or getattr(_LEDGER_APPEND, "__code__", None) is not _LEDGER_APPEND_CODE
+        or JsonlDecisionLedger.verified_economic_decision_for_material_action is not _LEDGER_RESOLVE
+        or getattr(_LEDGER_RESOLVE, "__code__", None) is not _LEDGER_RESOLVE_CODE
+        or JsonlDecisionLedger.verify_integrity is not _LEDGER_VERIFY
+        or getattr(_LEDGER_VERIFY, "__code__", None) is not _LEDGER_VERIFY_CODE
+        or DecisionRecord is not _RECORD_TYPE
+        or WorkspaceEconomicLock is not _LOCK_TYPE
+        or ProductProposalTargetTerminalPopulation is not _POPULATION_TYPE
+    ):
+        raise ProductProposalTargetTerminalPopulationError(
+            "proposal target terminal-population authority dispatch changed"
+        )
+
+
+_REQUIRE_DISPATCH_ORIGINAL = _require_dispatch
 
 
 def _workspace_path(value: object) -> Path:
@@ -301,9 +355,10 @@ def _authority_snapshot(
         raise TypeError(
             "authorities must contain exact MarketSettlementOutcomeAuthority values"
         )
+    _require_dispatch()
     try:
-        authority.assert_available_as_of(decision_at)
-        raw = authority.to_dict()
+        _AUTHORITY_AS_OF(authority, decision_at)
+        raw = _AUTHORITY_TO_DICT(authority)
     except (AttributeError, TypeError, ValueError) as exc:
         raise ProductProposalTargetTerminalPopulationError(
             "market terminal authority cannot be verified at proposal time"
@@ -318,7 +373,8 @@ def _authority_snapshot(
         raise ProductProposalTargetTerminalPopulationError(
             "market terminal authority serialization is inconsistent"
         )
-    _sha(authority.authority_sha256, "market_authority_sha256")
+    _require_dispatch()
+    _sha(_AUTHORITY_SHA_GETTER(authority), "market_authority_sha256")
     return raw
 
 
@@ -549,8 +605,9 @@ def _material(
 def _current_economic_state(
     workspace: Path,
 ) -> tuple[EconomicGoalContract, PaperRiskPolicy, JsonlDecisionLedger]:
+    _require_dispatch()
     try:
-        goal = EconomicGoalStore.load(EconomicGoalStore(workspace))
+        goal = _GOAL_LOAD(_GOAL_STORE_TYPE(workspace))
     except (EconomicGoalContractError, OSError, TypeError, ValueError) as exc:
         raise ProductProposalTargetTerminalPopulationError(
             "current product EconomicGoal cannot be resolved"
@@ -559,11 +616,11 @@ def _current_economic_state(
         raise ProductProposalTargetTerminalPopulationError(
             "current EconomicGoal has non-canonical type"
         )
-    policy = PaperRiskPolicy(economic_goal=goal)
-    ledger = JsonlDecisionLedger(workspace / "decisions.jsonl")
+    policy = _POLICY_TYPE(economic_goal=goal)
+    ledger = _LEDGER_TYPE(workspace / "decisions.jsonl")
     try:
         ensure_durable_file(ledger.path)
-        ledger.verify_integrity()
+        _LEDGER_VERIFY(ledger)
     except (DecisionLedgerIntegrityError, OSError, TypeError, ValueError) as exc:
         raise ProductProposalTargetTerminalPopulationError(
             "canonical Decision Ledger cannot be verified"
@@ -637,10 +694,15 @@ def issue_product_proposal_target_terminal_population(
 ) -> ProductProposalTargetTerminalPopulation:
     """Persist one target-specific provider terminal-space precommit."""
 
+    if _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL:
+        raise ProductProposalTargetTerminalPopulationError(
+            "terminal-population dispatch guard root changed"
+        )
+    _REQUIRE_DISPATCH_ORIGINAL()
     workspace = _workspace_path(workspace)
     target_sha256 = _sha(target_sha256, "target_sha256")
     try:
-        target = resolve_product_proposal_risk_target(workspace, target_sha256)
+        target = _TARGET_RESOLVER(workspace, target_sha256)
     except (
         ProductProposalRiskTargetError,
         OSError,
@@ -658,10 +720,10 @@ def issue_product_proposal_target_terminal_population(
     # The target resolver owns its own workspace lock. Do not nest it here. As with
     # the target/science join, mandatory post-append re-resolution below catches a
     # concurrent product transition and leaves at most a non-authorizing audit row.
-    with WorkspaceEconomicLock(workspace):
+    with _LOCK_TYPE(workspace):
         goal, policy, ledger = _current_economic_state(workspace)
         try:
-            existing = ledger.verified_economic_decision_for_material_action(
+            existing = _LEDGER_RESOLVE(ledger,
                 action_id,
                 goal,
                 risk_policy=policy,
@@ -686,12 +748,13 @@ def issue_product_proposal_target_terminal_population(
                 decision_id=action_id,
             )
             try:
-                ledger.append_economic(
+                _LEDGER_APPEND(
+                    ledger,
                     record,
                     goal,
                     risk_policy=policy,
                 )
-                existing = ledger.verified_economic_decision_for_material_action(
+                existing = _LEDGER_RESOLVE(ledger,
                     action_id,
                     goal,
                     risk_policy=policy,
@@ -706,7 +769,7 @@ def issue_product_proposal_target_terminal_population(
             )
 
     try:
-        fresh_target = resolve_product_proposal_risk_target(
+        fresh_target = _TARGET_RESOLVER(
             workspace,
             target_sha256,
         )
@@ -726,9 +789,9 @@ def issue_product_proposal_target_terminal_population(
             "target/source authority changed during terminal-population precommit"
         )
 
-    with WorkspaceEconomicLock(workspace):
+    with _LOCK_TYPE(workspace):
         goal, policy, ledger = _current_economic_state(workspace)
-        final_record = ledger.verified_economic_decision_for_material_action(
+        final_record = _LEDGER_RESOLVE(ledger,
             action_id,
             goal,
             risk_policy=policy,
@@ -753,10 +816,15 @@ def resolve_product_proposal_target_terminal_population(
 ) -> ProductProposalTargetTerminalPopulation:
     """Re-resolve a terminal population against separately reverified source authority."""
 
+    if _require_dispatch is not _REQUIRE_DISPATCH_ORIGINAL:
+        raise ProductProposalTargetTerminalPopulationError(
+            "terminal-population dispatch guard root changed"
+        )
+    _REQUIRE_DISPATCH_ORIGINAL()
     workspace = _workspace_path(workspace)
     target_sha256 = _sha(target_sha256, "target_sha256")
     try:
-        target = resolve_product_proposal_risk_target(workspace, target_sha256)
+        target = _TARGET_RESOLVER(workspace, target_sha256)
     except (
         ProductProposalRiskTargetError,
         OSError,
@@ -770,10 +838,10 @@ def resolve_product_proposal_target_terminal_population(
     material = _material(target, authorities)
     population_sha256 = _digest(material)
     action_id = _ACTION_PREFIX + target_sha256
-    with WorkspaceEconomicLock(workspace):
+    with _LOCK_TYPE(workspace):
         goal, policy, ledger = _current_economic_state(workspace)
         try:
-            record = ledger.verified_economic_decision_for_material_action(
+            record = _LEDGER_RESOLVE(ledger,
                 action_id,
                 goal,
                 risk_policy=policy,

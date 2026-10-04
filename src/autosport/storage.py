@@ -2271,6 +2271,58 @@ class SQLiteMarketStore:
     def append_many(self, events: Iterable[MarketEvent]) -> int:
         return len(self.append_batch_accepted(events))
 
+    def append_generation_hint(self) -> int:
+        """Return an untrusted cheap append-generation hint for race fencing.
+
+        This is deliberately analogous to external_change_token(): it is not market
+        authority and callers must prove the selected generation through
+        require_committed_append_generation() before persisting or acting on it.
+        """
+
+        with self._connection_lock:
+            self._require_database_path_identity()
+            row = self.connection.execute(
+                "SELECT COALESCE(MAX(append_generation), 0) "
+                "FROM market_event_commit_order"
+            ).fetchone()
+            self._require_database_path_identity()
+        if (
+            row is None
+            or len(row) != 1
+            or type(row[0]) is not int
+            or row[0] < 0
+        ):
+            raise ValueError("market append generation hint is invalid")
+        return row[0]
+
+    def require_committed_append_generation(self, max_generation: int) -> None:
+        """Prove one previously sampled generation is a committed product boundary."""
+
+        if type(max_generation) is not int or max_generation < 0:
+            raise ValueError("max_generation must be a non-negative int")
+
+        authority = self._market_append_authority()
+        with self._market_append_issuance_lock(authority):
+            with self._connection_lock:
+                self.connection.execute("BEGIN")
+                try:
+                    _validate_canonical_table(self.connection, "market_events")
+                    self._validate_causal_replay_state()
+                    self._require_product_issued_positive_history(authority)
+                    current_head = self._positive_append_generation_head()
+                    if max_generation > current_head:
+                        raise MonotonicAuthorityRollbackError(
+                            "requested market append boundary exceeds committed authority"
+                        )
+                    self._require_committed_append_authority_through(
+                        authority,
+                        max_generation,
+                    )
+                    self._commit_stable_database_path()
+                except BaseException:
+                    self.connection.rollback()
+                    raise
+
     def committed_append_generation_head(self) -> int:
         """Return the exact independently committed positive append boundary.
 

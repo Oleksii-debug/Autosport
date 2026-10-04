@@ -1555,7 +1555,7 @@ class SQLiteMarketStore:
         self,
         authority: MonotonicWorkspaceAuthority,
         max_generation: int,
-    ) -> None:
+    ) -> frozenset[int]:
         """Prove a frozen cutoff is an exact committed append transition prefix.
 
         This deliberately does not recover a pending append. Existing cutoffs must
@@ -1578,6 +1578,7 @@ class SQLiteMarketStore:
             )
 
         prefix_commits: list[AuthorityRecord] = [commits[0]]
+        committed_boundaries = {0}
         covered_generation = 0
         expected_start = 1
         for record in commits[1:]:
@@ -1599,6 +1600,7 @@ class SQLiteMarketStore:
                     "causal replay cutoff is not an exact committed append transition boundary"
                 )
             prefix_commits.append(record)
+            committed_boundaries.add(end)
             covered_generation = end
             expected_start = end + 1
 
@@ -1620,6 +1622,7 @@ class SQLiteMarketStore:
             entries,
             baseline_state_sha256=baseline_state_sha256,
         )
+        return frozenset(committed_boundaries)
 
     def _replay_cutoff_authority(self) -> MonotonicWorkspaceAuthority:
         self._require_database_path_identity()
@@ -1840,7 +1843,6 @@ class SQLiteMarketStore:
             rows_by_tx_prefix.setdefault(row[0][:32], []).append(row)
 
         corpus_by_generation: dict[int, str] = {}
-        proven_append_generations: set[int] = set()
 
         def corpus_for(max_generation: int) -> str:
             cached = corpus_by_generation.get(max_generation)
@@ -1849,14 +1851,14 @@ class SQLiteMarketStore:
                 corpus_by_generation[max_generation] = cached
             return cached
 
-        def prove_append_generation(max_generation: int) -> None:
-            if max_generation in proven_append_generations:
-                return
+        append_boundaries = (
             self._require_committed_append_authority_through(
                 append_authority,
-                max_generation,
+                max(row[2] for row in cutoff_rows),
             )
-            proven_append_generations.add(max_generation)
+            if cutoff_rows
+            else frozenset()
+        )
 
         remaining = set(cutoff_rows)
         issued: list[tuple[str, str, int]] = []
@@ -1898,7 +1900,10 @@ class SQLiteMarketStore:
                     "causal replay cutoff commit regresses append generation"
                 )
 
-            prove_append_generation(max_generation)
+            if max_generation not in append_boundaries:
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff is not an exact committed append transition boundary"
+                )
             prior_rows = tuple(sorted(issued, key=lambda item: item[0]))
             prior_state_sha256 = _replay_cutoff_state_sha256(
                 prior_rows,

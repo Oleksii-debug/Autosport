@@ -662,7 +662,12 @@ def _build_trusted_private_place_action(private_place_action, private_place_acti
                     "durable Betfair operator confirmation binding changed"
                 )
             if (
-                final_confirmation.receipt.consumed_at != submitted_at
+                final_confirmation.receipt.consumed_at is None
+                or _CONFIRMATION_INSTANT(
+                    final_confirmation.receipt.consumed_at,
+                    "receipt.consumed_at",
+                )
+                != submitted_instant
                 or final_confirmation.receipt.consumed_by is None
             ):
                 raise _impl.BetfairSupervisedExecutionError(

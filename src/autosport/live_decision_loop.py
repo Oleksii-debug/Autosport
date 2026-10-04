@@ -1644,16 +1644,18 @@ class PersistentLiveDecisionLoop:
                 "PaperBook changed before durable decision"
             )
 
-        if progress.gate == _GATE_NORMAL:
-            self._refresh_intents_from_replay(
-                progress.registered_input_ids,
-                decision_time,
-                expected_market_state_sha256=progress.market_state_sha256,
-                max_append_generation=progress.market_append_generation,
-            )
-            intents = self._all_cached_intents()
-        else:
-            intents = ()
+        self._refresh_intents_from_replay(
+            progress.registered_input_ids,
+            decision_time,
+            expected_market_state_sha256=progress.market_state_sha256,
+            max_append_generation=progress.market_append_generation,
+            refresh_intents=progress.gate == _GATE_NORMAL,
+        )
+        intents = (
+            self._all_cached_intents()
+            if progress.gate == _GATE_NORMAL
+            else ()
+        )
 
         # Once the exact economic DecisionRecord is durable, it is the immutable
         # pre-action plan authority. In particular, an accepted #623 attempt may
@@ -1822,11 +1824,14 @@ class PersistentLiveDecisionLoop:
         *,
         expected_market_state_sha256: str,
         max_append_generation: int | None,
+        refresh_intents: bool = True,
     ) -> None:
         _canonical_sha256(
             "expected replay market_state_sha256",
             expected_market_state_sha256,
         )
+        if type(refresh_intents) is not bool:
+            raise TypeError("refresh_intents must be a bool")
         store = SQLiteMarketStore(self.workspace / "market.db")
         try:
             if max_append_generation is None:
@@ -1861,6 +1866,8 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "unfinished live decision replayed market state changed across restart"
             )
+        if not refresh_intents:
+            return
 
         for input_id in input_ids:
             try:

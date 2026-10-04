@@ -339,15 +339,16 @@ class IngestionHealthTests(unittest.TestCase):
 
     def test_schema_v3_failure_remains_untyped_until_new_causal_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "source-health.json"
-            health = SourceHealthStore(path)
-            health.record_failure(
+            root = Path(tmp)
+            fixture_path = root / "fixture-workspace" / "source-health.json"
+            fixture = SourceHealthStore(fixture_path)
+            fixture.record_failure(
                 "legacy-source",
                 now="2026-09-12T12:00:00+00:00",
                 error=RuntimeError("legacy failure"),
             )
 
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw = json.loads(fixture_path.read_text(encoding="utf-8"))
             raw["schema_version"] = 3
             for payload in raw["sources"].values():
                 payload.pop("last_failure_kind")
@@ -356,6 +357,13 @@ class IngestionHealthTests(unittest.TestCase):
                 for entry in entries:
                     entry["state"].pop("last_failure_kind")
                     entry["state"].pop("consecutive_failure_kind_count")
+
+            # Model a real pre-v4 workspace: the legacy bytes exist before this
+            # workspace acquires SourceHealth monotonic authority. Rewriting an
+            # already-authority-bound v4 store into v3 would now correctly be a
+            # rollback/tamper event rather than a migration fixture.
+            path = root / "legacy-workspace" / "source-health.json"
+            path.parent.mkdir(parents=True)
             path.write_text(
                 json.dumps(raw, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",

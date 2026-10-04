@@ -2271,8 +2271,11 @@ class SQLiteMarketStore:
     def append_many(self, events: Iterable[MarketEvent]) -> int:
         return len(self.append_batch_accepted(events))
 
-    def events(self, event_id: str | None = None) -> list[MarketEvent]:
-        """Read only history proven against the independent append authority."""
+    def events_with_append_generation(
+        self,
+        event_id: str | None = None,
+    ) -> list[tuple[MarketEvent, int]]:
+        """Read trusted history together with its durable append generation."""
 
         authority = self._market_append_authority()
         # A read must not recover or inspect the transient PREPARE of a live writer.
@@ -2285,21 +2288,55 @@ class SQLiteMarketStore:
                     _validate_canonical_table(self.connection, "market_events")
                     self._validate_causal_replay_state()
                     self._require_product_issued_positive_history(authority)
+                    qualified_columns = ",".join(
+                        f"m.{column}" for column in _HISTORY_COLUMNS
+                    )
                     if event_id is None:
                         rows = self.connection.execute(
-                            f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
+                            f"""SELECT c.append_generation, {qualified_columns}
+                                FROM market_events AS m
+                                JOIN market_event_commit_order AS c
+                                  ON c.dedupe_key = m.dedupe_key"""
                         ).fetchall()
                     else:
                         rows = self.connection.execute(
-                            f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE event_id=?",
+                            f"""SELECT c.append_generation, {qualified_columns}
+                                FROM market_events AS m
+                                JOIN market_event_commit_order AS c
+                                  ON c.dedupe_key = m.dedupe_key
+                                WHERE m.event_id=?""",
                             (event_id,),
                         ).fetchall()
-                    events = [_event_from_history_row(row) for row in rows]
+
+                    events_with_generation: list[tuple[MarketEvent, int]] = []
+                    for row in rows:
+                        if len(row) != len(_HISTORY_COLUMNS) + 1:
+                            raise ValueError(
+                                "market event append-generation row has unexpected shape"
+                            )
+                        generation = row[0]
+                        if type(generation) is not int or generation < 0:
+                            raise ValueError(
+                                "market event append generation must be a non-negative int"
+                            )
+                        event = _event_from_history_row(tuple(row[1:]))
+                        events_with_generation.append((event, generation))
                     self._commit_stable_database_path()
                 except BaseException:
                     self.connection.rollback()
                     raise
-        return sorted(events, key=_event_order_key)
+        return sorted(
+            events_with_generation,
+            key=lambda item: _event_order_key(item[0]),
+        )
+
+    def events(self, event_id: str | None = None) -> list[MarketEvent]:
+        """Read only history proven against the independent append authority."""
+
+        return [
+            event
+            for event, _generation in self.events_with_append_generation(event_id)
+        ]
 
     def replay_events_at_frozen_cutoff(self, *, as_of: str) -> list[MarketEvent]:
         """Return the exact independently issued durable history cutoff for as_of.

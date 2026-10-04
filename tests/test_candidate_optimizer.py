@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 
 from autosport.candidate_optimizer import PortfolioAwareCandidateOptimizer
@@ -13,8 +14,20 @@ def _single_candidate(leg: CandidateLeg) -> ParlayCandidate:
     return ParlayCandidate((leg,), leg.decimal_odds, leg.probability, expected)
 
 
+class _ExactTerminalScenarioEngine(ScenarioSearchEngine):
+    """Unit stub: models a separately verified exact terminal-space authority."""
+
+    def analyse(self, tickets, groups):
+        report = super().analyse(tickets, groups)
+        return replace(
+            report,
+            outcome_space_exhaustive=True,
+            outcome_space_exact=True,
+        )
+
+
 class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
-    def test_equal_standalone_ev_is_reranked_by_exact_portfolio_worst_case_change(self):
+    def test_equal_standalone_ev_uses_scenario_extrema_only_as_secondary_tiebreak(self):
         book = PaperBook("1000")
         a_ticket_leg = TicketLeg("e1", "winner", "a", Decimal("2"))
         existing = book.open_ticket([a_ticket_leg], "10")
@@ -47,11 +60,15 @@ class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
         self.assertEqual(hedge.with_candidate_report.observed_worst, Decimal("0"))
         self.assertEqual(hedge.observed_worst_case_change, Decimal("10"))
         self.assertEqual(duplicate.observed_worst_case_change, Decimal("-10"))
-        self.assertTrue(hedge.worst_case_change_proven)
-        self.assertTrue(hedge.best_case_change_proven)
-        self.assertTrue(hedge.exact_marginal_extrema)
-        self.assertEqual(hedge.ranking_risk_truth, "exact-worst-case-change")
-        self.assertEqual(hedge.ranking_risk_change, Decimal("10"))
+        self.assertFalse(hedge.worst_case_change_proven)
+        self.assertFalse(hedge.best_case_change_proven)
+        self.assertFalse(hedge.exact_marginal_extrema)
+        self.assertTrue(hedge.scenario_worst_case_change_proven)
+        self.assertTrue(hedge.scenario_best_case_change_proven)
+        self.assertFalse(hedge.base_report.outcome_space_exhaustive)
+        self.assertFalse(hedge.base_report.outcome_space_exact)
+        self.assertEqual(hedge.ranking_risk_truth, "conservative-floor-change")
+        self.assertEqual(hedge.ranking_risk_change, Decimal("-10"))
         self.assertEqual(hedge.expected_case_change, Decimal("0.0"))
         self.assertEqual(hedge.dependent_existing_ticket_ids, (existing.ticket_id,))
         self.assertEqual(len(book.tickets), 1)
@@ -77,6 +94,7 @@ class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
         )[0]
 
         self.assertFalse(impact.worst_case_change_proven)
+        self.assertFalse(impact.scenario_worst_case_change_proven)
         self.assertEqual(impact.ranking_risk_truth, "conservative-floor-change")
         self.assertEqual(impact.conservative_floor_change, Decimal("-10"))
         self.assertEqual(impact.ranking_risk_change, Decimal("-10"))
@@ -145,8 +163,38 @@ class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
         impact = impacts[0]
         self.assertEqual(len(impact.candidate.legs), 2)
         self.assertEqual(impact.stake, Decimal("5"))
+        self.assertFalse(impact.worst_case_change_proven)
+        self.assertTrue(impact.scenario_worst_case_change_proven)
+        self.assertEqual(impact.ranking_risk_truth, "conservative-floor-change")
+
+    def test_terminal_exact_report_can_authorize_exact_risk_truth(self):
+        book = PaperBook("1000")
+        existing_leg = TicketLeg("e1", "winner", "a", Decimal("2"))
+        existing = book.open_ticket([existing_leg], "10")
+        candidate_leg = CandidateLeg(
+            "e1|winner|b", "e1", Decimal("2"), Decimal("0.5")
+        )
+        groups = [
+            ScenarioGroup(
+                "e1-winner",
+                (
+                    ScenarioOutcome(existing_leg.quote_key, Decimal("0.5")),
+                    ScenarioOutcome(candidate_leg.quote_key, Decimal("0.5")),
+                ),
+            )
+        ]
+        impact = PortfolioAwareCandidateOptimizer(
+            scenario_engine=_ExactTerminalScenarioEngine()
+        ).evaluate_candidates(
+            [existing], [_single_candidate(candidate_leg)], groups, stake="10"
+        )[0]
+
         self.assertTrue(impact.worst_case_change_proven)
+        self.assertTrue(impact.best_case_change_proven)
+        self.assertTrue(impact.exact_marginal_extrema)
+        self.assertTrue(impact.scenario_worst_case_change_proven)
         self.assertEqual(impact.ranking_risk_truth, "exact-worst-case-change")
+        self.assertEqual(impact.ranking_risk_change, Decimal("10"))
 
     def test_existing_ticket_outside_supplied_scenario_space_fails_closed(self):
         book = PaperBook("100")

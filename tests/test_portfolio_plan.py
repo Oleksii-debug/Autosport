@@ -15,7 +15,15 @@ from decimal import Decimal, ROUND_DOWN, localcontext
 from pathlib import Path
 from unittest.mock import patch
 
+from autosport import market_outcomes as _market_outcomes
 from autosport import predictive_authority as _runtime_authority
+from autosport.domain import MarketType
+from autosport.market_outcomes import (
+    MarketOutcomeIdentity,
+    MarketSettlementOutcomeAuthority,
+    OutcomeRosterBasis,
+    SettlementSemantics,
+)
 from autosport.opportunity import Opportunity
 from autosport.paper import PaperBook
 from autosport.portfolio_plan import PortfolioAction
@@ -65,6 +73,44 @@ def _historical_build_portfolio_plan(*args, **kwargs):
 
 
 _IMPL.build_portfolio_plan = _historical_build_portfolio_plan
+
+
+def _historical_test_market_outcome_authority(
+    cls,
+    selection_ids: tuple[str, ...] = ("101", "202"),
+) -> MarketSettlementOutcomeAuthority:
+    """Issue only the historical-suite fixture; never assert provider origin."""
+
+    del cls
+    identity = MarketOutcomeIdentity(
+        sport="table_tennis",
+        event_id="event-betfair-1",
+        market_id="1.23456789",
+        source_id="betfair_exchange_historical",
+        market_type=MarketType.WINNER,
+    )
+    issuance = _market_outcomes._VERIFIED_AUTHORITY_ISSUANCE.set(True)
+    try:
+        return MarketSettlementOutcomeAuthority(
+            identity=identity,
+            selection_ids=tuple(sorted(selection_ids)),
+            roster_basis=OutcomeRosterBasis.GOVERNED_DATASET_MARKET_DEFINITION,
+            settlement_semantics=SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET,
+            source_revision="test-only-portfolio-plan-governed-dataset-revision",
+            causal_cutoff="2026-09-18T13:19:57+00:00",
+            observed_at="2026-09-18T13:19:58+00:00",
+            roster_provenance_sha256="a" * 64,
+            settlement_rules_sha256="b" * 64,
+            verification_protocol_sha256="c" * 64,
+            _verification_token=_market_outcomes._VERIFIED_AUTHORITY_TOKEN,
+        )
+    finally:
+        _market_outcomes._VERIFIED_AUTHORITY_ISSUANCE.reset(issuance)
+
+
+_IMPL.PortfolioPlanTests._betfair_authority = classmethod(
+    _historical_test_market_outcome_authority
+)
 
 
 class PortfolioPlanTests(_IMPL.PortfolioPlanTests):

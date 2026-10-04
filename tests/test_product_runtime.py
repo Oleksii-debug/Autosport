@@ -898,6 +898,30 @@ class AutonomousProductCompositionTests(unittest.TestCase):
             finally:
                 runtime.close()
 
+    def test_product_coordinator_dispatch_authority_is_builder_local(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = build_autonomous_product_runtime(
+                workspace=Path(directory),
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                coordinator = runtime.coordinator
+                for name in (
+                    "status",
+                    "pause",
+                    "resume",
+                    "stop",
+                    "tick",
+                    "_settlement_resolutions",
+                ):
+                    self.assertTrue(callable(getattr(coordinator, name)), name)
+                self.assertEqual(runtime.status().source_id, "provider-a")
+            finally:
+                runtime.close()
+
     def test_runtime_and_collector_type_dispatch_are_immutable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = build_autonomous_product_runtime(

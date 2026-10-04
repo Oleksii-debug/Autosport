@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 import re
 import sqlite3
@@ -166,6 +167,21 @@ def _observed_instant(value: str) -> datetime:
 
 def _canonical_replay_cutoff(value: str) -> str:
     return _timezone_aware_instant(value, "as_of").astimezone(timezone.utc).isoformat()
+
+
+def _database_authority_key(path: Path) -> str:
+    """Return one machine-authority key for filesystem-equivalent database names."""
+
+    name = path.name
+    if os.name == "nt":
+        # A new database can be opened concurrently through Win32 case/trailing-dot
+        # aliases before Path.resolve() has an existing target from which to recover
+        # canonical spelling. Those aliases still identify one file, so they must not
+        # mint independent append/cutoff authority namespaces.
+        name = ntpath.normcase(name).rstrip(" .")
+    if not name:
+        raise ValueError("market database pathname has no canonical authority name")
+    return name
 
 
 def _replay_cutoff_id(canonical_as_of: str) -> str:
@@ -1061,7 +1077,7 @@ class SQLiteMarketStore:
         return MonotonicWorkspaceAuthority(
             workspace=database_path.parent,
             domain=_APPEND_MACHINE_DOMAIN,
-            key=f"{_APPEND_MACHINE_KEY_PREFIX}{database_path.name}",
+            key=f"{_APPEND_MACHINE_KEY_PREFIX}{_database_authority_key(database_path)}",
         )
 
     @staticmethod
@@ -1523,7 +1539,7 @@ class SQLiteMarketStore:
         return MonotonicWorkspaceAuthority(
             workspace=database_path.parent,
             domain=_REPLAY_CUTOFF_MACHINE_DOMAIN,
-            key=f"{_REPLAY_CUTOFF_MACHINE_KEY_PREFIX}{database_path.name}",
+            key=f"{_REPLAY_CUTOFF_MACHINE_KEY_PREFIX}{_database_authority_key(database_path)}",
         )
 
     def _validated_replay_cutoff_rows(self) -> tuple[tuple[str, str, int], ...]:

@@ -898,6 +898,50 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(loop.progress_path.read_bytes(), progress_bytes)
             loop.close()
 
+    def test_decision_frontier_fails_closed_under_continuous_peer_churn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=self._scientific_registry(
+                    workspace,
+                    self._strategy_version(),
+                ),
+                provider=_EmptyProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            live_store = loop._default_market_store
+            self.assertIsNotNone(live_store)
+            token_values = iter(range(100, 116))
+            with patch.object(
+                live_store,
+                "external_change_token",
+                side_effect=lambda: next(token_values),
+            ):
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "market truth changed continuously across decision cutoff",
+                ):
+                    loop._sample_decision_market_frontier()
+
+            loop.close()
+
     def test_stale_instance_cannot_overwrite_newer_pending_progress(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

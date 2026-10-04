@@ -921,6 +921,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
         _encode_query_kwdefaults=urlencode.__kwdefaults__,
         _run_parser=parse_run,
         _run_parser_code=parse_run.__code__,
+        _run_parser_defaults=parse_run.__defaults__,
+        _run_parser_kwdefaults=parse_run.__kwdefaults__,
         _workflow_run_type=WorkflowRun,
     ) -> tuple[WorkflowRun, ...]:
         if (
@@ -941,6 +943,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
             or getattr(_encode_query, "__kwdefaults__", None)
             is not _encode_query_kwdefaults
             or getattr(_run_parser, "__code__", None) is not _run_parser_code
+            or getattr(_run_parser, "__defaults__", None)
+            is not _run_parser_defaults
+            or getattr(_run_parser, "__kwdefaults__", None)
+            is not _run_parser_kwdefaults
         ):
             raise CancellationError("active workflow pagination authority is unavailable")
         workflow_id = object.__getattribute__(
@@ -993,6 +999,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 and getattr(_encode_query, "__kwdefaults__", None)
                 is _encode_query_kwdefaults
                 and getattr(_run_parser, "__code__", None) is _run_parser_code
+                and getattr(_run_parser, "__defaults__", None)
+                is _run_parser_defaults
+                and getattr(_run_parser, "__kwdefaults__", None)
+                is _run_parser_kwdefaults
                 and recovery_code is not None
                 and getattr(bound_recovery, "__func__", bound_recovery) is recovery_func
                 and getattr(recovery_func, "__code__", None) is recovery_code

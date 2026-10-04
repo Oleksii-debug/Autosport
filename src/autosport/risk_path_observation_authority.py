@@ -67,6 +67,12 @@ _REPLAY_CODE = getattr(_REPLAY, "__code__", None)
 _BRIDGE_TYPE = PaperSettlementLearningBridge
 _BRIDGE_WITNESS = PaperSettlementLearningBridge.resolution_witness
 _BRIDGE_WITNESS_CODE = getattr(_BRIDGE_WITNESS, "__code__", None)
+_BRIDGE_RISK_FINGERPRINT = PaperSettlementLearningBridge.risk_fingerprint.fget
+_BRIDGE_RISK_FINGERPRINT_CODE = getattr(
+    _BRIDGE_RISK_FINGERPRINT,
+    "__code__",
+    None,
+)
 _BRIDGE_DECISION_MATCHES = PaperSettlementLearningBridge._decision_matches
 _BRIDGE_DECISION_MATCHES_CODE = getattr(
     _BRIDGE_DECISION_MATCHES,
@@ -338,6 +344,9 @@ def _require_dispatch() -> None:
         or _BRIDGE_TYPE.resolution_witness is not _BRIDGE_WITNESS
         or getattr(_BRIDGE_WITNESS, "__code__", None)
         is not _BRIDGE_WITNESS_CODE
+        or _BRIDGE_TYPE.risk_fingerprint.fget is not _BRIDGE_RISK_FINGERPRINT
+        or getattr(_BRIDGE_RISK_FINGERPRINT, "__code__", None)
+        is not _BRIDGE_RISK_FINGERPRINT_CODE
         or _BRIDGE_TYPE._decision_matches is not _BRIDGE_DECISION_MATCHES
         or getattr(_BRIDGE_DECISION_MATCHES, "__code__", None)
         is not _BRIDGE_DECISION_MATCHES_CODE
@@ -657,6 +666,8 @@ class ProductRunCapitalPathEvidence:
     expected_draw_transcript_sha256: str
     run_admission_receipt_sha256: str
     run_execution_receipt_sha256: str
+    executed_initial_capital_state_sha256: str
+    executed_stake_policy_sha256: str
     expected_replay_input_event_payload_sequence_sha256: str
     completed_replay_input_event_payload_sequence_sha256: str
     expected_replay_consumed_event_payload_multiset_sha256: str
@@ -991,6 +1002,24 @@ def resolve_product_run_capital_path_evidence(
         structure.member_stream_sha256[member_index],
         "member_stream_sha256",
     )
+    executed_initial_capital_state_sha256 = _sha(
+        base.sha256,
+        "executed_initial_capital_state_sha256",
+    )
+    try:
+        executed_stake_policy_sha256 = _sha(
+            _BRIDGE_RISK_FINGERPRINT.__get__(
+                settlement_bridge,
+                _BRIDGE_TYPE,
+            ),
+            "executed_stake_policy_sha256",
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ProductRunCapitalPathError(
+            "run stake-policy authority cannot be re-resolved"
+        ) from exc
+    _require_dispatch()
+
     effects_payload = {
         "schema": _EFFECTS_SCHEMA,
         "member_id": run_id,
@@ -1028,6 +1057,10 @@ def resolve_product_run_capital_path_evidence(
             execution.receipt_sha256,
             "run_execution_receipt_sha256",
         ),
+        "executed_initial_capital_state_sha256": (
+            executed_initial_capital_state_sha256
+        ),
+        "executed_stake_policy_sha256": executed_stake_policy_sha256,
         "expected_replay_input_event_payload_sequence_sha256": (
             expected_replay_input_sha256
         ),
@@ -1086,6 +1119,11 @@ def resolve_product_run_capital_path_evidence(
             "run_execution_receipt_sha256",
             _sha(execution.receipt_sha256, "run_execution_receipt_sha256"),
         ),
+        (
+            "executed_initial_capital_state_sha256",
+            executed_initial_capital_state_sha256,
+        ),
+        ("executed_stake_policy_sha256", executed_stake_policy_sha256),
         (
             "expected_replay_input_event_payload_sequence_sha256",
             expected_replay_input_sha256,
@@ -1208,6 +1246,8 @@ def _build_product_run_capital_path_evidence_verifier(
         "expected_draw_transcript_sha256",
         "run_admission_receipt_sha256",
         "run_execution_receipt_sha256",
+        "executed_initial_capital_state_sha256",
+        "executed_stake_policy_sha256",
         "expected_replay_input_event_payload_sequence_sha256",
         "completed_replay_input_event_payload_sequence_sha256",
         "expected_replay_consumed_event_payload_multiset_sha256",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 from .paper_settlement_learning import PaperSettlementLearningBridge
@@ -25,7 +26,7 @@ from .risk_sampling_dependence import (
 from .risk_sampling_membership import ResolvedFixedNRiskMembership
 
 
-_SCHEMA = "AUTOSPORT_PRODUCT_FIXED_N_RISK_OBSERVATION_SET_V1"
+_SCHEMA = "AUTOSPORT_PRODUCT_FIXED_N_RISK_OBSERVATION_SET_V2"
 _HEX = frozenset("0123456789abcdef")
 
 _MEMBERSHIP_TYPE = ResolvedFixedNRiskMembership
@@ -526,8 +527,6 @@ def _build_observation_set_verifier(
             for name, descriptor in observation_descriptors
         }
         minimum_equity = values["minimum_equity"]
-        from decimal import Decimal
-
         if type(minimum_equity) is not Decimal or not minimum_equity.is_finite():
             raise ProductFixedNRiskObservationSetError(
                 "risk observation minimum_equity must be an exact finite Decimal"

@@ -432,10 +432,131 @@ _CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD_CODE = getattr(
 )
 
 
+def _assess_betfair_market_definition_structure(
+    *,
+    market_id: str,
+    market_definition: dict[str, object],
+    provider_publish_at: str,
+    observed_at: str,
+    source_id: str,
+) -> tuple[MarketOutcomeIdentity, tuple[str, ...] | None, str | None]:
+    market = _canonical_text("market_id", market_id)
+    _, publish_dt = _canonical_timestamp(
+        "provider_publish_at",
+        provider_publish_at,
+    )
+    _, observed_dt = _canonical_timestamp("observed_at", observed_at)
+    if publish_dt > observed_dt:
+        raise ValueError("provider_publish_at must not be after observed_at")
+    if type(market_definition) is not dict:
+        raise ValueError("market_definition must be a JSON object")
+
+    event_id = _canonical_text(
+        "marketDefinition.eventId",
+        market_definition.get("eventId"),
+    )
+    event_type_id = _canonical_text(
+        "marketDefinition.eventTypeId",
+        market_definition.get("eventTypeId"),
+    )
+    provider_market_type = _canonical_text(
+        "marketDefinition.marketType",
+        market_definition.get("marketType"),
+    )
+    status = _canonical_text(
+        "marketDefinition.status",
+        market_definition.get("status"),
+    ).upper()
+    identity = _CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE(
+        sport="table_tennis",
+        event_id=event_id,
+        market_id=market,
+        source_id=_canonical_text("source_id", source_id),
+        market_type=(
+            _CANONICAL_MARKET_TYPE_ENUM.WINNER
+            if provider_market_type == _BETFAIR_MATCH_ODDS_TYPE
+            else _CANONICAL_MARKET_TYPE_ENUM.OTHER
+        ),
+    )
+    if event_type_id != _BETFAIR_TABLE_TENNIS_EVENT_TYPE_ID:
+        return (
+            identity,
+            None,
+            "betfair_event_type_has_no_verified_roster_protocol",
+        )
+    if provider_market_type != _BETFAIR_MATCH_ODDS_TYPE:
+        return (
+            identity,
+            None,
+            "market_type_has_no_supported_terminal_settlement_semantics",
+        )
+    if status != "OPEN":
+        return (
+            identity,
+            None,
+            "betfair_market_definition_is_not_open_at_roster_revision",
+        )
+
+    complete = market_definition.get("complete")
+    if type(complete) is not bool:
+        raise ValueError("marketDefinition.complete must be a boolean")
+    if not complete:
+        return (
+            identity,
+            None,
+            "betfair_market_definition_runner_roster_is_not_complete",
+        )
+
+    runners = market_definition.get("runners")
+    if type(runners) is not list or len(runners) < 2:
+        return (
+            identity,
+            None,
+            "betfair_market_definition_lacks_authoritative_runner_roster",
+        )
+    selection_ids: list[str] = []
+    for index, runner in enumerate(runners):
+        if type(runner) is not dict or runner.get("id") is None:
+            raise ValueError(
+                f"marketDefinition.runners[{index}] requires id"
+            )
+        selection_ids.append(
+            _canonical_betfair_runner_id(
+                f"marketDefinition.runners[{index}].id",
+                runner["id"],
+            )
+        )
+    if len(selection_ids) != len(set(selection_ids)):
+        raise ValueError("marketDefinition.runners contains duplicate selection id")
+    return identity, tuple(sorted(selection_ids)), None
+
+
+_CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE = (
+    _assess_betfair_market_definition_structure
+)
+_CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE_CODE = getattr(
+    _CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE,
+    "__code__",
+    None,
+)
+
+
 _CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS = (
     ("datetime", _CANONICAL_DATETIME_TYPE),
     ("_canonical_json", _CANONICAL_JSON_ENCODER),
     ("_sha256_payload", _CANONICAL_SHA256_PAYLOAD),
+    (
+        "_assess_betfair_market_definition_structure",
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE,
+    ),
+    (
+        "_CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE",
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE,
+    ),
+    (
+        "_CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE_CODE",
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE_CODE,
+    ),
     ("_CANONICAL_JSON_DUMPS", _CANONICAL_JSON_DUMPS),
     ("_CANONICAL_JSON_DUMPS_CODE", _CANONICAL_JSON_DUMPS_CODE),
     ("_CANONICAL_JSON_LOADS", _CANONICAL_JSON_LOADS),
@@ -944,6 +1065,43 @@ def _authority_descriptor_code_identity(member: object) -> tuple[object, ...]:
     return (getattr(member, "__code__", None),)
 
 
+_CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_CLASS_SURFACE = tuple(
+    (
+        name,
+        member,
+        _authority_descriptor_code_identity(member),
+    )
+    for name in (
+        "market_id",
+        "provider_request_id",
+        "connection_id",
+        "connection_generation",
+        "subscription_id",
+        "market_filter_sha256",
+        "provider_publish_time_ms",
+        "observed_at_ms",
+        "market_definition_json",
+        "market_definition_sha256",
+        "transport_frame_sha256",
+        "evidence_id",
+        "__post_init__",
+        "__getattribute__",
+        "__setattr__",
+        "__delattr__",
+        "assert_issued",
+        "grants_provider_write_authority",
+        "grants_execution_authority",
+        "real_money_authorized",
+    )
+    for member in (
+        vars(_CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_TYPE).get(
+            name,
+            _MISSING_AUTHORITY_CLASS_SLOT,
+        ),
+    )
+)
+
+
 _CANONICAL_MARKET_OUTCOME_IDENTITY_CLASS_SURFACE = tuple(
     (
         name,
@@ -1027,6 +1185,10 @@ _CANONICAL_MARKET_OUTCOME_AUTHORITY_CLASS_SURFACE = tuple(
 
 def _assert_canonical_market_outcome_authority_dispatch(
     _module_roots=_CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS,
+    _evidence_surface=(
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_CLASS_SURFACE
+    ),
+    _evidence_type=_CANONICAL_BETFAIR_MARKET_DEFINITION_EVIDENCE_TYPE,
     _identity_surface=_CANONICAL_MARKET_OUTCOME_IDENTITY_CLASS_SURFACE,
     _authority_surface=_CANONICAL_MARKET_OUTCOME_AUTHORITY_CLASS_SURFACE,
     _terminal_guard=_CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD,
@@ -1055,6 +1217,10 @@ def _assert_canonical_market_outcome_authority_dispatch(
             _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED,
             _CANONICAL_BETFAIR_MARKET_DEFINITION_ASSERT_ISSUED_CODE,
         ),
+        (
+            _CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE,
+            _CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE_CODE,
+        ),
     )
     for helper, expected_code in helper_code_checks:
         if getattr(helper, "__code__", None) is not expected_code:
@@ -1073,6 +1239,27 @@ def _assert_canonical_market_outcome_authority_dispatch(
             "canonical market terminal state class dispatch was replaced"
         )
     _terminal_guard()
+
+    evidence_class_dict = vars(_evidence_type)
+    for name, expected, expected_code in _evidence_surface:
+        current = evidence_class_dict.get(name, _missing_slot)
+        if current is not expected:
+            raise ValueError(
+                "authenticated marketDefinition evidence class dispatch was replaced"
+            )
+        if isinstance(current, property):
+            current_code = tuple(
+                None if accessor is None else getattr(accessor, "__code__", None)
+                for accessor in (current.fget, current.fset, current.fdel)
+            )
+        elif isinstance(current, (classmethod, staticmethod)):
+            current_code = (getattr(current.__func__, "__code__", None),)
+        else:
+            current_code = (getattr(current, "__code__", None),)
+        if current_code != expected_code:
+            raise ValueError(
+                "authenticated marketDefinition evidence class dispatch was replaced"
+            )
 
     identity_class_dict = vars(_identity_type)
     for name, expected, expected_code in _identity_surface:
@@ -1195,125 +1382,24 @@ def assess_betfair_historical_market_definition_authority(
     until a product-owned Betfair acquisition witness is composed at this boundary.
     """
 
-    market = _canonical_text("market_id", market_id)
-    _, publish_dt = _canonical_timestamp(
-        "provider_publish_at",
-        provider_publish_at,
+    identity, _, refusal_reason = (
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE(
+            market_id=market_id,
+            market_definition=market_definition,
+            provider_publish_at=provider_publish_at,
+            observed_at=observed_at,
+            source_id=_BETFAIR_SOURCE_ID,
+        )
     )
-    _, observed_dt = _canonical_timestamp("observed_at", observed_at)
-    if publish_dt > observed_dt:
-        raise ValueError("provider_publish_at must not be after observed_at")
-    if type(market_definition) is not dict:
-        raise ValueError("market_definition must be a JSON object")
-
-    event_id = _canonical_text(
-        "marketDefinition.eventId",
-        market_definition.get("eventId"),
-    )
-    event_type_id = _canonical_text(
-        "marketDefinition.eventTypeId",
-        market_definition.get("eventTypeId"),
-    )
-    provider_market_type = _canonical_text(
-        "marketDefinition.marketType",
-        market_definition.get("marketType"),
-    )
-    status = _canonical_text(
-        "marketDefinition.status",
-        market_definition.get("status"),
-    ).upper()
-
-    identity = MarketOutcomeIdentity(
-        sport="table_tennis",
-        event_id=event_id,
-        market_id=market,
-        source_id=_BETFAIR_SOURCE_ID,
-        market_type=(
-            MarketType.WINNER
-            if provider_market_type == _BETFAIR_MATCH_ODDS_TYPE
-            else MarketType.OTHER
-        ),
-    )
-    if event_type_id != _BETFAIR_TABLE_TENNIS_EVENT_TYPE_ID:
-        return MarketOutcomeAuthorityAssessment(
-            identity=identity,
-            status=OutcomeAuthorityStatus.REFUSED,
-            authority=None,
-            refusal_reason="betfair_event_type_has_no_verified_roster_protocol",
-        )
-    if provider_market_type != _BETFAIR_MATCH_ODDS_TYPE:
-        return MarketOutcomeAuthorityAssessment(
-            identity=identity,
-            status=OutcomeAuthorityStatus.REFUSED,
-            authority=None,
-            refusal_reason="market_type_has_no_supported_terminal_settlement_semantics",
-        )
-    if status != "OPEN":
-        return MarketOutcomeAuthorityAssessment(
-            identity=identity,
-            status=OutcomeAuthorityStatus.REFUSED,
-            authority=None,
-            refusal_reason="betfair_market_definition_is_not_open_at_roster_revision",
-        )
-
-    complete = market_definition.get("complete")
-    if type(complete) is not bool:
-        raise ValueError("marketDefinition.complete must be a boolean")
-    if not complete:
-        return MarketOutcomeAuthorityAssessment(
-            identity=identity,
-            status=OutcomeAuthorityStatus.REFUSED,
-            authority=None,
-            refusal_reason="betfair_market_definition_runner_roster_is_not_complete",
-        )
-
-    runners = market_definition.get("runners")
-    if type(runners) is not list or len(runners) < 2:
-        return MarketOutcomeAuthorityAssessment(
-            identity=identity,
-            status=OutcomeAuthorityStatus.REFUSED,
-            authority=None,
-            refusal_reason="betfair_market_definition_lacks_authoritative_runner_roster",
-        )
-    selection_ids: list[str] = []
-    for index, runner in enumerate(runners):
-        if type(runner) is not dict or runner.get("id") is None:
-            raise ValueError(
-                f"marketDefinition.runners[{index}] requires id"
-            )
-        selection_ids.append(
-            _canonical_betfair_runner_id(
-                f"marketDefinition.runners[{index}].id",
-                runner["id"],
-            )
-        )
-    if len(selection_ids) != len(set(selection_ids)):
-        raise ValueError("marketDefinition.runners contains duplicate selection id")
-    # Structural validity is necessary but not sufficient for provider truth.
-    # betfair_historical_read_once only freezes bytes from a user-supplied file,
-    # and historical governance binds rights/retention records; neither authenticates
-    # these exact marketDefinition bytes as Betfair-origin evidence.
     return MarketOutcomeAuthorityAssessment(
         identity=identity,
         status=OutcomeAuthorityStatus.REFUSED,
         authority=None,
-        refusal_reason="betfair_market_definition_provider_origin_unverified",
+        refusal_reason=(
+            refusal_reason
+            or "betfair_market_definition_provider_origin_unverified"
+        ),
     )
-
-
-def _timestamp_from_epoch_millis(value: int, *, field: str) -> str:
-    if type(value) is not int or value < 0:
-        raise ValueError(f"{field} must be a non-negative integer")
-    seconds, milliseconds = divmod(value, 1000)
-    try:
-        parsed = _CANONICAL_DATETIME_TYPE.fromtimestamp(
-            seconds,
-            tz=_CANONICAL_TIMEZONE_UTC,
-        ).replace(microsecond=milliseconds * 1000)
-    except (OverflowError, OSError, ValueError) as exc:
-        raise ValueError(f"{field} is outside representable UTC range") from exc
-    return parsed.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
 
 def assess_betfair_authenticated_market_definition_authority(
     evidence: BetfairAuthenticatedMarketDefinitionEvidence,
@@ -1342,7 +1428,7 @@ def assess_betfair_authenticated_market_definition_authority(
 
     try:
         market_definition = _CANONICAL_JSON_LOADS(evidence.market_definition_json)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (TypeError, ValueError) as exc:
         raise ValueError(
             "authenticated marketDefinition evidence JSON is invalid"
         ) from exc
@@ -1353,47 +1439,49 @@ def assess_betfair_authenticated_market_definition_authority(
     if _sha256_payload(market_definition) != evidence.market_definition_sha256:
         raise ValueError("authenticated marketDefinition digest mismatch")
 
-    provider_publish_at = _timestamp_from_epoch_millis(
+    def timestamp_from_epoch_millis(value: int, field: str) -> str:
+        if type(value) is not int or value < 0:
+            raise ValueError(f"{field} must be a non-negative integer")
+        seconds, milliseconds = divmod(value, 1000)
+        try:
+            parsed = _CANONICAL_DATETIME_TYPE.fromtimestamp(
+                seconds,
+                tz=_CANONICAL_TIMEZONE_UTC,
+            ).replace(microsecond=milliseconds * 1000)
+        except (OverflowError, OSError, ValueError) as exc:
+            raise ValueError(
+                f"{field} is outside representable UTC range"
+            ) from exc
+        return parsed.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    provider_publish_at = timestamp_from_epoch_millis(
         evidence.provider_publish_time_ms,
-        field="provider_publish_time_ms",
+        "provider_publish_time_ms",
     )
-    observed_at = _timestamp_from_epoch_millis(
+    observed_at = timestamp_from_epoch_millis(
         evidence.observed_at_ms,
-        field="observed_at_ms",
+        "observed_at_ms",
     )
-    structural = assess_betfair_historical_market_definition_authority(
-        market_id=evidence.market_id,
-        market_definition=market_definition,
-        provider_publish_at=provider_publish_at,
-        observed_at=observed_at,
+    live_identity, selection_ids, refusal_reason = (
+        _CANONICAL_BETFAIR_MARKET_DEFINITION_STRUCTURE(
+            market_id=evidence.market_id,
+            market_definition=market_definition,
+            provider_publish_at=provider_publish_at,
+            observed_at=observed_at,
+            source_id=_CANONICAL_BETFAIR_STREAM_SOURCE_ID,
+        )
     )
-    live_identity = _CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE(
-        sport=structural.identity.sport,
-        event_id=structural.identity.event_id,
-        market_id=structural.identity.market_id,
-        source_id=_CANONICAL_BETFAIR_STREAM_SOURCE_ID,
-        market_type=structural.identity.market_type,
-    )
-    if structural.refusal_reason != (
-        "betfair_market_definition_provider_origin_unverified"
-    ):
+    if refusal_reason is not None:
         return MarketOutcomeAuthorityAssessment(
             identity=live_identity,
             status=_CANONICAL_OUTCOME_AUTHORITY_STATUS_TYPE.REFUSED,
             authority=None,
-            refusal_reason=structural.refusal_reason,
+            refusal_reason=refusal_reason,
         )
-
-    runners = market_definition["runners"]
-    selection_ids = tuple(
-        sorted(
-            _canonical_betfair_runner_id(
-                f"marketDefinition.runners[{index}].id",
-                runner["id"],
-            )
-            for index, runner in enumerate(runners)
+    if selection_ids is None:
+        raise ValueError(
+            "supported authenticated marketDefinition lacks canonical roster"
         )
-    )
     roster_provenance_sha256 = _sha256_payload(
         {
             "protocol": (

@@ -4,6 +4,7 @@ import json
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -16,12 +17,15 @@ from autosport.betfair_authenticated_stream import (
     open_authenticated_market_subscription,
 )
 from autosport.betfair_stream_codec import BETFAIR_STREAM_SOURCE_ID
+from autosport.domain import TicketLeg
 from autosport.market_outcomes import (
     OutcomeAuthorityStatus,
     OutcomeRosterBasis,
     SettlementSemantics,
     assess_betfair_authenticated_market_definition_authority,
 )
+from autosport.paper import PaperBook
+from autosport.scenario_search import ScenarioSearchEngine
 
 
 class FakeSocket:
@@ -379,3 +383,74 @@ def test_fake_module_registry_cannot_self_mint_evidence(
         forged.assert_issued()
     with pytest.raises(BetfairAuthenticatedStreamError):
         assess_betfair_authenticated_market_definition_authority(forged)
+
+
+
+def test_authenticated_authority_drives_conservative_scenario_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, runtime = _runtime(monkeypatch, payload=_mcm())
+    runtime.read_and_ingest()
+    evidence = runtime.resolve_market_definition("1.234")
+    assert evidence is not None
+    assessment = assess_betfair_authenticated_market_definition_authority(
+        evidence
+    )
+    authority = assessment.authority
+    assert authority is not None
+
+    book = PaperBook("100")
+    ticket = book.open_ticket(
+        [
+            TicketLeg(
+                "event-1",
+                "1.234",
+                "101",
+                Decimal("2.0"),
+                sport="table_tennis",
+            )
+        ],
+        "10",
+        provider_source_ids=(BETFAIR_STREAM_SOURCE_ID,),
+    )
+    decision_as_of = datetime.fromisoformat(
+        authority.observed_at.replace("Z", "+00:00")
+    )
+    report = ScenarioSearchEngine().analyse_authoritative(
+        [ticket],
+        [authority],
+        decision_as_of=decision_as_of,
+    )
+
+    assert report.outcome_space_exhaustive is True
+    assert report.outcome_space_exact is False
+    assert report.total_states == 9
+    assert report.outcome_authority_sha256s == (authority.authority_sha256,)
+
+
+def test_evidence_class_dispatch_replacement_fails_before_positive_issuance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, runtime = _runtime(monkeypatch, payload=_mcm())
+    runtime.read_and_ingest()
+    evidence = runtime.resolve_market_definition("1.234")
+    assert evidence is not None
+    original = BetfairAuthenticatedMarketDefinitionEvidence.__getattribute__
+    hostile_calls: list[str] = []
+
+    def hostile(self, name):
+        hostile_calls.append(name)
+        return original(self, name)
+
+    monkeypatch.setattr(
+        BetfairAuthenticatedMarketDefinitionEvidence,
+        "__getattribute__",
+        hostile,
+    )
+    with pytest.raises(
+        ValueError,
+        match="evidence class dispatch was replaced",
+    ):
+        assess_betfair_authenticated_market_definition_authority(evidence)
+
+    assert hostile_calls == []

@@ -366,6 +366,61 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(trusted[0].ingest_ts, self.RECEIVE_TIME)
             store.close()
 
+    def test_live_ingestion_uses_sealed_stage_helper_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            engine = IngestionEngine(
+                MarketEventBus(store),
+                clock=lambda: self.RECEIVE_TIME,
+            )
+
+            with (
+                patch.object(
+                    ingestion_module,
+                    "_stamp_live_event",
+                    side_effect=AssertionError("mutable stamp helper must not be consulted"),
+                ),
+                patch.object(
+                    ingestion_module,
+                    "_publish_normalized_live_batch",
+                    side_effect=AssertionError("mutable publish helper must not be consulted"),
+                ),
+            ):
+                stats = engine.poll_once(
+                    InMemoryProvider("provider-a", [self._quote(sequence=1)]),
+                    max_items=10,
+                )
+
+            self.assertEqual(stats.accepted, 1)
+            trusted = store.trusted_live_events()
+            self.assertEqual(len(trusted), 1)
+            self.assertEqual(trusted[0].ingest_ts, self.RECEIVE_TIME)
+            store.close()
+
+    def test_live_ingestion_uses_sealed_timestamp_parser_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            engine = IngestionEngine(
+                MarketEventBus(store),
+                clock=lambda: self.RECEIVE_TIME,
+            )
+
+            with patch.object(
+                ingestion_module,
+                "parse_source_timestamp",
+                side_effect=AssertionError("mutable timestamp parser must not be consulted"),
+            ):
+                stats = engine.poll_once(
+                    InMemoryProvider("provider-a", [self._quote(sequence=1)]),
+                    max_items=10,
+                )
+
+            self.assertEqual(stats.accepted, 1)
+            self.assertNotIn("STALE_SOURCE", stats.quality_flags)
+            self.assertNotIn("FUTURE_CLOCK_SKEW", stats.quality_flags)
+            self.assertEqual(len(store.trusted_live_events()), 1)
+            store.close()
+
     def test_live_ingestion_uses_sealed_live_publish_descriptor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

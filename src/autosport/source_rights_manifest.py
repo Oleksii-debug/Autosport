@@ -5,7 +5,9 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import RLock
 from typing import Any
+from weakref import ReferenceType, ref
 
 
 _MANIFEST_KIND = "autosport_source_rights_manifest"
@@ -52,7 +54,7 @@ class SourceRightsManifest:
     manifest_bytes: bytes = field(repr=False)
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
 class SourceRightsAuthorization:
     """Positive authorization result issued only by :func:`authorize_source_use`."""
 
@@ -65,16 +67,46 @@ class SourceRightsAuthorization:
 
 
 
-def _build_source_rights_authorization_init(
+def _install_source_rights_authorization_seal(
+    cls: type[SourceRightsAuthorization],
     *,
     _issuer_token=_AUTHORIZATION_ISSUER,
     _error_type=SourceRightsManifestError,
-    _object_setattr=object.__setattr__,
-):
-    """Seal direct positive-result construction to the canonical issuer token."""
+    _ref_impl=ref,
+    _id=id,
+    _type=type,
+) -> None:
+    """Store positive authorization truth outside caller-mutable object slots."""
+
+    field_names = (
+        "source_identity",
+        "required_scope",
+        "checked_at",
+        "manifest_sha256",
+        "approved_by",
+        "approval_reference",
+    )
+    issued: dict[
+        int,
+        tuple[ReferenceType[object], tuple[object, ...]],
+    ] = {}
+    lock = RLock()
+
+    def _lookup(self: SourceRightsAuthorization) -> tuple[object, ...]:
+        if _type(self) is not cls:
+            raise _error_type(
+                "source-rights authorization must be the exact canonical type"
+            )
+        with lock:
+            record = issued.get(_id(self))
+            if record is None or record[0]() is not self:
+                raise _error_type(
+                    "source-rights authorization is missing canonical issuance state"
+                )
+            return record[1]
 
     def _authorization_init(
-        self,
+        self: SourceRightsAuthorization,
         *,
         source_identity: str,
         required_scope: str,
@@ -84,22 +116,57 @@ def _build_source_rights_authorization_init(
         approval_reference: str,
         _issuer: object | None = None,
     ) -> None:
-        if _issuer is not _issuer_token:
+        if _type(self) is not cls or _issuer is not _issuer_token:
             raise _error_type(
                 "SourceRightsAuthorization can only be issued by authorize_source_use"
             )
-        _object_setattr(self, "source_identity", source_identity)
-        _object_setattr(self, "required_scope", required_scope)
-        _object_setattr(self, "checked_at", checked_at)
-        _object_setattr(self, "manifest_sha256", manifest_sha256)
-        _object_setattr(self, "approved_by", approved_by)
-        _object_setattr(self, "approval_reference", approval_reference)
+        key = _id(self)
 
-    return _authorization_init
+        def forget(
+            dead_ref: ReferenceType[object],
+            *,
+            issued_key: int = key,
+        ) -> None:
+            with lock:
+                record = issued.get(issued_key)
+                if record is not None and record[0] is dead_ref:
+                    issued.pop(issued_key, None)
+
+        state = (
+            source_identity,
+            required_scope,
+            checked_at,
+            manifest_sha256,
+            approved_by,
+            approval_reference,
+        )
+        authorization_ref = _ref_impl(self, forget)
+        with lock:
+            existing = issued.get(key)
+            if existing is not None and existing[0]() is self:
+                raise _error_type(
+                    "source-rights authorization is already canonically issued"
+                )
+            issued[key] = (authorization_ref, state)
+
+    def _field_property(index: int) -> property:
+        def getter(
+            self: SourceRightsAuthorization,
+            *,
+            _index=index,
+            _lookup_impl=_lookup,
+        ) -> object:
+            return _lookup_impl(self)[_index]
+
+        return property(getter)
+
+    cls.__init__ = _authorization_init  # type: ignore[method-assign]
+    for index, field_name in enumerate(field_names):
+        setattr(cls, field_name, _field_property(index))
 
 
-SourceRightsAuthorization.__init__ = _build_source_rights_authorization_init()
-del _build_source_rights_authorization_init
+_install_source_rights_authorization_seal(SourceRightsAuthorization)
+del _install_source_rights_authorization_seal
 
 
 def _build_source_rights_authorization_issuer(

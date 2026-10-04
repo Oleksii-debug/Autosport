@@ -66,6 +66,28 @@ def test_caller_cannot_mint_positive_source_rights_authorization() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    (
+        ("source_identity", "forged-source"),
+        ("required_scope", "live.write"),
+        ("manifest_sha256", "0" * 64),
+    ),
+)
+def test_issued_authorization_fields_cannot_be_rewritten(
+    tmp_path: Path,
+    field_name: str,
+    replacement: object,
+) -> None:
+    decision = authorize(manifest(tmp_path))
+    original = getattr(decision, field_name)
+
+    with pytest.raises(AttributeError):
+        object.__setattr__(decision, field_name, replacement)
+
+    assert getattr(decision, field_name) == original
+
+
 def test_string_subclasses_cannot_execute_callbacks(tmp_path: Path) -> None:
     current = manifest(tmp_path)
 

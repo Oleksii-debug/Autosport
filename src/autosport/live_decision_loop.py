@@ -895,10 +895,9 @@ class PersistentLiveDecisionLoop:
                 self.decision_ledger.verify_integrity()
                 if self._progress is None:
                     live_run_id = f"live:{self.loop_id}"
-                    if any(
-                        record.replay_run_id == live_run_id
-                        for record in self.decision_ledger.verified_records()
-                    ):
+                    if self._verified_latest_ledger_record(
+                        replay_run_id=live_run_id,
+                    ) is not None:
                         raise LiveDecisionProgressError(
                             "durable live decision history exists but progress is missing"
                         )
@@ -1432,14 +1431,12 @@ class PersistentLiveDecisionLoop:
                 raise LiveDecisionProgressError(
                     "append-pending durable PortfolioPlan identity changed"
                 )
-            live_records = tuple(
-                record
-                for record in self.decision_ledger.verified_records()
-                if record.replay_run_id == f"live:{self.loop_id}"
+            latest_live = self._verified_latest_ledger_record(
+                replay_run_id=f"live:{self.loop_id}",
             )
             if (
-                not live_records
-                or live_records[-1].decision_id != durable_record.decision_id
+                latest_live is None
+                or latest_live[1].decision_id != durable_record.decision_id
             ):
                 raise LiveDecisionProgressError(
                     "append-pending live progress is not the latest durable live decision"
@@ -1479,26 +1476,29 @@ class PersistentLiveDecisionLoop:
                 market_outcome_authorities=(),
             )
 
-        if (
-            progress.phase == _PHASE_PENDING
-            and self.decision_ledger.path.exists()
-        ):
-            existing_recovery_action = (
-                self.decision_ledger.verified_economic_decision_for_material_action(
-                    self._decision_identity(
-                        plan=plan,
-                        market_state_sha256=progress.market_state_sha256,
-                        gate=progress.gate,
-                        decision_context_sha256=progress.decision_context_sha256,
-                    )[1],
-                    self.authority.contract,
-                    risk_policy=self.authority.risk_policy,
-                )
+        if progress.phase == _PHASE_PENDING:
+            prospective_decision_id = self._decision_identity(
+                plan=plan,
+                market_state_sha256=progress.market_state_sha256,
+                gate=progress.gate,
+                decision_context_sha256=progress.decision_context_sha256,
+            )[1]
+            latest_live = self._verified_latest_ledger_record(
+                replay_run_id=f"live:{self.loop_id}",
             )
-            if existing_recovery_action is not None:
-                raise LiveDecisionProgressError(
-                    "pending live progress predates an already durable live decision"
+            if latest_live is not None:
+                latest_record = latest_live[1]
+                _, latest_time = _canonical_timestamp(
+                    "latest durable live decision observed_ts",
+                    latest_record.observed_ts,
                 )
+                if (
+                    latest_record.decision_id == prospective_decision_id
+                    or latest_time >= decision_time
+                ):
+                    raise LiveDecisionProgressError(
+                        "pending live progress predates an already durable live decision"
+                    )
 
         result = self._persist_plan(
             plan=plan,
@@ -2261,11 +2261,15 @@ class PersistentLiveDecisionLoop:
                 "Decision Ledger end offset is unreadable"
             ) from exc
 
-    def _verified_last_ledger_record(
+    def _verified_latest_ledger_record(
         self,
+        *,
+        replay_run_id: str | None = None,
     ) -> tuple[int, DecisionRecord] | None:
-        """Read and verify only the final durable ledger record and its byte offset."""
+        """Read verified ledger records backwards until the requested lineage is found."""
 
+        if replay_run_id is not None:
+            _canonical_text("replay_run_id", replay_run_id)
         path = self.decision_ledger.path
         try:
             with path.open("rb") as handle:
@@ -2280,33 +2284,51 @@ class PersistentLiveDecisionLoop:
                     )
 
                 end = size - 1
-                position = end
-                suffix = b""
-                while position > 0:
-                    start = max(0, position - 8192)
-                    handle.seek(start)
-                    chunk = handle.read(position - start)
-                    marker = chunk.rfind(b"\n")
-                    if marker >= 0:
-                        offset = start + marker + 1
-                        line = chunk[marker + 1 :] + suffix + b"\n"
-                        break
-                    suffix = chunk + suffix
-                    position = start
-                else:
+                while end >= 0:
+                    position = end
+                    pieces: list[bytes] = []
                     offset = 0
-                    line = suffix + b"\n"
+                    while position > 0:
+                        start = max(0, position - 8192)
+                        handle.seek(start)
+                        chunk = handle.read(position - start)
+                        marker = chunk.rfind(b"\n")
+                        if marker >= 0:
+                            offset = start + marker + 1
+                            pieces.append(chunk[marker + 1 :])
+                            break
+                        pieces.append(chunk)
+                        position = start
+                    else:
+                        offset = 0
+
+                    line = b"".join(reversed(pieces)) + b"\n"
+                    if line == b"\n":
+                        raise DecisionLedgerIntegrityError(
+                            "Decision Ledger contains a blank final record"
+                        )
+                    JsonlDecisionLedger._verify_bytes(line)
+                    envelope = json.loads(line.decode("utf-8"))
+                    record = DecisionRecord(
+                        **JsonlDecisionLedger._validate_record(envelope["record"])
+                    )
+                    if replay_run_id is None or record.replay_run_id == replay_run_id:
+                        return offset, record
+                    if offset == 0:
+                        return None
+                    end = offset - 1
         except FileNotFoundError:
             return None
         except OSError as exc:
             raise DecisionLedgerIntegrityError(
                 "Decision Ledger final record is unreadable"
             ) from exc
+        return None
 
-        JsonlDecisionLedger._verify_bytes(line)
-        envelope = json.loads(line.decode("utf-8"))
-        record = JsonlDecisionLedger._validate_record(envelope["record"])
-        return offset, DecisionRecord(**record)
+    def _verified_last_ledger_record(
+        self,
+    ) -> tuple[int, DecisionRecord] | None:
+        return self._verified_latest_ledger_record()
 
     def _verified_ledger_record_at_offset(
         self,
@@ -2446,12 +2468,10 @@ class PersistentLiveDecisionLoop:
                 "committed live progress conflicts with Decision Ledger record"
             )
 
-        live_records = tuple(
-            record
-            for record in self.decision_ledger.verified_records()
-            if record.replay_run_id == f"live:{self.loop_id}"
+        latest_live = self._verified_latest_ledger_record(
+            replay_run_id=f"live:{self.loop_id}",
         )
-        if not live_records or live_records[-1].decision_id != progress.decision_id:
+        if latest_live is None or latest_live[1].decision_id != progress.decision_id:
             raise DecisionLedgerIntegrityError(
                 "committed live progress is not the latest durable live decision"
             )

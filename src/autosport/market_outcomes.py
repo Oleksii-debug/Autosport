@@ -307,6 +307,7 @@ class MarketTerminalState:
         }
 
 
+_CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE = MarketOutcomeIdentity
 _CANONICAL_SETTLEMENT_RESULT_TYPE = SettlementResult
 _CANONICAL_MARKET_TERMINAL_STATE_TYPE = MarketTerminalState
 _MISSING_TERMINAL_STATE_CLASS_SLOT = object()
@@ -384,10 +385,15 @@ _CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD_CODE = getattr(
 
 _CANONICAL_MARKET_OUTCOME_AUTHORITY_MODULE_ROOTS = (
     ("datetime", _CANONICAL_DATETIME_TYPE),
+    ("MarketOutcomeIdentity", _CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE),
     ("timezone", _CANONICAL_TIMEZONE_TYPE),
     ("MarketTerminalState", _CANONICAL_MARKET_TERMINAL_STATE_TYPE),
     ("SettlementResult", _CANONICAL_SETTLEMENT_RESULT_TYPE),
     ("_CANONICAL_DATETIME_TYPE", _CANONICAL_DATETIME_TYPE),
+    (
+        "_CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE",
+        _CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE,
+    ),
     ("_CANONICAL_TIMEZONE_TYPE", _CANONICAL_TIMEZONE_TYPE),
     ("_CANONICAL_TIMEZONE_UTC", _CANONICAL_TIMEZONE_UTC),
     (
@@ -442,8 +448,8 @@ class MarketSettlementOutcomeAuthority:
             raise TypeError(
                 "MarketSettlementOutcomeAuthority must come from verified evidence"
             )
-        if not isinstance(self.identity, MarketOutcomeIdentity):
-            raise TypeError("identity must be MarketOutcomeIdentity")
+        if type(self.identity) is not _CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE:
+            raise TypeError("identity must be exact MarketOutcomeIdentity")
         if self.identity.market_type is not MarketType.WINNER:
             raise ValueError(
                 "authoritative terminal outcome semantics currently support winner markets only"
@@ -825,6 +831,39 @@ def _authority_descriptor_code_identity(member: object) -> tuple[object, ...]:
     return (getattr(member, "__code__", None),)
 
 
+_CANONICAL_MARKET_OUTCOME_IDENTITY_CLASS_SURFACE = tuple(
+    (
+        name,
+        member,
+        _authority_descriptor_code_identity(member),
+    )
+    for name in (
+        "sport",
+        "event_id",
+        "market_id",
+        "source_id",
+        "market_type",
+        "__post_init__",
+        "__getattribute__",
+        "__setattr__",
+        "__delattr__",
+        "__eq__",
+        "__hash__",
+        "identity_key",
+        "market_key",
+        "quote_key",
+        "to_dict",
+        "from_dict",
+    )
+    for member in (
+        vars(_CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE).get(
+            name,
+            _MISSING_AUTHORITY_CLASS_SLOT,
+        ),
+    )
+)
+
+
 _CANONICAL_MARKET_OUTCOME_AUTHORITY_CLASS_SURFACE = tuple(
     (
         name,
@@ -894,6 +933,20 @@ def _assert_canonical_market_outcome_authority_dispatch() -> None:
         )
     _CANONICAL_MARKET_TERMINAL_STATE_DISPATCH_GUARD()
 
+    identity_class_dict = vars(_CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE)
+    for name, expected, expected_code in (
+        _CANONICAL_MARKET_OUTCOME_IDENTITY_CLASS_SURFACE
+    ):
+        current = identity_class_dict.get(name, _MISSING_AUTHORITY_CLASS_SLOT)
+        if current is not expected:
+            raise ValueError(
+                "canonical market outcome identity class dispatch was replaced"
+            )
+        if _authority_descriptor_code_identity(current) != expected_code:
+            raise ValueError(
+                "canonical market outcome identity class dispatch was replaced"
+            )
+
     class_dict = vars(_CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE)
     for name, expected, expected_code in (
         _CANONICAL_MARKET_OUTCOME_AUTHORITY_CLASS_SURFACE
@@ -926,8 +979,8 @@ class MarketOutcomeAuthorityAssessment:
     refusal_reason: str | None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.identity, MarketOutcomeIdentity):
-            raise TypeError("assessment identity must be MarketOutcomeIdentity")
+        if type(self.identity) is not _CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE:
+            raise TypeError("assessment identity must be exact MarketOutcomeIdentity")
         if not isinstance(self.status, OutcomeAuthorityStatus):
             raise ValueError("assessment status must be OutcomeAuthorityStatus")
         if self.status is OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE:
@@ -962,8 +1015,8 @@ def assess_market_outcome_authority(
 ) -> MarketOutcomeAuthorityAssessment:
     """Refuse raw caller assertions; exhaustive authority needs verified source evidence."""
 
-    if not isinstance(identity, MarketOutcomeIdentity):
-        raise TypeError("identity must be MarketOutcomeIdentity")
+    if type(identity) is not _CANONICAL_MARKET_OUTCOME_IDENTITY_TYPE:
+        raise TypeError("identity must be exact MarketOutcomeIdentity")
     if not isinstance(roster_basis, OutcomeRosterBasis):
         raise ValueError("roster_basis must be OutcomeRosterBasis")
     if roster_basis is OutcomeRosterBasis.OBSERVED_ROWS_ONLY:

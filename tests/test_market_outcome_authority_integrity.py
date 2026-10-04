@@ -703,5 +703,102 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
         authority.assert_issued_integrity()
 
 
+    def test_identity_quote_key_rebinding_fails_closed_before_hostile_dispatch(
+        self,
+    ) -> None:
+        authority = self._authority()
+        original = MarketOutcomeIdentity.quote_key
+        hostile_calls: list[str] = []
+
+        def hostile(identity, selection_id):
+            del identity, selection_id
+            hostile_calls.append("quote_key")
+            return "forged:quote:key"
+
+        MarketOutcomeIdentity.quote_key = hostile
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "canonical market outcome identity class dispatch was replaced",
+            ):
+                _ = authority.quote_keys
+        finally:
+            MarketOutcomeIdentity.quote_key = original
+
+        self.assertEqual(hostile_calls, [])
+        authority.assert_issued_integrity()
+
+    def test_identity_quote_key_code_mutation_fails_closed(self) -> None:
+        authority = self._authority()
+        quote_key = MarketOutcomeIdentity.quote_key
+        original_code = quote_key.__code__
+
+        def hostile(identity, selection_id):
+            del identity, selection_id
+            raise AssertionError("hostile identity quote-key code executed")
+
+        self.assertEqual(original_code.co_freevars, ())
+        self.assertEqual(hostile.__code__.co_freevars, ())
+        quote_key.__code__ = hostile.__code__
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "canonical market outcome identity class dispatch was replaced",
+            ):
+                authority.assert_issued_integrity()
+        finally:
+            quote_key.__code__ = original_code
+
+        authority.assert_issued_integrity()
+
+    def test_authority_rejects_identity_subclass_before_nested_dispatch(
+        self,
+    ) -> None:
+        hostile_calls: list[str] = []
+
+        class HostileIdentity(MarketOutcomeIdentity):
+            def quote_key(self, selection_id: str) -> str:
+                del selection_id
+                hostile_calls.append("quote_key")
+                raise AssertionError("hostile identity dispatch executed")
+
+        identity = HostileIdentity(
+            sport="table_tennis",
+            event_id="event-1",
+            market_id="match_odds",
+            source_id=self.SOURCE_ID,
+            market_type=MarketType.WINNER,
+        )
+        issuance = market_outcomes_module._VERIFIED_AUTHORITY_ISSUANCE.set(True)
+        try:
+            with self.assertRaisesRegex(
+                TypeError,
+                "identity must be exact MarketOutcomeIdentity",
+            ):
+                MarketSettlementOutcomeAuthority(
+                    identity=identity,
+                    selection_ids=("away", "home"),
+                    roster_basis=(
+                        OutcomeRosterBasis.GOVERNED_DATASET_MARKET_DEFINITION
+                    ),
+                    settlement_semantics=(
+                        SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET
+                    ),
+                    source_revision="test-only-governed-dataset-revision",
+                    causal_cutoff="2026-09-18T15:00:00Z",
+                    observed_at="2026-09-18T15:00:01Z",
+                    roster_provenance_sha256="a" * 64,
+                    settlement_rules_sha256="b" * 64,
+                    verification_protocol_sha256="c" * 64,
+                    _verification_token=(
+                        market_outcomes_module._VERIFIED_AUTHORITY_TOKEN
+                    ),
+                )
+        finally:
+            market_outcomes_module._VERIFIED_AUTHORITY_ISSUANCE.reset(issuance)
+
+        self.assertEqual(hostile_calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

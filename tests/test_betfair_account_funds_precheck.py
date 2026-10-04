@@ -366,6 +366,24 @@ def test_adversarial_decimal_subclass_is_rejected_before_provider_read(
     assert methods == []
 
 
+def test_module_decimal_rebinding_cannot_change_exact_money_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    methods = _install_provider(monkeypatch)
+    client = _client()
+    hostile = _AdversarialDecimal("1")
+
+    monkeypatch.setattr(subject, "Decimal", _AdversarialDecimal)
+
+    with pytest.raises(
+        subject.BetfairAccountFundsPrecheckError,
+        match="finite non-negative Decimal",
+    ):
+        _evaluate(client=client, required=hostile)
+
+    assert methods == []
+
+
 def test_negative_provider_balance_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

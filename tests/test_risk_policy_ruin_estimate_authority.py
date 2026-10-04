@@ -266,3 +266,16 @@ def test_policy_estimate_dispatch_rejects_derivation_helper_rebinding(
         match="dispatch changed",
     ):
         policy_module._require_dispatch()
+
+
+
+def test_policy_estimate_dispatch_rejects_field_manifest_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(policy_module, "_ESTIMATE_FIELDS", ())
+
+    with pytest.raises(
+        ProductFixedNRiskPolicyEstimateError,
+        match="dispatch changed",
+    ):
+        policy_module._require_dispatch()

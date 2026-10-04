@@ -36,6 +36,9 @@ from autosport.risk_path_observation_authority import (
     verify_product_run_capital_path_evidence,
 )
 from autosport.risk_sampling_membership import ResolvedFixedNRiskMembership
+from autosport.risk_sampling_occurrence_authority import (
+    issue_product_iid_run_admission,
+)
 from autosport.run_registry import RunRegistry
 from autosport.run_transaction import RunTransaction
 
@@ -76,6 +79,7 @@ HORIZON_JSON = _canonical(
 )
 SAMPLING_FRAME_SHA256 = _sha_text(SAMPLING_FRAME_JSON)
 HORIZON_SHA256 = _sha_text(HORIZON_JSON)
+_TEST_ADMISSION_RECEIPT = ".test-iid-run-admission-receipt-sha256"
 
 
 def _membership() -> ResolvedFixedNRiskMembership:
@@ -164,6 +168,20 @@ def _product_precommit(tmp_path, monkeypatch):
     manifest = _sampling_manifest(
         randomization_root_sha256=issued.randomization_root_sha256,
     )
+    admission = issue_product_iid_run_admission(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        member_index=0,
+        authority_root=authority_root,
+    )
+    (workspace / _TEST_ADMISSION_RECEIPT).write_text(
+        admission.receipt_sha256 + "\n",
+        encoding="utf-8",
+    )
     return membership, workspace, registry_path, authority_root, manifest
 
 
@@ -204,6 +222,10 @@ def _completed_run_with_settlement_bridge(
     canonical_ledger.write_bytes(b"")
     base_ledger_sha = hashlib.sha256(b"").hexdigest()
 
+    receipt_sha256 = (workspace / _TEST_ADMISSION_RECEIPT).read_text(
+        encoding="utf-8"
+    ).strip()
+    assert len(receipt_sha256) == 64
     registry = RunRegistry(workspace / "run_registry.json")
     experiment_key = registry.begin(
         "b" * 64,
@@ -212,6 +234,7 @@ def _completed_run_with_settlement_bridge(
         RUN_ID,
         base_paper_book_sha256=base_book_sha,
         base_decision_ledger_sha256=base_ledger_sha,
+        sampling_draw_admission_receipt_sha256=receipt_sha256,
     )
     tx = RunTransaction.start(
         workspace,
@@ -222,6 +245,7 @@ def _completed_run_with_settlement_bridge(
         strategy_id="risk-path-strategy",
         base_paper_book_sha256=base_book_sha,
         base_decision_ledger_sha256=base_ledger_sha,
+        sampling_draw_admission_receipt_sha256=receipt_sha256,
     )
     book = PaperBook.load(book_path)
     if ticket is None:
@@ -422,6 +446,9 @@ def test_product_run_capital_path_re_resolves_completed_settlement(
     assert evidence.expected_draw_product_derived is True
     assert len(evidence.expected_draw_plan_sha256) == 64
     assert len(evidence.expected_draw_transcript_sha256) == 64
+    assert len(evidence.run_admission_receipt_sha256) == 64
+    assert evidence.run_admission_bound is True
+    assert evidence.execution_consumption_proven is False
     assert evidence.sampling_occurrence_ancestry_proven is False
     assert evidence.iid_qualified is False
     assert evidence.grants_real_money_authority is False
@@ -737,6 +764,7 @@ def test_object_new_forgery_cannot_pass_canonical_evidence_verifier(
         "outcome_available_at",
         "expected_draw_plan_sha256",
         "expected_draw_transcript_sha256",
+        "run_admission_receipt_sha256",
         "settlement_effects_sha256",
         "replay_source_evidence_sha256",
         "source_evidence_sha256",

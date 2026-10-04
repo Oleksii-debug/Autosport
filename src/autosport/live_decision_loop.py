@@ -1055,7 +1055,7 @@ class PersistentLiveDecisionLoop:
     def _sample_clock(self) -> datetime:
         """Return UTC wall time without allowing causal decision chronology to regress."""
 
-        now = self._sample_clock()
+        now = _require_utc_clock(self.clock)
         if now < self._last_clock_time:
             raise LiveDecisionProgressError(
                 "live decision clock moved backwards across causal chronology"
@@ -1119,7 +1119,7 @@ class PersistentLiveDecisionLoop:
                 exc,
             )
 
-        now = _require_utc_clock(self.clock)
+        now = self._sample_clock()
         batch = self.mirror_updates.drain(
             max_items=self.bounds.max_dirty_per_cycle
         )

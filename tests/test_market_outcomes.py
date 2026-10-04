@@ -366,6 +366,30 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
                     decision_as_of=self.DECISION_AS_OF,
                 )
 
+    def test_empty_portfolio_preserves_conservative_terminal_space_truth(self):
+        authority = self._authority()
+
+        report = ScenarioSearchEngine().analyse_authoritative(
+            [],
+            [authority],
+            decision_as_of=self.DECISION_AS_OF,
+        )
+
+        self.assertEqual(
+            report.mode,
+            "authoritative-conservative-enumeration",
+        )
+        self.assertTrue(report.outcome_space_exhaustive)
+        self.assertFalse(report.outcome_space_exact)
+        self.assertTrue(report.worst_proven)
+        self.assertTrue(report.best_proven)
+        self.assertEqual(report.observed_worst, Decimal("0"))
+        self.assertEqual(report.observed_best, Decimal("0"))
+        self.assertEqual(
+            report.outcome_authority_sha256s,
+            (authority.authority_sha256,),
+        )
+
     def test_authoritative_scenario_search_covers_unticketed_real_third_outcome(self):
         authority = self._authority()
         book = PaperBook("100")

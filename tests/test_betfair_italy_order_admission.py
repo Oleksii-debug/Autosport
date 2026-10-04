@@ -341,22 +341,35 @@ def test_hard_false_admission_authority_surface_is_sealed():
 
 
 @pytest.mark.parametrize(
-    ("field", "value", "message"),
+    ("field", "value"),
     [
-        ("selection_id", 0, "selection_id"),
-        ("side", "BUY", "side"),
-        ("size", Decimal("0"), "size"),
-        ("price", Decimal("1"), "price"),
-        ("bet_target_type", "UNKNOWN_TARGET", "bet_target_type"),
+        ("selection_id", 0),
+        ("side", "BUY"),
+        ("size", Decimal("0")),
+        ("price", Decimal("1")),
+        ("bet_target_type", "UNKNOWN_TARGET"),
     ],
 )
-def test_evaluation_revalidates_post_construction_slot_mutation(
-    field, value, message
-):
+def test_instruction_projection_is_instance_immutable(field, value):
     instruction = I()
-    # frozen dataclasses are not an integrity boundary: object.__setattr__
-    # can still write slots, so evaluation must validate its own snapshot.
-    object.__setattr__(instruction, field, value)
+    with pytest.raises(AttributeError):
+        object.__setattr__(instruction, field, value)
+
+
+@pytest.mark.parametrize(
+    ("raw_values", "message"),
+    [
+        ((0, "BACK", Decimal("2"), Decimal("2"), None), "selection_id"),
+        ((1, "BUY", Decimal("2"), Decimal("2"), None), "side"),
+        ((1, "BACK", Decimal("0"), Decimal("2"), None), "size"),
+        ((1, "BACK", Decimal("2"), Decimal("1"), None), "price"),
+        ((1, "BACK", Decimal("2"), Decimal("2"), "UNKNOWN_TARGET"), "bet_target_type"),
+    ],
+)
+def test_evaluation_revalidates_constructor_bypass(raw_values, message):
+    # Defensive use-time validation remains authoritative even if lower-level
+    # Python tuple construction bypasses the public projection constructor.
+    instruction = tuple.__new__(ItalianLimitInstruction, raw_values)
 
     with pytest.raises(ItalianOrderAdmissionError, match=message):
         evaluate_italian_limit_batch((instruction,))

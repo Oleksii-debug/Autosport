@@ -939,6 +939,49 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             original,
         )
 
+    def test_settlement_collection_rejects_instance_records_retargeting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="result:lifecycle-records-shadow",
+            )
+            authority = _OutcomeAuthority(
+                SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="result:lifecycle-records-shadow",
+                    quote_outcomes={"event-1|winner|home": "win"},
+                    evidence_id="lifecycle-records-shadow",
+                    evidence_sha256="9" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+            )
+            coordinator, store, lifecycle, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-1",
+                        position=1,
+                        events=(event,),
+                    )
+                ),
+                clock,
+                outcome_authority=authority,
+            )
+            lifecycle.records = lambda: ()
+            try:
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "lifecycle record dispatch changed",
+                ):
+                    coordinator._settlement_resolutions(as_of=clock())
+                self.assertEqual(authority.calls, 0)
+            finally:
+                store.close()
+
     def test_outcome_authority_method_retargeting_cannot_change_truth_origin(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

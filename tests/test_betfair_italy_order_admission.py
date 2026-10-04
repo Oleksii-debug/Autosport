@@ -447,3 +447,17 @@ def test_result_diagnostic_state_is_instance_immutable():
     assert result.ruleset_satisfied_unbound is False
     assert "I0:BACK_STAKE_BELOW_EUR_2" in result.reason_codes
     assert result.execution_authorized is False
+
+
+def test_ruleset_match_does_not_mint_price_ladder_authority():
+    # 2.01 is intentionally outside this module's authority question: the
+    # canonical price-ladder/tick owner (#1504 family) must decide it.
+    result = evaluate_italian_limit_batch((I(size="2.00", price="2.01"),))
+
+    assert result.state is ItalianLimitAdmissionState.RULESET_SATISFIED_UNBOUND
+    assert result.reason_codes == ()
+    assert result.ruleset_satisfied_unbound is True
+    assert result.admissible is False
+    assert result.current_provider_rules_proven is False
+    assert result.execution_authorized is False
+    assert result.real_money_execution is False

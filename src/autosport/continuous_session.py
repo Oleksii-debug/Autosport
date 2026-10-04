@@ -1012,6 +1012,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         self,
         *,
         resolutions: tuple[SettlementResolution, ...],
+        settled_at: str,
         _settlement_engine_type: type[SettlementEngine],
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if not resolutions:
@@ -1040,7 +1041,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 }
                 if scoped:
                     engine.record(scoped)
-            settled = tuple(engine.settle_ready(book))
+            settled = tuple(
+                engine.settle_ready(
+                    book,
+                    settled_at=_instant(settled_at, "settled_at").isoformat(),
+                )
+            )
             if settled:
                 book.save(self.paper_book_path)
 
@@ -1184,7 +1190,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                         resolutions=resolutions,
                         at=now,
                     )
-            settled, evidence_ids = self._settle(resolutions=resolutions)
+            settled, evidence_ids = self._settle(
+                resolutions=resolutions,
+                settled_at=now,
+            )
             if self.settlement_learning_handoff is not None:
                 self.settlement_learning_handoff.reconcile_after_settlement(
                     paper_book_path=self.paper_book_path,

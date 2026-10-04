@@ -41,7 +41,15 @@ def _install_scope_authority_guard() -> None:
         }
     )
     records: dict[int, tuple[object, ...]] = {}
+    record_seals: set[tuple[int, int, tuple[int, ...]]] = set()
     records_lock = RLock()
+
+    def _record_seal(instance_id: int, record: tuple[object, ...]):
+        return (
+            instance_id,
+            id(record),
+            tuple(id(value) for value in record),
+        )
 
     def _snapshot(instance) -> tuple[object, ...]:
         state = original_getattribute(instance, "__dict__")
@@ -69,14 +77,25 @@ def _install_scope_authority_guard() -> None:
                 current = records.get(instance_id)
                 if current is not None and current[0] is dead_ref:
                     records.pop(instance_id, None)
+                    record_seals.discard(_record_seal(instance_id, current))
 
         instance_ref = ref(instance, _discard)
+        record = (instance_ref, *expected)
         with records_lock:
-            records[instance_id] = (instance_ref, *expected)
+            previous = records.get(instance_id)
+            if previous is not None:
+                record_seals.discard(_record_seal(instance_id, previous))
+            records[instance_id] = record
+            record_seals.add(_record_seal(instance_id, record))
 
     def _require_current(instance) -> None:
+        instance_id = id(instance)
         with records_lock:
-            record = records.get(id(instance))
+            record = records.get(instance_id)
+            sealed = (
+                record is not None
+                and _record_seal(instance_id, record) in record_seals
+            )
         if record is None:
             # Canonical __init__ reads protected scope/path attributes before the
             # post-construction anchor is registered.  Its final initialization
@@ -90,7 +109,7 @@ def _install_scope_authority_guard() -> None:
             if type(state) is dict and "_thread_lock" not in state:
                 return
             raise error_type("session scope authority changed")
-        if record[0]() is not instance:
+        if not sealed or record[0]() is not instance:
             raise error_type("session scope authority changed")
         current = _snapshot(instance)
         expected = record[1:]

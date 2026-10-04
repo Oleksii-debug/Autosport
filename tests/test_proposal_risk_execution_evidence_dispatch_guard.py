@@ -139,6 +139,42 @@ class ProductProposalRiskExecutionEvidenceDispatchGuardTests(unittest.TestCase):
         finally:
             precommit_type.binding_identity_proven = original
 
+    def test_precommit_input_descriptor_rebinding_is_rejected_before_dispatch(self) -> None:
+        precommit_type = evidence_authority.ProductProposalRiskEvaluationPrecommit
+        original = precommit_type.__dict__["planned_member_ids"]
+        try:
+            precommit_type.planned_member_ids = property(lambda self: ("attacker",))
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "precommit descriptor planned_member_ids changed",
+            ):
+                evidence_authority.derive_product_proposal_risk_execution_evidence(
+                    None,
+                    (),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            precommit_type.planned_member_ids = original
+
+    def test_precommit_chronology_descriptor_rebinding_is_rejected_before_dispatch(self) -> None:
+        precommit_type = evidence_authority.ProductProposalRiskEvaluationPrecommit
+        original = precommit_type.__dict__["target_decision_ts"]
+        try:
+            precommit_type.target_decision_ts = property(
+                lambda self: "1970-01-01T00:00:00+00:00"
+            )
+            with self.assertRaisesRegex(
+                ProductProposalRiskExecutionEvidenceError,
+                "precommit descriptor target_decision_ts changed",
+            ):
+                evidence_authority.derive_product_proposal_risk_execution_evidence(
+                    None,
+                    (),
+                    evaluated_at="2026-10-04T10:02:00+00:00",
+                )
+        finally:
+            precommit_type.target_decision_ts = original
+
     def test_result_risk_truth_descriptor_rebinding_is_rejected(self) -> None:
         result_type = evidence_authority.ProductProposalRiskExecutionEvidence
         original = result_type.__dict__["proposal_target_risk_qualified"]

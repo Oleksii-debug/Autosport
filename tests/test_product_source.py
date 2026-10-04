@@ -438,6 +438,70 @@ class ParlayApiProductSourceTests(unittest.TestCase):
 
         self.assertEqual(calls, [])
 
+    def test_pending_snapshot_does_not_coerce_noncanonical_metadata_containers(self) -> None:
+        quote = _quote()
+        quote.metadata["tuple_value"] = ("must", "not", "coerce")
+        batch = ProviderBatch(
+            source_id=_SOURCE_ID,
+            quotes=(quote,),
+            cursor="snapshot-1",
+        )
+
+        class _TupleMetadataProvider:
+            source_id = _SOURCE_ID
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                del max_items
+                return batch
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _TupleMetadataProvider(),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "non-canonical JSON value type",
+            ):
+                source.fetch_catalog_page(None)
+
+    def test_pending_snapshot_rejects_metadata_container_subclasses(self) -> None:
+        class _HostileDict(dict):
+            pass
+
+        quote = _quote()
+        object.__setattr__(quote, "metadata", _HostileDict(quote.metadata))
+        batch = ProviderBatch(
+            source_id=_SOURCE_ID,
+            quotes=(),
+            cursor="snapshot-1",
+        )
+        object.__setattr__(batch, "quotes", (quote,))
+
+        class _MetadataSubclassProvider:
+            source_id = _SOURCE_ID
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                del max_items
+                return batch
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _MetadataSubclassProvider(),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "non-canonical acquisition value types",
+            ):
+                source.fetch_catalog_page(None)
+
     def test_pending_snapshot_freezes_mutable_provider_metadata_before_use(self) -> None:
         quote = _quote()
         quote.metadata["nested"] = {"value": "original"}

@@ -3186,6 +3186,50 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             ):
                 SQLiteMarketStore(path)
 
+    def test_noncanonical_pending_positive_append_is_not_machine_committed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            try:
+                forged = self.event(
+                    sequence=1,
+                    odds="9.99",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.direct_insert_positive_generation(
+                    store,
+                    forged,
+                    generation=1,
+                )
+
+                authority = store._market_append_authority()
+                baseline_state = store._generation_zero_baseline_state_sha256()
+                entries = store._validated_positive_append_entries()
+                intended_state = store._append_state_from_entries(
+                    entries,
+                    baseline_state_sha256=baseline_state,
+                )
+                tx_id = "append-1-1-" + ("1" * 32)
+                forged_binding = "1" * 64
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=baseline_state,
+                    intended_state_sha256=intended_state,
+                    semantic_binding_sha256=forged_binding,
+                )
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "PREPARE semantic binding is invalid",
+                ):
+                    store.events()
+
+                history = authority.read_history()
+                self.assertEqual(history[-1].phase.value, "PREPARE")
+                self.assertEqual(history[-1].tx_id, tx_id)
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

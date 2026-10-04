@@ -175,6 +175,110 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertEqual(batch.changed_keys, ())
         self.assertEqual(batch.semantic_refresh_keys, ())
 
+    def test_view_for_keys_is_bounded_and_revision_coherent(self) -> None:
+        mirror = MarketMirror()
+        first = self.event(
+            source_id="provider-a",
+            selection="selection-a",
+            sequence=1,
+        )
+        second = self.event(
+            source_id="provider-b",
+            selection="selection-b",
+            sequence=1,
+        )
+        mirror.apply(first)
+        mirror.apply(second)
+
+        with (
+            patch.object(
+                mirror,
+                "snapshot",
+                side_effect=AssertionError("whole snapshot is forbidden"),
+            ),
+            patch.object(
+                mirror,
+                "view",
+                side_effect=AssertionError("whole view is forbidden"),
+            ),
+        ):
+            captured = mirror.view_for_keys(
+                (
+                    ("provider-b", second.quote_key),
+                    ("provider-a", first.quote_key),
+                )
+            )
+
+        self.assertEqual(captured.revision, 2)
+        self.assertEqual(
+            tuple((event.source_id, event.quote_key) for event in captured.events),
+            (
+                ("provider-a", first.quote_key),
+                ("provider-b", second.quote_key),
+            ),
+        )
+
+    def test_refresh_only_routing_uses_one_bounded_mirror_capture(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="prophetx:sandbox")
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+
+        runtime.accept_persisted(first)
+        runtime.drain()
+        runtime.accept_persisted(refresh)
+        batch = runtime.drain()
+
+        with (
+            patch.object(
+                mirror,
+                "event_for_quote_key",
+                side_effect=AssertionError("per-key reads are forbidden"),
+            ),
+            patch.object(
+                mirror,
+                "snapshot",
+                side_effect=AssertionError("whole snapshot is forbidden"),
+            ),
+            patch.object(
+                mirror,
+                "view",
+                side_effect=AssertionError("whole view is forbidden"),
+            ),
+            patch.object(
+                mirror,
+                "view_for_keys",
+                wraps=mirror.view_for_keys,
+            ) as bounded,
+        ):
+            self.assertEqual(
+                dependencies.semantic_refresh_only_inputs(batch),
+                ("decision",),
+            )
+
+        bounded.assert_called_once_with(frozenset(batch.changed_keys))
+
+    def test_refresh_only_routing_fails_closed_on_missing_changed_key(self) -> None:
+        mirror = MarketMirror()
+        event = self.prophetx_refresh_event(sequence=1)
+        mirror.apply(event)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision")
+
+        batch = MirrorInvalidationBatch(
+            changed_keys=(
+                ("prophetx:sandbox", event.quote_key),
+                ("provider-missing", "missing-quote"),
+            ),
+            full_refresh_required=False,
+            has_more=False,
+            semantic_refresh_keys=(("prophetx:sandbox", event.quote_key),),
+        )
+
+        self.assertEqual(dependencies.semantic_refresh_only_inputs(batch), ())
+
     def test_refresh_only_routing_excludes_inputs_with_material_changes(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror)

@@ -2434,7 +2434,7 @@ class SQLiteMarketStore:
         )
 
     @contextmanager
-    def guard_current_append_authority_with_boundary(
+    def _guard_current_append_authority_with_boundary(
         self,
         max_generation: int,
     ) -> Iterator[list[tuple[MarketEvent, int]]]:
@@ -2493,7 +2493,7 @@ class SQLiteMarketStore:
         if type(max_generation) is not int or max_generation < 0:
             raise ValueError("max_generation must be a non-negative int")
 
-        with self.guard_current_append_authority_with_boundary(
+        with self._guard_current_append_authority_with_boundary(
             max_generation
         ):
             pass

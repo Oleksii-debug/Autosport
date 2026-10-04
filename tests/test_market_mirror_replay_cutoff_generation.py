@@ -5156,6 +5156,65 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_publication_guard_blocks_direct_sqlite_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            intruder = sqlite3.connect(path, timeout=0)
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(first))
+
+                with store._guard_current_append_authority_with_boundary(
+                    1
+                ) as prefix:
+                    self.assertEqual(
+                        [
+                            (event.sequence, generation)
+                            for event, generation in prefix
+                        ],
+                        [(1, 1)],
+                    )
+                    with self.assertRaises(sqlite3.OperationalError):
+                        intruder.execute("BEGIN IMMEDIATE")
+
+                intruder.execute("BEGIN IMMEDIATE")
+                intruder.rollback()
+            finally:
+                intruder.close()
+                store.close()
+
+    def test_publication_guard_releases_writer_reservation_on_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            intruder = sqlite3.connect(path, timeout=0)
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.assertTrue(store.append(first))
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated publication failure",
+                ):
+                    with store._guard_current_append_authority_with_boundary(1):
+                        raise RuntimeError("simulated publication failure")
+
+                intruder.execute("BEGIN IMMEDIATE")
+                intruder.rollback()
+                store.require_current_append_authority_with_boundary(1)
+            finally:
+                intruder.close()
+                store.close()
+
     def test_frozen_prefix_reader_bypasses_malformed_later_tail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

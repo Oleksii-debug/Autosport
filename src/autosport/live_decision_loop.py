@@ -2638,7 +2638,7 @@ class PersistentLiveDecisionLoop:
                 # The guard spans both the complete current-tail proof and durable
                 # PENDING publication. No cooperating append or direct SQLite writer
                 # can change canonical market truth inside this interval.
-                with store.guard_current_append_authority_with_boundary(
+                with store._guard_current_append_authority_with_boundary(
                     market_append_generation
                 ) as durable_history:
                     boundary, age_limit = MarketMirror._decision_boundary(

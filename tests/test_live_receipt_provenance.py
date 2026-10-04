@@ -1153,6 +1153,95 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(store.trusted_live_events(), [])
             store.close()
 
+    def test_live_bootstrap_ignores_market_mirror_init_and_apply_descriptor_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store)
+
+            with (
+                patch.object(
+                    MarketMirror,
+                    "__init__",
+                    side_effect=AssertionError("mutable mirror constructor must not be consulted"),
+                ),
+                patch.object(
+                    MarketMirror,
+                    "apply",
+                    side_effect=AssertionError("mutable mirror apply descriptor must not be consulted"),
+                ),
+            ):
+                live = MarketMirror.from_live_store(store)
+
+            snapshot = live.snapshot()
+            self.assertEqual(len(snapshot), 1)
+            self.assertEqual(live.revision, 1)
+            self.assertTrue(store.has_trusted_live_receipt(snapshot[0]))
+            store.close()
+
+    def test_live_bootstrap_ignores_market_mirror_key_and_snapshot_descriptor_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store)
+
+            with (
+                patch.object(
+                    MarketMirror,
+                    "_key",
+                    side_effect=AssertionError("mutable mirror key descriptor must not be consulted"),
+                ),
+                patch.object(
+                    MarketMirror,
+                    "_snapshot_event",
+                    side_effect=AssertionError("mutable mirror snapshot descriptor must not be consulted"),
+                ),
+            ):
+                live = MarketMirror.from_live_store(store)
+
+            snapshot = live.snapshot()
+            self.assertEqual(len(snapshot), 1)
+            self.assertEqual(live.revision, 1)
+            store.close()
+
+    def test_live_bootstrap_uses_sealed_trusted_key_and_snapshot_helpers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store)
+
+            with (
+                patch.object(
+                    market_mirror_module,
+                    "_trusted_mirror_event_key",
+                    side_effect=AssertionError("mutable trusted key helper must not be consulted"),
+                ),
+                patch.object(
+                    market_mirror_module,
+                    "_trusted_mirror_event_snapshot",
+                    side_effect=AssertionError("mutable trusted snapshot helper must not be consulted"),
+                ),
+            ):
+                live = MarketMirror.from_live_store(store)
+
+            self.assertEqual(len(live.snapshot()), 1)
+            self.assertEqual(live.revision, 1)
+            store.close()
+
+    def test_live_bootstrap_rejects_trusted_current_key_identity_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            self._ingest(store)
+            trusted = store.trusted_live_events()[0]
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "trusted live current key does not match MarketEvent identity",
+            ):
+                MarketMirror.from_live_store(
+                    store,
+                    _trusted_current=lambda _store: {("forged-source", "forged-key"): trusted},
+                )
+
+            store.close()
+
     def test_live_mirror_event_type_survives_module_rebind(self) -> None:
         class PoisonMarketEvent(MarketEvent):
             @classmethod

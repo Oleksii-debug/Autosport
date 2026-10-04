@@ -650,9 +650,9 @@ class _Progress:
         schema_version = raw.get("schema_version")
         expected_keys = (
             _PROGRESS_KEYS
-            if schema_version == _PROGRESS_VERSION
+            if type(schema_version) is int and schema_version == _PROGRESS_VERSION
             else _PROGRESS_KEYS_V1
-            if schema_version == 1
+            if type(schema_version) is int and schema_version == 1
             else None
         )
         if expected_keys is None or set(raw) != expected_keys:

@@ -488,3 +488,111 @@ def test_predictive_decision_time_rejects_hostile_objects_before_comparison() ->
         expected_model_id="model",
     ) == "predictive decision time must be timezone-aware"
 
+def test_public_opportunity_dependency_parameters_are_sealed() -> None:
+    from inspect import signature
+
+    public_surfaces = {
+        "QuoteRef.__post_init__": QuoteRef.__post_init__,
+        "QuoteRef.quote_key": QuoteRef.quote_key.fget,
+        "QuoteRef.from_market_event": QuoteRef.from_market_event,
+        "PredictiveEligibilityEvidence.__post_init__": (
+            PredictiveEligibilityEvidence.__post_init__
+        ),
+        "ForecastRef.__post_init__": ForecastRef.__post_init__,
+        "ForecastRef.from_forecast": ForecastRef.from_forecast,
+        "ForecastRef.predictive_eligibility_reason": (
+            ForecastRef.predictive_eligibility_reason
+        ),
+        "Opportunity.__post_init__": Opportunity.__post_init__,
+        "Opportunity.predictive_uncertainty_haircut": (
+            Opportunity.predictive_uncertainty_haircut.fget
+        ),
+        "Opportunity.conflict_key": Opportunity.conflict_key.fget,
+        "Opportunity.opportunity_id": Opportunity.opportunity_id.fget,
+        "OpportunitySet.__post_init__": OpportunitySet.__post_init__,
+        "OpportunitySet.opportunity_set_id": OpportunitySet.opportunity_set_id.fget,
+        "PlanAllocation.__post_init__": PlanAllocation.__post_init__,
+        "PortfolioPlan.__post_init__": PortfolioPlan.__post_init__,
+        "PortfolioPlan.plan_id": PortfolioPlan.plan_id.fget,
+    }
+    expected_parameters = {
+        "QuoteRef.__post_init__": ("self",),
+        "QuoteRef.quote_key": ("self",),
+        "QuoteRef.from_market_event": ("event", "market_snapshot_hash"),
+        "PredictiveEligibilityEvidence.__post_init__": ("self",),
+        "ForecastRef.__post_init__": ("self",),
+        "ForecastRef.from_forecast": (
+            "forecast",
+            "quote",
+            "predictive_eligibility",
+        ),
+        "ForecastRef.predictive_eligibility_reason": (
+            "self",
+            "decision_time",
+            "expected_model_id",
+        ),
+        "Opportunity.__post_init__": ("self",),
+        "Opportunity.predictive_uncertainty_haircut": ("self",),
+        "Opportunity.conflict_key": ("self",),
+        "Opportunity.opportunity_id": ("self",),
+        "OpportunitySet.__post_init__": ("self",),
+        "OpportunitySet.opportunity_set_id": ("self",),
+        "PlanAllocation.__post_init__": ("self",),
+        "PortfolioPlan.__post_init__": ("self",),
+        "PortfolioPlan.plan_id": ("self",),
+    }
+
+    assert set(public_surfaces) == set(expected_parameters)
+    for name, surface in public_surfaces.items():
+        assert surface is not None
+        assert tuple(signature(surface).parameters) == expected_parameters[name]
+
+
+def test_public_opportunity_dependency_injection_is_rejected() -> None:
+    quote = _quote()
+    opportunity = Opportunity(
+        strategy_class=StrategyClass.ARBITRAGE,
+        decision=OpportunityDecision.ACTIONABLE,
+        quotes=(quote,),
+    )
+    allocation = PlanAllocation(opportunity.opportunity_id, Decimal("1"))
+
+    with pytest.raises(TypeError):
+        QuoteRef.from_market_event(
+            MarketEvent(
+                event_id="event-public-hook",
+                market_id="market-public-hook",
+                selection_id="selection-public-hook",
+                decimal_odds=Decimal("2"),
+                observed_ts="2026-09-16T16:00:00+00:00",
+                source_id="provider-public-hook",
+                sequence=1,
+                ingest_ts="2026-09-16T16:00:01+00:00",
+            ),
+            _canonical_json_hash_fn=lambda _payload: "0" * 64,
+        )
+
+    with pytest.raises(TypeError):
+        QuoteRef.__post_init__(
+            quote,
+            _finite_decimal_fn=lambda value, *_args, **_kwargs: value,
+        )
+
+    with pytest.raises(TypeError):
+        QuoteRef.quote_key.fget(
+            quote,
+            _quote_key_fn=lambda *_args: "attacker|quote|key",
+        )
+
+    with pytest.raises(TypeError):
+        Opportunity.opportunity_id.fget(
+            opportunity,
+            _canonical_json_hash_fn=lambda _payload: "0" * 64,
+        )
+
+    with pytest.raises(TypeError):
+        PlanAllocation.__post_init__(
+            allocation,
+            _finite_decimal_fn=lambda value, *_args, **_kwargs: value,
+        )
+

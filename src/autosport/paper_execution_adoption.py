@@ -506,6 +506,95 @@ class PaperExecutionAdoptionRuntime:
             self.config,
         )
 
+    def resolve_execution_started_at(
+        self,
+        *,
+        prepared: PreparedPaperExecution,
+        trigger_id: str,
+        proposed_started_at: str,
+    ) -> str:
+        """Resolve the exact #623 start time without backdating a fresh action.
+
+        A fresh execution uses the caller's current product clock.  Recovery reuses
+        a previously durable RUN_RESERVED start so the same run can be resumed
+        exactly.  An earlier exposure-scope event without a reservation does not
+        count as execution start; after such a crash the retry must use its new
+        current time and can therefore expire.
+        """
+        if not isinstance(prepared, PreparedPaperExecution):
+            raise TypeError("prepared must be PreparedPaperExecution")
+        self._require_minted(prepared)
+        proposed_time = _utc_timestamp(
+            proposed_started_at,
+            "proposed PAPER execution started_at",
+        )
+        plan_time = _utc_timestamp(
+            prepared.execution_plan.created_at,
+            "PAPER execution plan created_at",
+        )
+        if proposed_time < plan_time:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution start clock precedes the authorized plan"
+            )
+
+        run_id = self.expected_run_id(prepared, trigger_id)
+        events = self.ledger.events(run_id)
+        reservations = [
+            event for event in events if event["event_type"] == "RUN_RESERVED"
+        ]
+        if not reservations:
+            unexpected = [
+                event["event_type"]
+                for event in events
+                if event["event_type"] != self._EXPOSURE_SCOPE_EVENT_TYPE
+            ]
+            if unexpected:
+                raise PaperExecutionAdoptionError(
+                    "PAPER execution history exists without a durable run reservation"
+                )
+            return proposed_started_at
+        if len(reservations) != 1:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution run must have exactly one durable reservation"
+            )
+
+        payload = reservations[0]["payload"]
+        expected_keys = {
+            "trigger_id",
+            "plan_id",
+            "plan_fingerprint",
+            "model_fingerprint",
+            "started_at",
+            "action_ids",
+            "observation_evidence_ids",
+        }
+        if type(payload) is not dict or set(payload) != expected_keys:
+            raise PaperExecutionAdoptionError(
+                "durable PAPER execution reservation schema is invalid"
+            )
+        if (
+            payload["trigger_id"] != trigger_id
+            or payload["plan_id"] != prepared.execution_plan.plan_id
+            or payload["plan_fingerprint"] != prepared.execution_plan.fingerprint
+            or payload["model_fingerprint"] != self.config.fingerprint
+            or payload["action_ids"]
+            != [action.action_id for action in prepared.execution_plan.actions]
+            or payload["observation_evidence_ids"] != {}
+        ):
+            raise PaperExecutionAdoptionError(
+                "durable PAPER execution reservation conflicts with prepared action"
+            )
+        durable_started_at = payload["started_at"]
+        durable_time = _utc_timestamp(
+            durable_started_at,
+            "durable PAPER execution started_at",
+        )
+        if durable_time < plan_time:
+            raise PaperExecutionAdoptionError(
+                "durable PAPER execution start precedes the authorized plan"
+            )
+        return durable_started_at
+
     @classmethod
     def _exposure_scope_payload(
         cls,

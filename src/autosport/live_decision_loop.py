@@ -2063,10 +2063,17 @@ class PersistentLiveDecisionLoop:
             # therefore re-enters this same append-pending identity and resumes
             # the exact run instead of fabricating a fresh fill.
             if prepared_execution is not None:
+                execution_started_at = (
+                    self.paper_execution.resolve_execution_started_at(
+                        prepared=prepared_execution,
+                        trigger_id=decision_id,
+                        proposed_started_at=_require_utc_clock(self.clock).isoformat(),
+                    )
+                )
                 execution_result = self.paper_execution.execute(
                     prepared=prepared_execution,
                     trigger_id=decision_id,
-                    started_at=plan.decision_ts,
+                    started_at=execution_started_at,
                     materialize_exposure=(self.mode is LiveDecisionMode.PAPER),
                 )
                 assert expected_execution_payload is not None

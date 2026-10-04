@@ -51,6 +51,7 @@ _OPTIONAL_ENTRY_FIELDS = frozenset(
         "abort_reason",
         "reconciled_from_summary",
         "outcome_lineage",
+        "sampling_occurrence_receipt_sha256",
     }
 )
 _HASH_EVIDENCE_FIELDS = (
@@ -994,6 +995,7 @@ class RunRegistry:
         base_paper_book_sha256: str | None = None,
         base_decision_ledger_sha256: str | None = None,
         outcome_lineage: OutcomeLineageBinding | None = None,
+        sampling_occurrence_receipt_sha256: str | None = None,
     ) -> str:
         _require_canonical_sha256("market_sha256", market_sha256)
         _require_canonical_sha256("results_sha256", results_sha256)
@@ -1008,6 +1010,11 @@ class RunRegistry:
             _require_canonical_sha256("base_decision_ledger_sha256", base_decision_ledger_sha256)
         if outcome_lineage is not None and not isinstance(outcome_lineage, OutcomeLineageBinding):
             raise ValueError("outcome_lineage must be an OutcomeLineageBinding or null")
+        if sampling_occurrence_receipt_sha256 is not None:
+            _require_canonical_sha256(
+                "sampling_occurrence_receipt_sha256",
+                sampling_occurrence_receipt_sha256,
+            )
 
         state = self._read()
         if outcome_lineage is not None:
@@ -1069,6 +1076,10 @@ class RunRegistry:
             )
             entry["outcome_lineage"] = outcome_lineage_payload(
                 product_bound_lineage
+            )
+        if sampling_occurrence_receipt_sha256 is not None:
+            entry["sampling_occurrence_receipt_sha256"] = (
+                sampling_occurrence_receipt_sha256
             )
         state["runs"][key] = entry
         self._validate_entry(key, entry)
@@ -1652,6 +1663,13 @@ class RunRegistry:
         for field_name in _HASH_EVIDENCE_FIELDS:
             if field_name in item and not _is_canonical_sha256(item[field_name]):
                 raise ValueError(f"run registry contains invalid {field_name}")
+        if (
+            "sampling_occurrence_receipt_sha256" in item
+            and not _is_canonical_sha256(item["sampling_occurrence_receipt_sha256"])
+        ):
+            raise ValueError(
+                "run registry contains invalid sampling_occurrence_receipt_sha256"
+            )
 
         if "outcome_lineage" in item:
             try:

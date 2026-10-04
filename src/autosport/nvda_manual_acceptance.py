@@ -635,6 +635,14 @@ def _resolution_fingerprint(resolution: ManualNvdaAcceptanceResolution) -> str:
 
 
 def _make_resolution_verifier(lookup_witness):
+    fingerprint_for = _resolution_fingerprint
+    fingerprint_code = fingerprint_for.__code__
+    resolution_type = ManualNvdaAcceptanceResolution
+    require_sha256 = _require_sha256
+    require_sha256_code = require_sha256.__code__
+    require_git_commit_sha = _require_git_commit_sha
+    require_git_commit_sha_code = require_git_commit_sha.__code__
+
     def verify_manual_nvda_acceptance_resolution(
         resolution: object,
         *,
@@ -645,20 +653,33 @@ def _make_resolution_verifier(lookup_witness):
     ) -> ManualNvdaAcceptanceResolution:
         """Verify one live resolver-issued projection for an exact candidate."""
 
-        artifact = _require_sha256(
+        if (
+            _resolution_fingerprint is not fingerprint_for
+            or getattr(fingerprint_for, "__code__", None) is not fingerprint_code
+            or ManualNvdaAcceptanceResolution is not resolution_type
+            or _require_sha256 is not require_sha256
+            or getattr(require_sha256, "__code__", None) is not require_sha256_code
+            or _require_git_commit_sha is not require_git_commit_sha
+            or getattr(require_git_commit_sha, "__code__", None)
+            is not require_git_commit_sha_code
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution verifier authority changed"
+            )
+        artifact = require_sha256(
             "expected_artifact_sha256", expected_artifact_sha256
         )
-        source_sha = _require_git_commit_sha(
+        source_sha = require_git_commit_sha(
             "expected_source_sha", expected_source_sha
         )
-        runtime_witness_sha = _require_sha256(
+        runtime_witness_sha = require_sha256(
             "expected_webview2_runtime_witness_sha256",
             expected_webview2_runtime_witness_sha256,
         )
-        transcript_sha = _require_sha256(
+        transcript_sha = require_sha256(
             "expected_transcript_sha256", expected_transcript_sha256
         )
-        if type(resolution) is not ManualNvdaAcceptanceResolution:
+        if type(resolution) is not resolution_type:
             raise NvdaManualAcceptanceStateError(
                 "manual NVDA resolution must be the exact canonical type"
             )
@@ -667,7 +688,7 @@ def _make_resolution_verifier(lookup_witness):
             raise NvdaManualAcceptanceStateError(
                 "manual NVDA resolution is not a live resolver-issued authority"
             )
-        fingerprint = _resolution_fingerprint(resolution)
+        fingerprint = fingerprint_for(resolution)
         if fingerprint != issued.fingerprint:
             raise NvdaManualAcceptanceStateError(
                 "manual NVDA resolution changed after issuance"
@@ -1291,6 +1312,10 @@ def _seal_resolution_issuance(register_witness) -> None:
     ledger_type = ManualNvdaAcceptanceLedger
     implementation = ledger_type.resolve_current
     implementation_code = implementation.__code__
+    structural_result = _structural_result
+    structural_result_code = structural_result.__code__
+    fingerprint_for = _resolution_fingerprint
+    fingerprint_code = fingerprint_for.__code__
     reader_method_names = (
         "events",
         "_recover_pending_locked",
@@ -1380,6 +1405,13 @@ def _seal_resolution_issuance(register_witness) -> None:
         if (
             ledger_type.resolve_current is not resolve_current
             or implementation.__code__ is not implementation_code
+            or implementation.__globals__.get("_structural_result")
+            is not structural_result
+            or getattr(structural_result, "__code__", None)
+            is not structural_result_code
+            or implementation.__globals__.get("_resolution_fingerprint")
+            is not fingerprint_for
+            or getattr(fingerprint_for, "__code__", None) is not fingerprint_code
             or "resolve_current" in vars(self)
         ):
             raise NvdaManualAcceptanceStateError(
@@ -1399,7 +1431,7 @@ def _seal_resolution_issuance(register_witness) -> None:
         require_reader_graph(self)
         if resolution is None:
             return None
-        fingerprint = _resolution_fingerprint(resolution)
+        fingerprint = fingerprint_for(resolution)
         register_witness(
             resolution=resolution,
             fingerprint=fingerprint,

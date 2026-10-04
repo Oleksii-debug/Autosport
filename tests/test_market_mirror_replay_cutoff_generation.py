@@ -2442,6 +2442,54 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_append_interrupt_rolls_back_sqlite_and_recovers_prepare_as_abort(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            authority = store._market_append_authority()
+            try:
+                with patch.object(
+                    store,
+                    "_commit_stable_database_path",
+                    side_effect=KeyboardInterrupt("simulated append interrupt"),
+                ):
+                    with self.assertRaises(KeyboardInterrupt):
+                        store.append(
+                            self.event(
+                                sequence=1,
+                                odds="2.00",
+                                observed_ts="2026-09-16T19:00:00+00:00",
+                            )
+                        )
+
+                self.assertFalse(store.connection.in_transaction)
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_events"
+                    ).fetchone(),
+                    (0,),
+                )
+                self.assertEqual(authority.read_history()[-1].phase.value, "PREPARE")
+
+                self.assertEqual(store.events(), [])
+                self.assertEqual(authority.read_history()[-1].phase.value, "ABORT")
+            finally:
+                store.close()
+
+    def test_events_interrupt_releases_sqlite_read_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                with patch.object(
+                    store,
+                    "_require_product_issued_positive_history",
+                    side_effect=KeyboardInterrupt("simulated trusted-read interrupt"),
+                ):
+                    with self.assertRaises(KeyboardInterrupt):
+                        store.events()
+                self.assertFalse(store.connection.in_transaction)
+            finally:
+                store.close()
+
     def test_append_authority_recovers_after_sqlite_commit_before_machine_commit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"
@@ -3412,6 +3460,41 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     ).fetchone(),
                     (1,),
                 )
+            finally:
+                store.close()
+
+    def test_cutoff_interrupt_rolls_back_sqlite_and_recovers_prepare_as_abort(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                store.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
+                authority = store._replay_cutoff_authority()
+                with patch.object(
+                    store,
+                    "_commit_stable_database_path",
+                    side_effect=KeyboardInterrupt("simulated cutoff interrupt"),
+                ):
+                    with self.assertRaises(KeyboardInterrupt):
+                        self.replay(store)
+
+                self.assertFalse(store.connection.in_transaction)
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (0,),
+                )
+                self.assertEqual(authority.read_history()[-1].phase.value, "PREPARE")
+
+                recovered = self.replay(store)
+                self.assertEqual(len(recovered.events), 1)
+                self.assertEqual(authority.read_history()[-1].phase.value, "COMMIT")
             finally:
                 store.close()
 

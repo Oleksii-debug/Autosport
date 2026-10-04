@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass, replace
@@ -17,7 +18,7 @@ from .causal_collector import (
 )
 from .collector_service import HeadlessCollectorService
 from .event_lifecycle import ContinuousEventLifecycle, EventLifecycleRecord, EventPhase
-from .integrity import atomic_write_json
+from .integrity import atomic_write_json, durable_path_lock
 from .json_integrity import strict_json_loads
 from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
@@ -282,10 +283,12 @@ def _sha256(value: object, field: str) -> str:
 
 class _ContinuousSessionState:
     _SCHEMA = "autosport.continuous_session"
-    _VERSION = 2
-    _OPERATIONAL_SCHEMA = "autosport.continuous_session.operational"
-    _OPERATIONAL_VERSION = 1
-    _OPERATIONAL_STATE_FIELDS = (
+    _V2_VERSION = 2
+    _VERSION = 3
+    _EVIDENCE_SCHEMA = "autosport.continuous_session.settlement_evidence"
+    _EVIDENCE_VERSION = 1
+    _EMPTY_EVIDENCE_TIP = "0" * 64
+    _STATE_FIELDS = {
         "session_id",
         "source_id",
         "state",
@@ -300,32 +303,41 @@ class _ContinuousSessionState:
         "source_unresolved_gap_delta_ids",
         "source_projection_stream_epoch",
         "source_state_projection_backlog",
-    )
-    _OPERATIONAL_FIELDS = {
+    }
+    _V2_FIELDS = {
         "schema",
         "schema_version",
-        "history_size",
-        "history_mtime_ns",
-        *_OPERATIONAL_STATE_FIELDS,
+        *_STATE_FIELDS,
+        "settlement_evidence",
     }
     _FIELDS = {
         "schema",
         "schema_version",
-        "session_id",
-        "source_id",
-        "state",
-        "started_at",
-        "cycles_completed",
-        "last_success_at",
-        "last_error_code",
-        "last_full_refresh_at",
-        "settlement_evidence",
-        "source_gap_state",
-        "source_sync_state",
-        "source_state_delta_id",
-        "source_unresolved_gap_delta_ids",
-        "source_projection_stream_epoch",
-        "source_state_projection_backlog",
+        *_STATE_FIELDS,
+        "settlement_evidence_count",
+        "settlement_evidence_tip_sha256",
+        "settlement_evidence_tip_key_sha256",
+        "settlement_evidence_pending",
+    }
+    _EVIDENCE_FIELDS = {
+        "schema",
+        "schema_version",
+        "sequence",
+        "previous_record_sha256",
+        "evidence_key_sha256",
+        "event_identity",
+        "settlement_ref",
+        "evidence_id",
+        "evidence_sha256",
+        "available_at",
+        "record_sha256",
+    }
+    _PENDING_FIELDS = {
+        "base_count",
+        "base_tip_sha256",
+        "success_at",
+        "full_refresh",
+        "records",
     }
 
     def __init__(
@@ -338,35 +350,39 @@ class _ContinuousSessionState:
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.operational_path = self.path.with_name(
-            f"{self.path.stem}.operational.json"
+        self.evidence_dir = self.path.with_name(
+            f"{self.path.stem}.settlement-evidence"
         )
         self.source_id = _text(source_id, "source_id")
         self._clock = clock
 
-        if self.path.exists():
-            raw = self._read()
-            existing_source = raw["source_id"]
-            if existing_source != self.source_id:
-                raise ContinuousSessionError(
-                    "durable session source_id does not match configured source"
+        with durable_path_lock(self.path):
+            if self.path.exists():
+                raw = self._read_file()
+                if raw["schema_version"] == self._V2_VERSION:
+                    raw = self._migrate_v2_locked(raw)
+                else:
+                    raw = self._recover_pending_locked(raw)
+                    self._load_evidence_history(raw)
+                existing_source = raw["source_id"]
+                if existing_source != self.source_id:
+                    raise ContinuousSessionError(
+                        "durable session source_id does not match configured source"
+                    )
+                if session_id is not None and raw["session_id"] != _text(
+                    session_id, "session_id"
+                ):
+                    raise ContinuousSessionError(
+                        "durable session_id does not match configured session"
+                    )
+            else:
+                resolved_id = _text(
+                    session_id or str(uuid.uuid4()),
+                    "session_id",
                 )
-            if session_id is not None and raw["session_id"] != _text(
-                session_id, "session_id"
-            ):
-                raise ContinuousSessionError(
-                    "durable session_id does not match configured session"
-                )
-        else:
-            resolved_id = _text(
-                session_id or str(uuid.uuid4()),
-                "session_id",
-            )
-            started_at = clock()
-            _instant(started_at, "started_at")
-            atomic_write_json(
-                self.path,
-                {
+                started_at = clock()
+                _instant(started_at, "started_at")
+                raw = {
                     "schema": self._SCHEMA,
                     "schema_version": self._VERSION,
                     "session_id": resolved_id,
@@ -377,24 +393,26 @@ class _ContinuousSessionState:
                     "last_success_at": None,
                     "last_error_code": None,
                     "last_full_refresh_at": None,
-                    "settlement_evidence": [],
                     "source_gap_state": None,
                     "source_sync_state": None,
                     "source_state_delta_id": None,
                     "source_unresolved_gap_delta_ids": [],
                     "source_projection_stream_epoch": None,
                     "source_state_projection_backlog": False,
-                },
-            )
-            raw = self._read()
-
-        self._ensure_operational(raw)
+                    "settlement_evidence_count": 0,
+                    "settlement_evidence_tip_sha256": self._EMPTY_EVIDENCE_TIP,
+                    "settlement_evidence_tip_key_sha256": self._EMPTY_EVIDENCE_TIP,
+                    "settlement_evidence_pending": None,
+                }
+                self._write_state_locked(raw)
+                self._load_evidence_history(raw)
 
     @staticmethod
     def _validate_settlement_evidence(raw: object) -> tuple[dict[str, str], ...]:
         if type(raw) is not list:
             raise ContinuousSessionError("settlement_evidence must be a list")
         values: list[dict[str, str]] = []
+        seen_ids: set[str] = set()
         for item in raw:
             if type(item) is not dict:
                 raise ContinuousSessionError(
@@ -410,76 +428,59 @@ class _ContinuousSessionState:
                 raise ContinuousSessionError(
                     "settlement_evidence entry fields mismatch"
                 )
-            _text(item["event_identity"], "settlement_evidence event_identity")
-            _text(item["settlement_ref"], "settlement_evidence settlement_ref")
-            _text(item["evidence_id"], "settlement_evidence evidence_id")
-            _sha256(item["evidence_sha256"], "settlement_evidence evidence_sha256")
-            _instant(item["available_at"], "settlement_evidence available_at")
+            event_identity = _text(
+                item["event_identity"],
+                "settlement_evidence event_identity",
+            )
+            settlement_ref = _text(
+                item["settlement_ref"],
+                "settlement_evidence settlement_ref",
+            )
+            evidence_id = _text(
+                item["evidence_id"],
+                "settlement_evidence evidence_id",
+            )
+            evidence_sha256 = _sha256(
+                item["evidence_sha256"],
+                "settlement_evidence evidence_sha256",
+            )
+            available_at = _instant(
+                item["available_at"],
+                "settlement_evidence available_at",
+            ).isoformat()
+            if evidence_id in seen_ids:
+                raise ContinuousSessionError(
+                    "settlement_evidence contains duplicate evidence_id"
+                )
+            seen_ids.add(evidence_id)
             values.append(
                 {
-                    "event_identity": item["event_identity"],
-                    "settlement_ref": item["settlement_ref"],
-                    "evidence_id": item["evidence_id"],
-                    "evidence_sha256": item["evidence_sha256"],
-                    "available_at": item["available_at"],
+                    "event_identity": event_identity,
+                    "settlement_ref": settlement_ref,
+                    "evidence_id": evidence_id,
+                    "evidence_sha256": evidence_sha256,
+                    "available_at": available_at,
                 }
             )
         return tuple(values)
 
-    def _history_signature(self) -> tuple[int, int]:
-        try:
-            stat = self.path.stat()
-        except OSError as exc:
+    def _validate_common_state(self, raw: dict[str, Any]) -> None:
+        if raw["source_id"] != self.source_id:
             raise ContinuousSessionError(
-                "cannot verify continuous session history checkpoint"
-            ) from exc
-        return stat.st_size, stat.st_mtime_ns
-
-    def _operational_from_full(self, raw: dict[str, Any]) -> dict[str, Any]:
-        size, mtime_ns = self._history_signature()
-        operational = {
-            "schema": self._OPERATIONAL_SCHEMA,
-            "schema_version": self._OPERATIONAL_VERSION,
-            "history_size": size,
-            "history_mtime_ns": mtime_ns,
-        }
-        for name in self._OPERATIONAL_STATE_FIELDS:
-            value = raw[name]
-            operational[name] = (
-                list(value)
-                if name == "source_unresolved_gap_delta_ids"
-                else value
-            )
-        return operational
-
-    def _validate_operational(
-        self,
-        raw: object,
-        *,
-        require_history_match: bool,
-    ) -> dict[str, Any]:
-        if (
-            type(raw) is not dict
-            or set(raw) != self._OPERATIONAL_FIELDS
-            or raw["schema"] != self._OPERATIONAL_SCHEMA
-            or raw["schema_version"] != self._OPERATIONAL_VERSION
-            or raw["source_id"] != self.source_id
-        ):
-            raise ContinuousSessionError(
-                "continuous session operational state schema/identity mismatch"
+                "continuous session state schema/identity mismatch"
             )
         _text(raw["session_id"], "session_id")
         _instant(raw["started_at"], "started_at")
         try:
-            raw["state"] = SessionState(raw["state"]).value
+            state = SessionState(raw["state"])
         except ValueError as exc:
             raise ContinuousSessionError(
-                "unsupported continuous session operational state"
+                "unsupported continuous session state"
             ) from exc
         cycles = raw["cycles_completed"]
         if isinstance(cycles, bool) or not isinstance(cycles, int) or cycles < 0:
             raise ContinuousSessionError(
-                "operational cycles_completed must be a non-negative integer"
+                "cycles_completed must be a non-negative integer"
             )
         for name in ("last_success_at", "last_full_refresh_at"):
             if raw[name] is not None:
@@ -511,161 +512,6 @@ class _ContinuousSessionState:
         if (raw["source_state_delta_id"] is None) != (
             raw["source_projection_stream_epoch"] is None
         ):
-            raise ContinuousSessionError("source projection identity is incomplete")
-        if raw["source_state_delta_id"] is None and gap_state is not None:
-            raise ContinuousSessionError(
-                "source projection state requires a canonical delta identity"
-            )
-        unresolved = raw["source_unresolved_gap_delta_ids"]
-        if (
-            type(unresolved) is not list
-            or any(type(item) is not str or not item.strip() for item in unresolved)
-            or len(set(unresolved)) != len(unresolved)
-        ):
-            raise ContinuousSessionError(
-                "source_unresolved_gap_delta_ids must contain unique non-empty strings"
-            )
-        if type(raw["source_state_projection_backlog"]) is not bool:
-            raise ContinuousSessionError(
-                "source_state_projection_backlog must be boolean"
-            )
-        if unresolved and (
-            gap_state != GapState.DETECTED.value
-            or sync_state != SyncState.GAP_DETECTED.value
-        ):
-            raise ContinuousSessionError(
-                "unresolved source gaps require DETECTED/GAP_DETECTED projection"
-            )
-        for name in ("history_size", "history_mtime_ns"):
-            value = raw[name]
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ContinuousSessionError(
-                    f"{name} must be a non-negative integer"
-                )
-        if require_history_match:
-            size, mtime_ns = self._history_signature()
-            if (
-                raw["history_size"] != size
-                or raw["history_mtime_ns"] != mtime_ns
-            ):
-                raise ContinuousSessionError(
-                    "continuous session history changed outside canonical state authority"
-                )
-        return raw
-
-    def _read_operational(
-        self,
-        *,
-        require_history_match: bool = True,
-    ) -> dict[str, Any]:
-        try:
-            raw = strict_json_loads(
-                self.operational_path.read_text(encoding="utf-8")
-            )
-        except (OSError, TypeError, ValueError) as exc:
-            raise ContinuousSessionError(
-                "cannot verify continuous session operational state"
-            ) from exc
-        return self._validate_operational(
-            raw,
-            require_history_match=require_history_match,
-        )
-
-    def _write_operational_from_full(self, raw: dict[str, Any]) -> None:
-        atomic_write_json(self.operational_path, self._operational_from_full(raw))
-        self._read_operational()
-
-    def _ensure_operational(self, full: dict[str, Any]) -> None:
-        if not self.operational_path.exists():
-            self._write_operational_from_full(full)
-            return
-        operational = self._read_operational(require_history_match=False)
-        if (
-            operational["session_id"] != full["session_id"]
-            or operational["started_at"] != full["started_at"]
-        ):
-            raise ContinuousSessionError(
-                "continuous session operational identity does not match history"
-            )
-        size, mtime_ns = self._history_signature()
-        if (
-            operational["history_size"] != size
-            or operational["history_mtime_ns"] != mtime_ns
-        ):
-            # The full checkpoint was validated immediately before this method.
-            # A signature change can be the crash boundary after canonical
-            # settlement-history publication but before operational sync. Rebuild
-            # bounded state from that verified full image rather than retaining
-            # potentially older cycle/source projection fields.
-            self._write_operational_from_full(full)
-            return
-        self._read_operational()
-
-    def _overlay_operational(
-        self,
-        full: dict[str, Any],
-        operational: dict[str, Any],
-    ) -> dict[str, Any]:
-        for name in self._OPERATIONAL_STATE_FIELDS:
-            value = operational[name]
-            full[name] = (
-                list(value)
-                if name == "source_unresolved_gap_delta_ids"
-                else value
-            )
-        return full
-
-    def _read(self) -> dict[str, Any]:
-        try:
-            raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, TypeError, ValueError) as exc:
-            raise ContinuousSessionError(
-                "cannot verify continuous session state"
-            ) from exc
-        if (
-            type(raw) is not dict
-            or set(raw) != self._FIELDS
-            or raw["schema"] != self._SCHEMA
-            or raw["schema_version"] != self._VERSION
-            or raw["source_id"] != self.source_id
-        ):
-            raise ContinuousSessionError("continuous session state schema/identity mismatch")
-        _text(raw["session_id"], "session_id")
-        _instant(raw["started_at"], "started_at")
-        try:
-            state = SessionState(raw["state"])
-        except ValueError as exc:
-            raise ContinuousSessionError("unsupported continuous session state") from exc
-        cycles = raw["cycles_completed"]
-        if isinstance(cycles, bool) or not isinstance(cycles, int) or cycles < 0:
-            raise ContinuousSessionError("cycles_completed must be a non-negative integer")
-        for name in ("last_success_at", "last_full_refresh_at"):
-            if raw[name] is not None:
-                _instant(raw[name], name)
-        if raw["last_error_code"] is not None:
-            _text(raw["last_error_code"], "last_error_code")
-        evidence = self._validate_settlement_evidence(raw["settlement_evidence"])
-        gap_state = raw["source_gap_state"]
-        sync_state = raw["source_sync_state"]
-        if (gap_state is None) != (sync_state is None):
-            raise ContinuousSessionError(
-                "source gap/sync projection must be present or absent together"
-            )
-        if gap_state is not None:
-            try:
-                GapState(gap_state)
-                SyncState(sync_state)
-            except ValueError as exc:
-                raise ContinuousSessionError(
-                    "source gap/sync projection contains an unsupported state"
-                ) from exc
-        if raw["source_state_delta_id"] is not None:
-            _text(raw["source_state_delta_id"], "source_state_delta_id")
-        if raw["source_projection_stream_epoch"] is not None:
-            _text(raw["source_projection_stream_epoch"], "source_projection_stream_epoch")
-        if (raw["source_state_delta_id"] is None) != (
-            raw["source_projection_stream_epoch"] is None
-        ):
             raise ContinuousSessionError(
                 "source projection identity is incomplete"
             )
@@ -694,37 +540,603 @@ class _ContinuousSessionState:
                 "unresolved source gaps require DETECTED/GAP_DETECTED projection"
             )
         raw["state"] = state.value
-        raw["settlement_evidence"] = [dict(item) for item in evidence]
+
+    def _validate_v2(self, raw: dict[str, Any]) -> dict[str, Any]:
+        if (
+            set(raw) != self._V2_FIELDS
+            or raw["schema"] != self._SCHEMA
+            or raw["schema_version"] != self._V2_VERSION
+        ):
+            raise ContinuousSessionError(
+                "continuous session state schema/identity mismatch"
+            )
+        self._validate_common_state(raw)
+        raw["settlement_evidence"] = [
+            dict(item)
+            for item in self._validate_settlement_evidence(
+                raw["settlement_evidence"]
+            )
+        ]
         return raw
 
-    def snapshot(self) -> ContinuousSessionStatus:
-        raw = self._overlay_operational(
-            self._read(),
-            self._read_operational(),
+    @staticmethod
+    def _canonical_sha256(payload: dict[str, Any]) -> str:
+        try:
+            canonical = json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ContinuousSessionError(
+                "continuous session evidence is outside canonical JSON domain"
+            ) from exc
+        return hashlib.sha256(canonical).hexdigest()
+
+    @staticmethod
+    def _evidence_key(evidence_id: str) -> str:
+        return hashlib.sha256(evidence_id.encode("utf-8")).hexdigest()
+
+    def _validate_evidence_record(self, raw: object) -> dict[str, Any]:
+        if (
+            type(raw) is not dict
+            or set(raw) != self._EVIDENCE_FIELDS
+            or raw["schema"] != self._EVIDENCE_SCHEMA
+            or raw["schema_version"] != self._EVIDENCE_VERSION
+        ):
+            raise ContinuousSessionError(
+                "settlement evidence journal record schema mismatch"
+            )
+        sequence = raw["sequence"]
+        if (
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or sequence <= 0
+        ):
+            raise ContinuousSessionError(
+                "settlement evidence sequence must be a positive integer"
+            )
+        _sha256(
+            raw["previous_record_sha256"],
+            "settlement evidence previous_record_sha256",
         )
-        return ContinuousSessionStatus(
-            session_id=raw["session_id"],
-            source_id=raw["source_id"],
-            state=SessionState(raw["state"]),
-            cycles_completed=raw["cycles_completed"],
-            last_success_at=raw["last_success_at"],
-            last_error_code=raw["last_error_code"],
-            last_full_refresh_at=raw["last_full_refresh_at"],
-            settlement_evidence=tuple(raw["settlement_evidence"]),
-            source_gap_state=raw["source_gap_state"],
-            source_sync_state=raw["source_sync_state"],
-            source_state_delta_id=raw["source_state_delta_id"],
-            source_unresolved_gap_delta_ids=tuple(
-                raw["source_unresolved_gap_delta_ids"]
-            ),
-            source_projection_stream_epoch=raw["source_projection_stream_epoch"],
-            source_state_projection_backlog=raw[
-                "source_state_projection_backlog"
-            ],
+        evidence_id = _text(
+            raw["evidence_id"],
+            "settlement evidence evidence_id",
+        )
+        expected_key = self._evidence_key(evidence_id)
+        if (
+            _sha256(
+                raw["evidence_key_sha256"],
+                "settlement evidence evidence_key_sha256",
+            )
+            != expected_key
+        ):
+            raise ContinuousSessionError(
+                "settlement evidence key digest mismatch"
+            )
+        _text(raw["event_identity"], "settlement evidence event_identity")
+        _text(raw["settlement_ref"], "settlement evidence settlement_ref")
+        _sha256(
+            raw["evidence_sha256"],
+            "settlement evidence evidence_sha256",
+        )
+        _instant(raw["available_at"], "settlement evidence available_at")
+        record_sha256 = _sha256(
+            raw["record_sha256"],
+            "settlement evidence record_sha256",
+        )
+        payload = dict(raw)
+        del payload["record_sha256"]
+        if record_sha256 != self._canonical_sha256(payload):
+            raise ContinuousSessionError(
+                "settlement evidence journal record digest mismatch"
+            )
+        return raw
+
+    def _validate_pending(self, raw: object, state: dict[str, Any]) -> dict[str, Any]:
+        if type(raw) is not dict or set(raw) != self._PENDING_FIELDS:
+            raise ContinuousSessionError(
+                "settlement evidence pending transaction schema mismatch"
+            )
+        base_count = raw["base_count"]
+        if (
+            isinstance(base_count, bool)
+            or not isinstance(base_count, int)
+            or base_count < 0
+            or base_count != state["settlement_evidence_count"]
+        ):
+            raise ContinuousSessionError(
+                "settlement evidence pending base count mismatch"
+            )
+        base_tip = _sha256(
+            raw["base_tip_sha256"],
+            "settlement evidence pending base_tip_sha256",
+        )
+        if base_tip != state["settlement_evidence_tip_sha256"]:
+            raise ContinuousSessionError(
+                "settlement evidence pending base tip mismatch"
+            )
+        _instant(raw["success_at"], "settlement evidence pending success_at")
+        if type(raw["full_refresh"]) is not bool:
+            raise ContinuousSessionError(
+                "settlement evidence pending full_refresh must be boolean"
+            )
+        records = raw["records"]
+        if type(records) is not list or not records:
+            raise ContinuousSessionError(
+                "settlement evidence pending records must be non-empty"
+            )
+        previous = base_tip
+        expected_sequence = base_count + 1
+        seen_keys: set[str] = set()
+        for item in records:
+            record = self._validate_evidence_record(item)
+            if record["sequence"] != expected_sequence:
+                raise ContinuousSessionError(
+                    "settlement evidence pending sequence is not contiguous"
+                )
+            if record["previous_record_sha256"] != previous:
+                raise ContinuousSessionError(
+                    "settlement evidence pending chain mismatch"
+                )
+            key = record["evidence_key_sha256"]
+            if key in seen_keys:
+                raise ContinuousSessionError(
+                    "settlement evidence pending contains duplicate key"
+                )
+            seen_keys.add(key)
+            previous = record["record_sha256"]
+            expected_sequence += 1
+        return raw
+
+    def _validate_v3(self, raw: dict[str, Any]) -> dict[str, Any]:
+        if (
+            set(raw) != self._FIELDS
+            or raw["schema"] != self._SCHEMA
+            or raw["schema_version"] != self._VERSION
+        ):
+            raise ContinuousSessionError(
+                "continuous session state schema/identity mismatch"
+            )
+        self._validate_common_state(raw)
+        count = raw["settlement_evidence_count"]
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 0
+        ):
+            raise ContinuousSessionError(
+                "settlement_evidence_count must be a non-negative integer"
+            )
+        tip = _sha256(
+            raw["settlement_evidence_tip_sha256"],
+            "settlement_evidence_tip_sha256",
+        )
+        tip_key = _sha256(
+            raw["settlement_evidence_tip_key_sha256"],
+            "settlement_evidence_tip_key_sha256",
+        )
+        if count == 0:
+            if (
+                tip != self._EMPTY_EVIDENCE_TIP
+                or tip_key != self._EMPTY_EVIDENCE_TIP
+            ):
+                raise ContinuousSessionError(
+                    "empty settlement evidence history has non-empty tip"
+                )
+        elif (
+            tip == self._EMPTY_EVIDENCE_TIP
+            or tip_key == self._EMPTY_EVIDENCE_TIP
+        ):
+            raise ContinuousSessionError(
+                "non-empty settlement evidence history lacks a tip"
+            )
+        pending = raw["settlement_evidence_pending"]
+        if pending is not None:
+            self._validate_pending(pending, raw)
+        return raw
+
+    def _read_file(self) -> dict[str, Any]:
+        try:
+            raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise ContinuousSessionError(
+                "cannot verify continuous session state"
+            ) from exc
+        if type(raw) is not dict:
+            raise ContinuousSessionError(
+                "continuous session state schema/identity mismatch"
+            )
+        version = raw.get("schema_version")
+        if version == self._V2_VERSION:
+            return self._validate_v2(raw)
+        if version == self._VERSION:
+            return self._validate_v3(raw)
+        raise ContinuousSessionError(
+            "unsupported continuous session state schema version"
         )
 
+    def _ensure_evidence_dir(self) -> None:
+        if self.evidence_dir.exists():
+            if self.evidence_dir.is_symlink() or not self.evidence_dir.is_dir():
+                raise ContinuousSessionError(
+                    "settlement evidence journal path is not a canonical directory"
+                )
+            return
+        try:
+            self.evidence_dir.mkdir(parents=False, exist_ok=False)
+        except FileExistsError:
+            if self.evidence_dir.is_symlink() or not self.evidence_dir.is_dir():
+                raise ContinuousSessionError(
+                    "settlement evidence journal path is not a canonical directory"
+                )
+        except OSError as exc:
+            raise ContinuousSessionError(
+                "cannot create settlement evidence journal"
+            ) from exc
+
+    def _evidence_path(self, evidence_key_sha256: str) -> Path:
+        key = _sha256(
+            evidence_key_sha256,
+            "settlement evidence key path",
+        )
+        return self.evidence_dir / f"{key}.json"
+
+    def _read_evidence_path(self, path: Path) -> dict[str, Any]:
+        if path.is_symlink() or not path.is_file():
+            raise ContinuousSessionError(
+                "settlement evidence journal entry is not a regular file"
+            )
+        try:
+            raw = strict_json_loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise ContinuousSessionError(
+                "cannot verify settlement evidence journal entry"
+            ) from exc
+        record = self._validate_evidence_record(raw)
+        if path.name != f"{record['evidence_key_sha256']}.json":
+            raise ContinuousSessionError(
+                "settlement evidence journal filename/key mismatch"
+            )
+        return record
+
+    def _record_paths(self) -> tuple[Path, ...]:
+        if not self.evidence_dir.exists():
+            return ()
+        if self.evidence_dir.is_symlink() or not self.evidence_dir.is_dir():
+            raise ContinuousSessionError(
+                "settlement evidence journal path is not a canonical directory"
+            )
+        try:
+            entries = tuple(self.evidence_dir.iterdir())
+        except OSError as exc:
+            raise ContinuousSessionError(
+                "cannot enumerate settlement evidence journal"
+            ) from exc
+        records: list[Path] = []
+        for path in entries:
+            if path.name.startswith("."):
+                continue
+            if path.suffix != ".json":
+                raise ContinuousSessionError(
+                    "settlement evidence journal contains an unexpected entry"
+                )
+            if path.is_symlink() or not path.is_file():
+                raise ContinuousSessionError(
+                    "settlement evidence journal contains a non-regular entry"
+                )
+            records.append(path)
+        return tuple(records)
+
+    def _write_evidence_record(self, record: dict[str, Any]) -> None:
+        record = self._validate_evidence_record(dict(record))
+        self._ensure_evidence_dir()
+        path = self._evidence_path(record["evidence_key_sha256"])
+        if path.exists():
+            if self._read_evidence_path(path) != record:
+                raise ContinuousSessionError(
+                    "settlement evidence id conflicts with durable evidence"
+                )
+            return
+        atomic_write_json(path, record)
+        if self._read_evidence_path(path) != record:
+            raise ContinuousSessionError(
+                "settlement evidence journal publication mismatch"
+            )
+
+    @staticmethod
+    def _normalized_item_from_record(record: dict[str, Any]) -> dict[str, str]:
+        return {
+            "event_identity": record["event_identity"],
+            "settlement_ref": record["settlement_ref"],
+            "evidence_id": record["evidence_id"],
+            "evidence_sha256": record["evidence_sha256"],
+            "available_at": _instant(
+                record["available_at"],
+                "settlement evidence available_at",
+            ).isoformat(),
+        }
+
+    def _build_evidence_record(
+        self,
+        item: dict[str, str],
+        *,
+        sequence: int,
+        previous_record_sha256: str,
+    ) -> dict[str, Any]:
+        record: dict[str, Any] = {
+            "schema": self._EVIDENCE_SCHEMA,
+            "schema_version": self._EVIDENCE_VERSION,
+            "sequence": sequence,
+            "previous_record_sha256": previous_record_sha256,
+            "evidence_key_sha256": self._evidence_key(item["evidence_id"]),
+            "event_identity": item["event_identity"],
+            "settlement_ref": item["settlement_ref"],
+            "evidence_id": item["evidence_id"],
+            "evidence_sha256": item["evidence_sha256"],
+            "available_at": _instant(
+                item["available_at"],
+                "settlement evidence available_at",
+            ).isoformat(),
+        }
+        record["record_sha256"] = self._canonical_sha256(record)
+        return self._validate_evidence_record(record)
+
+    def _load_evidence_history(
+        self,
+        state: dict[str, Any],
+    ) -> tuple[dict[str, str], ...]:
+        count = state["settlement_evidence_count"]
+        paths = self._record_paths()
+        if len(paths) != count:
+            raise ContinuousSessionError(
+                "settlement evidence journal cardinality mismatch"
+            )
+        if count == 0:
+            return ()
+        records = sorted(
+            (self._read_evidence_path(path) for path in paths),
+            key=lambda item: item["sequence"],
+        )
+        previous = self._EMPTY_EVIDENCE_TIP
+        evidence_ids: set[str] = set()
+        for expected_sequence, record in enumerate(records, start=1):
+            if record["sequence"] != expected_sequence:
+                raise ContinuousSessionError(
+                    "settlement evidence journal sequence is not contiguous"
+                )
+            if record["previous_record_sha256"] != previous:
+                raise ContinuousSessionError(
+                    "settlement evidence journal chain mismatch"
+                )
+            evidence_id = record["evidence_id"]
+            if evidence_id in evidence_ids:
+                raise ContinuousSessionError(
+                    "settlement evidence journal repeats evidence_id"
+                )
+            evidence_ids.add(evidence_id)
+            previous = record["record_sha256"]
+        tip = records[-1]
+        if (
+            tip["record_sha256"] != state["settlement_evidence_tip_sha256"]
+            or tip["evidence_key_sha256"]
+            != state["settlement_evidence_tip_key_sha256"]
+        ):
+            raise ContinuousSessionError(
+                "settlement evidence journal tip mismatch"
+            )
+        return tuple(
+            self._normalized_item_from_record(record)
+            for record in records
+        )
+
+    def _verify_evidence_tip(self, state: dict[str, Any]) -> None:
+        count = state["settlement_evidence_count"]
+        if count == 0:
+            return
+        path = self._evidence_path(
+            state["settlement_evidence_tip_key_sha256"]
+        )
+        if not path.exists():
+            raise ContinuousSessionError(
+                "settlement evidence journal tip is missing"
+            )
+        record = self._read_evidence_path(path)
+        if (
+            record["sequence"] != count
+            or record["record_sha256"]
+            != state["settlement_evidence_tip_sha256"]
+        ):
+            raise ContinuousSessionError(
+                "settlement evidence journal tip is inconsistent"
+            )
+
+    def _state_from_v2(
+        self,
+        raw: dict[str, Any],
+        records: tuple[dict[str, Any], ...],
+    ) -> dict[str, Any]:
+        state = {
+            "schema": self._SCHEMA,
+            "schema_version": self._VERSION,
+        }
+        for name in self._STATE_FIELDS:
+            value = raw[name]
+            state[name] = (
+                list(value)
+                if name == "source_unresolved_gap_delta_ids"
+                else value
+            )
+        state["settlement_evidence_count"] = len(records)
+        state["settlement_evidence_tip_sha256"] = (
+            records[-1]["record_sha256"]
+            if records
+            else self._EMPTY_EVIDENCE_TIP
+        )
+        state["settlement_evidence_tip_key_sha256"] = (
+            records[-1]["evidence_key_sha256"]
+            if records
+            else self._EMPTY_EVIDENCE_TIP
+        )
+        state["settlement_evidence_pending"] = None
+        return self._validate_v3(state)
+
+    def _migrate_v2_locked(self, raw: dict[str, Any]) -> dict[str, Any]:
+        evidence = tuple(
+            sorted(
+                (dict(item) for item in raw["settlement_evidence"]),
+                key=lambda item: item["evidence_id"],
+            )
+        )
+        records: list[dict[str, Any]] = []
+        previous = self._EMPTY_EVIDENCE_TIP
+        for sequence, item in enumerate(evidence, start=1):
+            record = self._build_evidence_record(
+                item,
+                sequence=sequence,
+                previous_record_sha256=previous,
+            )
+            records.append(record)
+            previous = record["record_sha256"]
+
+        expected_by_name = {
+            f"{record['evidence_key_sha256']}.json": record
+            for record in records
+        }
+        for path in self._record_paths():
+            expected = expected_by_name.get(path.name)
+            if expected is None or self._read_evidence_path(path) != expected:
+                raise ContinuousSessionError(
+                    "legacy continuous session conflicts with existing evidence journal"
+                )
+        for record in records:
+            self._write_evidence_record(record)
+
+        state = self._state_from_v2(raw, tuple(records))
+        atomic_write_json(self.path, state)
+        persisted = self._read_file()
+        if persisted["schema_version"] != self._VERSION:
+            raise ContinuousSessionError(
+                "continuous session migration did not publish schema v3"
+            )
+        self._load_evidence_history(persisted)
+        return persisted
+
+    def _write_state_locked(self, raw: dict[str, Any]) -> dict[str, Any]:
+        candidate = self._validate_v3(dict(raw))
+        atomic_write_json(self.path, candidate)
+        persisted = self._read_file()
+        if persisted["schema_version"] != self._VERSION:
+            raise ContinuousSessionError(
+                "continuous session state publication regressed schema version"
+            )
+        self._verify_evidence_tip(persisted)
+        return persisted
+
+    def _recover_pending_locked(
+        self,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        pending = state["settlement_evidence_pending"]
+        if pending is None:
+            self._verify_evidence_tip(state)
+            return state
+        pending = self._validate_pending(pending, state)
+        for record in pending["records"]:
+            self._write_evidence_record(record)
+        final = dict(state)
+        final["settlement_evidence_count"] = (
+            pending["base_count"] + len(pending["records"])
+        )
+        final["settlement_evidence_tip_sha256"] = pending["records"][-1][
+            "record_sha256"
+        ]
+        final["settlement_evidence_tip_key_sha256"] = pending["records"][-1][
+            "evidence_key_sha256"
+        ]
+        final["settlement_evidence_pending"] = None
+        final["cycles_completed"] = int(final["cycles_completed"]) + 1
+        final["last_success_at"] = _instant(
+            pending["success_at"],
+            "settlement evidence pending success_at",
+        ).isoformat()
+        final["last_error_code"] = None
+        if pending["full_refresh"]:
+            final["last_full_refresh_at"] = final["last_success_at"]
+        persisted = self._write_state_locked(final)
+        self._load_evidence_history(persisted)
+        return persisted
+
+    def _current_state_locked(self) -> dict[str, Any]:
+        raw = self._read_file()
+        if raw["schema_version"] != self._VERSION:
+            raise ContinuousSessionError(
+                "continuous session state rolled back to legacy schema during runtime"
+            )
+        raw = self._recover_pending_locked(raw)
+        self._verify_evidence_tip(raw)
+        return raw
+
+    def _read_current_state(self) -> dict[str, Any]:
+        with durable_path_lock(self.path):
+            return self._current_state_locked()
+
+    def _update_state(
+        self,
+        mutate: Callable[[dict[str, Any]], None],
+    ) -> None:
+        with durable_path_lock(self.path):
+            raw = self._current_state_locked()
+            protected = (
+                raw["settlement_evidence_count"],
+                raw["settlement_evidence_tip_sha256"],
+                raw["settlement_evidence_tip_key_sha256"],
+                raw["settlement_evidence_pending"],
+            )
+            mutate(raw)
+            if protected != (
+                raw["settlement_evidence_count"],
+                raw["settlement_evidence_tip_sha256"],
+                raw["settlement_evidence_tip_key_sha256"],
+                raw["settlement_evidence_pending"],
+            ):
+                raise ContinuousSessionError(
+                    "operational mutation changed settlement evidence authority"
+                )
+            self._write_state_locked(raw)
+
+    def snapshot(self) -> ContinuousSessionStatus:
+        with durable_path_lock(self.path):
+            raw = self._current_state_locked()
+            evidence = self._load_evidence_history(raw)
+            return ContinuousSessionStatus(
+                session_id=raw["session_id"],
+                source_id=raw["source_id"],
+                state=SessionState(raw["state"]),
+                cycles_completed=raw["cycles_completed"],
+                last_success_at=raw["last_success_at"],
+                last_error_code=raw["last_error_code"],
+                last_full_refresh_at=raw["last_full_refresh_at"],
+                settlement_evidence=tuple(dict(item) for item in evidence),
+                source_gap_state=raw["source_gap_state"],
+                source_sync_state=raw["source_sync_state"],
+                source_state_delta_id=raw["source_state_delta_id"],
+                source_unresolved_gap_delta_ids=tuple(
+                    raw["source_unresolved_gap_delta_ids"]
+                ),
+                source_projection_stream_epoch=raw[
+                    "source_projection_stream_epoch"
+                ],
+                source_state_projection_backlog=raw[
+                    "source_state_projection_backlog"
+                ],
+            )
+
     def operational_snapshot(self) -> ContinuousSessionStatus:
-        raw = self._read_operational()
+        raw = self._read_current_state()
         return ContinuousSessionStatus(
             session_id=raw["session_id"],
             source_id=raw["source_id"],
@@ -750,26 +1162,7 @@ class _ContinuousSessionState:
 
     @property
     def session_id(self) -> str:
-        return self._read_operational()["session_id"]
-
-    def _update_operational(
-        self,
-        mutate: Callable[[dict[str, Any]], None],
-    ) -> None:
-        raw = self._read_operational()
-        mutate(raw)
-        atomic_write_json(self.operational_path, raw)
-        self._read_operational()
-
-    def _update(self, mutate: Callable[[dict[str, Any]], None]) -> None:
-        raw = self._overlay_operational(
-            self._read(),
-            self._read_operational(),
-        )
-        mutate(raw)
-        atomic_write_json(self.path, raw)
-        self._read()
-        self._write_operational_from_full(raw)
+        return self._read_current_state()["session_id"]
 
     def set_state(self, state: SessionState, *, reason: str | None = None) -> None:
         if not isinstance(state, SessionState):
@@ -780,7 +1173,7 @@ class _ContinuousSessionState:
             if reason is not None:
                 raw["last_error_code"] = _text(reason, "reason")
 
-        self._update_operational(mutate)
+        self._update_state(mutate)
 
     @staticmethod
     def _normalized_settlement_evidence(
@@ -804,19 +1197,26 @@ class _ContinuousSessionState:
     ) -> None:
         if not settlement_evidence:
             return
-        raw = self._read()
-        known = {
-            item["evidence_id"]: item
-            for item in raw["settlement_evidence"]
-        }
-        for evidence in settlement_evidence:
-            normalized = self._normalized_settlement_evidence(evidence)
-            existing = known.get(evidence.evidence_id)
-            if existing is not None and existing != normalized:
-                raise ContinuousSessionError(
-                    "settlement evidence id conflicts with durable evidence"
-                )
-            known[evidence.evidence_id] = normalized
+        with durable_path_lock(self.path):
+            raw = self._current_state_locked()
+            known = {
+                item["evidence_id"]: item
+                for item in self._load_evidence_history(raw)
+            }
+            pending_ids: dict[str, dict[str, str]] = {}
+            for evidence in settlement_evidence:
+                normalized = self._normalized_settlement_evidence(evidence)
+                prior = pending_ids.get(evidence.evidence_id)
+                if prior is not None and prior != normalized:
+                    raise ContinuousSessionError(
+                        "settlement evidence id conflicts within current batch"
+                    )
+                pending_ids[evidence.evidence_id] = normalized
+                existing = known.get(evidence.evidence_id)
+                if existing is not None and existing != normalized:
+                    raise ContinuousSessionError(
+                        "settlement evidence id conflicts with durable evidence"
+                    )
 
     def record_source_projection(
         self,
@@ -865,7 +1265,7 @@ class _ContinuousSessionState:
             raw["source_unresolved_gap_delta_ids"] = sorted(unresolved)
             raw["source_state_projection_backlog"] = backlog
 
-        self._update_operational(mutate)
+        self._update_state(mutate)
 
     def record_success(
         self,
@@ -874,44 +1274,77 @@ class _ContinuousSessionState:
         full_refresh: bool,
         settlement_evidence: tuple[SettlementResolution, ...],
     ) -> None:
-        timestamp = _instant(at, "at")
+        timestamp = _instant(at, "at").isoformat()
+        if type(full_refresh) is not bool:
+            raise TypeError("full_refresh must be boolean")
 
-        def mutate_operational(raw: dict[str, Any]) -> None:
+        def mutate_success(raw: dict[str, Any]) -> None:
             raw["cycles_completed"] = int(raw["cycles_completed"]) + 1
-            raw["last_success_at"] = timestamp.isoformat()
+            raw["last_success_at"] = timestamp
             raw["last_error_code"] = None
             if full_refresh:
-                raw["last_full_refresh_at"] = timestamp.isoformat()
+                raw["last_full_refresh_at"] = timestamp
 
         if not settlement_evidence:
-            self._update_operational(mutate_operational)
+            self._update_state(mutate_success)
             return
 
-        def mutate(raw: dict[str, Any]) -> None:
-            mutate_operational(raw)
-            known = {
-                item["evidence_id"]: item
-                for item in raw["settlement_evidence"]
-            }
+        with durable_path_lock(self.path):
+            raw = self._current_state_locked()
+            history = self._load_evidence_history(raw)
+            known = {item["evidence_id"]: item for item in history}
+            incoming: dict[str, dict[str, str]] = {}
             for evidence in settlement_evidence:
-                existing = known.get(evidence.evidence_id)
                 normalized = self._normalized_settlement_evidence(evidence)
-                if existing is not None:
-                    if existing != normalized:
-                        raise ContinuousSessionError(
-                            "settlement evidence id conflicts with durable evidence"
-                        )
-                    continue
-                known[evidence.evidence_id] = normalized
-            raw["settlement_evidence"] = list(
-                sorted(known.values(), key=lambda item: item["evidence_id"])
-            )
+                prior = incoming.get(evidence.evidence_id)
+                if prior is not None and prior != normalized:
+                    raise ContinuousSessionError(
+                        "settlement evidence id conflicts within current batch"
+                    )
+                incoming[evidence.evidence_id] = normalized
+                existing = known.get(evidence.evidence_id)
+                if existing is not None and existing != normalized:
+                    raise ContinuousSessionError(
+                        "settlement evidence id conflicts with durable evidence"
+                    )
 
-        self._update(mutate)
+            new_items = tuple(
+                incoming[evidence_id]
+                for evidence_id in sorted(incoming)
+                if evidence_id not in known
+            )
+            if not new_items:
+                mutate_success(raw)
+                self._write_state_locked(raw)
+                return
+
+            previous = raw["settlement_evidence_tip_sha256"]
+            records: list[dict[str, Any]] = []
+            for offset, item in enumerate(new_items, start=1):
+                record = self._build_evidence_record(
+                    item,
+                    sequence=raw["settlement_evidence_count"] + offset,
+                    previous_record_sha256=previous,
+                )
+                records.append(record)
+                previous = record["record_sha256"]
+
+            prepared = dict(raw)
+            prepared["settlement_evidence_pending"] = {
+                "base_count": raw["settlement_evidence_count"],
+                "base_tip_sha256": raw[
+                    "settlement_evidence_tip_sha256"
+                ],
+                "success_at": timestamp,
+                "full_refresh": full_refresh,
+                "records": records,
+            }
+            prepared = self._write_state_locked(prepared)
+            self._recover_pending_locked(prepared)
 
     def record_failure(self, *, code: str) -> None:
         code = _text(code, "code")
-        self._update_operational(
+        self._update_state(
             lambda raw: raw.__setitem__("last_error_code", code)
         )
 

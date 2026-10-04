@@ -1,5 +1,7 @@
 # Автоспорт — Product Vision
 
+> **Binding completion authority:** Autosport has one final product and one completion definition. Historical `V1`, `V1.1`, `post-V1` and similar labels are milestone archaeology only; they do not define a separate product target, readiness percentage or stopping point. See `docs/WHOLE_PRODUCT_COMPLETION_AUTHORITY.md`.
+
 ## 1. Мета продукту
 
 Автоспорт — незалежний Windows-продукт і професійна багатоагентна система спортивного market intelligence, portfolio/risk decision support та, після окремого доказового етапу, контрольованого bookmaker execution. Продукт розробляється незалежно від готовності Nika-Core; готові нейтральні компоненти з Nika-Core, Accessible Chess та інших lawful/open-source проєктів можуть вибірково переноситися або адаптуватися після перевірки сумісності.
@@ -44,7 +46,7 @@ Truth label `OUTCOME_INDEPENDENT_POSITIVE` дозволений лише для 
 
 Агенти можуть мати спеціалізовані ролі: research, player/match analysis, forecast, live-market analysis, opportunity classification, ticket/stake-vector construction, portfolio/risk, critic, settlement review, learning/evaluation. Ролі не повинні створювати дубльовану інфраструктуру; усі працюють через спільні canonical stores/contracts. Окремий collector не повинен бути LLM-агентом у hot path: його робота детермінована й високошвидкісна.
 
-Поточний V1 `ResearchDecisionPipeline` залишається forecast-bound для predictive paper path. Issue #356 визначає майбутній bounded generic contract, де `ForecastRecord` обов’язковий для probability-edge intents, але не фабрикується для arbitrage/dutching/hedge strategy classes, якщо causal quote evidence і terminal-state economics є достатнім strategy-specific proof.
+Поточний predictive-paper `ResearchDecisionPipeline` залишається forecast-bound для probability-edge path. Issue #356 визначає bounded generic contract, де `ForecastRecord` обов’язковий для probability-edge intents, але не фабрикується для arbitrage/dutching/hedge strategy classes, якщо causal quote evidence і terminal-state economics є достатнім strategy-specific proof.
 
 Learning records фіксують рішення до outcome: доступні дані, probabilities (коли вони входять у strategy contract), features, odds, candidate positions/stake vector, обраний/відхилений action, strategy/model/config version та risk snapshot. Це забезпечує чесне post-settlement evaluation та захист від future leakage.
 
@@ -60,17 +62,17 @@ Learning records фіксують рішення до outcome: доступні 
 
 ## 9. Релізи та whole-product development
 
-Версії є milestones, а не ізольованими фазами. Команда може паралельно розвивати ingestion, replay, portfolio, agents, Windows UI, performance та packaging, якщо це не створює конфліктів. Перший release candidate повинен уже бути цілісним Windows-продуктом із агентами, а не throwaway demo.
+Autosport має одну кінцеву ціль; release labels і historical version names можуть використовуватися лише як engineering checkpoints. Вони не створюють окремої finish line і не дозволяють відкладати інші потрібні capabilities після досягнення локального milestone.
 
-Орієнтовні milestones: v0.1 — runnable vertical slice з causal replay, paper bankroll, базовими tickets, semantic UI та deterministic tests; v0.2 — високочастотний store, розширені markets, portfolio exposure та incremental recomputation; v0.3 — multi-agent research/forecast/critic/learning, evaluation lab і масштабний replay; v0.4 — optimized combinatorial engine, long-run experiments, live-observation adapters і production-like resilience; v1.0 — стабільний packaged Windows product із перевіреною доступністю, performance, recovery та reproducible release evidence.
+Команда може паралельно розвивати ingestion, replay, portfolio, agents, Windows UI, performance, packaging, live-market intelligence та execution/reconciliation, якщо залежності й safety gates залишаються коректними.
 
-Після exact V1: reliability/bug bash -> professional paper/live-observation qualification -> #355 live portfolio intelligence -> bookmaker read-only capability -> supervised execution -> real execution ledger/reconciliation -> bounded autonomous execution лише після окремих profitability/safety/compliance gates.
+Практичний dependency order усередині одного продукту: causal replay/paper/live-observation proof -> reliability/recovery/package qualification -> professional bankroll/risk/live-opportunity evidence -> #355 live portfolio intelligence -> bookmaker read-only capability -> supervised execution -> real execution ledger/reconciliation -> bounded autonomous execution лише після окремих profitability/safety/compliance gates.
 
 ## 10. Межа реального wagering
 
-Поточна реалізація працює в paper/simulation, historical replay, live-observation/analysis, forecasting і portfolio/risk modes; real-money executor відсутній/disabled, тому `REAL_MONEY_EXECUTION=false`.
+Поточний product tree працює з paper/simulation, historical replay, live-observation/analysis, forecasting і portfolio/risk та вже містить bookmaker/account, supervised-execution і real-ledger/reconciliation surfaces. Це не означає кваліфікований money-moving path: `REAL_MONEY_EXECUTION=false` залишається чинною authority truth.
 
-Це current truth, а не постійна межа продукту. Майбутня money-moving authority належить окремій #353 програмі й активується поетапно тільки після доказів provider/legal capability, exact reconciliation, duplicate prevention, fail-closed partial execution, user limits/approval level та emergency STOP. V1 не перескакує безпосередньо до необмеженого real-money execution.
+Це current truth, а не постійна межа продукту. Money-moving authority у #353 активується поетапно тільки після доказів provider/legal capability, exact reconciliation, duplicate prevention, fail-closed partial execution, user limits/approval level та emergency STOP. Жодний paper/live або supervised milestone сам по собі не дозволяє необмежене real-money execution.
 
 ## 11. Головний критерій готовності
 
@@ -79,4 +81,6 @@ Learning records фіксують рішення до outcome: доступні 
 `HUMAN_TESTED=false`  
 `NVDA_VERIFIED=false`  
 `REAL_MONEY_EXECUTION=false`  
-`V1_READY=false`
+`WHOLE_PRODUCT_COMPLETE=false`
+
+Legacy compatibility evidence may still contain `V1_READY=false`; that flag is not the completion definition.

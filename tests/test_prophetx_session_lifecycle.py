@@ -7,6 +7,7 @@ import pytest
 import autosport.prophetx_session_lifecycle as prophetx_session_lifecycle
 from autosport.prophetx_session_lifecycle import (
     CONSERVATIVE_SESSION_SLOT_HOLD,
+    ProphetXLoginAdmission,
     ProphetXLoginAdmissionAction,
     ProphetXLoginFailureClass,
     ProphetXRenewalFailureClass,
@@ -71,7 +72,9 @@ def test_two_consumers_share_one_persisted_login_reservation(tmp_path):
     two = second.begin_login(now=NOW, access_token_available=False)
 
     assert one.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
-    assert one.login_authorized is True
+    assert one.login_authorized is False
+    assert first.effect_authorized(one) is True
+    assert second.effect_authorized(one) is False
     assert two.action is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
     assert two.login_authorized is False
     assert two.snapshot is not None
@@ -1585,7 +1588,8 @@ def test_same_process_stale_renewal_recovers_after_uncertainty_deadline(tmp_path
 
     assert recovered.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
     assert recovered.attempt_id != started.attempt_id
-    assert recovered.login_authorized is True
+    assert recovered.login_authorized is False
+    assert lifecycle.effect_authorized(recovered) is True
 
 
 def test_available_token_without_durable_state_fails_closed(tmp_path):
@@ -1987,6 +1991,89 @@ def test_raw_provider_slot_bool_cannot_authorize_refresh_promotion(tmp_path):
     still_renewing = lifecycle.read_snapshot()
     assert still_renewing.state is ProphetXSessionState.RENEWING
     assert still_renewing.attempt_id == started.attempt_id
+
+def test_structurally_valid_forged_login_admission_has_no_effect_authority(
+    tmp_path,
+):
+    lifecycle = _lifecycle(tmp_path)
+    attempt = "a" * 64
+    snapshot = ProphetXSessionSnapshot(
+        state=ProphetXSessionState.LOGIN_IN_FLIGHT,
+        generation=1,
+        credential_revision="rev-1",
+        integration_role="market-maker-primary",
+        last_transition_at=NOW,
+        attempt_id=attempt,
+        attempt_started_at=NOW,
+        slot_hold_until=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
+    )
+    forged = ProphetXLoginAdmission(
+        action=ProphetXLoginAdmissionAction.CREATE_LOGIN,
+        snapshot=snapshot,
+        attempt_id=attempt,
+        retry_at=snapshot.slot_hold_until,
+    )
+
+    assert forged.login_authorized is False
+    assert lifecycle.effect_authorized(forged) is False
+
+
+def test_reconstructed_login_admission_cannot_reuse_issued_attempt_authority(
+    tmp_path,
+):
+    lifecycle = _lifecycle(tmp_path)
+    issued = lifecycle.begin_login(now=NOW, access_token_available=False)
+    forged = ProphetXLoginAdmission(
+        action=issued.action,
+        snapshot=issued.snapshot,
+        attempt_id=issued.attempt_id,
+        retry_at=issued.retry_at,
+    )
+
+    assert lifecycle.effect_authorized(issued) is True
+    assert lifecycle.effect_authorized(forged) is False
+
+    restarted = _lifecycle(tmp_path)
+    assert restarted.effect_authorized(issued) is False
+
+
+def test_effect_authority_is_revoked_after_login_completion(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    issued = lifecycle.begin_login(now=NOW, access_token_available=False)
+    assert lifecycle.effect_authorized(issued) is True
+
+    lifecycle.complete_login_failure(
+        attempt_id=issued.attempt_id,
+        now=NOW + timedelta(seconds=1),
+        failure=ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE,
+    )
+
+    assert lifecycle.effect_authorized(issued) is False
+
+
+def test_reconstructed_renewal_admission_cannot_reuse_issued_authority(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
+    issued = lifecycle.begin_renewal(
+        now=due_at,
+        refresh_token_lineage_id=active.session_lineage_id,
+    )
+    forged = ProphetXLoginAdmission(
+        action=issued.action,
+        snapshot=issued.snapshot,
+        attempt_id=issued.attempt_id,
+        retry_at=issued.retry_at,
+    )
+
+    assert lifecycle.effect_authorized(issued) is True
+    assert lifecycle.effect_authorized(forged) is False
+
 
 def test_admission_cannot_forge_login_authority_without_reservation():
     with pytest.raises(

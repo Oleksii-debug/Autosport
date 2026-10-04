@@ -668,7 +668,8 @@ class ProphetXLoginAdmission:
 
     @property
     def login_authorized(self) -> bool:
-        return self.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+        """Admission DTOs never carry standalone positive side-effect authority."""
+        return False
 
     @property
     def real_money_execution(self) -> bool:
@@ -700,10 +701,64 @@ class ProphetXSessionLifecycle:
         self._state_path = self._scope_dir / self._STATE_NAME
         self._thread_lock = RLock()
         self._owned_attempts: set[str] = set()
+        self._issued_effect_admissions: dict[str, ProphetXLoginAdmission] = {}
 
     @property
     def state_path(self) -> Path:
         return self._state_path
+
+    def effect_authorized(self, admission: ProphetXLoginAdmission) -> bool:
+        """Revalidate coordinator-issued login/renewal authority against durable state."""
+
+        if type(admission) is not ProphetXLoginAdmission:
+            return False
+        if admission.action not in {
+            ProphetXLoginAdmissionAction.CREATE_LOGIN,
+            ProphetXLoginAdmissionAction.START_RENEWAL,
+        }:
+            return False
+        attempt = admission.attempt_id
+        if attempt is None:
+            return False
+
+        with self._thread_lock:
+            if (
+                attempt not in self._owned_attempts
+                or self._issued_effect_admissions.get(attempt) is not admission
+            ):
+                return False
+            try:
+                with WorkspaceEconomicLock(self._scope_dir):
+                    current = self._load_state()
+                    expected_state = (
+                        ProphetXSessionState.LOGIN_IN_FLIGHT
+                        if admission.action
+                        is ProphetXLoginAdmissionAction.CREATE_LOGIN
+                        else ProphetXSessionState.RENEWING
+                    )
+                    if (
+                        current is None
+                        or current.state is not expected_state
+                        or current.attempt_id != attempt
+                        or current.credential_revision
+                        != self.scope.credential_revision
+                        or current.integration_role != self.scope.integration_role
+                        or admission.snapshot != current
+                    ):
+                        return False
+                    expected_retry = (
+                        current.slot_hold_until
+                        if admission.action
+                        is ProphetXLoginAdmissionAction.CREATE_LOGIN
+                        else current.access_expires_at
+                    )
+                    return admission.retry_at == expected_retry
+            except WorkspaceEconomicLockBusyError:
+                return False
+            except WorkspaceEconomicLockError as exc:
+                raise ProphetXSessionLifecycleError(
+                    "cannot acquire ProphetX session-pool coordination lock"
+                ) from exc
 
     def begin_login(
         self,
@@ -813,7 +868,7 @@ class ProphetXSessionLifecycle:
                                 retry_at=uncertainty_deadline,
                             )
                         if current.attempt_id is not None:
-                            self._owned_attempts.discard(current.attempt_id)
+                            self._discard_owned_attempt(current.attempt_id)
                         raise ProphetXSessionLifecycleError(
                             "stale renewal ambiguity must re-enter login admission"
                         )
@@ -867,12 +922,14 @@ class ProphetXSessionLifecycle:
                     )
                     self._write_state(updated)
                     self._owned_attempts.add(attempt)
-                    return ProphetXLoginAdmission(
+                    admission = ProphetXLoginAdmission(
                         action=ProphetXLoginAdmissionAction.START_RENEWAL,
                         snapshot=updated,
                         attempt_id=attempt,
                         retry_at=current.access_expires_at,
                     )
+                    self._issued_effect_admissions[attempt] = admission
+                    return admission
             except WorkspaceEconomicLockBusyError:
                 # Another process is mutating this exact provider pool. A concurrent
                 # renewal caller must wait rather than treating lock contention as an
@@ -939,7 +996,7 @@ class ProphetXSessionLifecycle:
                 raise ProphetXSessionLifecycleError(
                     "cannot acquire ProphetX session-pool coordination lock"
                 ) from exc
-            self._owned_attempts.discard(attempt)
+            self._discard_owned_attempt(attempt)
             return updated
 
     def complete_renewal_failure(
@@ -1189,6 +1246,8 @@ class ProphetXSessionLifecycle:
                         last_failure_class=ProphetXLoginFailureClass.CREDENTIAL_REJECTED,
                     )
                     self._write_state(updated)
+                    if current is not None and current.attempt_id is not None:
+                        self._discard_owned_attempt(current.attempt_id)
                     return updated
             except WorkspaceEconomicLockError as exc:
                 raise ProphetXSessionLifecycleError(
@@ -1473,12 +1532,18 @@ class ProphetXSessionLifecycle:
         )
         self._write_state(updated)
         self._owned_attempts.add(attempt)
-        return ProphetXLoginAdmission(
+        admission = ProphetXLoginAdmission(
             action=ProphetXLoginAdmissionAction.CREATE_LOGIN,
             snapshot=updated,
             attempt_id=attempt,
             retry_at=hold,
         )
+        self._issued_effect_admissions[attempt] = admission
+        return admission
+
+    def _discard_owned_attempt(self, attempt_id: str) -> None:
+        self._owned_attempts.discard(attempt_id)
+        self._issued_effect_admissions.pop(attempt_id, None)
 
     def _require_owned_inflight(
         self,

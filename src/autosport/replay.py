@@ -445,21 +445,6 @@ class ReplayEngine:
         applied_sequence_sha256 = market_event_payload_sequence_sha256(
             tuple(applied_payloads)
         )
-        receipt = _issue_replay_execution_receipt(
-            run_id=resolved_run_id,
-            dataset_hash=self.dataset_hash,
-            event_count=count,
-            input_event_payload_sequence_sha256=(
-                self.input_event_payload_sequence_sha256
-            ),
-            consumed_event_payload_sequence_sha256=(
-                self._consumed_event_payload_sequence_sha256
-            ),
-            applied_event_payload_sequence_sha256=applied_sequence_sha256,
-            consumed_event_payload_multiset_sha256=(
-                self._consumed_event_payload_multiset_sha256
-            ),
-        )
         return ReplayRun(
             run_id=resolved_run_id,
             dataset_hash=self.dataset_hash,
@@ -476,8 +461,82 @@ class ReplayEngine:
             consumed_event_payload_multiset_sha256=(
                 self._consumed_event_payload_multiset_sha256
             ),
+        )
+
+
+def _build_authoritative_replay_run(
+    run_impl,
+    receipt_issuer,
+    replay_run_type: type[ReplayRun],
+):
+    def authoritative_run(
+        self: ReplayEngine,
+        on_event: Callable[[MarketEvent], None],
+        speed: float = 0.0,
+        run_id: str | None = None,
+        on_raw_event: Callable[[MarketEvent], object] | None = None,
+    ) -> ReplayRun:
+        result = run_impl(
+            self,
+            on_event,
+            speed=speed,
+            run_id=run_id,
+            on_raw_event=on_raw_event,
+        )
+        if type(result) is not replay_run_type or result.execution_receipt is not None:
+            raise RuntimeError(
+                "canonical replay implementation returned invalid receipt boundary"
+            )
+        receipt = receipt_issuer(
+            run_id=result.run_id,
+            dataset_hash=result.dataset_hash,
+            event_count=result.event_count,
+            input_event_payload_sequence_sha256=(
+                result.input_event_payload_sequence_sha256
+            ),
+            consumed_event_payload_sequence_sha256=(
+                result.consumed_event_payload_sequence_sha256
+            ),
+            applied_event_payload_sequence_sha256=(
+                result.applied_event_payload_sequence_sha256
+            ),
+            consumed_event_payload_multiset_sha256=(
+                result.consumed_event_payload_multiset_sha256
+            ),
+        )
+        return replay_run_type(
+            run_id=result.run_id,
+            dataset_hash=result.dataset_hash,
+            event_count=result.event_count,
+            started_at=result.started_at,
+            completed_at=result.completed_at,
+            input_event_payload_sequence_sha256=(
+                result.input_event_payload_sequence_sha256
+            ),
+            consumed_event_payload_sequence_sha256=(
+                result.consumed_event_payload_sequence_sha256
+            ),
+            applied_event_payload_sequence_sha256=(
+                result.applied_event_payload_sequence_sha256
+            ),
+            consumed_event_payload_multiset_sha256=(
+                result.consumed_event_payload_multiset_sha256
+            ),
             execution_receipt=receipt,
         )
+
+    authoritative_run.__name__ = "run"
+    authoritative_run.__qualname__ = "ReplayEngine.run"
+    return authoritative_run
+
+
+ReplayEngine.run = _build_authoritative_replay_run(
+    ReplayEngine.run,
+    _issue_replay_execution_receipt,
+    ReplayRun,
+)
+del _build_authoritative_replay_run
+del _issue_replay_execution_receipt
 
 
 def _dataset_hash(events: list[MarketEvent]) -> str:

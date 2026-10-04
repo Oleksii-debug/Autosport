@@ -29,10 +29,11 @@ permissions:
 # event may be the surviving trigger; that controller still reconciles its source workflow
 # against fresh live PR qualification rather than trusting the trigger head.
 #
-# The scoped controller also carries one shared 12-request transport budget. The
-# canonical transport timeout is 20 seconds, so even worst-case request waits retain
-# margin below this job's five-minute timeout. Exhaustion defers all remaining cleanup;
-# a partial status scan is discarded and never becomes cancellation authority.
+# The scoped controller carries one shared 24-request transport budget. The canonical
+# transport timeout remains 20 seconds, so worst-case network wait is bounded to 480
+# seconds inside this job's ten-minute timeout, leaving two minutes for checkout/Python
+# overhead. This envelope can finish a 1200-run/three-status snapshot and still perform
+# revalidated cancellation effects; exhaustion still defers remaining cleanup.
 #
 # cancel-in-progress stays false so a newer requested PR event cannot kill a controller
 # that is already making trusted decisions. Pull-request source events share one lane per
@@ -50,7 +51,7 @@ jobs:
   cancel_superseded_head_runs:
     if: github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-slim
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout trusted default-branch controller code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

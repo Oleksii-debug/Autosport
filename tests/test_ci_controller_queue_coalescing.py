@@ -4349,19 +4349,18 @@ def test_active_run_reader_bounds_continuous_growth_to_initial_horizon(
 
 
 
-def test_main_request_budget_exhaustion_defers_incomplete_snapshot(
+def test_main_large_complete_snapshot_makes_progress_before_budget_exhaustion(
     monkeypatch,
     capsys,
 ) -> None:
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
     monkeypatch.setenv("GITHUB_TOKEN", "token")
-    requested: list[str] = []
+    requested: list[tuple[str, str]] = []
 
     class FakeResponse:
-        status = 200
-
-        def __init__(self, body: bytes) -> None:
+        def __init__(self, body: bytes = b"", *, status: int = 200) -> None:
             self.body = body
+            self.status = status
 
         def __enter__(self):
             return self
@@ -4374,26 +4373,58 @@ def test_main_request_budget_exhaustion_defers_incomplete_snapshot(
 
     def fake_urlopen(request, *, timeout: int):
         assert timeout == 20
-        requested.append(request.full_url)
-        assert "/actions/workflows/356678400/runs?" in request.full_url
-        assert "status=queued" in request.full_url
-        page = len(requested)
-        assert 1 <= page <= 12
-        first_run_id = (page - 1) * 100 + 1
-        payload = {
-            "total_count": 1200,
-            "workflow_runs": [
-                {
-                    "id": first_run_id + offset,
-                    "head_sha": STALE_HEAD,
-                    "name": "CI",
-                    "status": "queued",
-                    "pull_requests": [{"number": 2039}],
+        method = request.get_method()
+        url = request.full_url
+        requested.append((method, url))
+
+        if "/actions/workflows/356678400/runs?" in url:
+            if "status=queued" in url:
+                page = int(url.rsplit("page=", 1)[1])
+                assert 1 <= page <= 12
+                first_run_id = (page - 1) * 100 + 1
+                payload = {
+                    "total_count": 1200,
+                    "workflow_runs": [
+                        {
+                            "id": first_run_id + offset,
+                            "head_sha": STALE_HEAD,
+                            "name": "CI",
+                            "status": "queued",
+                            "pull_requests": [{"number": 2039}],
+                        }
+                        for offset in range(100)
+                    ],
                 }
-                for offset in range(100)
-            ],
-        }
-        return FakeResponse(json.dumps(payload).encode("utf-8"))
+            else:
+                assert "status=in_progress" in url or "status=pending" in url
+                payload = {"total_count": 0, "workflow_runs": []}
+            return FakeResponse(json.dumps(payload).encode("utf-8"))
+
+        if url.endswith("/pulls/2039"):
+            return FakeResponse(
+                (
+                    '{"state":"open","draft":false,'
+                    '"head":{"sha":"' + HEAD + '","repo":{"full_name":"owner/repo"}},'
+                    '"base":{"repo":{"full_name":"owner/repo"}}}'
+                ).encode("utf-8")
+            )
+
+        if "/actions/runs/" in url and not url.endswith("/cancel"):
+            run_id = int(url.split("/actions/runs/", 1)[1].split("/", 1)[0])
+            return FakeResponse(
+                (
+                    '{"id":' + str(run_id) + ',"workflow_id":356678400,'
+                    '"event":"pull_request","head_sha":"' + STALE_HEAD + '",'
+                    '"name":"CI","status":"queued",'
+                    '"pull_requests":[{"number":2039}]}'
+                ).encode("utf-8")
+            )
+
+        if url.endswith("/cancel"):
+            assert method == "POST"
+            return FakeResponse(status=202)
+
+        raise AssertionError(url)
 
     request_impl = scoped_controller.GitHubApi._request
     monkeypatch.setitem(request_impl.__globals__, "urlopen", fake_urlopen)
@@ -4401,9 +4432,12 @@ def test_main_request_budget_exhaustion_defers_incomplete_snapshot(
     assert scoped_controller.main(_scoped_main_args()) == 0
 
     captured = capsys.readouterr()
+    cancel_requests = [
+        url for method, url in requested if method == "POST" and url.endswith("/cancel")
+    ]
+    assert cancel_requests
     assert "request budget exhausted" in captured.err
-    assert len(requested) == 12
-    assert all("/cancel" not in url for url in requested)
+    assert len(requested) == 24
 
 
 def test_request_budget_exhaustion_is_not_downgraded_to_group_failure() -> None:

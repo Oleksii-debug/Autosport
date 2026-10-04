@@ -136,14 +136,14 @@ class WorkflowScopedGitHubApi(GitHubApi):
         workflow_id: int,
         workflow_name: str,
     ) -> None:
-        # The canonical transport has a 20-second per-request timeout. Twelve actual
-        # transport attempts bound worst-case network wait to 240 seconds, preserving
-        # margin under this trusted controller's five-minute workflow timeout. Budget
-        # exhaustion defers remaining cleanup; it never makes a partial scan authoritative.
+        # The canonical transport has a 20-second per-request timeout. Twenty-four
+        # attempts bound worst-case network wait to 480 seconds under the controller's
+        # ten-minute job timeout while allowing a 1200-run/three-status snapshot plus
+        # revalidated cancellation effects. Exhaustion remains a fail-closed deferral.
         super().__init__(
             repository=repository,
             token=token,
-            request_budget=12,
+            request_budget=24,
         )
         if type(workflow_id) is not int or workflow_id <= 0:
             raise CancellationError("invalid workflow id")

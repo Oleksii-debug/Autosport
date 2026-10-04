@@ -4287,3 +4287,62 @@ def test_scoped_main_rejects_replaced_trigger_kwdefault_mapping(monkeypatch) -> 
     monkeypatch.setenv("GITHUB_TOKEN", "token")
 
     assert scoped_controller.main(_scoped_main_args()) == 2
+
+
+def test_active_run_reader_bounds_continuous_growth_to_initial_horizon(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    requested: list[str] = []
+
+    def run_payload(run_id: int) -> dict[str, object]:
+        return {
+            "id": run_id,
+            "head_sha": HEAD,
+            "name": "CI",
+            "status": "queued",
+            "pull_requests": [{"number": 303}],
+            "head_branch": "feature/head",
+            "head_repository": {"full_name": "owner/repo"},
+        }
+
+    def fake_request(
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ) -> object:
+        assert method == "GET"
+        assert not allowed_http_errors
+        requested.append(path)
+        page = int(path.rsplit("page=", 1)[1])
+        if page > 3:
+            raise AssertionError("moving scan must not chase continuous queue growth")
+        first_id = (page - 1) * 100 + 1
+        return {
+            "total_count": (page + 1) * 100,
+            "workflow_runs": [
+                run_payload(run_id)
+                for run_id in range(first_id, first_id + 100)
+            ],
+        }
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    runs = api._active_runs_for_status("queued")
+
+    assert {run.run_id for run in runs} == set(range(1, 301))
+    assert requested == [
+        "/actions/workflows/356678400/runs?"
+        "event=pull_request&status=queued&per_page=100&page=1",
+        "/actions/workflows/356678400/runs?"
+        "event=pull_request&status=queued&per_page=100&page=2",
+        "/actions/workflows/356678400/runs?"
+        "event=pull_request&status=queued&per_page=100&page=3",
+    ]
+

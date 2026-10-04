@@ -1378,3 +1378,47 @@ def test_cancel_rejects_inflight_active_runs_shadow(monkeypatch) -> None:
     assert forged_calls == []
     assert api.cancelled == []
 
+
+def test_base_active_run_reader_bounds_continuous_growth_to_initial_horizon(
+    monkeypatch,
+) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    requested: list[str] = []
+
+    def run_payload(run_id: int) -> dict[str, object]:
+        return {
+            "id": run_id,
+            "head_sha": HEAD_A,
+            "name": "CI",
+            "status": "queued",
+            "pull_requests": [{"number": 2008}],
+        }
+
+    def fake_request(path: str, **_kwargs):
+        requested.append(path)
+        page = int(path.rsplit("page=", 1)[1])
+        if page > 3:
+            raise AssertionError("moving scan must not chase continuous queue growth")
+        first_id = (page - 1) * 100 + 1
+        return {
+            "total_count": (page + 1) * 100,
+            "workflow_runs": [
+                run_payload(run_id)
+                for run_id in range(first_id, first_id + 100)
+            ],
+        }
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    runs = api._active_runs_for_status("queued")
+
+    assert {run.run_id for run in runs} == set(range(1, 301))
+    assert requested == [
+        "/actions/runs?event=pull_request&status=queued&per_page=100&page=1",
+        "/actions/runs?event=pull_request&status=queued&per_page=100&page=2",
+        "/actions/runs?event=pull_request&status=queued&per_page=100&page=3",
+    ]
+

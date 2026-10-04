@@ -1081,6 +1081,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
         # cannot make the scan look complete and hide later active runs.
         seen_run_ids: set[int] = set()
         page = 1
+        # Freeze a bounded moving-snapshot horizon from the first provider count.
+        # One grace page preserves useful overlap recovery without letting sustained
+        # queue growth make this trusted controller chase new work until job timeout.
+        scan_page_limit: int | None = None
         while True:
             query = _encode_query(
                 {
@@ -1117,6 +1121,12 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 raise CancellationError("invalid workflow-runs response")
             page_runs = payload["workflow_runs"]
             total_count = payload["total_count"]
+            if scan_page_limit is None:
+                initial_pages = max(
+                    1,
+                    (total_count + _runs_per_page - 1) // _runs_per_page,
+                )
+                scan_page_limit = initial_pages + 1
             unique_before_page = len(seen_run_ids)
             if len(page_runs) > _runs_per_page:
                 raise CancellationError("invalid workflow-runs page size")
@@ -1187,6 +1197,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 or len(page_runs) < _runs_per_page
                 or len(seen_run_ids) == unique_before_page
                 or len(seen_run_ids) >= total_count
+                or (
+                    scan_page_limit is not None
+                    and page >= scan_page_limit
+                )
             ):
                 break
             page += 1

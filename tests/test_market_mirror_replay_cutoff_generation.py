@@ -422,12 +422,23 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             path = Path(directory) / "market.db"
             original = SQLiteMarketStore(path)
             try:
-                original.append(
-                    self.event(
-                        sequence=1,
-                        odds="2.00",
-                        observed_ts="2026-09-16T19:00:00+00:00",
+                # Build bytes that predate both causal companion tables and the
+                # independent positive-append witness. Going through public append()
+                # here would correctly create the new machine authority and would no
+                # longer model a pre-v1 database.
+                with original.connection:
+                    self.assertTrue(
+                        original._insert_one(
+                            self.event(
+                                sequence=1,
+                                odds="2.00",
+                                observed_ts="2026-09-16T19:00:00+00:00",
+                            )
+                        )
                     )
+                self.assertEqual(
+                    original._market_append_authority().read_history(),
+                    (),
                 )
             finally:
                 original.close()

@@ -423,6 +423,41 @@ class PaperExecutionRealityTests(unittest.TestCase):
             self.assertEqual(attempt.evidence_id, obs.evidence_id)
             self.assertEqual(attempt.evidence_sha256, obs.evidence_sha256)
 
+    def test_invalid_observed_timing_does_not_reserve_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(
+                Path(tmp) / "paper-execution.jsonl"
+            )
+            current = plan(action("a1"))
+            observation, registry = registered_observation(
+                ledger,
+                current.actions[0],
+                PaperAttemptOutcome.REJECTED,
+                at=EXPIRES_AT,
+            )
+            event_count = len(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "at/after action expiry",
+            ):
+                execute_paper_plan(
+                    plan=current,
+                    trigger_id="trigger-observed-expired",
+                    config=config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                    observations={"a1": observation},
+                    evidence_registry=registry,
+                )
+            self.assertEqual(len(ledger.events()), event_count)
+            self.assertFalse(
+                any(
+                    event["event_type"] == "RUN_RESERVED"
+                    for event in ledger.events()
+                )
+            )
+
     def test_submillisecond_timestamp_precision_is_accepted_and_floored(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
@@ -1151,14 +1186,19 @@ class PaperExecutionRealityTests(unittest.TestCase):
 
     def test_non_back_plan_fails_closed_until_liability_authority_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(PaperExecutionStateError, "supports BACK only"):
+            path = Path(tmp) / "paper-execution.jsonl"
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "supports BACK only",
+            ):
                 execute_paper_plan(
                     plan=plan(action("a1", side="LAY")),
                     trigger_id="trigger-lay",
                     config=config(),
-                    ledger=PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl"),
+                    ledger=PaperExecutionLedger(path),
                     started_at=STARTED_AT,
                 )
+            self.assertFalse(path.exists())
 
     def test_per_leg_market_identity_survives_for_external_settlement(self):
         with tempfile.TemporaryDirectory() as tmp:

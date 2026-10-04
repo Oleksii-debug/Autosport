@@ -4,6 +4,8 @@ import sys
 
 import pytest
 
+import autosport.product_runtime as product_runtime_module
+
 from autosport.event_lifecycle import CatalogPage, EventLifecycleRecord
 from autosport.product_runtime import (
     ProductCompositionError,
@@ -265,6 +267,40 @@ def test_parlay_product_source_authority_roots_are_immutable_after_construction(
         ):
             setattr(source, name, value)
         assert getattr(source, name) is original or getattr(source, name) == original
+
+
+def test_live_settlement_verifier_ignores_post_build_hash_root_rebind(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source = _ProductSource()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=source,
+        clock=lambda: NOW,
+        outcome_authority=source,
+    )
+    expected_identity = runtime.manifest.settlement_authority_identity
+
+    class _ForgedHash:
+        def hexdigest(self) -> str:
+            assert expected_identity is not None
+            return expected_identity
+
+    try:
+        monkeypatch.setattr(
+            product_runtime_module.hashlib,
+            "sha256",
+            lambda *_args, **_kwargs: _ForgedHash(),
+        )
+        source.settlement_configuration_sha256 = SHA_B
+        with pytest.raises(
+            ProductCompositionError,
+            match="settlement authority changed after product composition",
+        ):
+            runtime.coordinator.outcome_authority.resolve(object(), as_of=NOW)
+    finally:
+        runtime.close()
 
 
 def test_product_coordinator_rejects_post_build_authority_reassignment(

@@ -1606,7 +1606,9 @@ def _build_autonomous_product_runtime_impl(
 
         def resolve_product_event(delta: CollectorDelta) -> MarketEvent:
             require_source_resolver_authority()
-            return source_resolve_event(delta)
+            event = source_resolve_event(delta)
+            require_source_resolver_authority()
+            return event
 
         def lookup_completed_desktop_application(
             delta: CollectorDelta,

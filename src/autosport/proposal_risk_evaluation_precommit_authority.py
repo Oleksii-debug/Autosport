@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -157,6 +158,11 @@ class ProductProposalRiskEvaluationPrecommit:
     membership_design_sha256: str
     sampling_manifest_sha256: str
     planned_member_ids: tuple[str, ...]
+    membership_protocol_record_sha256: str
+    membership_dataset_record_sha256: str
+    membership_causal_cutoff: str
+    membership_precommitted_at: str
+    membership_outcome_reveal_after: str
     confidence_level: Decimal
     ruin_threshold: Decimal
     risk_target_scope: str
@@ -189,6 +195,12 @@ class ProductProposalRiskEvaluationPrecommit:
 
     @property
     def scientific_precommit_proven(self, _proven=_IDENTITY_PROVEN) -> bool:
+        return _proven(self)
+
+    @property
+    def proposal_target_preoutcome_chronology_proven(
+        self, _proven=_IDENTITY_PROVEN
+    ) -> bool:
         return _proven(self)
 
     @property
@@ -228,6 +240,11 @@ _BINDING_FIELDS = (
     "membership_design_sha256",
     "sampling_manifest_sha256",
     "planned_member_ids",
+    "membership_protocol_record_sha256",
+    "membership_dataset_record_sha256",
+    "membership_causal_cutoff",
+    "membership_precommitted_at",
+    "membership_outcome_reveal_after",
     "confidence_level",
     "ruin_threshold",
     "risk_target_scope",
@@ -301,6 +318,21 @@ def _decimal_text(value: object, name: str) -> str:
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text
+
+
+def _instant(value: object, name: str) -> datetime:
+    text = _text(value, name)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ProductProposalRiskEvaluationPrecommitError(
+            f"{name} must be valid ISO-8601"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ProductProposalRiskEvaluationPrecommitError(
+            f"{name} must include a timezone offset"
+        )
+    return parsed.astimezone(timezone.utc)
 
 
 def _canonical_json(value: object) -> bytes:
@@ -513,9 +545,29 @@ def _resolve_inputs(
 def _material(
     target: ProductProposalRiskTarget,
     science: ProductFixedNRiskEvaluationPrecommitAuthority,
+    membership: ResolvedFixedNRiskMembership,
 ) -> dict[str, object]:
-    if type(target) is not _TARGET_TYPE or type(science) is not _SCIENCE_TYPE:
+    if (
+        type(target) is not _TARGET_TYPE
+        or type(science) is not _SCIENCE_TYPE
+        or type(membership) is not _MEMBERSHIP_TYPE
+    ):
         raise TypeError("binding inputs must be exact product authority values")
+    target_time = _instant(target.decision_ts, "target_decision_ts")
+    precommitted_at = _instant(
+        membership.precommitted_at, "membership_precommitted_at"
+    )
+    outcome_reveal_after = _instant(
+        membership.outcome_reveal_after, "membership_outcome_reveal_after"
+    )
+    if target_time < precommitted_at:
+        raise ProductProposalRiskEvaluationPrecommitError(
+            "proposal target predates the product scientific membership precommit"
+        )
+    if target_time >= outcome_reveal_after:
+        raise ProductProposalRiskEvaluationPrecommitError(
+            "proposal target is not inside the pre-outcome evaluation window"
+        )
     return {
         "schema": _SCHEMA,
         "workspace_instance_id": _text(
@@ -558,6 +610,23 @@ def _material(
         "planned_member_ids": [
             _text(value, "planned_member_id") for value in science.planned_member_ids
         ],
+        "membership_protocol_record_sha256": _sha(
+            membership.protocol_record_sha256,
+            "membership_protocol_record_sha256",
+        ),
+        "membership_dataset_record_sha256": _sha(
+            membership.dataset_record_sha256,
+            "membership_dataset_record_sha256",
+        ),
+        "membership_causal_cutoff": _text(
+            membership.causal_cutoff, "membership_causal_cutoff"
+        ),
+        "membership_precommitted_at": _text(
+            membership.precommitted_at, "membership_precommitted_at"
+        ),
+        "membership_outcome_reveal_after": _text(
+            membership.outcome_reveal_after, "membership_outcome_reveal_after"
+        ),
         "confidence_level": _decimal_text(
             science.confidence_level, "confidence_level"
         ),
@@ -574,6 +643,7 @@ def _material(
         ),
         "proposal_target_identity_proven": True,
         "scientific_precommit_proven": True,
+        "proposal_target_preoutcome_chronology_proven": True,
         "proposal_target_counterfactual_execution_proven": False,
         "risk_upper_bound_for_target": False,
         "grants_ticket_authority": False,
@@ -586,6 +656,7 @@ def _build(
     record: DecisionRecord,
     target: ProductProposalRiskTarget,
     science: ProductFixedNRiskEvaluationPrecommitAuthority,
+    membership: ResolvedFixedNRiskMembership,
     expected_binding_sha256: str,
     _bind=_BIND_IDENTITY,
 ) -> ProductProposalRiskEvaluationPrecommit:
@@ -596,7 +667,7 @@ def _build(
     binding_sha256 = _sha(expected_binding_sha256, "expected_binding_sha256")
     action_id = _ACTION_PREFIX + binding_sha256
     payload = record.payload
-    expected_fields = set(_material(target, science))
+    expected_fields = set(_material(target, science, membership))
     expected_fields.update(
         {
             "binding_sha256",
@@ -621,7 +692,7 @@ def _build(
         raise ProductProposalRiskEvaluationPrecommitError(
             "persisted evaluation precommit envelope is invalid"
         )
-    expected_material = _material(target, science)
+    expected_material = _material(target, science, membership)
     for key, value in expected_material.items():
         if payload.get(key) != value:
             raise ProductProposalRiskEvaluationPrecommitError(
@@ -652,6 +723,11 @@ def _build(
         "membership_design_sha256": science.membership_design_sha256,
         "sampling_manifest_sha256": science.sampling_manifest_sha256,
         "planned_member_ids": tuple(science.planned_member_ids),
+        "membership_protocol_record_sha256": membership.protocol_record_sha256,
+        "membership_dataset_record_sha256": membership.dataset_record_sha256,
+        "membership_causal_cutoff": membership.causal_cutoff,
+        "membership_precommitted_at": membership.precommitted_at,
+        "membership_outcome_reveal_after": membership.outcome_reveal_after,
         "confidence_level": science.confidence_level,
         "ruin_threshold": science.ruin_threshold,
         "risk_target_scope": science.risk_target_scope,
@@ -692,7 +768,7 @@ def issue_product_proposal_risk_evaluation_precommit(
         sampling_manifest_json=sampling_manifest_json,
         authority_root=authority_root,
     )
-    material = _material(target, science)
+    material = _material(target, science, membership)
     binding_sha256 = _digest(material)
     action_id = _ACTION_PREFIX + binding_sha256
 
@@ -759,7 +835,7 @@ def issue_product_proposal_risk_evaluation_precommit(
         sampling_manifest_json=sampling_manifest_json,
         authority_root=authority_root,
     )
-    if _digest(_material(fresh_target, fresh_science)) != binding_sha256:
+    if _digest(_material(fresh_target, fresh_science, membership)) != binding_sha256:
         raise ProductProposalRiskEvaluationPrecommitError(
             "proposal/scientific authority changed during evaluation precommit"
         )
@@ -785,6 +861,7 @@ def issue_product_proposal_risk_evaluation_precommit(
             record=final_record,
             target=fresh_target,
             science=fresh_science,
+            membership=membership,
             expected_binding_sha256=binding_sha256,
         )
 
@@ -817,7 +894,7 @@ def resolve_product_proposal_risk_evaluation_precommit(
         sampling_manifest_json=sampling_manifest_json,
         authority_root=authority_root,
     )
-    if _digest(_material(target, science)) != binding_sha256:
+    if _digest(_material(target, science, membership)) != binding_sha256:
         raise ProductProposalRiskEvaluationPrecommitError(
             "requested evaluation precommit differs from current target/science roots"
         )
@@ -844,6 +921,7 @@ def resolve_product_proposal_risk_evaluation_precommit(
             record=record,
             target=target,
             science=science,
+            membership=membership,
             expected_binding_sha256=binding_sha256,
         )
 
@@ -863,6 +941,7 @@ _PROPOSAL_RISK_EVALUATION_PRECOMMIT_HELPER_WITNESSES = tuple(
         "_text",
         "_sha",
         "_decimal_text",
+        "_instant",
         "_canonical_json",
         "_digest",
     )

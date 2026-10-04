@@ -21,6 +21,7 @@ from autosport.causal_collector import (
 )
 from autosport.agent_loop import AgentLoopPhase, AgentLoopRuntime, ExternalEffectState
 from autosport.collector_service import HeadlessCollectorService
+import autosport.continuous_session as continuous_session_module
 from autosport.continuous_session import (
     ContinuousSessionCoordinator,
     ContinuousSessionError,
@@ -637,6 +638,97 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 self.assertEqual(durable.balance, Decimal("90"))
                 self.assertEqual(durable.tickets[ticket.ticket_id].status.value, "open")
                 self.assertEqual(coordinator.status().cycles_completed, 1)
+            finally:
+                store.close()
+
+    def test_settlement_scope_rebind_cannot_authorize_legacy_ticket_pnl(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:scope-rebind",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+            )
+            book.save(root / "paper_book.json")
+            authority = _OutcomeAuthority(
+                SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="provider-result:scope-rebind",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="scope-rebind-outcome",
+                    evidence_sha256="0" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                coordinator._open_quote_keys_for_book = (
+                    lambda *_args, **_kwargs: {leg.quote_key}
+                )
+                with patch.object(
+                    continuous_session_module,
+                    "_canonical_open_quote_keys_for_book",
+                    lambda *_args, **_kwargs: {leg.quote_key},
+                ):
+                    result = coordinator.tick()
+                self.assertEqual(result.settled_ticket_ids, ())
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("90"))
+                self.assertEqual(durable.tickets[ticket.ticket_id].status.value, "open")
+            finally:
+                store.close()
+
+    def test_settlement_scope_injection_argument_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "settlement scope origin is internal product authority",
+                ):
+                    coordinator._settle(
+                        resolutions=(),
+                        settled_at=clock(),
+                        _settlement_scope_resolver=lambda *_args: set(),
+                    )
             finally:
                 store.close()
 

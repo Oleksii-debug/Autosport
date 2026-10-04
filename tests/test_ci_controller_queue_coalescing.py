@@ -3490,6 +3490,47 @@ def test_active_run_reader_rejects_provider_page_larger_than_requested_bound(
         api._active_runs_for_status("queued")
 
 
+def test_active_run_reader_rejects_total_count_smaller_than_page(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+
+    def run_payload(run_id: int) -> dict[str, object]:
+        return {
+            "id": run_id,
+            "head_sha": HEAD,
+            "name": "CI",
+            "status": "queued",
+            "pull_requests": [{"number": 303}],
+            "head_branch": "feature/head",
+            "head_repository": {"full_name": "owner/repo"},
+        }
+
+    def fake_request(
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ) -> object:
+        assert "per_page=100&page=1" in path
+        assert method == "GET"
+        assert not allowed_http_errors
+        return {
+            "total_count": 1,
+            "workflow_runs": [run_payload(1), run_payload(2)],
+        }
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    with pytest.raises(CancellationError, match="invalid workflow-runs total_count"):
+        api._active_runs_for_status("queued")
+
+
 def test_sweep_decision_helpers_are_captured_before_active_run_callback_rebind(
     monkeypatch,
 ) -> None:

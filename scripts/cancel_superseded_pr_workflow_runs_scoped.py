@@ -563,49 +563,82 @@ class WorkflowScopedGitHubApi(GitHubApi):
         pull_request,
         qualification_state_reader,
     ):
+        def freeze_default_metadata(function):
+            positional = getattr(function, "__defaults__", None)
+            keyword = getattr(function, "__kwdefaults__", None)
+            keyword_items = tuple(keyword.items()) if keyword is not None else ()
+            return positional, keyword, keyword_items
+
+        def default_metadata_current(function, snapshot) -> bool:
+            positional, keyword, keyword_items = snapshot
+            if getattr(function, "__defaults__", None) is not positional:
+                return False
+            current_keyword = getattr(function, "__kwdefaults__", None)
+            if current_keyword is not keyword:
+                return False
+            if keyword is None:
+                return True
+            if len(current_keyword) != len(keyword_items):
+                return False
+            return all(
+                key in current_keyword and current_keyword[key] is value
+                for key, value in keyword_items
+            )
+
         base_cancel_code = getattr(base_cancel, "__code__", None)
+        base_cancel_defaults = freeze_default_metadata(base_cancel)
         qualification_state_reader_code = getattr(
             qualification_state_reader,
             "__code__",
             None,
+        )
+        qualification_state_reader_defaults = freeze_default_metadata(
+            qualification_state_reader
         )
         helper_dispatch = (
             (
                 "_request",
                 request_impl,
                 getattr(request_impl, "__code__", None),
+                freeze_default_metadata(request_impl),
             ),
             (
                 "_historical_associated_pr_number",
                 historical_associated_pr_number,
                 getattr(historical_associated_pr_number, "__code__", None),
+                freeze_default_metadata(historical_associated_pr_number),
             ),
             (
                 "_historical_head_has_no_associated_prs",
                 historical_head_has_no_associated_prs,
                 getattr(historical_head_has_no_associated_prs, "__code__", None),
+                freeze_default_metadata(historical_head_has_no_associated_prs),
             ),
             (
                 "_canonical_branch_head",
                 canonical_branch_head,
                 getattr(canonical_branch_head, "__code__", None),
+                freeze_default_metadata(canonical_branch_head),
             ),
             (
                 "live_pr_qualification",
                 live_pr_qualification,
                 getattr(live_pr_qualification, "__code__", None),
+                freeze_default_metadata(live_pr_qualification),
             ),
             (
                 "_pull_request",
                 pull_request,
                 getattr(pull_request, "__code__", None),
+                freeze_default_metadata(pull_request),
             ),
         )
         if (
-            qualification_state_reader_code is None
+            base_cancel_code is None
+            or qualification_state_reader_code is None
             or any(
                 implementation_code is None
-                for _, _, implementation_code in helper_dispatch
+                for _, _, implementation_code, _ in helper_dispatch
             )
         ):
             raise RuntimeError(
@@ -615,29 +648,44 @@ class WorkflowScopedGitHubApi(GitHubApi):
         def cancel(self, run_id: int) -> None:
             """Revalidate synthetic candidate identity at the irreversible boundary."""
 
-            if getattr(base_cancel, "__code__", None) is not base_cancel_code:
+            if (
+                getattr(base_cancel, "__code__", None) is not base_cancel_code
+                or not default_metadata_current(base_cancel, base_cancel_defaults)
+                or getattr(qualification_state_reader, "__code__", None)
+                is not qualification_state_reader_code
+                or not default_metadata_current(
+                    qualification_state_reader,
+                    qualification_state_reader_defaults,
+                )
+            ):
                 raise CancellationError(
                     "canonical base cancellation authority changed"
                 )
 
             def require_helper_dispatch(name: str) -> None:
                 match = None
-                for helper_name, expected, expected_code in helper_dispatch:
+                for (
+                    helper_name,
+                    expected,
+                    expected_code,
+                    expected_defaults,
+                ) in helper_dispatch:
                     if helper_name != name:
                         continue
                     if match is not None:
                         raise CancellationError(
                             "scoped cancellation revalidation dispatch changed"
                         )
-                    match = (expected, expected_code)
+                    match = (expected, expected_code, expected_defaults)
                 if match is None:
                     raise CancellationError(
                         "scoped cancellation revalidation dispatch changed"
                     )
-                expected, expected_code = match
+                expected, expected_code, expected_defaults = match
                 bound = getattr(self, name, None)
                 if (
                     getattr(expected, "__code__", None) is not expected_code
+                    or not default_metadata_current(expected, expected_defaults)
                     or getattr(bound, "__self__", None) is not self
                     or getattr(bound, "__func__", None) is not expected
                 ):
@@ -645,7 +693,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
                         "scoped cancellation revalidation dispatch changed"
                     )
 
-            for name, _, _ in helper_dispatch:
+            for name, _, _, _ in helper_dispatch:
                 require_helper_dispatch(name)
 
             # Keep the candidate key identical to the run selected by the controller.

@@ -178,10 +178,32 @@ class ScenarioSearchProbabilityTruthTests(unittest.TestCase):
             seed=41,
         )
 
+        scaled_first = ScenarioGroup(
+            "e1-winner",
+            (
+                ScenarioOutcome(a1.quote_key, Decimal("0.60")),
+                ScenarioOutcome(b1.quote_key, Decimal("0.400")),
+            ),
+        )
+        scaled_second = ScenarioGroup(
+            "e2-winner",
+            (
+                ScenarioOutcome(a2.quote_key, Decimal("0.30")),
+                ScenarioOutcome(b2.quote_key, Decimal("0.700")),
+            ),
+        )
+
         left = engine.analyse(tickets, [first, second])
         right = engine.analyse(tickets, [reversed_second, reversed_first])
+        scaled = engine.analyse(tickets, [scaled_first, scaled_second])
 
         self.assertEqual(left, right)
+        self.assertEqual(left, scaled)
+        self.assertEqual(_integer_probability_weights(first.outcomes), (3, 2))
+        self.assertEqual(
+            _integer_probability_weights(first.outcomes),
+            _integer_probability_weights(scaled_first.outcomes),
+        )
         self.assertEqual(left.mode, "bounded-approximation")
         self.assertEqual(left.expected_mode, "sampled-independent-groups")
 

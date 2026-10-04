@@ -132,6 +132,36 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(trusted[0].ingest_ts, self.RECEIVE_TIME)
             store.close()
 
+    def test_live_ingestion_rejects_store_subclass_receipt_override(self) -> None:
+        class ForgingStore(SQLiteMarketStore):
+            def _append_live_batch_accepted(self, events):
+                forged = tuple(
+                    replace(event, ingest_ts="2000-01-01T00:00:00+00:00")
+                    for event in events
+                )
+                return SQLiteMarketStore._append_live_batch_accepted(self, forged)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = ForgingStore(path)
+            engine = IngestionEngine(
+                MarketEventBus(store),
+                clock=lambda: self.RECEIVE_TIME,
+            )
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "live ingestion requires an exact SQLiteMarketStore",
+            ):
+                engine.poll_once(
+                    InMemoryProvider("provider-a", [self._quote(sequence=1)]),
+                    max_items=10,
+                )
+
+            self.assertEqual(store.events(), [])
+            self.assertEqual(store.trusted_live_events(), [])
+            store.close()
+
     def test_store_subclass_cannot_forge_live_bootstrap_or_replay_authority(self) -> None:
         class ForgingStore(SQLiteMarketStore):
             def trusted_live_events(self):

@@ -411,11 +411,83 @@ class _CanonicalDesktopApplicationStore(_JsonAtomicStore):
         return item
 
     def progress(self, delta: CollectorDelta) -> dict[str, Any] | None:
-        item = self._read()["applications"].get(delta.delta_id)
+        delta.validate()
+        raw = self._read()
+        applications = raw.get("applications")
+        if type(applications) is not dict:
+            raise ApplicationReceiptError(
+                "canonical desktop application index is malformed"
+            )
+        item = applications.get(delta.delta_id)
         if item is None:
             return None
-        if item.get("canonical_event_digest") != delta.canonical_event_digest:
-            raise ApplicationReceiptError("canonical application digest conflicts with delta")
+        if type(item) is not dict:
+            raise ApplicationReceiptError(
+                "canonical desktop application entry is malformed"
+            )
+        expected_receipt_id = (
+            f"canonical-desktop:{delta.delta_id}:{delta.canonical_event_digest[:16]}"
+        )
+        expected_identity = {
+            "delta_id": delta.delta_id,
+            "canonical_event_digest": delta.canonical_event_digest,
+            "source_id": delta.source_id,
+            "source_cursor": delta.source_cursor,
+            "receipt_id": expected_receipt_id,
+        }
+        for field_name, expected in expected_identity.items():
+            if item.get(field_name) != expected:
+                raise ApplicationReceiptError(
+                    f"canonical application progress conflicts on {field_name}"
+                )
+        try:
+            prepared = _instant(item.get("prepared_at"), "prepared_at")
+            available = _instant(
+                delta.desktop_available_at,
+                "desktop_available_at",
+            )
+            health_before = self._health_state(item.get("health_before"))
+            health_after = self._health_state(item.get("health_after"))
+        except (TypeError, ValueError) as exc:
+            raise ApplicationReceiptError(
+                "canonical application progress is malformed"
+            ) from exc
+        if prepared < available:
+            raise ApplicationReceiptError(
+                "canonical application preparation predates desktop availability"
+            )
+        if (
+            health_before.source_id != delta.source_id
+            or health_after.source_id != delta.source_id
+        ):
+            raise ApplicationReceiptError(
+                "canonical application health source identity conflicts with delta"
+            )
+        market_applied = item.get("market_applied")
+        health_applied = item.get("health_applied")
+        if type(market_applied) is not bool or type(health_applied) is not bool:
+            raise ApplicationReceiptError(
+                "canonical application completion flags are invalid"
+            )
+        if health_applied and not market_applied:
+            raise ApplicationReceiptError(
+                "canonical application health cannot precede market persistence"
+            )
+        completed_at = item.get("completed_at")
+        if completed_at is not None:
+            if not market_applied or not health_applied:
+                raise ApplicationReceiptError(
+                    "canonical application completed without durable effects"
+                )
+            receipt = self._validated_completed_receipt(
+                delta_id=delta.delta_id,
+                item=item,
+                stored_source_id=delta.source_id,
+            )
+            if _instant(receipt.applied_at, "completed_at") < available:
+                raise ApplicationReceiptError(
+                    "canonical application completion predates desktop availability"
+                )
         return item
 
     def _mark(self, delta: CollectorDelta, field: str) -> None:
@@ -738,6 +810,22 @@ class CanonicalDesktopApplication:
                 health_after=health_after,
             )
 
+        expected_before = self._state.health_before(delta)
+        expected_after = self._state.health_after(delta)
+        reproved_outcome = self._outcome(
+            delta,
+            event,
+            applied_at=progress["prepared_at"],
+            health_before=expected_before,
+        )
+        reproved_after = (
+            reproved_outcome.health_before.after_success(reproved_outcome).to_state()
+        )
+        if reproved_after != expected_after:
+            raise ApplicationReceiptError(
+                "canonical application health transition conflicts with event evidence"
+            )
+
         if not progress.get("market_applied"):
             # MarketEvent is frozen only at the outer dataclass layer; canonical
             # metadata remains a mutable JSON object. External preparation callbacks
@@ -754,8 +842,6 @@ class CanonicalDesktopApplication:
                 raise ApplicationReceiptError("canonical application progress disappeared")
 
         if not progress.get("health_applied"):
-            expected_before = self._state.health_before(delta)
-            expected_after = self._state.health_after(delta)
             current = self.health_store.get(delta.source_id)
             if current == expected_after:
                 self._state.mark_health_applied(delta)
@@ -775,6 +861,12 @@ class CanonicalDesktopApplication:
             else:
                 raise ApplicationReceiptError(
                     "canonical source health changed during desktop application; refusing ambiguous retry"
+                )
+        else:
+            current = self.health_store.get(delta.source_id)
+            if current != expected_after:
+                raise ApplicationReceiptError(
+                    "canonical application health marker lacks its durable post-state"
                 )
 
         self._state.mark_complete(delta, completed_at=self.clock())

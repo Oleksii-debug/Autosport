@@ -57,6 +57,52 @@ from .strategies import (
 from .workspace_lock import WorkspaceEconomicLock
 
 
+_IID_PLAN_RESOLVER = resolve_product_iid_expected_draw_plan
+_IID_PLAN_RESOLVER_CODE = getattr(_IID_PLAN_RESOLVER, "__code__", None)
+_IID_MATERIALIZER = materialize_product_iid_member_market_events
+_IID_MATERIALIZER_CODE = getattr(_IID_MATERIALIZER, "__code__", None)
+_IID_ADMISSION_ISSUER = issue_product_iid_run_admission
+_IID_ADMISSION_ISSUER_CODE = getattr(_IID_ADMISSION_ISSUER, "__code__", None)
+_IID_EXECUTION_RESOLVER = resolve_product_iid_run_execution
+_IID_EXECUTION_RESOLVER_CODE = getattr(_IID_EXECUTION_RESOLVER, "__code__", None)
+_IID_EXPECTED_SEQUENCE = expected_replay_input_payload_sequence_sha256
+_IID_EXPECTED_SEQUENCE_CODE = getattr(_IID_EXPECTED_SEQUENCE, "__code__", None)
+_IID_EXPECTED_MULTISET = expected_replay_consumed_payload_multiset_sha256
+_IID_EXPECTED_MULTISET_CODE = getattr(_IID_EXPECTED_MULTISET, "__code__", None)
+_IID_REPLAY_ENGINE = ReplayEngine
+_IID_EXECUTION_RECEIPT_TYPE = ProductIidRunExecutionReceipt
+
+
+def _require_iid_session_dispatch() -> None:
+    if (
+        resolve_product_iid_expected_draw_plan is not _IID_PLAN_RESOLVER
+        or getattr(_IID_PLAN_RESOLVER, "__code__", None)
+        is not _IID_PLAN_RESOLVER_CODE
+        or materialize_product_iid_member_market_events is not _IID_MATERIALIZER
+        or getattr(_IID_MATERIALIZER, "__code__", None)
+        is not _IID_MATERIALIZER_CODE
+        or issue_product_iid_run_admission is not _IID_ADMISSION_ISSUER
+        or getattr(_IID_ADMISSION_ISSUER, "__code__", None)
+        is not _IID_ADMISSION_ISSUER_CODE
+        or resolve_product_iid_run_execution is not _IID_EXECUTION_RESOLVER
+        or getattr(_IID_EXECUTION_RESOLVER, "__code__", None)
+        is not _IID_EXECUTION_RESOLVER_CODE
+        or expected_replay_input_payload_sequence_sha256
+        is not _IID_EXPECTED_SEQUENCE
+        or getattr(_IID_EXPECTED_SEQUENCE, "__code__", None)
+        is not _IID_EXPECTED_SEQUENCE_CODE
+        or expected_replay_consumed_payload_multiset_sha256
+        is not _IID_EXPECTED_MULTISET
+        or getattr(_IID_EXPECTED_MULTISET, "__code__", None)
+        is not _IID_EXPECTED_MULTISET_CODE
+        or ReplayEngine is not _IID_REPLAY_ENGINE
+        or ProductIidRunExecutionReceipt is not _IID_EXECUTION_RECEIPT_TYPE
+    ):
+        raise ProductIidDrawPlanError(
+            "IID session execution authority dispatch changed"
+        )
+
+
 def _bind_canonical_settlement_engine(method):
     """Inject the import-time exact SettlementEngine through a closure-owned seam."""
 
@@ -371,8 +417,9 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
         RunRegistry or economic state mutation.
         """
 
+        _require_iid_session_dispatch()
         with WorkspaceEconomicLock(self.workspace):
-            plan = resolve_product_iid_expected_draw_plan(
+            plan = _IID_PLAN_RESOLVER(
                 membership,
                 registry_path=registry_path,
                 workspace=self.workspace,
@@ -395,7 +442,8 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
             dataset._assert_sport_scope(corpus_events)
             if self.research_plan is not None:
                 self.research_plan.preflight(corpus_events)
-            member_events = materialize_product_iid_member_market_events(
+            _require_iid_session_dispatch()
+            member_events = _IID_MATERIALIZER(
                 plan,
                 member_index=member_index,
                 market_events=corpus_events,
@@ -404,9 +452,10 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
             if self.research_plan is not None:
                 self.research_plan.preflight(list(member_events))
 
-            expected_sequence = expected_replay_input_payload_sequence_sha256(draw)
-            expected_multiset = expected_replay_consumed_payload_multiset_sha256(draw)
-            preflight = ReplayEngine(member_events).run(
+            _require_iid_session_dispatch()
+            expected_sequence = _IID_EXPECTED_SEQUENCE(draw)
+            expected_multiset = _IID_EXPECTED_MULTISET(draw)
+            preflight = _IID_REPLAY_ENGINE(member_events).run(
                 lambda _event: None,
                 speed=0.0,
                 run_id=draw.member_id,
@@ -427,7 +476,8 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
                     "or current-state suppression"
                 )
 
-            admission = issue_product_iid_run_admission(
+            _require_iid_session_dispatch()
+            admission = _IID_ADMISSION_ISSUER(
                 membership,
                 registry_path=registry_path,
                 workspace=self.workspace,
@@ -474,6 +524,7 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
             if outcome_lineage is not None:
                 self.registry.assert_outcome_lineage_compatible(outcome_lineage)
 
+            _require_iid_session_dispatch()
             result = self._run_dataset_locked(
                 dataset,
                 market_events=list(member_events),
@@ -487,7 +538,8 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
                 run_id=draw.member_id,
                 sampling_draw_admission_receipt_sha256=admission.receipt_sha256,
             )
-            execution = resolve_product_iid_run_execution(
+            _require_iid_session_dispatch()
+            execution = _IID_EXECUTION_RESOLVER(
                 membership,
                 registry_path=registry_path,
                 workspace=self.workspace,
@@ -498,7 +550,7 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
                 authority_root=authority_root,
             )
             if (
-                type(execution) is not ProductIidRunExecutionReceipt
+                type(execution) is not _IID_EXECUTION_RECEIPT_TYPE
                 or execution.member_id != draw.member_id
                 or execution.expected_draw_plan_sha256 != plan.plan_sha256
                 or execution.execution_consumption_proven is not True
@@ -507,6 +559,7 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
                 raise ProductIidDrawPlanError(
                     "IID member run completed without canonical execution proof"
                 )
+            _require_iid_session_dispatch()
             return IidMemberSessionResult(result, execution)
 
     @_seal_settlement_consumer_entry

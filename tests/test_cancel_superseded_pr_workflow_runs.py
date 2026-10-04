@@ -740,6 +740,48 @@ def test_base_active_run_scan_rejects_parser_kwdefault_rebase(monkeypatch) -> No
     assert requested == []
 
 
+def test_base_active_run_scan_rejects_inflight_request_default_rebase(
+    monkeypatch,
+) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    request_impl = controller_module.GitHubApi._request
+    defaults = request_impl.__kwdefaults__
+    assert defaults is not None
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return b'{"total_count":0,"workflow_runs":[]}'
+
+    def mutating_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        assert "status=queued" in request.full_url
+        monkeypatch.setitem(defaults, "_json_parse_int", str)
+        return FakeResponse()
+
+    monkeypatch.setitem(
+        request_impl.__globals__,
+        "urlopen",
+        mutating_urlopen,
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="workflow-runs request dispatch changed",
+    ):
+        api._active_runs_for_status("queued")
+
+
 def test_base_active_runs_rejects_status_reader_kwdefault_rebase(monkeypatch) -> None:
     api = controller_module.GitHubApi(
         repository="owner/repo",

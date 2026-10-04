@@ -636,7 +636,8 @@ def test_non_pr_source_events_cannot_evict_pending_pr_cleanup_controller() -> No
     assert "github.event.workflow_run.id" not in concurrency
     assert "'non-pr'" in concurrency
     assert "concurrency is evaluated before the job-level pull_request guard" in workflow
-    assert "coalesces skipped non-PR controllers" in workflow\n    assert "non-PR lane is scheduler isolation only" in workflow
+    assert "coalesces skipped non-PR controllers" in workflow
+    assert "non-PR lane is scheduler isolation only" in workflow
 
 def test_main_captures_sweep_before_snapshot_callback_global_rebind(
     monkeypatch,

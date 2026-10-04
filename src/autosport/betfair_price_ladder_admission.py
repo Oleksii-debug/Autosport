@@ -87,7 +87,22 @@ def _receipt_timestamp(value: str) -> datetime:
 
 
 def _on_grid(price: Decimal, lower: Decimal, step: Decimal) -> bool:
-    return (price - lower) % step == 0
+    """Return exact tick membership without consulting mutable Decimal context.
+
+    Decimal arithmetic operators obey the process/thread decimal Context. Price
+    admissibility is provider truth and must not change because unrelated code
+    lowered precision or changed traps. as_integer_ratio() is exact and
+    context-independent, so perform the divisibility proof over integers.
+    """
+
+    price_num, price_den = price.as_integer_ratio()
+    lower_num, lower_den = lower.as_integer_ratio()
+    step_num, step_den = step.as_integer_ratio()
+    if step_num <= 0:
+        raise ValueError("price ladder step must be positive")
+    delta_num = price_num * lower_den - lower_num * price_den
+    delta_den = price_den * lower_den
+    return (delta_num * step_den) % (delta_den * step_num) == 0
 
 
 def _classic_admissible(price: Decimal) -> bool:

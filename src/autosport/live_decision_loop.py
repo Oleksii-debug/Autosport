@@ -2535,7 +2535,7 @@ class PersistentLiveDecisionLoop:
         if owns_store:
             store = SQLiteMarketStore(self.workspace / "market.db")
 
-        def publish_pending() -> None:
+        def publish_pending() -> _Progress:
             with WorkspaceEconomicLock(self.workspace):
                 durable_control = self._load_control()
                 if durable_control is None:
@@ -2628,9 +2628,11 @@ class PersistentLiveDecisionLoop:
                     gate=gate,
                 )
                 atomic_write_json(self.progress_path, pending.to_dict())
+                return pending
+
         try:
             if market_append_generation is None:
-                publish_pending()
+                pending = publish_pending()
             else:
                 assert store is not None
                 # The guard spans both the complete current-tail proof and durable
@@ -2665,7 +2667,7 @@ class PersistentLiveDecisionLoop:
                             "decision-visible market state is not durable at "
                             "sampled append frontier"
                         )
-                    publish_pending()
+                    pending = publish_pending()
         finally:
             if owns_store:
                 assert store is not None

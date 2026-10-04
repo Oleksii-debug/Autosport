@@ -232,13 +232,14 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             second = runtime.execute(
                 prepared=current_prepared,
                 trigger_id="trigger-1",
-                started_at=STARTED_AT,
+                started_at="2026-09-20T06:00:00.200000+00:00",
                 materialize_exposure=True,
                 observations={"a1": registered.as_observation()},
                 evidence_registry=registry,
             )
 
             self.assertEqual(first.run.run_id, second.run.run_id)
+            self.assertEqual(second.run.started_at, STARTED_AT)
             self.assertEqual(first.ticket_ids, second.ticket_ids)
             self.assertEqual(len(book.tickets), 1)
             ticket = next(iter(book.tickets.values()))

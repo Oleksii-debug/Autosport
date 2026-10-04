@@ -578,7 +578,6 @@ class PaperExecutionAdoptionRuntime:
             or payload["model_fingerprint"] != self.config.fingerprint
             or payload["action_ids"]
             != [action.action_id for action in prepared.execution_plan.actions]
-            or payload["observation_evidence_ids"] != {}
         ):
             raise PaperExecutionAdoptionError(
                 "durable PAPER execution reservation conflicts with prepared action"

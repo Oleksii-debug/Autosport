@@ -20,6 +20,16 @@ class ProductProposalRiskExecutionEvidenceTargetChronologyTests(unittest.TestCas
     def _row(self, member_id: str, **kwargs: object):
         return _row_impl(self.precommit, member_id, **kwargs)
 
+    def _result(self):
+        return derive_product_proposal_risk_execution_evidence(
+            self.precommit,
+            (
+                self._row("member-a", source="source-a"),
+                self._row("member-b", source="source-b"),
+            ),
+            evaluated_at="2026-10-04T10:02:00+00:00",
+        )
+
     def test_product_precommit_slots_reject_object_setattr_mutation(self) -> None:
         original = self.precommit.ruin_threshold
         with self.assertRaisesRegex(AttributeError, "write-once product evidence"):
@@ -33,6 +43,19 @@ class ProductProposalRiskExecutionEvidenceTargetChronologyTests(unittest.TestCas
         with self.assertRaisesRegex(AttributeError, "write-once product evidence"):
             object.__setattr__(row, "minimum_equity", Decimal("0"))
         self.assertEqual(row.minimum_equity, original)
+
+    def test_product_result_slots_reject_object_setattr_mutation(self) -> None:
+        result = self._result()
+        original = result.ruin_probability_upper_bound
+        with self.assertRaisesRegex(AttributeError, "write-once product evidence"):
+            object.__setattr__(
+                result,
+                "ruin_probability_upper_bound",
+                Decimal("0"),
+            )
+        self.assertEqual(result.ruin_probability_upper_bound, original)
+        self.assertTrue(result.execution_evidence_identity_proven)
+        self.assertFalse(result.proposal_target_risk_qualified)
 
     def test_member_assertion_after_reveal_but_before_target_is_rejected(self) -> None:
         pre_target = self._row(

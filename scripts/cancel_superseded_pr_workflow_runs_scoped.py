@@ -923,6 +923,9 @@ class WorkflowScopedGitHubApi(GitHubApi):
         _run_parser_code=parse_run.__code__,
         _run_parser_defaults=parse_run.__defaults__,
         _run_parser_kwdefaults=parse_run.__kwdefaults__,
+        _run_parser_kwdefault_items=tuple(parse_run.__kwdefaults__.items())
+        if parse_run.__kwdefaults__ is not None
+        else (),
         _workflow_run_type=WorkflowRun,
     ) -> tuple[WorkflowRun, ...]:
         if (
@@ -947,6 +950,18 @@ class WorkflowScopedGitHubApi(GitHubApi):
             is not _run_parser_defaults
             or getattr(_run_parser, "__kwdefaults__", None)
             is not _run_parser_kwdefaults
+            or (
+                _run_parser_kwdefaults is not None
+                and (
+                    len(_run_parser_kwdefaults)
+                    != len(_run_parser_kwdefault_items)
+                    or any(
+                        key not in _run_parser_kwdefaults
+                        or _run_parser_kwdefaults[key] is not value
+                        for key, value in _run_parser_kwdefault_items
+                    )
+                )
+            )
         ):
             raise CancellationError("active workflow pagination authority is unavailable")
         workflow_id = object.__getattribute__(
@@ -1003,6 +1018,18 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 is _run_parser_defaults
                 and getattr(_run_parser, "__kwdefaults__", None)
                 is _run_parser_kwdefaults
+                and (
+                    _run_parser_kwdefaults is None
+                    or (
+                        len(_run_parser_kwdefaults)
+                        == len(_run_parser_kwdefault_items)
+                        and all(
+                            key in _run_parser_kwdefaults
+                            and _run_parser_kwdefaults[key] is value
+                            for key, value in _run_parser_kwdefault_items
+                        )
+                    )
+                )
                 and recovery_code is not None
                 and getattr(bound_recovery, "__func__", bound_recovery) is recovery_func
                 and getattr(recovery_func, "__code__", None) is recovery_code

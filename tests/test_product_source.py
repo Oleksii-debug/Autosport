@@ -358,6 +358,86 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             ):
                 source.fetch_catalog_page(None)
 
+    def test_pending_snapshot_rejects_decimal_subclass_before_virtual_dispatch(self) -> None:
+        calls: list[str] = []
+
+        class _HostileDecimal(Decimal):
+            def is_finite(self):
+                calls.append("is_finite")
+                raise AssertionError("Decimal subclass virtual dispatch must not run")
+
+        quote = _quote()
+        object.__setattr__(quote, "decimal_odds", _HostileDecimal("1.80"))
+        batch = ProviderBatch(
+            source_id=_SOURCE_ID,
+            quotes=(),
+            cursor="snapshot-1",
+        )
+        object.__setattr__(batch, "quotes", (quote,))
+
+        class _ProviderWithHostileOdds:
+            source_id = _SOURCE_ID
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                del max_items
+                return batch
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _ProviderWithHostileOdds(),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "non-canonical acquisition value types",
+            ):
+                source.fetch_catalog_page(None)
+
+        self.assertEqual(calls, [])
+
+    def test_pending_snapshot_rejects_string_subclass_before_validation_dispatch(self) -> None:
+        calls: list[str] = []
+
+        class _HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("str subclass validation dispatch must not run")
+
+        quote = _quote()
+        object.__setattr__(quote, "provider_market_id", _HostileText("book:h2h"))
+        batch = ProviderBatch(
+            source_id=_SOURCE_ID,
+            quotes=(),
+            cursor="snapshot-1",
+        )
+        object.__setattr__(batch, "quotes", (quote,))
+
+        class _ProviderWithHostileText:
+            source_id = _SOURCE_ID
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                del max_items
+                return batch
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _ProviderWithHostileText(),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "non-canonical acquisition value types",
+            ):
+                source.fetch_catalog_page(None)
+
+        self.assertEqual(calls, [])
+
     def test_pending_snapshot_freezes_mutable_provider_metadata_before_use(self) -> None:
         quote = _quote()
         quote.metadata["nested"] = {"value": "original"}

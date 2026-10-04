@@ -2283,22 +2283,36 @@ class AutosportWebBridge:
                 "The WebView bridge controller does not expose its required operations"
             )
 
+        controller_record = (
+            resolved_controller,
+            controller_type,
+            controller_operations,
+        )
         object.__setattr__(self, "_controller", resolved_controller)
         object.__setattr__(self, "_controller_witness", resolved_controller)
+        object.__setattr__(self, "_controller_record_witness", controller_record)
+        object.__setattr__(
+            self,
+            "_controller_workspace_witness",
+            getattr(resolved_controller, "workspace", None)
+            if controller_type is not None
+            else None,
+        )
         self._trust_lock = threading.RLock()
         self._trusted_window: object | None = None
         self._trusted_url: str | None = None
         self._trust_revoked = False
         self._host_shutdown = False
         with _WEB_BRIDGE_CONTROLLER_REGISTRY_LOCK:
-            _WEB_BRIDGE_CONTROLLER_REGISTRY[self] = (
-                resolved_controller,
-                controller_type,
-                controller_operations,
-            )
+            _WEB_BRIDGE_CONTROLLER_REGISTRY[self] = controller_record
 
     def __setattr__(self, name: str, value: object) -> None:
-        if name in {"_controller", "_controller_witness"} and hasattr(
+        if name in {
+            "_controller",
+            "_controller_witness",
+            "_controller_record_witness",
+            "_controller_workspace_witness",
+        } and hasattr(
             self, "_controller_witness"
         ):
             raise WindowsWebBridgeTrustError(
@@ -2340,6 +2354,11 @@ class AutosportWebBridge:
             raise WindowsWebBridgeTrustError(
                 "The WebView bridge lost its construction-time controller authority"
             )
+        if record is not getattr(self, "_controller_record_witness", None):
+            self._trust_revoked = True
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge construction-time controller authority record changed"
+            )
         controller, controller_type, operations = record
         if self._controller is not controller or self._controller_witness is not controller:
             self._trust_revoked = True
@@ -2348,6 +2367,14 @@ class AutosportWebBridge:
             )
 
         if controller_type is not None:
+            if (
+                getattr(controller, "workspace", None)
+                is not getattr(self, "_controller_workspace_witness", None)
+            ):
+                self._trust_revoked = True
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge canonical controller workspace authority changed"
+                )
             for name, expected, expected_code in _base_witnesses:
                 current_base = getattr(_base_type, name, None)
                 if (

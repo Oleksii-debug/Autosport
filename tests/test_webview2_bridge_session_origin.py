@@ -382,6 +382,66 @@ def test_bridge_rejects_controller_registry_global_rebind(tmp_path) -> None:
     bridge._close_from_host()
 
 
+def test_bridge_rejects_controller_registry_record_downgrade(tmp_path) -> None:
+    controller = AutosportWebController(tmp_path / "workspace")
+    bridge = AutosportWebBridge(controller)
+    window = _Window()
+    bridge._bind_trusted_window(window)
+    module = sys.modules["autosport.windows_webview_shell"]
+    registry = module._WEB_BRIDGE_CONTROLLER_REGISTRY
+    original_record = registry[bridge]
+
+    controller.__dict__["dispatch"] = lambda raw: {
+        "request_id": raw.get("request_id", "forged"),
+        "status": "forged",
+    }
+    registry[bridge] = (controller, None, ())
+    try:
+        with pytest.raises(
+            WindowsWebBridgeTrustError,
+            match="construction-time controller authority record changed",
+        ):
+            bridge.dispatch(
+                {
+                    "request_id": "r-registry-record",
+                    "action_id": "noop",
+                    "payload": {},
+                }
+            )
+    finally:
+        registry[bridge] = original_record
+        controller.__dict__.pop("dispatch", None)
+
+    assert bridge._trust_revoked is True
+    bridge._close_from_host()
+
+
+def test_bridge_rejects_canonical_controller_workspace_rebind(tmp_path) -> None:
+    original_workspace = tmp_path / "original"
+    controller = AutosportWebController(original_workspace)
+    bridge = AutosportWebBridge(controller)
+    window = _Window()
+    bridge._bind_trusted_window(window)
+
+    controller.workspace = tmp_path / "replacement"
+    try:
+        with pytest.raises(
+            WindowsWebBridgeTrustError,
+            match="controller workspace authority changed",
+        ):
+            bridge.get_state()
+        with pytest.raises(
+            WindowsWebBridgeTrustError,
+            match="controller workspace authority changed",
+        ):
+            bridge._runtime_witness_path()
+    finally:
+        controller.workspace = original_workspace
+
+    assert bridge._trust_revoked is True
+    bridge._close_from_host()
+
+
 def test_bridge_detects_controller_rebind_during_document_trust_proof() -> None:
     original = _Controller()
     replacement = _Controller()

@@ -60,7 +60,6 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
             clock=lambda: "2026-09-14T08:00:10+00:00",
         )
 
-        original_append = SQLiteMarketStore.append_batch_accepted
         append_attempts = 0
         failed_chunk: tuple[str, ...] | None = None
         persisted_chunks: list[tuple[str, ...]] = []
@@ -74,12 +73,11 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
                 failed_chunk = selection_ids
                 raise sqlite3.OperationalError("injected transient storage failure")
             persisted_chunks.append(selection_ids)
-            return original_append(store, materialized)
 
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(
                 SQLiteMarketStore,
-                "append_batch_accepted",
+                "_before_live_append_attempt",
                 new=fail_first_append,
             ):
                 result = observe_workspace_once(
@@ -143,7 +141,6 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
             clock=lambda: "2026-09-14T08:00:10+00:00",
         )
 
-        original_append = SQLiteMarketStore.append_batch_accepted
         append_attempts = 0
 
         def fail_first_two_appends(store, events):
@@ -152,13 +149,12 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
             append_attempts += 1
             if append_attempts <= 2:
                 raise sqlite3.OperationalError("injected repeated storage failure")
-            return original_append(store, materialized)
 
         with tempfile.TemporaryDirectory() as tmp:
             market_path = Path(tmp) / "market.db"
             with patch.object(
                 SQLiteMarketStore,
-                "append_batch_accepted",
+                "_before_live_append_attempt",
                 new=fail_first_two_appends,
             ):
                 with self.assertRaises(sqlite3.OperationalError):
@@ -261,14 +257,13 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
             clock=lambda: "2026-09-14T08:00:10+00:00",
         )
 
-        original_append = SQLiteMarketStore.append_batch_accepted
         append_attempts = 0
         health_success_attempts = 0
 
         def track_append(store, events):
             nonlocal append_attempts
+            tuple(events)
             append_attempts += 1
-            return original_append(store, tuple(events))
 
         def fail_health_success(health_store, *args, **kwargs):
             nonlocal health_success_attempts
@@ -279,7 +274,7 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
             market_path = Path(tmp) / "market.db"
             with patch.object(
                 SQLiteMarketStore,
-                "append_batch_accepted",
+                "_before_live_append_attempt",
                 new=track_append,
             ), patch.object(
                 SourceHealthStore,

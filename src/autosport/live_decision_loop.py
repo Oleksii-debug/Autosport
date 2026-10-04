@@ -1196,8 +1196,49 @@ class PersistentLiveDecisionLoop:
                         ),
                     )
             self._observe(self.mirror_updates)
+            # Provider observation is another external-I/O boundary.  Re-resolve
+            # durable workspace authorities before draining invalidations or doing
+            # any decision work so a peer mutation that happened while the poll was
+            # in flight cannot flow through stale process-local state.
+            self._refresh_cycle_authorities()
+            if self.stopped:
+                return LiveCycleResult(
+                    LiveCycleStatus.STOPPED,
+                    detail=(
+                        "durable STOP became active during provider observation; "
+                        "no economic decision was published"
+                    ),
+                )
+            if self.paused:
+                return LiveCycleResult(
+                    LiveCycleStatus.PAUSED,
+                    detail=(
+                        "durable PAUSE became active during provider observation; "
+                        "no economic decision was published"
+                    ),
+                )
         except ProviderUnavailableError as exc:
             self._needs_cache_rebuild = True
+            # A provider failure does not outrank a concurrent operator control or
+            # peer decision/registry publication.  Fence those authorities before
+            # turning the failure into durable provider-gap economic evidence.
+            self._refresh_cycle_authorities()
+            if self.stopped:
+                return LiveCycleResult(
+                    LiveCycleStatus.STOPPED,
+                    detail=(
+                        "durable STOP became active during failed provider observation; "
+                        "provider gap was not published"
+                    ),
+                )
+            if self.paused:
+                return LiveCycleResult(
+                    LiveCycleStatus.PAUSED,
+                    detail=(
+                        "durable PAUSE became active during failed provider observation; "
+                        "provider gap was not published"
+                    ),
+                )
             return self._persist_provider_gap(
                 self._sample_clock(),
                 exc,

@@ -1030,6 +1030,21 @@ def test_event_tamper_is_detected(tmp_path):
         ledger.events()
 
 
+def test_unterminated_final_ledger_record_fails_closed(tmp_path):
+    ledger = _ledger(tmp_path)
+    _record(ledger, _transcript())
+
+    raw = ledger.path.read_bytes()
+    assert raw.endswith(b"\n")
+    ledger.path.write_bytes(raw[:-1])
+
+    with pytest.raises(
+        NvdaManualAcceptanceIntegrityError,
+        match="canonical trailing newline",
+    ):
+        ledger.events()
+
+
 def test_tail_deletion_is_detected_by_anchor(tmp_path):
     transcript = _transcript()
     ledger = _ledger(tmp_path)

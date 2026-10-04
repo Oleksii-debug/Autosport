@@ -504,6 +504,40 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
                         original,
                     )
 
+    def test_constructor_dispatch_rebinding_fails_closed(self) -> None:
+        owners = (
+            ("EconomicGoalStore", proposal_target_authority.EconomicGoalStore),
+            ("JsonlDecisionLedger", proposal_target_authority.JsonlDecisionLedger),
+            (
+                "MonotonicWorkspaceAuthority",
+                proposal_target_authority.MonotonicWorkspaceAuthority,
+            ),
+        )
+        for label, owner in owners:
+            with self.subTest(label=label):
+                original = owner.__init__
+                try:
+                    owner.__init__ = lambda *args, **kwargs: None
+                    with self.assertRaisesRegex(
+                        ProductProposalRiskTargetError,
+                        rf"{label}\.__init__",
+                    ):
+                        proposal_target_authority._require_dispatch()
+                finally:
+                    owner.__init__ = original
+
+    def test_constructor_witness_root_rebinding_fails_closed(self) -> None:
+        original = proposal_target_authority._CONSTRUCTOR_WITNESSES
+        try:
+            proposal_target_authority._CONSTRUCTOR_WITNESSES = ()
+            with self.assertRaisesRegex(
+                ProductProposalRiskTargetError,
+                "constructor witness root",
+            ):
+                proposal_target_authority._require_dispatch()
+        finally:
+            proposal_target_authority._CONSTRUCTOR_WITNESSES = original
+
     def test_direct_construction_is_not_authority(self) -> None:
         with self.assertRaisesRegex(TypeError, "product-issued"):
             ProductProposalRiskTarget()

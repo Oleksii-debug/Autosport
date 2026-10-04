@@ -178,6 +178,36 @@ class ProductProposalRiskEvaluationPrecommitForgeTests(unittest.TestCase):
         finally:
             authority._LOCK_METHOD_WITNESSES = original
 
+    def test_constructor_dispatch_rebinding_fails_closed(self) -> None:
+        owners = (
+            ("EconomicGoalStore", authority.EconomicGoalStore),
+            ("JsonlDecisionLedger", authority.JsonlDecisionLedger),
+        )
+        for label, owner in owners:
+            with self.subTest(label=label):
+                original = owner.__init__
+                try:
+                    owner.__init__ = lambda *args, **kwargs: None
+                    with self.assertRaisesRegex(
+                        authority.ProductProposalRiskEvaluationPrecommitError,
+                        rf"{label}\.__init__",
+                    ):
+                        authority._REQUIRE_DISPATCH_ORIGINAL()
+                finally:
+                    owner.__init__ = original
+
+    def test_constructor_witness_root_rebinding_fails_closed(self) -> None:
+        original = authority._CONSTRUCTOR_WITNESSES
+        try:
+            authority._CONSTRUCTOR_WITNESSES = ()
+            with self.assertRaisesRegex(
+                authority.ProductProposalRiskEvaluationPrecommitError,
+                "dispatch changed",
+            ):
+                authority._REQUIRE_DISPATCH_ORIGINAL()
+        finally:
+            authority._CONSTRUCTOR_WITNESSES = original
+
     def test_decision_record_and_ledger_internal_rebinding_fails_closed(self) -> None:
         original_record = authority.DecisionRecord.to_dict
         try:

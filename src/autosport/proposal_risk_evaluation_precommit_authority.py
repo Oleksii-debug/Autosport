@@ -121,6 +121,20 @@ _LOCK_METHOD_WITNESSES = tuple(
 _LOCK_METHOD_WITNESSES_EXPECTED = _LOCK_METHOD_WITNESSES
 _ENSURE_DURABLE_FILE = ensure_durable_file
 _ENSURE_DURABLE_FILE_CODE = getattr(_ENSURE_DURABLE_FILE, "__code__", None)
+_CONSTRUCTOR_WITNESSES = tuple(
+    (
+        label,
+        owner,
+        owner.__init__,
+        getattr(owner.__init__, "__code__", None),
+    )
+    for label, owner in (
+        ("EconomicGoalStore", EconomicGoalStore),
+        ("PaperRiskPolicy", PaperRiskPolicy),
+        ("JsonlDecisionLedger", JsonlDecisionLedger),
+    )
+)
+_CONSTRUCTOR_WITNESSES_EXPECTED = _CONSTRUCTOR_WITNESSES
 
 _JSON_DUMPS = json.dumps
 _HASHLIB_SHA256 = hashlib.sha256
@@ -470,6 +484,7 @@ def _require_dispatch() -> None:
         or DecisionRecord is not _RECORD_TYPE
         or WorkspaceEconomicLock is not _LOCK_TYPE
         or _LOCK_METHOD_WITNESSES is not _LOCK_METHOD_WITNESSES_EXPECTED
+        or _CONSTRUCTOR_WITNESSES is not _CONSTRUCTOR_WITNESSES_EXPECTED
         or ensure_durable_file is not _ENSURE_DURABLE_FILE
         or getattr(_ENSURE_DURABLE_FILE, "__code__", None)
         is not _ENSURE_DURABLE_FILE_CODE
@@ -500,6 +515,14 @@ def _require_dispatch() -> None:
             raise ProductProposalRiskEvaluationPrecommitError(
                 "proposal risk evaluation precommit WorkspaceEconomicLock "
                 f"authority changed: {name}"
+            )
+
+    for label, owner, expected, code in _CONSTRUCTOR_WITNESSES_EXPECTED:
+        current = owner.__init__
+        if current is not expected or getattr(current, "__code__", None) is not code:
+            raise ProductProposalRiskEvaluationPrecommitError(
+                "proposal risk evaluation precommit constructor "
+                f"authority changed: {label}.__init__"
             )
 
     for name, expected, code in _LEDGER_INTERNAL_METHOD_WITNESSES:

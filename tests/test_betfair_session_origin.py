@@ -630,6 +630,58 @@ def test_semantic_slot_descriptors_cannot_be_class_rebound():
                 setattr(cls, name, property(lambda _self: None))
 
 
+def test_authority_surface_attribute_dispatch_is_sealed():
+    for cls in (
+        BetfairSessionOrigin,
+        BetfairAuthenticatedJurisdiction,
+    ):
+        with pytest.raises(TypeError, match="authority surface is sealed"):
+            cls.__getattribute__ = lambda _self, _name: True
+
+
+def test_direct_origin_getattribute_rebinding_revokes_login_runtime(tmp_path):
+    had_getattribute = "__getattribute__" in BetfairSessionOrigin.__dict__
+    original_getattribute = BetfairSessionOrigin.__dict__.get(
+        "__getattribute__"
+    )
+    secrets = BetfairNonInteractiveLoginSecrets(
+        "app",
+        "user",
+        "password",
+        tmp_path / "missing.crt",
+        tmp_path / "missing.key",
+    )
+    try:
+        # Deliberately bypass the sealing metaclass. Even a behaviorally benign
+        # replacement changes the executable trust graph and must revoke issuance
+        # before certificate/network work can occur.
+        type.__setattr__(
+            BetfairSessionOrigin,
+            "__getattribute__",
+            lambda self, name: object.__getattribute__(self, name),
+        )
+        with pytest.raises(
+            BetfairSessionOriginError,
+            match="canonical Betfair login authority binding changed",
+        ):
+            login_betfair_noninteractive(
+                secrets,
+                jurisdiction=BetfairLoginJurisdiction.GLOBAL_COM,
+            )
+    finally:
+        if had_getattribute:
+            type.__setattr__(
+                BetfairSessionOrigin,
+                "__getattribute__",
+                original_getattribute,
+            )
+        else:
+            type.__delattr__(
+                BetfairSessionOrigin,
+                "__getattribute__",
+            )
+
+
 def test_public_authority_false_getters_are_non_python_and_sealed():
     origin = BetfairSessionOrigin(
         venue_id="betfair",

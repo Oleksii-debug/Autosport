@@ -1137,6 +1137,56 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_settlement_collection_rejects_missing_durable_discovery_chronology(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="result:missing-discovery",
+            )
+            authority = _OutcomeAuthority(
+                SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="result:missing-discovery",
+                    quote_outcomes={"event-1|winner|home": "win"},
+                    evidence_id="missing-discovery",
+                    evidence_sha256="5" * 64,
+                    available_at="2026-09-19T21:19:00+00:00",
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                _Source(
+                    CatalogPage(
+                        source_id="provider-a",
+                        stream_epoch="epoch-1",
+                        cursor="cursor-1",
+                        position=1,
+                        events=(event,),
+                    )
+                ),
+                clock,
+                outcome_authority=authority,
+            )
+            try:
+                coordinator.tick()
+                raw = json.loads((root / "catalog.json").read_text(encoding="utf-8"))
+                raw["events"][event.identity]["settlement_discovered_at"] = None
+                (root / "catalog.json").write_text(
+                    json.dumps(raw, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                calls_after_tick = authority.calls
+                with self.assertRaisesRegex(
+                    ContinuousSessionError,
+                    "lacks durable discovery chronology",
+                ):
+                    coordinator._settlement_resolutions(as_of=clock())
+                self.assertEqual(authority.calls, calls_after_tick)
+            finally:
+                store.close()
+
     def test_outcome_authority_method_retargeting_cannot_change_truth_origin(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

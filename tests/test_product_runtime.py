@@ -17,6 +17,7 @@ from autosport.causal_collector import (
     canonical_event_digest,
     digest_source_payload,
 )
+from autosport.continuous_session import SettlementResolution
 from autosport.domain import MarketEvent
 from autosport.event_lifecycle import CatalogPage
 from autosport.ingestion_health import SourceHealthStore
@@ -416,6 +417,36 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                     )
             finally:
                 _LearningHandoff.prepared_settlement_resolutions = original
+                runtime.close()
+
+    def test_product_status_exposes_pending_settlement_recovery_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=_Source(),
+                clock=_Clock(),
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                resolution = SettlementResolution(
+                    event_identity="provider-a:event-1",
+                    settlement_ref="result:operator-status",
+                    quote_outcomes={"event-1|winner|home": "win"},
+                    evidence_id="operator-status-evidence",
+                    evidence_sha256="d" * 64,
+                    available_at="2026-09-20T13:57:00+00:00",
+                )
+                runtime.coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                status = runtime.status()
+                self.assertEqual(
+                    status.pending_settlement_evidence_ids,
+                    (resolution.evidence_id,),
+                )
+            finally:
                 runtime.close()
 
     def test_settlement_learning_handoff_identity_is_stable_across_restart(self) -> None:

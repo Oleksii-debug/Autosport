@@ -461,9 +461,12 @@ class MarketMirror:
         read of an exact normalized as_of durably issues a causal cutoff by freezing
         the store's product-owned append generation; later appends therefore cannot
         rewrite that already-issued cutoff,
-        even when they carry backdated local clocks. Events whose local observation or
-        ingestion/receipt instant is after as_of are still excluded. Malformed causal
-        clocks fail closed. The reconstructed mirror then applies the same canonical
+        even when they carry backdated local clocks. Pre-authority generation-zero
+        migration rows remain sealed for tamper detection but are not admitted as
+        causal decision history because their historical receipt chronology is
+        unproven. Events whose local observation or ingestion/receipt instant is after
+        as_of are still excluded. Malformed causal clocks fail closed. The
+        reconstructed mirror then applies the same canonical
         status/freshness/selectors contract as a live active_view.
         """
         if not isinstance(store, SQLiteMarketStore):

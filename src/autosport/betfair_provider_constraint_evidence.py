@@ -576,6 +576,8 @@ def _build_constraint_resolver():
     decimal_text_fn = _decimal_text
     canonical_sha256_fn = _canonical_sha256
 
+    observation_new = observation_type.__new__
+    result_new = result_type.__new__
     generation_getter = observation_type.__dict__["generation_sha256"].fget
     semantic_getter = observation_type.__dict__["semantic_sha256"].fget
 
@@ -614,7 +616,8 @@ def _build_constraint_resolver():
             ),
             "lower_minimum_payout_enabled": lower_minimum_payout_enabled,
         }
-        return result_type(
+        return result_new(
+            result_type,
             state=state,
             provider_id=provider_id,
             jurisdiction_scope=jurisdiction_scope,
@@ -649,8 +652,31 @@ def _build_constraint_resolver():
                 "BetfairProviderConstraintObservation"
             )
 
+        canonical_observations = []
+        for item in observations:
+            if len(item) != 19:
+                raise error_type(
+                    "observation tuple shape does not match canonical schema"
+                )
+            try:
+                rebuilt = observation_new(
+                    observation_type,
+                    *tuple(item[:17]),
+                )
+            except error_type:
+                raise
+            except Exception as exc:
+                raise error_type(
+                    "observation canonical reconstruction failed"
+                ) from exc
+            if tuple(rebuilt) != tuple(item):
+                raise error_type(
+                    "observation payload/digests do not match canonical reconstruction"
+                )
+            canonical_observations.append(rebuilt)
+
         unique_by_generation = {
-            generation_getter(item): item for item in observations
+            generation_getter(item): item for item in canonical_observations
         }
         normalized_observations = tuple(
             unique_by_generation[generation]

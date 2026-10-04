@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from .learning_settlement import PaperSettlementLearningBridge
+from .paper_settlement_learning import PaperSettlementLearningBridge
 from .risk_of_ruin_evaluator import RiskPathObservation
 from .risk_path_observation_authority import (
     ProductRunCapitalPathError,

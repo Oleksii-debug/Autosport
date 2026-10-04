@@ -42,11 +42,11 @@ def test_workspace_atomic_preflight_invokes_canonical_atomic_writer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = tmp_path / "Autosport" / "workspace"
-    calls: list[tuple[Path, dict[str, object]]] = []
+    calls: list[tuple[Path, dict[str, object], bool]] = []
 
     def write_probe(path: str | Path, payload: dict[str, object]) -> None:
         destination = Path(path)
-        calls.append((destination, dict(payload)))
+        calls.append((destination, dict(payload), destination.exists()))
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(
             json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
@@ -59,9 +59,11 @@ def test_workspace_atomic_preflight_invokes_canonical_atomic_writer(
     probe_workspace_writable(workspace)
 
     assert len(calls) == 1
-    destination, payload = calls[0]
-    assert destination.name == "probe.json"
+    destination, payload, reservation_existed = calls[0]
+    assert destination.name.endswith(".json")
+    assert destination.name.startswith(".autosport-workspace-write-probe-")
     assert destination.parent == workspace
+    assert reservation_existed is True
     assert payload == {
         "probe": "autosport workspace atomic publish probe",
         "schema_version": 1,

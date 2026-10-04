@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -1345,10 +1346,20 @@ class PortfolioPlanTests(unittest.TestCase):
             "serialized portfolio plan is invalid",
         ):
             PortfolioPlan.from_dict(payload)
+        with self.assertRaisesRegex(
+            ValueError,
+            "serialized portfolio plan is invalid",
+        ):
+            PortfolioPlan.from_dict(
+                payload,
+                verified_outcome_authorities=(authority,),
+            )
+
         self.assertEqual(
             PortfolioPlan.from_dict(
                 payload,
                 verified_outcome_authorities=(authority,),
+                verified_terminal_economics=plan.terminal_economics,
             ),
             plan,
         )
@@ -1360,6 +1371,34 @@ class PortfolioPlanTests(unittest.TestCase):
             PortfolioPlan.from_dict(
                 payload,
                 verified_outcome_authorities=(copy.copy(authority),),
+                verified_terminal_economics=plan.terminal_economics,
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "serialized portfolio plan is invalid",
+        ):
+            PortfolioPlan.from_dict(
+                payload,
+                verified_outcome_authorities=(authority,),
+                verified_terminal_economics=copy.copy(plan.terminal_economics),
+            )
+
+        forged_economics = copy.copy(plan.terminal_economics)
+        object.__setattr__(
+            forged_economics,
+            "worst_terminal_profit",
+            plan.terminal_economics.worst_terminal_profit - Decimal("1"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "serialized terminal economics is invalid",
+        ):
+            VerifiedTerminalEconomics.from_dict(
+                forged_economics.to_dict(),
+                verified_outcome_authorities=(authority,),
+                decision_as_of=datetime.fromisoformat(self.DECISION_TS),
+                verified_terminal_economics=plan.terminal_economics,
             )
 
         tampered = json.loads(json.dumps(payload))
@@ -1373,6 +1412,7 @@ class PortfolioPlanTests(unittest.TestCase):
             PortfolioPlan.from_dict(
                 tampered,
                 verified_outcome_authorities=(authority,),
+                verified_terminal_economics=plan.terminal_economics,
             )
 
     def test_verified_terminal_model_with_nonpositive_minimum_fails_closed(self) -> None:

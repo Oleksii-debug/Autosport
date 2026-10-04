@@ -32,15 +32,25 @@ _LIVE_RECEIPT_AUTHORITY = "autosport.live_ingestion_receipt.v1"
 
 
 class _LiveReceiptBatch:
-    """Internal capability wrapper for the one authority-bearing storage path."""
+    """Immutable value snapshot for the one authority-bearing storage path."""
 
-    __slots__ = ("events",)
+    __slots__ = ("_payloads",)
 
     def __init__(self, events: tuple[MarketEvent, ...]) -> None:
-        self.events = events
+        object.__setattr__(
+            self,
+            "_payloads",
+            tuple(_canonical_payload(event) for event in events),
+        )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("live receipt batch is immutable")
 
     def __iter__(self):
-        return iter(self.events)
+        return (
+            MarketEvent.from_dict(json.loads(payload))
+            for payload in self._payloads
+        )
 
 
 _LEGACY_CURRENT_COLUMNS = ("quote_key", "observed_ts", "sequence", "payload_json")
@@ -865,9 +875,8 @@ class SQLiteMarketStore:
                 type(events) is _LiveReceiptBatch
                 and self._live_receipt_write_depth == 1
             )
-            batch_events = events.events if live_receipt_authority else events
             with self.connection:
-                for event in batch_events:
+                for event in events:
                     if self._insert_one(event):
                         if live_receipt_authority:
                             self._insert_live_receipt_authority(event)

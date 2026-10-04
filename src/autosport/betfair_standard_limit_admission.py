@@ -249,6 +249,14 @@ def _build_admission_authority():
     italy_state_type = ItalianLimitAdmissionState
     spain_assess = assess_betfair_spain_limit_order
     spain_state_type = SpainOrderAdmission
+    constraint_state_type = BetfairConstraintResolutionState
+    jurisdiction_enum = BetfairLoginJurisdiction
+
+    snapshot_action_fn = _snapshot_action
+    exact_multiply_fn = _exact_multiply
+    utc_fn = _utc
+    make_result_fn = _make_result
+    fingerprint_fn = _fingerprint
 
     issued: dict[int, _IssuedRecord] = {}
     lock = RLock()
@@ -272,7 +280,7 @@ def _build_admission_authority():
         with lock:
             issued[key] = _IssuedRecord(
                 ref(value, discard),
-                _fingerprint(value),
+                fingerprint_fn(value),
                 client,
                 identity,
                 jurisdiction,
@@ -296,9 +304,9 @@ def _build_admission_authority():
             raise BetfairStandardLimitAdmissionError(
                 "action must be exact BetfairStandardLimitAction"
             )
-        current = _utc(as_of, "as_of")
-        action_snapshot = _snapshot_action(action)
-        payout = _exact_multiply(action_snapshot[2], action_snapshot[3])
+        current = utc_fn(as_of, "as_of")
+        action_snapshot = snapshot_action_fn(action)
+        payout = exact_multiply_fn(action_snapshot[2], action_snapshot[3])
 
         reasons: list[str] = []
         identity_value: BetfairAuthenticatedAccountIdentity | None = None
@@ -368,7 +376,7 @@ def _build_admission_authority():
             constraint_value = constraints
             if constraints.as_of != current:
                 reasons.append("CONSTRAINT_DECISION_CUT_MISMATCH")
-            if constraints.state is not BetfairConstraintResolutionState.CONSISTENT_UNVERIFIED:
+            if constraints.state is not constraint_state_type.CONSISTENT_UNVERIFIED:
                 reasons.append("CONSTRAINT_" + constraints.state.value)
             if constraints.provider_origin_proven is not True:
                 reasons.append("CONSTRAINT_PROVIDER_ORIGIN_UNPROVEN")
@@ -385,18 +393,18 @@ def _build_admission_authority():
             else jurisdiction_value.jurisdiction.value
         )
         if jurisdiction_value is not None:
-            if jurisdiction_value.jurisdiction is BetfairLoginJurisdiction.GLOBAL_COM:
+            if jurisdiction_value.jurisdiction is jurisdiction_enum.GLOBAL_COM:
                 reasons.append("GLOBAL_COM_ECONOMIC_PROFILE_UNPROVEN")
             elif jurisdiction_value.jurisdiction in {
-                BetfairLoginJurisdiction.AUSTRALIA_NEW_ZEALAND,
-                BetfairLoginJurisdiction.ROMANIA,
+                jurisdiction_enum.AUSTRALIA_NEW_ZEALAND,
+                jurisdiction_enum.ROMANIA,
             }:
                 reasons.append("JURISDICTION_ORDER_SEMANTICS_UNQUALIFIED")
 
         italy_reasons: tuple[str, ...] = ()
         if (
             jurisdiction_value is not None
-            and jurisdiction_value.jurisdiction is BetfairLoginJurisdiction.ITALY
+            and jurisdiction_value.jurisdiction is jurisdiction_enum.ITALY
         ):
             italy_result = italy_evaluate(
                 (
@@ -422,7 +430,7 @@ def _build_admission_authority():
 
         if (
             jurisdiction_value is not None
-            and jurisdiction_value.jurisdiction is BetfairLoginJurisdiction.SPAIN
+            and jurisdiction_value.jurisdiction is jurisdiction_enum.SPAIN
             and constraint_value is not None
             and constraint_value.jurisdiction_scope != "SPAIN"
         ):
@@ -430,7 +438,7 @@ def _build_admission_authority():
 
         deduped = tuple(dict.fromkeys(reasons))
         if deduped:
-            result = _make_result(
+            result = make_result_fn(
                 state=BetfairStandardLimitAdmissionState.UNKNOWN_UNPROVEN,
                 reason_codes=deduped,
                 as_of=current,
@@ -470,7 +478,7 @@ def _build_admission_authority():
                 positive_reasons = ("SIZE_BELOW_CURRENT_STANDARD_MINIMUM",)
             elif (
                 jurisdiction_value.jurisdiction
-                is BetfairLoginJurisdiction.SPAIN
+                is jurisdiction_enum.SPAIN
             ):
                 spain = spain_assess(
                     backer_stake=action_snapshot[2],
@@ -489,7 +497,7 @@ def _build_admission_authority():
                 )
             elif (
                 jurisdiction_value.jurisdiction
-                is BetfairLoginJurisdiction.ITALY
+                is jurisdiction_enum.ITALY
             ):
                 state = BetfairStandardLimitAdmissionState.BELOW_PROVIDER_MINIMUM
                 positive_reasons = (
@@ -509,7 +517,7 @@ def _build_admission_authority():
                     state = BetfairStandardLimitAdmissionState.BELOW_PROVIDER_MINIMUM
                     positive_reasons = ("PAYOUT_BELOW_CURRENT_MINIMUM",)
 
-            result = _make_result(
+            result = make_result_fn(
                 state=state,
                 reason_codes=positive_reasons,
                 as_of=current,
@@ -552,7 +560,7 @@ def _build_admission_authority():
                     issued.pop(id(value), None)
 
         try:
-            if _fingerprint(value) != record.fingerprint:
+            if fingerprint_fn(value) != record.fingerprint:
                 revoke()
                 return False
             identity_require(record.identity, client=record.client)

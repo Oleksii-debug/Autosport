@@ -292,6 +292,47 @@ def test_runtime_witness_path_rejects_prelaunch_controller_rebind(tmp_path) -> N
     bridge._close_from_host()
 
 
+def test_runtime_witness_rejects_dual_controller_witness_rebind(tmp_path) -> None:
+    original = AutosportWebController(tmp_path / "original")
+    replacement = AutosportWebController(tmp_path / "replacement")
+    bridge = AutosportWebBridge(original)
+
+    bridge.__dict__["_controller"] = replacement
+    bridge.__dict__["_controller_witness"] = replacement
+    with pytest.raises(
+        WindowsWebBridgeTrustError,
+        match="changed before runtime witness binding",
+    ):
+        bridge._runtime_witness_path()
+
+    assert bridge._trust_revoked is True
+    bridge.__dict__["_controller"] = original
+    bridge.__dict__["_controller_witness"] = original
+    bridge._close_from_host()
+
+
+def test_bridge_rejects_controller_registry_global_rebind(tmp_path) -> None:
+    controller = AutosportWebController(tmp_path / "workspace")
+    bridge = AutosportWebBridge(controller)
+    window = _Window()
+    bridge._bind_trusted_window(window)
+    module = sys.modules["autosport.windows_webview_shell"]
+    original_registry = module._WEB_BRIDGE_CONTROLLER_REGISTRY
+
+    try:
+        module._WEB_BRIDGE_CONTROLLER_REGISTRY = {}
+        with pytest.raises(
+            WindowsWebBridgeTrustError,
+            match="registry authority changed",
+        ):
+            bridge.get_state()
+    finally:
+        module._WEB_BRIDGE_CONTROLLER_REGISTRY = original_registry
+
+    assert bridge._trust_revoked is True
+    bridge._close_from_host()
+
+
 def test_bridge_detects_controller_rebind_during_document_trust_proof() -> None:
     original = _Controller()
     replacement = _Controller()

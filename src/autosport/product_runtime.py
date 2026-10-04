@@ -531,31 +531,37 @@ class ProductCompositionManifest:
 class _ManifestStore:
     _SCHEMA = "autosport.autonomous_product_composition"
     _VERSION = 4
-    _V1_FIELDS = {"schema", "schema_version", "source_id", "initial_bankroll"}
-    _V2_FIELDS = {
-        "schema",
-        "schema_version",
-        "source_id",
-        "initial_bankroll",
-        "settlement_authority_identity",
-    }
-    _V3_FIELDS = {
-        "schema",
-        "schema_version",
-        "source_id",
-        "initial_bankroll",
-        "source_resolver_identity",
-        "settlement_authority_identity",
-    }
-    _FIELDS = {
-        "schema",
-        "schema_version",
-        "source_id",
-        "initial_bankroll",
-        "source_resolver_identity",
-        "settlement_authority_identity",
-        "settlement_learning_handoff_identity",
-    }
+    _V1_FIELDS = frozenset({"schema", "schema_version", "source_id", "initial_bankroll"})
+    _V2_FIELDS = frozenset(
+        {
+            "schema",
+            "schema_version",
+            "source_id",
+            "initial_bankroll",
+            "settlement_authority_identity",
+        }
+    )
+    _V3_FIELDS = frozenset(
+        {
+            "schema",
+            "schema_version",
+            "source_id",
+            "initial_bankroll",
+            "source_resolver_identity",
+            "settlement_authority_identity",
+        }
+    )
+    _FIELDS = frozenset(
+        {
+            "schema",
+            "schema_version",
+            "source_id",
+            "initial_bankroll",
+            "source_resolver_identity",
+            "settlement_authority_identity",
+            "settlement_learning_handoff_identity",
+        }
+    )
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -567,14 +573,49 @@ class _ManifestStore:
         return value
 
     def _read_raw(self) -> dict[str, object]:
+        schema = "autosport.autonomous_product_composition"
+        current_version = 4
+        v1_fields = frozenset(
+            {"schema", "schema_version", "source_id", "initial_bankroll"}
+        )
+        v2_fields = frozenset(
+            {
+                "schema",
+                "schema_version",
+                "source_id",
+                "initial_bankroll",
+                "settlement_authority_identity",
+            }
+        )
+        v3_fields = frozenset(
+            {
+                "schema",
+                "schema_version",
+                "source_id",
+                "initial_bankroll",
+                "source_resolver_identity",
+                "settlement_authority_identity",
+            }
+        )
+        current_fields = frozenset(
+            {
+                "schema",
+                "schema_version",
+                "source_id",
+                "initial_bankroll",
+                "source_resolver_identity",
+                "settlement_authority_identity",
+                "settlement_learning_handoff_identity",
+            }
+        )
         try:
             raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:
             raise ProductCompositionError("cannot verify product composition manifest") from exc
-        if type(raw) is not dict or raw.get("schema") != self._SCHEMA:
+        if type(raw) is not dict or raw.get("schema") != schema:
             raise ProductCompositionError("product composition manifest schema mismatch")
         version = raw.get("schema_version")
-        if version == 1 and set(raw) == self._V1_FIELDS:
+        if version == 1 and set(raw) == v1_fields:
             self._text(raw.get("source_id"), "source_id")
             self._text(raw.get("initial_bankroll"), "initial_bankroll")
             return {
@@ -583,7 +624,7 @@ class _ManifestStore:
                 "settlement_authority_identity": None,
                 "settlement_learning_handoff_identity": None,
             }
-        if version == 2 and set(raw) == self._V2_FIELDS:
+        if version == 2 and set(raw) == v2_fields:
             self._text(raw.get("source_id"), "source_id")
             self._text(raw.get("initial_bankroll"), "initial_bankroll")
             return {
@@ -591,14 +632,14 @@ class _ManifestStore:
                 "source_resolver_identity": None,
                 "settlement_learning_handoff_identity": None,
             }
-        if version == 3 and set(raw) == self._V3_FIELDS:
+        if version == 3 and set(raw) == v3_fields:
             self._text(raw.get("source_id"), "source_id")
             self._text(raw.get("initial_bankroll"), "initial_bankroll")
             return {
                 **raw,
                 "settlement_learning_handoff_identity": None,
             }
-        if version != self._VERSION or set(raw) != self._FIELDS:
+        if version != current_version or set(raw) != current_fields:
             raise ProductCompositionError("product composition manifest schema mismatch")
         self._text(raw.get("source_id"), "source_id")
         self._text(raw.get("initial_bankroll"), "initial_bankroll")
@@ -690,8 +731,8 @@ class _ManifestStore:
             atomic_write_json(
                 self.path,
                 {
-                    "schema": self._SCHEMA,
-                    "schema_version": self._VERSION,
+                    "schema": "autosport.autonomous_product_composition",
+                    "schema_version": 4,
                     "source_id": source_id,
                     "initial_bankroll": initial_bankroll,
                     "source_resolver_identity": source_resolver_identity,

@@ -129,29 +129,56 @@ def test_bridge_controller_authority_is_immutable_after_construction() -> None:
     assert replacement.events == []
 
 
-def test_launch_rejects_autosport_controller_subclass_before_window_creation(
-    monkeypatch,
-    tmp_path,
-) -> None:
+def test_bridge_rejects_unregistered_autosport_controller_subclass(tmp_path) -> None:
     class ExpandedController(AutosportWebController):
         def dispatch(self, raw):
             return {"request_id": raw.get("request_id", "forged"), "status": "forged"}
 
-    fake = _FakeWebview()
     controller = ExpandedController(tmp_path / "workspace")
-    bridge = AutosportWebBridge(controller)
-    monkeypatch.setitem(sys.modules, "webview", fake)
 
     with pytest.raises(
-        WindowsWebViewUnavailable,
-        match="runtime witness workspace",
-    ) as captured:
-        launch_windows_shell(bridge, storage_path=tmp_path / "webview")
+        WindowsWebBridgeTrustError,
+        match="non-canonical controller subclass",
+    ):
+        AutosportWebBridge(controller)
 
-    assert isinstance(captured.value.__cause__, WindowsWebBridgeTrustError)
-    assert "non-canonical controller surface" in str(captured.value.__cause__)
+
+def test_bridge_accepts_and_seals_canonical_emergency_stop_controller(
+    tmp_path,
+) -> None:
+    from autosport.windows_webview_emergency_stop import EmergencyStopWebController
+
+    controller = EmergencyStopWebController(tmp_path / "workspace")
+    bridge = AutosportWebBridge(controller)
+    window = _Window()
+    bridge._bind_trusted_window(window)
+
+    assert bridge._runtime_witness_path() == (
+        tmp_path / "workspace" / "webview2-runtime-witness.json"
+    )
+    with bridge._trust_lock:
+        _controller, dispatch = bridge._trusted_controller_operation_locked("dispatch")
+        _controller, state = bridge._trusted_controller_operation_locked("state")
+
+    assert getattr(dispatch, "__func__", None) is EmergencyStopWebController.dispatch
+    assert getattr(state, "__func__", None) is EmergencyStopWebController.state
+
+    original_dispatch = EmergencyStopWebController.__dict__["dispatch"]
+    try:
+        EmergencyStopWebController.dispatch = lambda self, raw: {  # type: ignore[method-assign]
+            "request_id": raw.get("request_id", "forged"),
+            "status": "forged",
+        }
+        with pytest.raises(
+            WindowsWebBridgeTrustError,
+            match="rebound canonical controller method",
+        ):
+            bridge.get_state()
+    finally:
+        EmergencyStopWebController.dispatch = original_dispatch  # type: ignore[method-assign]
+
     assert bridge._trust_revoked is True
-    assert fake.api is None
+    bridge._close_from_host()
 
 
 def test_bridge_rejects_canonical_controller_instance_method_shadow(tmp_path) -> None:
@@ -215,7 +242,7 @@ def test_bridge_rejects_canonical_controller_module_class_rebind(tmp_path) -> No
         module.AutosportWebController = _Controller
         with pytest.raises(
             WindowsWebBridgeTrustError,
-            match="non-canonical controller surface",
+            match="registry authority changed",
         ):
             bridge.get_state()
     finally:

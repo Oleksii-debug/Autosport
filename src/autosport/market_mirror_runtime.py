@@ -566,6 +566,7 @@ class BoundedMirrorInvalidationBuffer:
         event: MarketEvent,
         *,
         _snapshot_event=MarketMirror._snapshot_event,
+        _apply=MarketMirror.apply,
     ) -> MirrorApplyResult:
         """Apply one already-durable event and record its affected quote if material.
 
@@ -578,7 +579,7 @@ class BoundedMirrorInvalidationBuffer:
 
         with self._lock:
             try:
-                result = self._mirror.apply(event)
+                result = _apply(self._mirror, event)
             except Exception:
                 # MarketEventBus invokes this callback only after the live receipt
                 # transaction commits. Keep an owned canonical snapshot before
@@ -589,7 +590,11 @@ class BoundedMirrorInvalidationBuffer:
             self._record_invalidation_locked(result)
             return result
 
-    def reconcile_pending(self) -> tuple[MirrorApplyResult, ...]:
+    def reconcile_pending(
+        self,
+        *,
+        _apply=MarketMirror.apply,
+    ) -> tuple[MirrorApplyResult, ...]:
         """Repair post-commit subscriber failures before admitting newer live input.
 
         Recovery is strictly in original delivery order. A still-failing head remains
@@ -602,7 +607,7 @@ class BoundedMirrorInvalidationBuffer:
         with self._lock:
             while self._pending_recovery:
                 event = self._pending_recovery[0]
-                result = self._mirror.apply(event)
+                result = _apply(self._mirror, event)
                 self._record_invalidation_locked(result)
                 self._pending_recovery.pop(0)
                 recovered.append(result)

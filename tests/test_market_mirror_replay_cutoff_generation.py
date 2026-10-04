@@ -2330,6 +2330,73 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 first.close()
 
+    def test_cutoff_resolver_does_not_recover_live_append_prepare(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            first = SQLiteMarketStore(path)
+            second = SQLiteMarketStore(path)
+            writer_at_machine_commit = threading.Event()
+            release_writer = threading.Event()
+            foreign_recovery = threading.Event()
+            writer_errors: list[BaseException] = []
+            original_recover = MonotonicWorkspaceAuthority.recover
+
+            def guarded_recover(authority, **kwargs):
+                tx_id = kwargs.get("tx_id")
+                if isinstance(tx_id, str) and tx_id.startswith("append-"):
+                    if threading.current_thread().name == "append-writer":
+                        writer_at_machine_commit.set()
+                        if not release_writer.wait(timeout=5):
+                            raise TimeoutError("append writer was not released")
+                    else:
+                        foreign_recovery.set()
+                return original_recover(authority, **kwargs)
+
+            def append_from_first() -> None:
+                try:
+                    first.append(
+                        self.event(
+                            sequence=1,
+                            odds="2.00",
+                            observed_ts="2026-09-16T19:00:00+00:00",
+                        )
+                    )
+                except BaseException as exc:  # pragma: no cover - thread handoff
+                    writer_errors.append(exc)
+
+            try:
+                with patch.object(
+                    MonotonicWorkspaceAuthority,
+                    "recover",
+                    new=guarded_recover,
+                ):
+                    writer = threading.Thread(
+                        target=append_from_first,
+                        name="append-writer",
+                    )
+                    writer.start()
+                    self.assertTrue(writer_at_machine_commit.wait(timeout=5))
+
+                    # The first store has committed SQLite but still owns the live
+                    # append PREPARE. A second-store cutoff resolver must fail closed
+                    # on the sibling append lock rather than recover that live writer.
+                    with self.assertRaises(WorkspaceEconomicLockBusyError):
+                        self.replay(second)
+                    self.assertFalse(foreign_recovery.is_set())
+
+                    release_writer.set()
+                    writer.join(timeout=5)
+                    self.assertFalse(writer.is_alive())
+
+                self.assertEqual(writer_errors, [])
+                snapshot = self.replay(second)
+                self.assertEqual(len(snapshot.events), 1)
+                self.assertFalse(foreign_recovery.is_set())
+            finally:
+                release_writer.set()
+                second.close()
+                first.close()
+
     def test_parallel_store_append_lock_contention_has_no_partial_write(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

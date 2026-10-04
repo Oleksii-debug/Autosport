@@ -987,6 +987,8 @@ class SQLiteMarketStore:
         *,
         _market_event_type: type[MarketEvent] = MarketEvent,
         _capability_type: type[_LiveReceiptBatch] = _LiveReceiptBatch,
+        _capability_init=_LiveReceiptBatch.__init__,
+        _object_new=object.__new__,
     ) -> list[MarketEvent]:
         """Route one exact live-ingestion batch through the canonical write choke point.
 
@@ -1002,7 +1004,8 @@ class SQLiteMarketStore:
         materialized = tuple(events)
         if any(type(event) is not _market_event_type for event in materialized):
             raise TypeError("live receipt authority requires exact MarketEvent values")
-        capability = _capability_type(materialized)
+        capability = _object_new(_capability_type)
+        _capability_init(capability, materialized)
         with self._connection_lock:
             if self._active_live_receipt_batch is not None:
                 raise RuntimeError("nested live receipt authority write is not allowed")
@@ -1022,6 +1025,10 @@ class SQLiteMarketStore:
         events: Iterable[MarketEvent],
         *,
         _capability_type: type[_LiveReceiptBatch] = _LiveReceiptBatch,
+        _capability_authorizes=_LiveReceiptBatch.authorizes,
+        _capability_iter=_LiveReceiptBatch.__iter__,
+        _insert_one_fn=_insert_one,
+        _insert_receipt_fn=_insert_live_receipt_authority,
     ) -> list[MarketEvent]:
         """Insert one normalized batch in one transaction and return newly accepted events."""
         accepted: list[MarketEvent] = []
@@ -1029,13 +1036,18 @@ class SQLiteMarketStore:
             capability = self._active_live_receipt_batch
             live_receipt_authority = (
                 type(capability) is _capability_type
-                and capability.authorizes(events)
+                and _capability_authorizes(capability, events)
+            )
+            iteration_events = (
+                _capability_iter(capability)
+                if live_receipt_authority and events is capability
+                else iter(events)
             )
             with self.connection:
-                for event in events:
-                    if self._insert_one(event):
+                for event in iteration_events:
+                    if _insert_one_fn(self, event):
                         if live_receipt_authority:
-                            self._insert_live_receipt_authority(event)
+                            _insert_receipt_fn(self, event)
                         accepted.append(event)
         return accepted
 

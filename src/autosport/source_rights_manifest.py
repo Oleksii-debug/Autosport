@@ -10,6 +10,8 @@ from typing import Any
 
 _MANIFEST_KIND = "autosport_source_rights_manifest"
 _MAX_TEXT_LENGTH = 4096
+_MAX_MANIFEST_BYTES = 64 * 1024
+_MAX_AUTHORIZED_SCOPES = 256
 _REQUIRED_FIELDS = {
     "schema_version",
     "kind",
@@ -139,6 +141,10 @@ def _scopes(value: object) -> tuple[str, ...]:
         raise SourceRightsManifestError(
             "authorized_scopes must be a non-empty list"
         )
+    if len(value) > _MAX_AUTHORIZED_SCOPES:
+        raise SourceRightsManifestError(
+            "authorized_scopes exceeds the maximum supported scope count"
+        )
     normalized: list[str] = []
     for item in value:
         scope = _canonical_text(item, field_name="authorized_scopes item")
@@ -155,6 +161,10 @@ def _scopes(value: object) -> tuple[str, ...]:
 def _runtime_scopes(value: object) -> tuple[str, ...]:
     if type(value) is not tuple or not value:
         raise SourceRightsManifestError("manifest authorized_scopes snapshot is malformed")
+    if len(value) > _MAX_AUTHORIZED_SCOPES:
+        raise SourceRightsManifestError(
+            "manifest authorized_scopes snapshot exceeds the maximum supported scope count"
+        )
     normalized = tuple(
         _canonical_text(item, field_name="manifest authorized_scopes item")
         for item in value
@@ -166,9 +176,18 @@ def _runtime_scopes(value: object) -> tuple[str, ...]:
     return normalized
 
 
+def _bounded_manifest_bytes(value: object) -> bytes:
+    if type(value) is not bytes:
+        raise SourceRightsManifestError("source-rights manifest snapshot bytes are malformed")
+    if len(value) > _MAX_MANIFEST_BYTES:
+        raise SourceRightsManifestError("source-rights manifest exceeds the maximum supported size")
+    return value
+
+
 def _validated_projection(
     payload: bytes,
 ) -> tuple[str, tuple[str, ...], datetime, datetime, str, str, datetime]:
+    payload = _bounded_manifest_bytes(payload)
     try:
         raw = json.loads(
             payload.decode("utf-8"),
@@ -254,8 +273,7 @@ def _validated_projection(
 def _validated_manifest_snapshot(
     manifest: SourceRightsManifest,
 ) -> tuple[str, tuple[str, ...], datetime, datetime, str, str, datetime]:
-    if type(manifest.manifest_bytes) is not bytes:
-        raise SourceRightsManifestError("source-rights manifest snapshot bytes are malformed")
+    _bounded_manifest_bytes(manifest.manifest_bytes)
     digest = _canonical_text(manifest.manifest_sha256, field_name="manifest_sha256")
     if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
         raise SourceRightsManifestError("source-rights manifest snapshot digest is malformed")
@@ -278,11 +296,13 @@ def load_source_rights_manifest(path: str | Path) -> SourceRightsManifest:
 
     manifest_path = Path(path)
     try:
-        payload = manifest_path.read_bytes()
+        with manifest_path.open("rb") as handle:
+            payload = handle.read(_MAX_MANIFEST_BYTES + 1)
     except OSError as exc:
         raise SourceRightsManifestError(
             f"source-rights manifest is not readable: {manifest_path}"
         ) from exc
+    payload = _bounded_manifest_bytes(payload)
 
     (
         source_identity,

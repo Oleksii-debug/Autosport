@@ -767,9 +767,31 @@ class SQLiteMarketStore:
         # same durable database.
         self.path = Path(path).resolve(strict=False)
         self._connection_lock = RLock()
+
+        # Ensure even a brand-new database has an inode that can be witnessed both
+        # before and after sqlite3.connect(). Without this pre/post witness, a
+        # pathname replacement in the connect -> first-lstat window could leave the
+        # SQLite connection bound to one inode while machine authority trusts another.
+        try:
+            file_descriptor = os.open(
+                self.path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            pass
+        else:
+            os.close(file_descriptor)
+
+        pre_open_identity = self._current_database_path_identity()
         self.connection = sqlite3.connect(self.path, check_same_thread=False)
         try:
-            self._database_identity = self._current_database_path_identity()
+            opened_identity = self._current_database_path_identity()
+            if not os.path.samestat(pre_open_identity, opened_identity):
+                raise ValueError(
+                    "market database pathname changed while opening database"
+                )
+            self._database_identity = opened_identity
             self.connection.execute("PRAGMA journal_mode=WAL")
             self.connection.execute("PRAGMA synchronous=FULL")
             self._init_schema()

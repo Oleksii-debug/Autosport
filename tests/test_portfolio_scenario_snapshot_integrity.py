@@ -434,5 +434,45 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
             self.assertEqual(report.mean_case, Decimal("0"))
 
 
+    def test_paperbook_global_rebind_cannot_replace_portfolio_economic_authority(self) -> None:
+        _book, ticket, leg = self._open_ticket()
+
+        class PoisonPaperBook:
+            @staticmethod
+            def _normalize_resolution_keys(*args, **kwargs):
+                raise AssertionError("rebound PaperBook normalizer executed")
+
+            @classmethod
+            def _validate_ticket_leg(cls, *args, **kwargs):
+                raise AssertionError("rebound PaperBook leg validator executed")
+
+            @classmethod
+            def _validate_placed_at(cls, *args, **kwargs):
+                raise AssertionError("rebound PaperBook timestamp validator executed")
+
+            @classmethod
+            def _settlement_result(cls, *args, **kwargs):
+                raise AssertionError("rebound PaperBook settlement authority executed")
+
+        with patch.object(portfolio_module, "PaperBook", PoisonPaperBook):
+            self.assertEqual(
+                PortfolioEngine.scenario_profit(
+                    [ticket],
+                    {leg.quote_key},
+                ),
+                Decimal("10"),
+            )
+            self.assertEqual(
+                PortfolioEngine.scenario_profit_settlements(
+                    [ticket],
+                    {leg.quote_key: "win"},
+                ),
+                Decimal("10"),
+            )
+            report = PortfolioEngine().analyse([ticket])
+            self.assertEqual(report.worst_case, Decimal("-10"))
+            self.assertEqual(report.best_case, Decimal("10"))
+
+
 if __name__ == "__main__":
     unittest.main()

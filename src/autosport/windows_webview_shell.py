@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import threading
+import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -77,6 +78,8 @@ _PYWEBVIEW_RELEASE_SETTINGS = (
     "WEBVIEW2_RUNTIME_PATH",
     "REMOTE_DEBUGGING_PORT",
 )
+_WEBVIEW2_RUNTIME_WITNESS_FILENAME = "webview2-runtime-witness.json"
+_WEBVIEW2_RUNTIME_VERSION_MAX_LENGTH = 256
 
 if set(_PRODUCT_SOURCE_LABELS_UK) != {
     entry.source_id for entry in list_product_source_entries()
@@ -177,6 +180,73 @@ def _probe_webview_storage_writable(storage_path: Path) -> None:
             "Autosport canonical WebView storage is not writable",
             reason="storage",
         ) from exc
+
+
+def _observed_webview2_browser_version(window: object) -> str:
+    """Read the runtime identity from the actual native CoreWebView2 instance."""
+
+    try:
+        native = getattr(window, "native")
+        native_webview = getattr(native, "webview")
+        core_webview = getattr(native_webview, "CoreWebView2")
+        environment = getattr(core_webview, "Environment")
+        value = getattr(environment, "BrowserVersionString")
+    except Exception as exc:
+        raise WindowsWebViewUnavailable(
+            "Autosport could not observe the launched WebView2 runtime identity"
+        ) from exc
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or len(value) > _WEBVIEW2_RUNTIME_VERSION_MAX_LENGTH
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    ):
+        raise WindowsWebViewUnavailable(
+            "Autosport observed an invalid launched WebView2 runtime identity"
+        )
+    return value
+
+
+def _write_webview2_runtime_witness(path: Path, browser_version: str) -> None:
+    """Atomically persist one bounded witness from the actual native WebView2 host."""
+
+    payload = {
+        "schema_version": 1,
+        "renderer": "edgechromium",
+        "browser_version_string": browser_version,
+        "observation_source": "native_core_webview2_environment",
+        "real_money_execution": False,
+        "human_tested": False,
+        "nvda_verified": False,
+        "whole_product_complete": False,
+    }
+    encoded = (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def web_shell_index_path() -> Path:
@@ -2124,6 +2194,19 @@ class AutosportWebBridge:
             )
         return value
 
+    def _runtime_witness_path(self) -> Path | None:
+        """Return the product-owned witness path only for the canonical controller."""
+
+        controller = self._controller
+        if not isinstance(controller, AutosportWebController):
+            return None
+        workspace = getattr(controller, "workspace", None)
+        if not isinstance(workspace, Path) or not workspace.is_absolute():
+            raise WindowsWebBridgeTrustError(
+                "The canonical WebView controller has no absolute workspace identity"
+            )
+        return workspace / _WEBVIEW2_RUNTIME_WITNESS_FILENAME
+
     def _revoke_trust(self) -> None:
         with self._trust_lock:
             self._trust_revoked = True
@@ -2257,6 +2340,23 @@ def launch_windows_shell(
     renderer_observed = False
     trusted_document_observed = not canonical_bridge
     trusted_document_violation = False
+    runtime_browser_version: str | None = None
+    runtime_identity_violation = False
+    runtime_witness_path: Path | None = None
+    if canonical_bridge:
+        try:
+            runtime_witness_path = api._runtime_witness_path()
+        except WindowsWebBridgeTrustError as exc:
+            raise WindowsWebViewUnavailable(
+                "Autosport could not bind the WebView2 runtime witness workspace"
+            ) from exc
+        if runtime_witness_path is not None:
+            try:
+                runtime_witness_path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise WindowsWebViewUnavailable(
+                    "Autosport could not invalidate the previous WebView2 runtime witness"
+                ) from exc
     window: object | None = None
 
     def verify_initialized_renderer(renderer: object) -> bool:
@@ -2268,21 +2368,38 @@ def launch_windows_shell(
         renderer_observed = True
         return True
 
-    def bind_trusted_document() -> None:
+    def bind_trusted_document() -> bool | None:
+        nonlocal runtime_browser_version, runtime_identity_violation
         nonlocal trusted_document_observed, trusted_document_violation
         if not canonical_bridge:
-            return
+            return None
         if not renderer_observed or window is None:
             api._revoke_trust()
             trusted_document_violation = True
-            return
+            return False
+        if runtime_witness_path is not None:
+            try:
+                observed_version = _observed_webview2_browser_version(window)
+            except WindowsWebViewUnavailable:
+                api._revoke_trust()
+                runtime_identity_violation = True
+                trusted_document_violation = True
+                return False
+            if runtime_browser_version is None:
+                runtime_browser_version = observed_version
+            elif runtime_browser_version != observed_version:
+                api._revoke_trust()
+                runtime_identity_violation = True
+                trusted_document_violation = True
+                return False
         try:
             api._bind_trusted_window(window)
         except WindowsWebBridgeTrustError:
             api._revoke_trust()
             trusted_document_violation = True
-            return
+            return False
         trusted_document_observed = True
+        return None
 
     close_teardown_lock = threading.Lock()
     close_teardown_thread: threading.Thread | None = None
@@ -2393,6 +2510,20 @@ def launch_windows_shell(
             raise WindowsWebViewUnavailable(
                 "The Autosport semantic shell lost its trusted WebView document binding"
             )
+        if runtime_witness_path is not None:
+            if runtime_browser_version is None or runtime_identity_violation:
+                raise WindowsWebViewUnavailable(
+                    "The Autosport semantic shell has no actual WebView2 runtime witness"
+                )
+            try:
+                _write_webview2_runtime_witness(
+                    runtime_witness_path,
+                    runtime_browser_version,
+                )
+            except OSError as exc:
+                raise WindowsWebViewUnavailable(
+                    "Autosport could not persist the actual WebView2 runtime witness"
+                ) from exc
     except WindowsWebViewUnavailable:
         raise
     except Exception as exc:

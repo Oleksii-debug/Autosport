@@ -732,6 +732,56 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_continuous_session_authority_fields_are_immutable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                authorities = {
+                    "workspace": coordinator.workspace,
+                    "collector": coordinator.collector,
+                    "lifecycle": coordinator.lifecycle,
+                    "market_store": coordinator.market_store,
+                    "desktop_consumer": coordinator.desktop_consumer,
+                    "paper_book_path": coordinator.paper_book_path,
+                    "outcome_authority": coordinator.outcome_authority,
+                    "settlement_learning_handoff": (
+                        coordinator.settlement_learning_handoff
+                    ),
+                    "clock": coordinator.clock,
+                    "causal_view": coordinator.causal_view,
+                    "initial_bankroll": coordinator.initial_bankroll,
+                    "_state": coordinator._state,
+                }
+                for name, value in authorities.items():
+                    with self.subTest(name=name):
+                        with self.assertRaisesRegex(
+                            ContinuousSessionError,
+                            f"authority field {name} is immutable",
+                        ):
+                            setattr(coordinator, name, value)
+            finally:
+                store.close()
+
+    def test_continuous_session_authority_setattr_dispatch_is_sealed(self) -> None:
+        original = ContinuousSessionCoordinator.__setattr__
+        with self.assertRaisesRegex(
+            TypeError,
+            "canonical settlement consumer entry binding is immutable",
+        ):
+            ContinuousSessionCoordinator.__setattr__ = object.__setattr__
+        self.assertIs(ContinuousSessionCoordinator.__setattr__, original)
+
     def test_direct_settle_rejects_conflicting_duplicate_evidence_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

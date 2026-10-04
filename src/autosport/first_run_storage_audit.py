@@ -20,6 +20,9 @@ def run_first_run_storage_audit(output_path: str | Path) -> int:
 
     destination = Path(output_path)
     failure_stage = "workspace_identity"
+    workspace_canonical_atomic_publication_proven = False
+    webview_host_writability_proven = False
+    webview_child_profile_access_proven = False
     try:
         workspace = default_workspace()
         if not workspace.is_absolute():
@@ -41,14 +44,21 @@ def run_first_run_storage_audit(output_path: str | Path) -> int:
             raise ValueError("release-sensitive WebView2 environment override is active")
         failure_stage = "workspace_writability"
         probe_workspace_writable(workspace)
+        workspace_canonical_atomic_publication_proven = True
         failure_stage = "webview_storage_writability"
         probe_webview_storage_writable(webview_storage)
+        webview_host_writability_proven = True
 
         payload = {
             "status": "PASS",
             "workspace": str(workspace),
             "webview_storage": str(webview_storage),
             "launch_cwd": str(launch_cwd),
+            "workspace_canonical_atomic_publication_proven": (
+                workspace_canonical_atomic_publication_proven
+            ),
+            "webview_host_writability_proven": webview_host_writability_proven,
+            "webview_child_profile_access_proven": webview_child_profile_access_proven,
             "webview_environment_overrides_clear": True,
             "real_money_execution": False,
             "human_tested": False,
@@ -62,6 +72,11 @@ def run_first_run_storage_audit(output_path: str | Path) -> int:
             "error": "first-run storage preflight failed",
             "failure_stage": failure_stage,
             "error_type": type(exc).__name__,
+            "workspace_canonical_atomic_publication_proven": (
+                workspace_canonical_atomic_publication_proven
+            ),
+            "webview_host_writability_proven": webview_host_writability_proven,
+            "webview_child_profile_access_proven": webview_child_profile_access_proven,
             "real_money_execution": False,
             "human_tested": False,
             "nvda_verified": False,

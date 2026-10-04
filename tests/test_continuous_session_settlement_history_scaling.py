@@ -310,6 +310,90 @@ def test_pending_settlement_journal_recovers_after_write_crash() -> None:
         assert final_checkpoint["settlement_evidence_count"] == _SMALL_HISTORY + 1
 
 
+def test_pending_recovery_rejects_corrupt_base_before_advancing_checkpoint() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        path = root / "continuous_session.json"
+        state = _state_with_history(root, _SMALL_HISTORY)
+        new_resolution = continuous_session.SettlementResolution(
+            event_identity="provider-a:event-pending-corrupt-base",
+            settlement_ref="provider-result:pending-corrupt-base",
+            quote_outcomes={
+                "provider-a:event-pending-corrupt-base:winner:home": "win"
+            },
+            evidence_id="receipt-pending-corrupt-base",
+            evidence_sha256="c" * 64,
+            available_at=_AT,
+        )
+
+        with patch.object(
+            state,
+            "_write_evidence_record",
+            side_effect=OSError("synthetic evidence write crash"),
+        ):
+            try:
+                state.record_success(
+                    at=_AT,
+                    full_refresh=False,
+                    settlement_evidence=(new_resolution,),
+                )
+            except OSError:
+                pass
+            else:
+                raise AssertionError("synthetic write crash did not interrupt commit")
+
+        interrupted = json.loads(path.read_text(encoding="utf-8"))
+        pending = interrupted["settlement_evidence_pending"]
+        assert pending is not None
+        assert interrupted["settlement_evidence_count"] == _SMALL_HISTORY
+        assert interrupted["cycles_completed"] == _SMALL_HISTORY
+
+        pending_path = (
+            root
+            / "continuous_session.settlement-evidence"
+            / f"{pending['records'][0]['evidence_key_sha256']}.json"
+        )
+        assert not pending_path.exists()
+
+        journal = root / "continuous_session.settlement-evidence"
+        tip_name = (
+            f"{interrupted['settlement_evidence_tip_key_sha256']}.json"
+        )
+        non_tip = next(
+            item
+            for item in journal.iterdir()
+            if item.suffix == ".json"
+            and not item.name.startswith(".")
+            and item.name != tip_name
+        )
+        non_tip.unlink()
+
+        checkpoint_before_recovery = path.read_bytes()
+        journal_before_recovery = _journal_snapshot(root)
+
+        try:
+            continuous_session._ContinuousSessionState(
+                path,
+                session_id="session-history-scaling",
+                source_id="provider-a",
+                clock=lambda: _AT,
+            )
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "pending recovery advanced across a corrupt committed base journal"
+            )
+
+        assert path.read_bytes() == checkpoint_before_recovery
+        assert _journal_snapshot(root) == journal_before_recovery
+        assert not pending_path.exists()
+        unchanged = json.loads(path.read_text(encoding="utf-8"))
+        assert unchanged["settlement_evidence_pending"] == pending
+        assert unchanged["settlement_evidence_count"] == _SMALL_HISTORY
+        assert unchanged["cycles_completed"] == _SMALL_HISTORY
+
+
 def test_legacy_v2_migration_preserves_session_truth_and_evidence() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

@@ -14,6 +14,42 @@ from . import proposal_risk_evaluation_precommit_authority as _authority
 from . import proposal_risk_execution_evidence_authority as _execution_authority
 
 
+class _WriteOnceSlot:
+    """Delegate one dataclass slot while rejecting post-construction mutation."""
+
+    __slots__ = ("_slot", "_name")
+
+    def __init__(self, slot, name: str) -> None:
+        self._slot = slot
+        self._name = name
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return self
+        return self._slot.__get__(instance, owner)
+
+    def __set__(self, instance, value) -> None:
+        try:
+            self._slot.__get__(instance, type(instance))
+        except AttributeError:
+            self._slot.__set__(instance, value)
+            return
+        raise AttributeError(f"{self._name} is write-once product evidence")
+
+    def __delete__(self, instance) -> None:
+        raise AttributeError(f"{self._name} is write-once product evidence")
+
+
+def _seal_write_once_slots(owner, names) -> None:
+    for name in names:
+        current = owner.__dict__.get(name)
+        if isinstance(current, _WriteOnceSlot):
+            continue
+        if current is None or not hasattr(current, "__get__") or not hasattr(current, "__set__"):
+            raise RuntimeError(f"proposal risk product slot {name} is unavailable")
+        setattr(owner, name, _WriteOnceSlot(current, name))
+
+
 def _install_precommit_guard() -> None:
     module = _authority
     error_type = module.ProductProposalRiskEvaluationPrecommitError
@@ -408,7 +444,36 @@ def _install_execution_evidence_guard() -> None:
 
 
 _install_precommit_guard()
+_seal_write_once_slots(
+    _execution_authority.ProductProposalRiskEvaluationPrecommit,
+    _authority._BINDING_FIELDS,
+)
+_seal_write_once_slots(
+    _execution_authority.CounterfactualMemberExecutionEvidence,
+    (
+        "member_id",
+        "binding_sha256",
+        "target_sha256",
+        "candidate_vector_sha256",
+        "executed_stakes",
+        "execution_engine_sha256",
+        "source_sha256",
+        "observed_at",
+        "starting_equity",
+        "minimum_equity",
+        "terminal_equity",
+        "gross_pnl",
+        "costs",
+        "net_pnl",
+    ),
+)
+_seal_write_once_slots(
+    _execution_authority.ProductProposalRiskExecutionEvidence,
+    _execution_authority._RESULT_FIELDS,
+)
 _install_execution_evidence_guard()
+del _seal_write_once_slots
+del _WriteOnceSlot
 del _install_precommit_guard
 del _install_execution_evidence_guard
 del _authority

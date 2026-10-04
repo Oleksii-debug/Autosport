@@ -6,7 +6,7 @@ import sqlite3
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
-from threading import RLock
+from threading import RLock, local
 from typing import Iterable
 
 from .domain import MarketEvent
@@ -201,6 +201,10 @@ def _source_payload(
 
 _LIVE_RECEIPT_ISSUE_TOKEN = object()
 _LIVE_RECEIPT_CONTEXT = ContextVar("autosport_live_receipt_context", default=None)
+# ContextVar values are intentionally copyable. Pair them with a non-propagating
+# thread-local lease so a retry hook cannot copy_context() and replay live authority
+# after the outer product-owned ingestion call has exited.
+_LIVE_RECEIPT_THREAD_STATE = local()
 
 
 class _LiveReceiptBatch:
@@ -1135,6 +1139,7 @@ class SQLiteMarketStore:
         _capability_type: type[_LiveReceiptBatch] = _LiveReceiptBatch,
         _expected_issue_token=_LIVE_RECEIPT_ISSUE_TOKEN,
         _live_context=_LIVE_RECEIPT_CONTEXT,
+        _thread_state=_LIVE_RECEIPT_THREAD_STATE,
         _canonical_payload_fn=_canonical_payload,
         _dedupe_key=_market_event_dedupe_key,
         _quote_key=_market_event_quote_key,
@@ -1145,9 +1150,11 @@ class SQLiteMarketStore:
         if type(event) is not _event_type:
             raise TypeError("live receipt authority requires an exact MarketEvent")
         context = _live_context.get()
+        thread_context = getattr(_thread_state, "context", None)
         capability = (
             context[1]
-            if type(context) is tuple
+            if context is thread_context
+            and type(context) is tuple
             and len(context) == 3
             and context[0] is self
             else None
@@ -1205,6 +1212,7 @@ class SQLiteMarketStore:
         _capability_iter=_LiveReceiptBatch.__iter__,
         _issue_token=_LIVE_RECEIPT_ISSUE_TOKEN,
         _live_context=_LIVE_RECEIPT_CONTEXT,
+        _thread_state=_LIVE_RECEIPT_THREAD_STATE,
         _object_new=object.__new__,
         _dedupe_key=_market_event_dedupe_key,
         _canonical_payload_fn=_canonical_payload,
@@ -1232,7 +1240,10 @@ class SQLiteMarketStore:
             requested_counts[identity] = requested_counts.get(identity, 0) + 1
 
         with self._connection_lock:
-            if _live_context.get() is not None:
+            if (
+                _live_context.get() is not None
+                or getattr(_thread_state, "context", None) is not None
+            ):
                 raise RuntimeError("nested live receipt authority write is not allowed")
             receipt_keys_before = {
                 _dedupe_key(event)
@@ -1244,11 +1255,14 @@ class SQLiteMarketStore:
                 is not None
             }
             retry_view = tuple(_capability_iter(capability))
-            context_token = _live_context.set((self, capability, retry_view))
+            lease = (self, capability, retry_view)
+            _thread_state.context = lease
+            context_token = _live_context.set(lease)
             try:
                 accepted = self.append_batch_accepted(retry_view)
             finally:
                 _live_context.reset(context_token)
+                del _thread_state.context
 
             if type(accepted) is not list:
                 raise TypeError("live append must return a list of accepted MarketEvent values")
@@ -1282,6 +1296,7 @@ class SQLiteMarketStore:
         _expected_issue_token=_LIVE_RECEIPT_ISSUE_TOKEN,
         _capability_iter=_LiveReceiptBatch.__iter__,
         _live_context=_LIVE_RECEIPT_CONTEXT,
+        _thread_state=_LIVE_RECEIPT_THREAD_STATE,
         _insert_one_fn=_insert_one,
         _insert_receipt_fn=_insert_live_receipt_authority,
     ) -> list[MarketEvent]:
@@ -1289,9 +1304,11 @@ class SQLiteMarketStore:
         accepted: list[MarketEvent] = []
         with self._connection_lock:
             context = _live_context.get()
+            thread_context = getattr(_thread_state, "context", None)
             capability = (
                 context[1]
-                if type(context) is tuple
+                if context is thread_context
+                and type(context) is tuple
                 and len(context) == 3
                 and context[0] is self
                 else None
@@ -1454,3 +1471,4 @@ _seal_live_receipt_authority_call_surfaces()
 del _seal_live_receipt_authority_call_surfaces
 del _LIVE_RECEIPT_ISSUE_TOKEN
 del _LIVE_RECEIPT_CONTEXT
+del _LIVE_RECEIPT_THREAD_STATE

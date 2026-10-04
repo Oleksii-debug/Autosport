@@ -73,9 +73,9 @@ def test_two_consumers_share_one_persisted_login_reservation(tmp_path):
 
     assert one.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
     assert one.login_authorized is False
-    assert first.consume_effect_authority(one) is True
-    assert second.consume_effect_authority(one) is False
-    assert first.consume_effect_authority(one) is False
+    assert first.consume_effect_authority(one, now=NOW) is True
+    assert second.consume_effect_authority(one, now=NOW) is False
+    assert first.consume_effect_authority(one, now=NOW) is False
     assert two.action is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
     assert two.login_authorized is False
     assert two.snapshot is not None
@@ -1942,7 +1942,7 @@ def test_same_process_stale_renewal_recovers_after_uncertainty_deadline(tmp_path
     assert recovered.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
     assert recovered.attempt_id != started.attempt_id
     assert recovered.login_authorized is False
-    assert lifecycle.consume_effect_authority(recovered) is True
+    assert lifecycle.consume_effect_authority(\n        recovered,\n        now=uncertainty_deadline + timedelta(seconds=1),\n    ) is True
 
 
 def test_available_token_without_durable_state_fails_closed(tmp_path):
@@ -2354,6 +2354,108 @@ def test_raw_provider_slot_bool_cannot_authorize_refresh_promotion(tmp_path):
     assert still_renewing.state is ProphetXSessionState.RENEWING
     assert still_renewing.attempt_id == started.attempt_id
 
+def test_login_dispatch_rebases_restart_slot_horizon(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    issued = lifecycle.begin_login(now=NOW, access_token_available=False)
+    dispatch_at = NOW + timedelta(minutes=5)
+
+    assert lifecycle.consume_effect_authority(
+        issued,
+        now=dispatch_at,
+    ) is True
+    dispatched = lifecycle.read_snapshot()
+    assert dispatched.state is ProphetXSessionState.LOGIN_IN_FLIGHT
+    assert dispatched.last_transition_at == dispatch_at
+    assert dispatched.attempt_started_at == dispatch_at
+    assert dispatched.slot_hold_started_at == dispatch_at
+    assert (
+        dispatched.slot_hold_until
+        == dispatch_at + CONSERVATIVE_SESSION_SLOT_HOLD
+    )
+
+    restarted = _lifecycle(tmp_path)
+    old_reservation_horizon = NOW + CONSERVATIVE_SESSION_SLOT_HOLD
+    blocked = restarted.begin_login(
+        now=old_reservation_horizon + timedelta(seconds=1),
+        access_token_available=False,
+    )
+    assert (
+        blocked.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    )
+    assert blocked.retry_at == dispatched.slot_hold_until
+
+    recovered = restarted.begin_login(
+        now=dispatched.slot_hold_until,
+        access_token_available=False,
+    )
+    assert recovered.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+
+
+def test_renewal_dispatch_rebases_crash_uncertainty_horizon(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
+    issued = lifecycle.begin_renewal(
+        now=due_at,
+        refresh_token_lineage_id=active.session_lineage_id,
+    )
+    dispatch_at = due_at + timedelta(seconds=30)
+
+    assert lifecycle.consume_effect_authority(
+        issued,
+        now=dispatch_at,
+    ) is True
+    dispatched = lifecycle.read_snapshot()
+    assert dispatched.state is ProphetXSessionState.RENEWING
+    assert dispatched.last_transition_at == dispatch_at
+    assert dispatched.attempt_started_at == dispatch_at
+    assert dispatched.slot_hold_started_at == dispatch_at
+    assert (
+        dispatched.slot_hold_until
+        == dispatch_at + CONSERVATIVE_SESSION_SLOT_HOLD
+    )
+
+    restarted = _lifecycle(tmp_path)
+    old_uncertainty_horizon = due_at + CONSERVATIVE_SESSION_SLOT_HOLD
+    blocked = restarted.begin_login(
+        now=old_uncertainty_horizon + timedelta(seconds=1),
+        access_token_available=False,
+    )
+    assert (
+        blocked.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    )
+    assert blocked.retry_at == dispatched.slot_hold_until
+
+
+def test_expired_renewal_cannot_consume_stale_effect_authority(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
+    issued = lifecycle.begin_renewal(
+        now=due_at,
+        refresh_token_lineage_id=active.session_lineage_id,
+    )
+
+    assert lifecycle.consume_effect_authority(
+        issued,
+        now=active.access_expires_at,
+    ) is False
+    unchanged = lifecycle.read_snapshot()
+    assert unchanged == issued.snapshot
+
+
 def test_structurally_valid_forged_login_admission_has_no_effect_authority(
     tmp_path,
 ):
@@ -2378,7 +2480,7 @@ def test_structurally_valid_forged_login_admission_has_no_effect_authority(
     )
 
     assert forged.login_authorized is False
-    assert lifecycle.consume_effect_authority(forged) is False
+    assert lifecycle.consume_effect_authority(forged, now=NOW) is False
 
 
 def test_reconstructed_login_admission_cannot_reuse_issued_attempt_authority(
@@ -2393,17 +2495,17 @@ def test_reconstructed_login_admission_cannot_reuse_issued_attempt_authority(
         retry_at=issued.retry_at,
     )
 
-    assert lifecycle.consume_effect_authority(issued) is True
-    assert lifecycle.consume_effect_authority(forged) is False
+    assert lifecycle.consume_effect_authority(issued, now=NOW) is True
+    assert lifecycle.consume_effect_authority(forged, now=NOW) is False
 
     restarted = _lifecycle(tmp_path)
-    assert restarted.consume_effect_authority(issued) is False
+    assert restarted.consume_effect_authority(issued, now=NOW) is False
 
 
 def test_consumed_effect_authority_cannot_be_reused_after_login_completion(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     issued = lifecycle.begin_login(now=NOW, access_token_available=False)
-    assert lifecycle.consume_effect_authority(issued) is True
+    assert lifecycle.consume_effect_authority(issued, now=NOW) is True
 
     lifecycle.complete_login_failure(
         attempt_id=issued.attempt_id,
@@ -2411,7 +2513,7 @@ def test_consumed_effect_authority_cannot_be_reused_after_login_completion(tmp_p
         failure=ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE,
     )
 
-    assert lifecycle.consume_effect_authority(issued) is False
+    assert lifecycle.consume_effect_authority(issued, now=NOW) is False
 
 
 def test_completed_login_attempt_is_removed_from_effect_registry(tmp_path):
@@ -2472,9 +2574,9 @@ def test_reconstructed_renewal_admission_cannot_reuse_issued_authority(tmp_path)
         retry_at=issued.retry_at,
     )
 
-    assert lifecycle.consume_effect_authority(issued) is True
-    assert lifecycle.consume_effect_authority(forged) is False
-    assert lifecycle.consume_effect_authority(issued) is False
+    assert lifecycle.consume_effect_authority(issued, now=due_at) is True
+    assert lifecycle.consume_effect_authority(forged, now=due_at) is False
+    assert lifecycle.consume_effect_authority(issued, now=due_at) is False
 
 
 def test_admission_cannot_forge_login_authority_without_reservation():

@@ -54,6 +54,30 @@ _TERMINAL_PARENT_SCHEMA = "autosport.proposal-target-terminal-population-precomm
 _TERMINAL_PARENT_ACTION = "PROPOSAL_TARGET_TERMINAL_POPULATION_PRECOMMIT"
 _TERMINAL_PARENT_AGENT = "autosport.proposal-target-terminal-population-authority.v1"
 _TERMINAL_PARENT_ACTION_PREFIX = "proposal-target-terminal-population-v1:"
+_PROTOCOL_CONSTANTS = (
+    _SCHEMA,
+    _ACTION,
+    _AGENT,
+    _BINDING_SCOPE,
+    _ACTION_PREFIX,
+    _TARGET_AUTHORITY_DOMAIN,
+    _TARGET_WORKSPACE_KEY,
+    _TARGET_CHAIN_KEY,
+    _POPULATION_AUTHORITY_DOMAIN,
+    _POPULATION_AUTHORITY_PREFIX,
+    _PARENT_PRECOMMIT_SCHEMA,
+    _PARENT_PRECOMMIT_ACTION,
+    _PARENT_PRECOMMIT_AGENT,
+    _TARGET_SCHEMA,
+    _TARGET_ACTION,
+    _TARGET_AGENT,
+    _TARGET_ACTION_PREFIX,
+    _TERMINAL_PARENT_SCHEMA,
+    _TERMINAL_PARENT_ACTION,
+    _TERMINAL_PARENT_AGENT,
+    _TERMINAL_PARENT_ACTION_PREFIX,
+)
+_PROTOCOL_CONSTANTS_EXPECTED = _PROTOCOL_CONSTANTS
 _HEX = frozenset("0123456789abcdef")
 _MAX_DECIMAL_TEXT = 256
 _PATH_TYPE = type(Path("."))
@@ -66,16 +90,22 @@ _RECORD_TYPE = DecisionRecord
 _LOCK_TYPE = WorkspaceEconomicLock
 _AUTHORITY_TYPE = MonotonicWorkspaceAuthority
 _GOAL_LOAD = EconomicGoalStore.load
+_GOAL_LOAD_CODE = getattr(_GOAL_LOAD, "__code__", None)
 _LEDGER_APPEND = JsonlDecisionLedger.append_economic
+_LEDGER_APPEND_CODE = getattr(_LEDGER_APPEND, "__code__", None)
 _LEDGER_RESOLVE = JsonlDecisionLedger.verified_economic_decision_for_material_action
+_LEDGER_RESOLVE_CODE = getattr(_LEDGER_RESOLVE, "__code__", None)
 _LEDGER_VERIFY = JsonlDecisionLedger.verify_integrity
+_LEDGER_VERIFY_CODE = getattr(_LEDGER_VERIFY, "__code__", None)
 _ENSURE_DURABLE_FILE = ensure_durable_file
+_ENSURE_DURABLE_FILE_CODE = getattr(_ENSURE_DURABLE_FILE, "__code__", None)
 _JSON_DUMPS = json.dumps
 _JSON_DUMPS_EXPECTED = _JSON_DUMPS
 _JSON_DUMPS_CODE = getattr(_JSON_DUMPS, "__code__", None)
 _HASHLIB_SHA256 = hashlib.sha256
 _HASHLIB_SHA256_EXPECTED = _HASHLIB_SHA256
 _UTC_NOW_ISO = utc_now_iso
+_UTC_NOW_ISO_CODE = getattr(_UTC_NOW_ISO, "__code__", None)
 _TERMINAL_POPULATION_TYPE = ProductProposalTargetTerminalPopulation
 _TERMINAL_POPULATION_PROPERTY_NAMES = (
     "population_identity_proven",
@@ -101,6 +131,131 @@ _TERMINAL_POPULATION_PROPERTY_WITNESSES = tuple(
 _TERMINAL_POPULATION_PROPERTY_WITNESSES_EXPECTED = (
     _TERMINAL_POPULATION_PROPERTY_WITNESSES
 )
+_LOCK_METHOD_WITNESSES = tuple(
+    (
+        name,
+        WorkspaceEconomicLock.__dict__[name],
+        getattr(
+            getattr(
+                WorkspaceEconomicLock.__dict__[name],
+                "__func__",
+                WorkspaceEconomicLock.__dict__[name],
+            ),
+            "__code__",
+            None,
+        ),
+    )
+    for name in (
+        "__init__",
+        "acquire",
+        "release",
+        "__enter__",
+        "__exit__",
+        "_open_lock_handle",
+        "_open_new_lock_handle",
+        "_validate_existing_lock_path",
+        "_validate_open_handle_identity",
+        "_require_regular_file",
+        "_require_single_link",
+        "_lock_handle",
+        "_unlock_handle",
+    )
+)
+_LOCK_METHOD_WITNESSES_EXPECTED = _LOCK_METHOD_WITNESSES
+_AUTHORITY_METHOD_WITNESSES = tuple(
+    (
+        name,
+        MonotonicWorkspaceAuthority.__dict__[name],
+        getattr(
+            getattr(
+                MonotonicWorkspaceAuthority.__dict__[name],
+                "__func__",
+                MonotonicWorkspaceAuthority.__dict__[name],
+            ),
+            "__code__",
+            None,
+        ),
+    )
+    for name in (
+        "__init__",
+        "prepare",
+        "commit",
+        "abort",
+        "recover",
+        "read_history",
+        "_validate_authority_root_selection",
+        "_ensure_authority_root_bound",
+        "_validate_authority_root_activation",
+        "_ensure_authority_root_activated",
+        "_validate_workspace_binding",
+        "_ensure_workspace_bound",
+        "_load_bound_history",
+        "_latest_record_for_tx",
+        "_require_same_transaction",
+        "_validate_prepare_retry",
+        "_new_record",
+        "_new_terminal_record",
+        "_payload",
+        "_namespace_payload",
+        "_ensure_namespace_marker",
+        "_validate_namespace_marker",
+        "_append_record",
+        "_load_history",
+        "_decode_record",
+    )
+)
+_AUTHORITY_METHOD_WITNESSES_EXPECTED = _AUTHORITY_METHOD_WITNESSES
+_CONSTRUCTOR_WITNESSES = tuple(
+    (
+        label,
+        owner,
+        owner.__init__,
+        getattr(owner.__init__, "__code__", None),
+    )
+    for label, owner in (
+        ("EconomicGoalStore", EconomicGoalStore),
+        ("PaperRiskPolicy", PaperRiskPolicy),
+        ("JsonlDecisionLedger", JsonlDecisionLedger),
+    )
+)
+_CONSTRUCTOR_WITNESSES_EXPECTED = _CONSTRUCTOR_WITNESSES
+_LEDGER_INTERNAL_METHOD_WITNESSES = tuple(
+    (
+        name,
+        JsonlDecisionLedger.__dict__[name],
+        getattr(
+            getattr(
+                JsonlDecisionLedger.__dict__[name],
+                "__func__",
+                JsonlDecisionLedger.__dict__[name],
+            ),
+            "__code__",
+            None,
+        ),
+    )
+    for name in (
+        "_require_utf8_text",
+        "_validate_json_value",
+        "_canonical_record",
+        "_validate_record",
+        "_json_object_without_duplicate_keys",
+        "_reject_non_finite_json",
+        "_append_validated",
+        "_verify_bytes",
+        "verified_snapshot",
+        "verify_integrity",
+    )
+)
+_LEDGER_INTERNAL_METHOD_WITNESSES_EXPECTED = _LEDGER_INTERNAL_METHOD_WITNESSES
+_DECISION_RECORD_METHOD_WITNESSES = tuple(
+    (
+        name,
+        DecisionRecord.__dict__[name],
+        getattr(DecisionRecord.__dict__[name], "__code__", None),
+    )
+    for name in ("__post_init__", "to_dict")
+)
+_DECISION_RECORD_METHOD_WITNESSES_EXPECTED = _DECISION_RECORD_METHOD_WITNESSES
 
 
 class ProductProposalRiskScenarioPopulationError(RuntimeError):
@@ -256,6 +411,12 @@ class CounterfactualScenarioMemberBinding:
         _text(self.member_id, "member_id")
         _text(self.scenario_id, "scenario_id")
         _sha(self.mapping_sha256, "mapping_sha256")
+
+
+_MEMBER_BINDING_TYPE = CounterfactualScenarioMemberBinding
+_MEMBER_BINDING_TYPE_EXPECTED = _MEMBER_BINDING_TYPE
+_MEMBER_BINDING_POST_INIT = CounterfactualScenarioMemberBinding.__post_init__
+_MEMBER_BINDING_POST_INIT_CODE = getattr(_MEMBER_BINDING_POST_INIT, "__code__", None)
 
 
 def _make_identity_capability():
@@ -484,8 +645,33 @@ def _require_dispatch(
         _UTC_NOW_ISO,
         _TERMINAL_POPULATION_TYPE,
     )
+    live_protocol_constants = (
+        _SCHEMA,
+        _ACTION,
+        _AGENT,
+        _BINDING_SCOPE,
+        _ACTION_PREFIX,
+        _TARGET_AUTHORITY_DOMAIN,
+        _TARGET_WORKSPACE_KEY,
+        _TARGET_CHAIN_KEY,
+        _POPULATION_AUTHORITY_DOMAIN,
+        _POPULATION_AUTHORITY_PREFIX,
+        _PARENT_PRECOMMIT_SCHEMA,
+        _PARENT_PRECOMMIT_ACTION,
+        _PARENT_PRECOMMIT_AGENT,
+        _TARGET_SCHEMA,
+        _TARGET_ACTION,
+        _TARGET_AGENT,
+        _TARGET_ACTION_PREFIX,
+        _TERMINAL_PARENT_SCHEMA,
+        _TERMINAL_PARENT_ACTION,
+        _TERMINAL_PARENT_AGENT,
+        _TERMINAL_PARENT_ACTION_PREFIX,
+    )
     if (
-        type(_expected) is not tuple
+        _PROTOCOL_CONSTANTS is not _PROTOCOL_CONSTANTS_EXPECTED
+        or live_protocol_constants != _PROTOCOL_CONSTANTS_EXPECTED
+        or type(_expected) is not tuple
         or len(current) != len(_expected)
         or any(actual is not expected for actual, expected in zip(current, _expected))
         or any(actual is not expected for actual, expected in zip(aliases, _expected))
@@ -526,10 +712,83 @@ def _require_dispatch(
         or getattr(_JSON_DUMPS_EXPECTED, "__code__", None) is not _JSON_DUMPS_CODE
         or _HASHLIB_SHA256 is not _HASHLIB_SHA256_EXPECTED
         or hashlib.sha256 is not _HASHLIB_SHA256_EXPECTED
+        or getattr(EconomicGoalStore.load, "__code__", None) is not _GOAL_LOAD_CODE
+        or getattr(_GOAL_LOAD, "__code__", None) is not _GOAL_LOAD_CODE
+        or getattr(JsonlDecisionLedger.append_economic, "__code__", None)
+        is not _LEDGER_APPEND_CODE
+        or getattr(_LEDGER_APPEND, "__code__", None) is not _LEDGER_APPEND_CODE
+        or getattr(
+            JsonlDecisionLedger.verified_economic_decision_for_material_action,
+            "__code__",
+            None,
+        )
+        is not _LEDGER_RESOLVE_CODE
+        or getattr(_LEDGER_RESOLVE, "__code__", None) is not _LEDGER_RESOLVE_CODE
+        or getattr(JsonlDecisionLedger.verify_integrity, "__code__", None)
+        is not _LEDGER_VERIFY_CODE
+        or getattr(_LEDGER_VERIFY, "__code__", None) is not _LEDGER_VERIFY_CODE
+        or getattr(ensure_durable_file, "__code__", None)
+        is not _ENSURE_DURABLE_FILE_CODE
+        or getattr(_ENSURE_DURABLE_FILE, "__code__", None)
+        is not _ENSURE_DURABLE_FILE_CODE
+        or getattr(utc_now_iso, "__code__", None) is not _UTC_NOW_ISO_CODE
+        or getattr(_UTC_NOW_ISO, "__code__", None) is not _UTC_NOW_ISO_CODE
+        or CounterfactualScenarioMemberBinding is not _MEMBER_BINDING_TYPE_EXPECTED
+        or _MEMBER_BINDING_TYPE is not _MEMBER_BINDING_TYPE_EXPECTED
+        or CounterfactualScenarioMemberBinding.__post_init__
+        is not _MEMBER_BINDING_POST_INIT
+        or getattr(_MEMBER_BINDING_POST_INIT, "__code__", None)
+        is not _MEMBER_BINDING_POST_INIT_CODE
     ):
         raise ProductProposalRiskScenarioPopulationError(
             "scenario population authority dispatch changed"
         )
+
+    for witness_set, owner in (
+        (_LOCK_METHOD_WITNESSES_EXPECTED, WorkspaceEconomicLock),
+        (_AUTHORITY_METHOD_WITNESSES_EXPECTED, MonotonicWorkspaceAuthority),
+        (_LEDGER_INTERNAL_METHOD_WITNESSES_EXPECTED, JsonlDecisionLedger),
+    ):
+        for name, expected_member, code in witness_set:
+            current_member = owner.__dict__.get(name)
+            current_function = getattr(current_member, "__func__", current_member)
+            if (
+                current_member is not expected_member
+                or getattr(current_function, "__code__", None) is not code
+            ):
+                raise ProductProposalRiskScenarioPopulationError(
+                    "scenario population authority dispatch changed"
+                )
+
+    if _CONSTRUCTOR_WITNESSES is not _CONSTRUCTOR_WITNESSES_EXPECTED:
+        raise ProductProposalRiskScenarioPopulationError(
+            "scenario population authority dispatch changed"
+        )
+    for _label, owner, expected_init, code in _CONSTRUCTOR_WITNESSES_EXPECTED:
+        if (
+            owner.__init__ is not expected_init
+            or getattr(owner.__init__, "__code__", None) is not code
+        ):
+            raise ProductProposalRiskScenarioPopulationError(
+                "scenario population authority dispatch changed"
+            )
+
+    if (
+        _DECISION_RECORD_METHOD_WITNESSES
+        is not _DECISION_RECORD_METHOD_WITNESSES_EXPECTED
+    ):
+        raise ProductProposalRiskScenarioPopulationError(
+            "scenario population authority dispatch changed"
+        )
+    for name, expected_member, code in _DECISION_RECORD_METHOD_WITNESSES_EXPECTED:
+        current_member = DecisionRecord.__dict__.get(name)
+        if (
+            current_member is not expected_member
+            or getattr(current_member, "__code__", None) is not code
+        ):
+            raise ProductProposalRiskScenarioPopulationError(
+                "scenario population authority dispatch changed"
+            )
 
     helper_witnesses = globals().get("_HELPER_WITNESSES")
     expected_helper_witnesses = globals().get("_HELPER_WITNESSES_EXPECTED")
@@ -629,10 +888,13 @@ def _validate_members(
         )
     validated: list[CounterfactualScenarioMemberBinding] = []
     for index, member in enumerate(members):
-        if type(member) is not CounterfactualScenarioMemberBinding:
+        if type(member) is not _MEMBER_BINDING_TYPE:
             raise ProductProposalRiskScenarioPopulationError(
                 f"members[{index}] must be exact CounterfactualScenarioMemberBinding"
             )
+        _text(member.member_id, f"members[{index}].member_id")
+        _text(member.scenario_id, f"members[{index}].scenario_id")
+        _sha(member.mapping_sha256, f"members[{index}].mapping_sha256")
         validated.append(member)
     result = tuple(validated)
     member_ids = tuple(member.member_id for member in result)

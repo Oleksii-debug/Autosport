@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, localcontext
 import pickle
 
@@ -540,4 +540,44 @@ def test_resolution_type_rejects_subclass_authority_laundering() -> None:
     with pytest.raises(TypeError, match="authority surface classes are final"):
         class ForgedResolution(resolution_type):
             execution_authorized = property(lambda _self: True)
+
+class _MutableOffsetTz(tzinfo):
+    def __init__(self, offset: timedelta) -> None:
+        self.offset = offset
+
+    def utcoffset(self, _dt: datetime | None) -> timedelta:
+        return self.offset
+
+    def dst(self, _dt: datetime | None) -> timedelta:
+        return timedelta(0)
+
+    def tzname(self, _dt: datetime | None) -> str:
+        return "MUTABLE"
+
+
+def test_observation_freezes_normalized_time_against_mutable_tzinfo() -> None:
+    mutable_zone = _MutableOffsetTz(timedelta(0))
+    item = observation(
+        retrieved_at=datetime(2026, 9, 1, 0, 0, tzinfo=mutable_zone),
+        reviewed_at=datetime(2026, 9, 1, 0, 1, tzinfo=mutable_zone),
+        available_at=datetime(2026, 9, 1, 0, 2, tzinfo=mutable_zone),
+        effective_from=datetime(2026, 9, 1, 0, 0, tzinfo=mutable_zone),
+        review_expires_at=datetime(2026, 9, 8, 0, 0, tzinfo=mutable_zone),
+    )
+    cutoff = T0 + timedelta(minutes=3)
+    generation_before = item.generation_sha256
+    available_before = item.available_at.astimezone(UTC)
+
+    assert item.available_at.tzinfo is UTC
+    assert resolve(item, as_of=cutoff).state is (
+        BetfairConstraintResolutionState.CONSISTENT_UNVERIFIED
+    )
+
+    mutable_zone.offset = timedelta(hours=-12)
+
+    assert item.generation_sha256 == generation_before
+    assert item.available_at.astimezone(UTC) == available_before
+    assert resolve(item, as_of=cutoff).state is (
+        BetfairConstraintResolutionState.CONSISTENT_UNVERIFIED
+    )
 

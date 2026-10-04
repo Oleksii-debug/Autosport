@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -465,4 +466,101 @@ def test_economic_identity_hashing_uses_captured_dispatch_roots(
         rebuilt_set.opportunity_set_id,
         rebuilt_plan.plan_id,
     ) == expected_ids
+
+def test_predictive_chronology_uses_captured_timestamp_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _poison_timestamp_parser(value: object) -> object:
+        raise AssertionError("rebound timestamp parser executed")
+
+    monkeypatch.setattr(
+        opportunity_module,
+        "parse_iso_timestamp",
+        _poison_timestamp_parser,
+    )
+
+    eligibility = PredictiveEligibilityEvidence(
+        evaluation_id="evaluation-chronology-root",
+        evaluation_sha256=_HASH,
+        protocol_sha256=_HASH,
+        admission_policy_sha256=_HASH,
+        model_id="model",
+        model_version="1",
+        strategy_version="1",
+        uncertainty_kind="absolute_probability_radius_v1",
+        sample_size=100,
+        minimum_sample_size=50,
+        maximum_uncertainty=Decimal("0.1"),
+        as_of="2026-09-16T15:00:00+00:00",
+        valid_until="2026-09-16T18:00:00+00:00",
+    )
+    forecast = ForecastRef(
+        forecast_id="forecast-chronology-root",
+        forecast_hash=_HASH,
+        quote_key=_quote().quote_key,
+        probability=Decimal("0.5"),
+        input_cutoff_ts="2026-09-16T16:00:00+00:00",
+        market_snapshot_hash=_HASH,
+        quote_market_event_hash=_HASH,
+        model_id="model",
+        model_version="1",
+        strategy_version="1",
+        uncertainty=Decimal("0.05"),
+        predictive_eligibility=eligibility,
+    )
+
+    reason = forecast.predictive_eligibility_reason(
+        datetime(2026, 9, 16, 16, 30, tzinfo=timezone.utc),
+        expected_model_id="model",
+    )
+    assert reason is None
+
+
+def test_future_forecast_cutoff_still_rejects_after_parser_global_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eligibility = PredictiveEligibilityEvidence(
+        evaluation_id="evaluation-future-cutoff",
+        evaluation_sha256=_HASH,
+        protocol_sha256=_HASH,
+        admission_policy_sha256=_HASH,
+        model_id="model",
+        model_version="1",
+        strategy_version="1",
+        uncertainty_kind="absolute_probability_radius_v1",
+        sample_size=100,
+        minimum_sample_size=50,
+        maximum_uncertainty=Decimal("0.1"),
+        as_of="2026-09-16T15:00:00+00:00",
+        valid_until="2026-09-16T18:00:00+00:00",
+    )
+    forecast = ForecastRef(
+        forecast_id="forecast-future-cutoff",
+        forecast_hash=_HASH,
+        quote_key=_quote().quote_key,
+        probability=Decimal("0.5"),
+        input_cutoff_ts="2026-09-16T17:00:00+00:00",
+        market_snapshot_hash=_HASH,
+        quote_market_event_hash=_HASH,
+        model_id="model",
+        model_version="1",
+        strategy_version="1",
+        uncertainty=Decimal("0.05"),
+        predictive_eligibility=eligibility,
+    )
+
+    def _launder_future_cutoff(value: object) -> object:
+        raise AssertionError("rebound timestamp parser executed")
+
+    monkeypatch.setattr(
+        opportunity_module,
+        "parse_iso_timestamp",
+        _launder_future_cutoff,
+    )
+
+    reason = forecast.predictive_eligibility_reason(
+        datetime(2026, 9, 16, 16, 30, tzinfo=timezone.utc),
+        expected_model_id="model",
+    )
+    assert reason == "predictive forecast input cutoff is from the future"
 

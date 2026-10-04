@@ -30,6 +30,10 @@ def _parse_jsonl_event(line: str, line_number: int) -> MarketEvent:
         raise ValueError(f"invalid replay event schema at line {line_number}") from exc
 
 
+_EVENT_PAYLOAD_SEQUENCE_DOMAIN = "AUTOSPORT_REPLAY_EVENT_PAYLOAD_SEQUENCE_V1"
+_HEX = frozenset("0123456789abcdef")
+
+
 class FutureLeakageError(RuntimeError):
     pass
 
@@ -97,6 +101,9 @@ class ReplayRun:
     event_count: int
     started_at: str
     completed_at: str
+    input_event_payload_sequence_sha256: str | None = None
+    consumed_event_payload_sequence_sha256: str | None = None
+    applied_event_payload_sequence_sha256: str | None = None
 
 
 def _snapshot_replay_event(event: MarketEvent) -> MarketEvent:
@@ -112,13 +119,66 @@ def _snapshot_replay_event(event: MarketEvent) -> MarketEvent:
         raise ValueError("replay event must be canonical") from exc
 
 
+def market_event_payload_sha256(event: MarketEvent) -> str:
+    """Digest one exact canonical MarketEvent value without trusting overrides."""
+
+    snapshot = _snapshot_replay_event(event)
+    payload = json.dumps(
+        MarketEvent.to_dict(snapshot),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def market_event_payload_sequence_sha256(
+    payload_sha256: Iterable[str],
+) -> str:
+    """Digest an ordered sequence of canonical MarketEvent payload digests."""
+
+    digest = hashlib.sha256()
+    digest.update((_EVENT_PAYLOAD_SEQUENCE_DOMAIN + "\n").encode("ascii"))
+    count = 0
+    for ordinal, value in enumerate(payload_sha256):
+        if (
+            type(value) is not str
+            or len(value) != 64
+            or any(ch not in _HEX for ch in value)
+        ):
+            raise ValueError(
+                "event payload sequence requires lowercase SHA-256 digests"
+            )
+        digest.update(str(ordinal).encode("ascii"))
+        digest.update(b":")
+        digest.update(value.encode("ascii"))
+        digest.update(b"\n")
+        count += 1
+    digest.update(b"count:")
+    digest.update(str(count).encode("ascii"))
+    digest.update(b"\n")
+    return digest.hexdigest()
+
+
 class ReplayEngine:
     def __init__(self, events: Iterable[MarketEvent], firewall: ReplayLeakageFirewall | None = None) -> None:
         # Snapshot each yielded value immediately. MarketEvent is frozen but nested
         # metadata is mutable, so retaining caller objects would allow strategy-visible
         # replay bytes to drift after dataset_hash was frozen.
         raw_events = [_snapshot_replay_event(event) for event in events]
+        input_payloads = tuple(
+            market_event_payload_sha256(event) for event in raw_events
+        )
+        self.input_event_payload_sequence_sha256 = (
+            market_event_payload_sequence_sha256(input_payloads)
+        )
         self._events = tuple(sorted(raw_events, key=_replay_order_key))
+        self._consumed_event_payload_sequence_sha256 = (
+            market_event_payload_sequence_sha256(
+                tuple(market_event_payload_sha256(event) for event in self._events)
+            )
+        )
         self.firewall = firewall or ReplayLeakageFirewall()
         # Dataset identity preserves the pre-causal-delivery ordering contract.
         # Delivery order may evolve to match live availability semantics without
@@ -165,6 +225,7 @@ class ReplayEngine:
         previous: float | None = None
         started = utc_now_iso()
         count = 0
+        applied_payloads: list[str] = []
         replay_mirror = MarketMirror()
         for event in self._events:
             if speed > 0:
@@ -190,6 +251,7 @@ class ReplayEngine:
                 # A strategy callback receives a value snapshot, never the engine's
                 # hash-bound internal event. Callback mutation therefore cannot
                 # rewrite later audit inspection or the durable replay identity.
+                applied_payloads.append(market_event_payload_sha256(event))
                 on_event(_snapshot_replay_event(event))
         self.firewall._complete_replay(completion_capability)
         return ReplayRun(
@@ -198,6 +260,15 @@ class ReplayEngine:
             event_count=count,
             started_at=started,
             completed_at=utc_now_iso(),
+            input_event_payload_sequence_sha256=(
+                self.input_event_payload_sequence_sha256
+            ),
+            consumed_event_payload_sequence_sha256=(
+                self._consumed_event_payload_sequence_sha256
+            ),
+            applied_event_payload_sequence_sha256=(
+                market_event_payload_sequence_sha256(tuple(applied_payloads))
+            ),
         )
 
 

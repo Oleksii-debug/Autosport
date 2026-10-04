@@ -125,13 +125,10 @@ def test_product_runtime_entry_rejects_coherent_status_code_mutation(
         "__dict__",
     )["_coherent_status"]
     original_code = canonical_status.__code__
-    hostile_calls = 0
 
     def hostile_status(self, **_kwargs):
-        nonlocal hostile_calls
         del self
-        hostile_calls += 1
-        return object()
+        raise AssertionError("hostile coherent status executed")
 
     try:
         canonical_status.__code__ = hostile_status.__code__
@@ -140,7 +137,6 @@ def test_product_runtime_entry_rejects_coherent_status_code_mutation(
             match="status authority changed",
         ):
             tick_autonomous_product_runtime(runtime)
-        assert hostile_calls == 0
     finally:
         canonical_status.__code__ = original_code
         runtime.close()

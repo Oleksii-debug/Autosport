@@ -1942,7 +1942,10 @@ def test_same_process_stale_renewal_recovers_after_uncertainty_deadline(tmp_path
     assert recovered.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
     assert recovered.attempt_id != started.attempt_id
     assert recovered.login_authorized is False
-    assert lifecycle.consume_effect_authority(\n        recovered,\n        now=uncertainty_deadline + timedelta(seconds=1),\n    ) is True
+    assert lifecycle.consume_effect_authority(
+        recovered,
+        now=uncertainty_deadline + timedelta(seconds=1),
+    ) is True
 
 
 def test_available_token_without_durable_state_fails_closed(tmp_path):

@@ -3316,6 +3316,97 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 restarted_store.close()
 
+    def test_provider_outage_still_recovers_already_staged_settlement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:outage-recovery",
+            )
+            page = CatalogPage(
+                source_id="provider-a",
+                stream_epoch="epoch-1",
+                cursor="cursor-outage-recovery",
+                position=1,
+                events=(event,),
+            )
+            source = _Source(page)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = PaperBook("100")
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:10+00:00",
+                provider_source_ids=("provider-a",),
+            )
+            book.save(root / "paper_book.json")
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="provider-result:outage-recovery",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="outage-recovery-evidence",
+                evidence_sha256="7" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+            )
+            try:
+                coordinator.collector.run_cycle()
+                coordinator._state.record_settlement_evidence(
+                    settlement_evidence=(resolution,),
+                )
+                self.assertEqual(
+                    PaperBook.load(root / "paper_book.json").balance,
+                    Decimal("90"),
+                )
+            finally:
+                store.close()
+
+            unavailable = _UnavailableSource(page)
+            restarted, restarted_store, *_ = _build_coordinator(
+                root,
+                unavailable,
+                clock,
+            )
+            try:
+                result = restarted.tick()
+                self.assertTrue(result.source_provider_unavailable)
+                self.assertEqual(
+                    result.settled_ticket_ids,
+                    (ticket.ticket_id,),
+                )
+                self.assertIn(
+                    resolution.evidence_id,
+                    result.settlement_evidence_ids,
+                )
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("110"))
+                self.assertEqual(
+                    durable.tickets[ticket.ticket_id].status.value,
+                    "won",
+                )
+                raw = json.loads(
+                    (root / "continuous_session.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(raw["pending_settlement_resolutions"], [])
+                self.assertEqual(raw["cycles_completed"], 0)
+                self.assertEqual(
+                    raw["last_error_code"],
+                    "ProviderUnavailableError",
+                )
+            finally:
+                restarted_store.close()
+
     def test_pending_settlement_outcomes_tamper_fails_digest_reproof(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

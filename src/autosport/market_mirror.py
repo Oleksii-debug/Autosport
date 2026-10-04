@@ -679,3 +679,45 @@ class MarketMirror:
     def __len__(self) -> int:
         with self._lock:
             return len(self._latest)
+
+def _seal_trusted_recovery_call_surfaces() -> None:
+    """Expose trusted recovery contracts without caller-replaceable canonical hooks."""
+
+    replay_impl = MarketMirror.__dict__["replay_view_from_store"].__func__
+    live_bootstrap_impl = MarketMirror.__dict__["from_live_store"].__func__
+
+    def replay_view_from_store(
+        cls,
+        store: SQLiteMarketStore,
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+        require_live_receipt_authority: bool = False,
+        source_ids: str | Iterable[str] | None = None,
+        sports: str | Iterable[str] | None = None,
+        event_ids: str | Iterable[str] | None = None,
+        market_ids: str | Iterable[str] | None = None,
+        selection_ids: str | Iterable[str] | None = None,
+    ) -> MirrorSnapshot:
+        return replay_impl(
+            cls,
+            store,
+            as_of=as_of,
+            max_age=max_age,
+            require_live_receipt_authority=require_live_receipt_authority,
+            source_ids=source_ids,
+            sports=sports,
+            event_ids=event_ids,
+            market_ids=market_ids,
+            selection_ids=selection_ids,
+        )
+
+    def from_live_store(cls, store: SQLiteMarketStore) -> "MarketMirror":
+        return live_bootstrap_impl(cls, store)
+
+    MarketMirror.replay_view_from_store = classmethod(replay_view_from_store)
+    MarketMirror.from_live_store = classmethod(from_live_store)
+
+
+_seal_trusted_recovery_call_surfaces()
+del _seal_trusted_recovery_call_surfaces

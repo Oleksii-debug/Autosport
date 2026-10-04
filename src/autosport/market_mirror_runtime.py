@@ -11,6 +11,7 @@ from .storage import SQLiteMarketStore
 
 
 MirrorQuoteKey = tuple[str, str]
+MirrorRefreshIdentity = tuple[MirrorQuoteKey, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,11 +33,16 @@ class MirrorInvalidationBatch:
     full_refresh_required: bool
     has_more: bool
     semantic_refresh_keys: tuple[MirrorQuoteKey, ...] = ()
+    semantic_refresh_identities: tuple[MirrorRefreshIdentity, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.full_refresh_required) is not bool or type(self.has_more) is not bool:
             raise TypeError("invalidation batch flags must be booleans")
-        if type(self.changed_keys) is not tuple or type(self.semantic_refresh_keys) is not tuple:
+        if (
+            type(self.changed_keys) is not tuple
+            or type(self.semantic_refresh_keys) is not tuple
+            or type(self.semantic_refresh_identities) is not tuple
+        ):
             raise TypeError("invalidation key collections must be tuples")
         for key in (*self.changed_keys, *self.semantic_refresh_keys):
             if (
@@ -55,6 +61,34 @@ class MirrorInvalidationBatch:
         if len(set(self.semantic_refresh_keys)) != len(self.semantic_refresh_keys):
             raise ValueError("semantic refresh keys must be unique")
 
+        refresh_identity_keys: list[MirrorQuoteKey] = []
+        for identity in self.semantic_refresh_identities:
+            if type(identity) is not tuple or len(identity) != 2:
+                raise ValueError(
+                    "semantic refresh identity must be ((source_id, quote_key), sequence)"
+                )
+            key, sequence = identity
+            if (
+                type(key) is not tuple
+                or len(key) != 2
+                or type(key[0]) is not str
+                or type(key[1]) is not str
+                or not key[0]
+                or not key[1]
+                or type(sequence) is not int
+                or sequence <= 0
+            ):
+                raise ValueError(
+                    "semantic refresh identity must bind one valid key to a positive sequence"
+                )
+            refresh_identity_keys.append(key)
+        if len(set(refresh_identity_keys)) != len(refresh_identity_keys):
+            raise ValueError("semantic refresh identities must have unique keys")
+        if frozenset(refresh_identity_keys) != frozenset(self.semantic_refresh_keys):
+            raise ValueError(
+                "semantic refresh identities must exactly bind semantic refresh keys"
+            )
+
         changed = frozenset(self.changed_keys)
         semantic_refresh = frozenset(self.semantic_refresh_keys)
         if not semantic_refresh.issubset(changed):
@@ -62,7 +96,10 @@ class MirrorInvalidationBatch:
                 "semantic refresh keys must be a subset of changed invalidation keys"
             )
         if self.full_refresh_required and (
-            self.changed_keys or self.semantic_refresh_keys or self.has_more
+            self.changed_keys
+            or self.semantic_refresh_keys
+            or self.semantic_refresh_identities
+            or self.has_more
         ):
             raise ValueError(
                 "full-refresh invalidation must not carry bounded key state"
@@ -269,6 +306,14 @@ class FocusedMirrorDependencyIndex:
         if len(events) != len(changed_keys):
             # Positive refresh-only classification must fail closed when one coherent
             # mirror revision cannot resolve every changed identity in the batch.
+            return ()
+        refresh_sequences = dict(batch.semantic_refresh_identities)
+        if any(
+            events[key].sequence != refresh_sequences[key]
+            for key in refresh_keys
+        ):
+            # A later acquisition already advanced this key after the batch was
+            # drained. Stale refresh-only provenance must never relabel newer state.
             return ()
 
         with self._lock:
@@ -556,7 +601,7 @@ class BoundedMirrorInvalidationBuffer:
         self._mirror = mirror
         self._max_dirty_keys = max_dirty_keys
         self._dirty: dict[MirrorQuoteKey, None] = {}
-        self._semantic_refresh: dict[MirrorQuoteKey, None] = {}
+        self._semantic_refresh: dict[MirrorQuoteKey, int] = {}
         self._full_refresh_required = False
         self._lock = RLock()
 
@@ -609,10 +654,15 @@ class BoundedMirrorInvalidationBuffer:
             if key in self._dirty:
                 # Coalescing must never relabel a batch containing a material update
                 # as refresh-only. A later APPLIED update therefore revokes an earlier
-                # refresh classification, while a later refresh cannot downgrade an
-                # already-material dirty key.
+                # refresh classification. Repeated refreshes retain refresh-only status
+                # but advance its provenance to the exact latest acquisition sequence.
                 if result.status is MirrorUpdate.APPLIED:
                     self._semantic_refresh.pop(key, None)
+                elif (
+                    result.status is MirrorUpdate.SEMANTIC_REFRESH
+                    and key in self._semantic_refresh
+                ):
+                    self._semantic_refresh[key] = event.sequence
                 return result
 
             if len(self._dirty) >= self._max_dirty_keys:
@@ -626,7 +676,7 @@ class BoundedMirrorInvalidationBuffer:
 
             self._dirty[key] = None
             if result.status is MirrorUpdate.SEMANTIC_REFRESH:
-                self._semantic_refresh[key] = None
+                self._semantic_refresh[key] = event.sequence
             return result
 
     def accept_persisted(self, event: MarketEvent) -> MirrorApplyResult:
@@ -678,12 +728,17 @@ class BoundedMirrorInvalidationBuffer:
                     full_refresh_required=True,
                     has_more=False,
                     semantic_refresh_keys=(),
+                    semantic_refresh_identities=(),
                 )
 
             count = min(max_items, len(self._dirty))
             keys = tuple(list(self._dirty)[:count])
             semantic_refresh_keys = tuple(
                 key for key in keys if key in self._semantic_refresh
+            )
+            semantic_refresh_identities = tuple(
+                (key, self._semantic_refresh[key])
+                for key in semantic_refresh_keys
             )
             for key in keys:
                 del self._dirty[key]
@@ -693,4 +748,5 @@ class BoundedMirrorInvalidationBuffer:
                 full_refresh_required=False,
                 has_more=bool(self._dirty),
                 semantic_refresh_keys=semantic_refresh_keys,
+                semantic_refresh_identities=semantic_refresh_identities,
             )

@@ -209,7 +209,7 @@ class HealthGatedMirrorDecisionIndex:
             recorded_at=latest["recorded_at"],
             transition_order=(
                 latest["transition_order"]
-                if schema_version == 3
+                if "transition_order" in latest
                 else len(entries)
             ),
         )
@@ -248,7 +248,7 @@ class HealthGatedMirrorDecisionIndex:
         elif entries:
             available_order = (
                 entries[-1]["transition_order"]
-                if schema_version == 3
+                if "transition_order" in entries[-1]
                 else len(entries)
             )
             available_recorded_at = entries[-1]["recorded_at"]
@@ -273,7 +273,7 @@ class HealthGatedMirrorDecisionIndex:
                         break
                     horizon_order = (
                         entry["transition_order"]
-                        if schema_version == 3
+                        if "transition_order" in entry
                         else index
                     )
                     horizon_recorded_at = entry["recorded_at"]
@@ -296,7 +296,7 @@ class HealthGatedMirrorDecisionIndex:
                     expected = entries[horizon_order - 1]
                     expected_order = (
                         expected["transition_order"]
-                        if schema_version == 3
+                        if "transition_order" in expected
                         else horizon_order
                     )
                     if expected_order != horizon_order:
@@ -327,7 +327,7 @@ class HealthGatedMirrorDecisionIndex:
 
         selected: dict | None = None
         for index, entry in enumerate(entries, start=1):
-            order = entry["transition_order"] if schema_version == 3 else index
+            order = entry["transition_order"] if "transition_order" in entry else index
             if order > horizon_order:
                 break
             if parse_source_timestamp(entry["recorded_at"]) <= as_of:

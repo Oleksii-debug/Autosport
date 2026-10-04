@@ -18,7 +18,6 @@ from .monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
 )
 from . import secret_redaction as _secret_redaction
-from .secret_redaction import safe_exception_text
 
 
 _ALLOWED_HEALTH_STATUSES = frozenset({"unknown", "healthy", "degraded", "failed"})
@@ -59,7 +58,8 @@ def _build_durable_failure_renderer():
     fixed product-owned literal.
     """
 
-    canonical_renderer = safe_exception_text
+    secret_module = _secret_redaction
+    canonical_renderer = secret_module.safe_exception_text
     canonical_globals = canonical_renderer.__globals__
     fallback = _DURABLE_FAILURE_FALLBACK
 
@@ -67,28 +67,40 @@ def _build_durable_failure_renderer():
         (name, value, value.__code__)
         for name, value in canonical_globals.items()
         if type(value) is FunctionType
-        and getattr(value, "__module__", None) == _secret_redaction.__name__
+        and getattr(value, "__module__", None) == secret_module.__name__
     )
-    external_callable_witness = tuple(
-        (name, value)
-        for name, value in canonical_globals.items()
-        if callable(value)
-        and type(value) is not FunctionType
-        and not name.startswith("__")
+    referenced_names = frozenset(
+        name
+        for _function_name, function, _code in function_witness
+        for name in function.__code__.co_names
+        if name in canonical_globals
+    )
+    binding_witness = tuple(
+        (name, canonical_globals[name])
+        for name in sorted(referenced_names)
+    )
+    mutable_binding_witness = tuple(
+        (name, tuple(sorted(value.items())))
+        for name, value in binding_witness
+        if type(value) is dict
     )
 
     def authority_current() -> bool:
-        if globals().get("safe_exception_text") is not canonical_renderer:
-            return False
-        if _secret_redaction.safe_exception_text is not canonical_renderer:
+        if secret_module.safe_exception_text is not canonical_renderer:
             return False
         for name, function, code in function_witness:
             if canonical_globals.get(name) is not function:
                 return False
             if function.__code__ is not code:
                 return False
-        for name, value in external_callable_witness:
+        for name, value in binding_witness:
             if canonical_globals.get(name) is not value:
+                return False
+        for name, expected_items in mutable_binding_witness:
+            value = canonical_globals.get(name)
+            if type(value) is not dict:
+                return False
+            if tuple(sorted(value.items())) != expected_items:
                 return False
         return True
 
@@ -1131,3 +1143,12 @@ class SourceHealthStore:
                 temporary.unlink()
             except FileNotFoundError:
                 pass
+
+
+# The durable renderer and its dependency module are intentionally not public
+# late-dispatch surfaces. SourceHealthStore.record_failure already holds the
+# renderer in a lexical cell created during class construction.
+del _DURABLE_FAILURE_RENDERER
+del _DURABLE_FAILURE_FALLBACK
+del _build_record_failure_method
+del _secret_redaction

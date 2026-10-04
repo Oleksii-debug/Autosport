@@ -46,6 +46,18 @@ _VERIFIED_EXECUTION_VIEW = _impl.RealExecutionLedger.verified_execution_view
 _VERIFIED_EXECUTION_VIEW_CODE = getattr(_VERIFIED_EXECUTION_VIEW, "__code__", None)
 _LEDGER_MUTATE = _impl.RealExecutionLedger._mutate
 _LEDGER_MUTATE_CODE = getattr(_LEDGER_MUTATE, "__code__", None)
+_FINAL_REQUIRE_APPROVAL = _impl._CANONICAL_REQUIRE_SUPERVISED_APPROVAL
+_FINAL_REQUIRE_APPROVAL_CODE = getattr(_FINAL_REQUIRE_APPROVAL, "__code__", None)
+_FINAL_REQUIRE_DURABLE_APPROVAL = (
+    _impl._CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL
+)
+_FINAL_REQUIRE_DURABLE_APPROVAL_CODE = getattr(
+    _FINAL_REQUIRE_DURABLE_APPROVAL,
+    "__code__",
+    None,
+)
+_LEDGER_MARK_SUBMITTED = _impl._CANONICAL_LEDGER_MARK_SUBMITTED
+_LEDGER_MARK_SUBMITTED_CODE = getattr(_LEDGER_MARK_SUBMITTED, "__code__", None)
 _SUBMITTED_STATE = _impl.AttemptState.SUBMITTED
 
 # The outer transport boundary seals not only the public consume function but every
@@ -201,6 +213,12 @@ if (
     or _VERIFIED_EXECUTION_VIEW_CODE is None
     or not callable(_LEDGER_MUTATE)
     or _LEDGER_MUTATE_CODE is None
+    or not callable(_FINAL_REQUIRE_APPROVAL)
+    or _FINAL_REQUIRE_APPROVAL_CODE is None
+    or not callable(_FINAL_REQUIRE_DURABLE_APPROVAL)
+    or _FINAL_REQUIRE_DURABLE_APPROVAL_CODE is None
+    or not callable(_LEDGER_MARK_SUBMITTED)
+    or _LEDGER_MARK_SUBMITTED_CODE is None
     or type(_TRUSTED_ACTIVE_BY_WORKSPACE) is not dict
     or type(_TRUSTED_ISSUED) is not dict
     or not callable(_REQUIRE_TRUSTED_PROFILE)
@@ -332,6 +350,19 @@ def _confirmation_graph_unchanged() -> bool:
         is _VERIFIED_EXECUTION_VIEW_CODE
         and _impl.RealExecutionLedger._mutate is _LEDGER_MUTATE
         and getattr(_LEDGER_MUTATE, "__code__", None) is _LEDGER_MUTATE_CODE
+        and _impl._CANONICAL_REQUIRE_SUPERVISED_APPROVAL
+        is _FINAL_REQUIRE_APPROVAL
+        and getattr(_FINAL_REQUIRE_APPROVAL, "__code__", None)
+        is _FINAL_REQUIRE_APPROVAL_CODE
+        and _impl._CANONICAL_REQUIRE_DURABLE_SUPERVISED_APPROVAL
+        is _FINAL_REQUIRE_DURABLE_APPROVAL
+        and getattr(_FINAL_REQUIRE_DURABLE_APPROVAL, "__code__", None)
+        is _FINAL_REQUIRE_DURABLE_APPROVAL_CODE
+        and _impl._CANONICAL_LEDGER_MARK_SUBMITTED
+        is _LEDGER_MARK_SUBMITTED
+        and getattr(_LEDGER_MARK_SUBMITTED, "__code__", None)
+        is _LEDGER_MARK_SUBMITTED_CODE
+        and _impl.RealExecutionLedger.mark_submitted is _LEDGER_MARK_SUBMITTED
         and _impl.AttemptState.SUBMITTED is _SUBMITTED_STATE
     )
 
@@ -531,6 +562,7 @@ def _build_trusted_private_place_action(private_place_action, private_place_acti
                 raise _impl.BetfairSupervisedExecutionError(
                     "canonical Betfair internal provider-write authority changed"
                 )
+
             def dispatch_under_durable_approval_fence():
                 return private_place_action(
                     self,

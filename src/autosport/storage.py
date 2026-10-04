@@ -1148,7 +1148,7 @@ class SQLiteMarketStore:
         capability = (
             context[1]
             if type(context) is tuple
-            and len(context) == 2
+            and len(context) == 3
             and context[0] is self
             else None
         )
@@ -1243,10 +1243,10 @@ class SQLiteMarketStore:
                 ).fetchone()
                 is not None
             }
-            issued_generation = tuple(_capability_iter(capability))
-            context_token = _live_context.set((self, capability))
+            retry_view = tuple(_capability_iter(capability))
+            context_token = _live_context.set((self, capability, retry_view))
             try:
-                accepted = self.append_batch_accepted(issued_generation)
+                accepted = self.append_batch_accepted(retry_view)
             finally:
                 _live_context.reset(context_token)
 
@@ -1279,7 +1279,7 @@ class SQLiteMarketStore:
         events: Iterable[MarketEvent],
         *,
         _capability_type: type[_LiveReceiptBatch] = _LiveReceiptBatch,
-        _capability_authorizes=_LiveReceiptBatch.authorizes,
+        _expected_issue_token=_LIVE_RECEIPT_ISSUE_TOKEN,
         _capability_iter=_LiveReceiptBatch.__iter__,
         _live_context=_LIVE_RECEIPT_CONTEXT,
         _insert_one_fn=_insert_one,
@@ -1292,17 +1292,23 @@ class SQLiteMarketStore:
             capability = (
                 context[1]
                 if type(context) is tuple
-                and len(context) == 2
+                and len(context) == 3
                 and context[0] is self
                 else None
             )
+            retry_view = context[2] if capability is not None else None
             live_receipt_authority = (
                 type(capability) is _capability_type
-                and _capability_authorizes(capability, events)
+                and capability._issue_token is _expected_issue_token
+                and events is retry_view
             )
+            # Retry/fault hooks may freely inspect or mutate their view. Once the
+            # exact issued view re-enters the canonical append choke point, ignore
+            # its mutable values and regenerate a fresh generation from sealed
+            # payload snapshots before persistence/receipt publication.
             iteration_events = (
                 _capability_iter(capability)
-                if live_receipt_authority and events is capability
+                if live_receipt_authority
                 else iter(events)
             )
             with self.connection:

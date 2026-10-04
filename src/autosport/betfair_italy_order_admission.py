@@ -77,6 +77,9 @@ def _build_italian_limit_batch_admission_meta():
             "__dataclass_fields__",
             "__init__",
             "__post_init__",
+            "state",
+            "reason_codes",
+            "preselected_returns_eur",
             "ruleset_satisfied_unbound",
             "admissible",
             "jurisdiction_bound",
@@ -141,7 +144,7 @@ class ItalianLimitBatchAdmission(metaclass=_ItalianLimitBatchAdmissionMeta):
             type(reason) is not str or not reason
             for reason in self.reason_codes
         ):
-            raise ItalianOrderAdmissionError(
+            raise _error_type(
                 "reason_codes must be an exact tuple of non-empty strings"
             )
         if type(self.preselected_returns_eur) is not tuple or any(

@@ -1821,30 +1821,54 @@ class SQLiteMarketStore:
                 "causal replay cutoff authority commit count does not match durable rows"
             )
 
-        remaining = list(cutoff_rows)
+        rows_by_tx_prefix: dict[str, list[tuple[str, str, int]]] = {}
+        for row in cutoff_rows:
+            rows_by_tx_prefix.setdefault(row[0][:32], []).append(row)
+
+        corpus_by_generation: dict[int, str] = {}
+        proven_append_generations: set[int] = set()
+
+        def corpus_for(max_generation: int) -> str:
+            cached = corpus_by_generation.get(max_generation)
+            if cached is None:
+                cached = self._frozen_replay_corpus_sha256(max_generation)
+                corpus_by_generation[max_generation] = cached
+            return cached
+
+        def prove_append_generation(max_generation: int) -> None:
+            if max_generation in proven_append_generations:
+                return
+            self._require_committed_append_authority_through(
+                append_authority,
+                max_generation,
+            )
+            proven_append_generations.add(max_generation)
+
+        remaining = set(cutoff_rows)
         issued: list[tuple[str, str, int]] = []
         previous_max_generation = 0
         for record in commits:
-            candidates: list[tuple[str, str, int]] = []
-            for row in remaining:
-                cutoff_id, canonical_as_of, max_generation = row
-                tx_prefix = f"{cutoff_id[:32]}-"
-                tx_suffix = (
-                    record.tx_id[len(tx_prefix) :]
-                    if record.tx_id.startswith(tx_prefix)
-                    else ""
+            if len(record.tx_id) != 65 or record.tx_id[32] != "-":
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff committed transaction identity is invalid"
                 )
-                if (
-                    len(tx_suffix) != 32
-                    or re.fullmatch(r"[0-9a-f]{32}", tx_suffix) is None
-                ):
+            tx_prefix = record.tx_id[:32]
+            tx_suffix = record.tx_id[33:]
+            if re.fullmatch(r"[0-9a-f]{32}", tx_suffix) is None:
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff committed transaction identity is invalid"
+                )
+
+            candidates: list[tuple[str, str, int]] = []
+            for row in rows_by_tx_prefix.get(tx_prefix, ()):
+                if row not in remaining:
                     continue
-                corpus_sha256 = self._frozen_replay_corpus_sha256(max_generation)
+                cutoff_id, canonical_as_of, max_generation = row
                 expected_binding_sha256 = _replay_cutoff_binding_sha256(
                     cutoff_id=cutoff_id,
                     canonical_as_of=canonical_as_of,
                     max_append_generation=max_generation,
-                    corpus_sha256=corpus_sha256,
+                    corpus_sha256=corpus_for(max_generation),
                 )
                 if record.semantic_binding_sha256 == expected_binding_sha256:
                     candidates.append(row)
@@ -1854,25 +1878,26 @@ class SQLiteMarketStore:
                     "causal replay cutoff commit does not identify one canonical row"
                 )
             row = candidates[0]
-            cutoff_id, _canonical_as_of, max_generation = row
+            _cutoff_id, _canonical_as_of, max_generation = row
             if issued and max_generation < previous_max_generation:
                 raise MonotonicAuthorityRollbackError(
                     "causal replay cutoff commit regresses append generation"
                 )
 
-            self._require_committed_append_authority_through(
-                append_authority,
-                max_generation,
-            )
+            prove_append_generation(max_generation)
             prior_rows = tuple(sorted(issued, key=lambda item: item[0]))
-            prior_state_sha256 = self._replay_cutoff_authority_state_sha256(
-                prior_rows
+            prior_state_sha256 = _replay_cutoff_state_sha256(
+                prior_rows,
+                sealed_corpus_sha256=(
+                    corpus_for(previous_max_generation) if issued else None
+                ),
             )
             intended_rows = tuple(
                 sorted((*issued, row), key=lambda item: item[0])
             )
-            intended_state_sha256 = self._replay_cutoff_authority_state_sha256(
-                intended_rows
+            intended_state_sha256 = _replay_cutoff_state_sha256(
+                intended_rows,
+                sealed_corpus_sha256=corpus_for(max_generation),
             )
             if (
                 record.previous_committed_state_sha256 != prior_state_sha256

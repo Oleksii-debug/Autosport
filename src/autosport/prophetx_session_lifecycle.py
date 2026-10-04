@@ -443,6 +443,13 @@ class ProphetXSessionSnapshot:
                 raise ProphetXSessionLifecycleError(
                     "login_in_flight slot hold must follow attempt start"
                 )
+            if (
+                self.slot_hold_until
+                < self.attempt_started_at + CONSERVATIVE_SESSION_SLOT_HOLD
+            ):
+                raise ProphetXSessionLifecycleError(
+                    "login_in_flight slot hold is below the conservative floor"
+                )
         elif self.state is ProphetXSessionState.RENEWING:
             if self.retry_not_before is not None:
                 raise ProphetXSessionLifecycleError(
@@ -476,6 +483,14 @@ class ProphetXSessionSnapshot:
             if self.slot_hold_until < self.access_expires_at:
                 raise ProphetXSessionLifecycleError(
                     "active slot hold cannot precede access expiry"
+                )
+            if (
+                self.state is ProphetXSessionState.ACTIVE
+                and self.slot_hold_until
+                < self.last_transition_at + CONSERVATIVE_SESSION_SLOT_HOLD
+            ):
+                raise ProphetXSessionLifecycleError(
+                    "active slot hold is below the conservative floor"
                 )
             if (
                 self.state is not ProphetXSessionState.RENEWAL_DUE

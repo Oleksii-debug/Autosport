@@ -54,8 +54,11 @@ from autosport.portfolio_plan import (
     build_portfolio_plan,
 )
 from autosport.real_execution_ledger import (
+    AcknowledgementStatus,
     AttemptState,
     ExecutionStateError,
+    ExternalAcknowledgement,
+    ExternalEffectReconciliation,
     RealExecutionLedger,
     ReconciliationSnapshot,
 )
@@ -2665,6 +2668,7 @@ def test_terminal_recovery_still_requires_exact_bound_approval_identity() -> Non
         assert len(transport.calls) == 1
 
 
+
 def test_terminal_redelivery_reports_reconciliation_evidence_over_earlier_ambiguity() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
@@ -2696,46 +2700,34 @@ def test_terminal_redelivery_reports_reconciliation_evidence_over_earlier_ambigu
         assert initial.outcome is PlaceOrdersOutcome.UNKNOWN
         assert initial.evidence_id is not None
 
-        provider_ref = ledger.provider_order_reference(
-            attempt_id=attempt_id,
-            provider_id=action.bookmaker_id,
+        # This test exercises redelivery from an already-authorized durable
+        # reconciliation state.  #1462 intentionally makes deterministic mocked
+        # network I/O non-authoritative, so provider acquisition/verification is
+        # covered by its dedicated final-origin boundary tests rather than forged
+        # here through an injected BetfairReadOnlyClient.
+        reconciliation_evidence_id = "6" * 64
+        external_receipt_id = "bet-reconciled-terminal-redelivery"
+        ledger.reconcile_found(
+            ExternalEffectReconciliation(
+                attempt_id=attempt_id,
+                evidence_id=reconciliation_evidence_id,
+                external_receipt_id=external_receipt_id,
+                observed_at=READBACK_AT,
+                source="test:preauthorized-provider-reconciliation",
+            )
         )
-        assert provider_ref is not None
-        read_transport = _ReadbackTransport(
-            provider_order_ref=provider_ref,
-            action=action,
-            include_effect=True,
+        ledger.acknowledge(
+            ExternalAcknowledgement(
+                attempt_id=attempt_id,
+                external_receipt_id=external_receipt_id,
+                status=AcknowledgementStatus.ACCEPTED,
+                acknowledged_at=READBACK_AT,
+                accepted_odds=action.requested_odds,
+                accepted_stake=action.requested_stake,
+                reconciliation_evidence_id=reconciliation_evidence_id,
+            )
         )
-        read_client = BetfairReadOnlyClient(
-            BetfairSessionCredentials("app-key", "session-token"),
-            transport=read_transport,
-            clock=lambda: datetime.fromisoformat(
-                "2099-01-01T00:00:00+00:00"
-            ),
-            venue_id="betfair",
-            account_id="acct-1",
-        )
-        envelope = read_betfair_supervised_action_readback(
-            read_client,
-            ledger,
-            bound,
-            attempt_id=attempt_id,
-        )
-        verified = verify_betfair_provider_state(
-            action,
-            profile,
-            expected_profile_sha256=profile.profile_id,
-            readback=envelope,
-            expected_provider_order_ref=provider_ref,
-        )
-        reconciliation = reconcile_provider_readback(
-            ledger,
-            bound,
-            attempt_id=attempt_id,
-            readback=verified,
-        )
-        assert reconciliation.attempt_state is AttemptState.ACCEPTED
-        assert reconciliation.evidence_id != initial.evidence_id
+        assert ledger.attempt_state(attempt_id) is AttemptState.ACCEPTED
 
         redelivery = execute_betfair_supervised_action(
             ledger,
@@ -2749,8 +2741,9 @@ def test_terminal_redelivery_reports_reconciliation_evidence_over_earlier_ambigu
 
         assert redelivery.outcome is PlaceOrdersOutcome.ACCEPTED
         assert redelivery.attempt_state is AttemptState.ACCEPTED
-        assert redelivery.evidence_id == reconciliation.evidence_id
+        assert redelivery.evidence_id == reconciliation_evidence_id
         assert redelivery.evidence_id != initial.evidence_id
+        assert redelivery.external_receipt_id == external_receipt_id
         assert len(initial_transport.calls) == 1
 
 

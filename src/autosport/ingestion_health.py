@@ -354,8 +354,8 @@ class SourceHealthStore:
             if not self.path.exists():
                 self._write({"schema_version": _SCHEMA_V4, "sources": {}, "history": {}})
             else:
-                self._read(verify_authority=False)
-                self._recover_or_bootstrap_authority(self._current_state_sha256())
+                _, observed = self._read_snapshot(verify_authority=False)
+                self._recover_or_bootstrap_authority(observed)
 
     def _monotonic_authority(self) -> MonotonicWorkspaceAuthority:
         return MonotonicWorkspaceAuthority(
@@ -864,7 +864,11 @@ class SourceHealthStore:
         value["quality_flags"] = tuple(value["quality_flags"])
         SourceHealthState(**value)
 
-    def _read(self, *, verify_authority: bool = True) -> dict:
+    def _read_snapshot(
+        self,
+        *,
+        verify_authority: bool = True,
+    ) -> tuple[dict, str]:
         try:
             raw_bytes = self.path.read_bytes()
             raw = json.loads(
@@ -955,8 +959,13 @@ class SourceHealthStore:
                         raise ValueError("source health latest projection/history mismatch")
         except (TypeError, ValueError) as exc:
             raise ValueError("invalid source health state/history") from exc
+        digest = self._sha256_bytes(raw_bytes)
         if verify_authority:
-            self._verify_authority_current(self._sha256_bytes(raw_bytes))
+            self._verify_authority_current(digest)
+        return raw, digest
+
+    def _read(self, *, verify_authority: bool = True) -> dict:
+        raw, _ = self._read_snapshot(verify_authority=verify_authority)
         return raw
 
     def _write(self, raw: dict) -> None:

@@ -146,3 +146,31 @@ def test_account_route_change_after_capture_revokes_currency_persistence(
         match="authenticated context changed before persistence",
     ):
         origin_guard._currency_for_capture(capture)
+
+
+def test_k07_verifier_executable_drift_cannot_preserve_currency_after_credential_rotation(
+    monkeypatch,
+) -> None:
+    client, _provider = _client(monkeypatch)
+    capture = _qualified_capture(client)
+    assert origin_guard._currency_for_capture(capture) == "USD"
+
+    client._credentials = BetfairSessionCredentials(
+        "app-key-rotated",
+        "session-token-rotated",
+    )
+
+    def permissive_verifier(identity, *, client):
+        return identity
+
+    monkeypatch.setattr(
+        origin_guard._REQUIRE_IDENTITY,
+        "__code__",
+        permissive_verifier.__code__,
+    )
+
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="authenticated identity verifier authority changed",
+    ):
+        origin_guard._currency_for_capture(capture)

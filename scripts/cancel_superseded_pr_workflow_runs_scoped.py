@@ -1847,7 +1847,7 @@ def _build_main(
     trusted_qualification_code = getattr(trusted_qualification_impl, "__code__", None)
     event_identity_code = getattr(event_identity_impl, "__code__", None)
 
-    def main(argv: list[str] | None = None) -> int:
+    def main(argv: list[str] | None) -> int:
         # Production dispatch roots are closure-owned from module composition time.
         # Callers cannot rebase the comparison graph through main() arguments/defaults.
         def orchestration_authority_current() -> bool:
@@ -2049,4 +2049,4 @@ main = _build_main(
 del _build_main
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

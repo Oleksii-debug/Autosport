@@ -1008,10 +1008,7 @@ def resolve_product_run_capital_path_evidence(
     )
     try:
         executed_stake_policy_sha256 = _sha(
-            _BRIDGE_RISK_FINGERPRINT.__get__(
-                settlement_bridge,
-                _BRIDGE_TYPE,
-            ),
+            _BRIDGE_RISK_FINGERPRINT(settlement_bridge),
             "executed_stake_policy_sha256",
         )
     except (AttributeError, TypeError, ValueError) as exc:

@@ -1014,7 +1014,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with patch.object(
                     store,
-                    "events",
+                    "events_with_append_generation",
                     side_effect=AssertionError(
                         "hot duplicate must not rescan canonical history"
                     ),

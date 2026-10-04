@@ -527,6 +527,42 @@ def test_structurally_copied_price_ladder_witness_cannot_cross_consumer_gate() -
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
 
 
+def test_price_ladder_observed_after_plan_reservation_cannot_backdate_gate() -> None:
+    transport = MarketBookAndPriceLadderTransport()
+    receipt, canonical_source = _synthetic_authoritative_receipt(transport)
+    bound = _bound(datetime.now(timezone.utc))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _reserved_ledger(tmp, bound)
+        original_opener = urllib_request._opener
+        try:
+            urllib_request._opener = _CanonicalUrlOpenerHarness(transport)
+            ladder_observation = canonical_source.read_market_price_ladder(
+                "1.234"
+            )
+            ladder = assess_betfair_price_ladder_admission(
+                ladder_observation,
+                Decimal("2.00"),
+                max_evidence_age=timedelta(seconds=5),
+            )
+        finally:
+            urllib_request._opener = original_opener
+
+        assert ladder.admissible is True
+        result = assess_authoritative_betfair_execution_feasibility(
+            ledger,
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            max_snapshot_age=timedelta(seconds=2),
+            price_ladder_admission=ladder,
+        )
+
+    assert "PRICE_LADDER_EVIDENCE_AFTER_DECISION" in result.reasons
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+    assert result.sufficient is False
+
+
 def test_price_ladder_witness_must_match_exact_durable_action() -> None:
     transport = MarketBookAndPriceLadderTransport()
     receipt, ladder, canonical_source = (

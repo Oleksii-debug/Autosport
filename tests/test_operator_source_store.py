@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-import autosport.operator_source_store as operator_source_store
+import autosport.integrity as integrity\nimport autosport.operator_source_store as operator_source_store
 from autosport.operator_source_config import OperatorSourceSelectionState
 from autosport.operator_source_store import (
     OperatorSourceConfigStore,
@@ -245,3 +245,51 @@ def test_invalid_admin_override_does_not_modify_persisted_choice(tmp_path: Path)
     result = store.resolve(admin_override_source_id="pkg.mod:factory")
     assert result.state is OperatorSourceSelectionState.INVALID
     assert store.read() == original
+
+def test_failed_canonical_replace_preserves_last_good_config_and_cleans_temp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "operator-source.json"
+    store = OperatorSourceConfigStore(path)
+    original = store.write_source_id("betfair-exchange")
+    original_bytes = path.read_bytes()
+    durable_entries = {item.name for item in tmp_path.iterdir()}
+
+    def fail_replace(_source, _destination) -> None:
+        raise OSError("simulated disk-full or sharing failure")
+
+    monkeypatch.setattr(integrity.os, "replace", fail_replace)
+
+    with pytest.raises(OperatorSourceStoreError, match="could not be published"):
+        store.write_source_id("paper-fixture")
+
+    assert path.read_bytes() == original_bytes
+    assert OperatorSourceConfigStore(path).read() == original
+    assert {item.name for item in tmp_path.iterdir()} == durable_entries
+
+
+def test_post_publish_ack_failure_is_restart_resolvable_and_retry_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "operator-source.json"
+    store = OperatorSourceConfigStore(path)
+    store.write_source_id("betfair-exchange")
+
+    def lose_acknowledgement() -> None:
+        raise OperatorSourceStoreError("simulated acknowledgement loss")
+
+    monkeypatch.setattr(store, "read", lose_acknowledgement)
+
+    with pytest.raises(OperatorSourceStoreError, match="acknowledgement loss"):
+        store.write_source_id("paper-fixture")
+
+    restarted = OperatorSourceConfigStore(path)
+    committed = restarted.read()
+    assert committed is not None
+    assert committed.source_id == "paper-fixture"
+
+    retried = restarted.write_source_id("paper-fixture")
+    assert retried == committed
+    assert OperatorSourceConfigStore(path).read() == committed

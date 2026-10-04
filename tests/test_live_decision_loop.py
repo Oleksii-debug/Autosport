@@ -307,6 +307,127 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             catalog_required_history=catalog_required_history,
         )
 
+    def test_stale_instance_cannot_overwrite_newer_pending_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            bootstrap = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            bootstrap.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(bootstrap.run_cycle().status, LiveCycleStatus.DECIDED)
+            bootstrap.close()
+
+            winner = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            stale = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            stale_progress = stale._progress
+            self.assertEqual(stale_progress, winner._progress)
+
+            winner._write_pending(
+                decision_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                market_state_sha256="a" * 64,
+                affected_input_ids=("input-a",),
+                gate="normal",
+            )
+            progress_bytes = winner.progress_path.read_bytes()
+            pre_action_bytes = winner.pre_action_book_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "changed concurrently before pending publication",
+            ):
+                stale._write_pending(
+                    decision_ts=(self.START + timedelta(seconds=3)).isoformat(),
+                    market_state_sha256="b" * 64,
+                    affected_input_ids=("input-a",),
+                    gate="normal",
+                )
+
+            self.assertEqual(winner.progress_path.read_bytes(), progress_bytes)
+            self.assertEqual(winner.pre_action_book_path.read_bytes(), pre_action_bytes)
+            self.assertEqual(stale._progress, stale_progress)
+            winner.close()
+            stale.close()
+
+    def test_stale_instance_cannot_overwrite_newer_committed_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            bootstrap = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            bootstrap.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(bootstrap.run_cycle().status, LiveCycleStatus.DECIDED)
+            bootstrap.close()
+
+            active = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [
+                        (
+                            self._event(
+                                sequence=2,
+                                odds="2.10",
+                                observed=self.START + timedelta(seconds=2),
+                            ),
+                        )
+                    ],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            stale = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            stale_progress = stale._progress
+            self.assertEqual(stale_progress, active._progress)
+
+            self.assertEqual(active.run_cycle().status, LiveCycleStatus.DECIDED)
+            self.assertNotEqual(active._progress, stale_progress)
+            progress_bytes = active.progress_path.read_bytes()
+            pre_action_bytes = active.pre_action_book_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "changed concurrently before pending publication",
+            ):
+                stale._write_pending(
+                    decision_ts=(self.START + timedelta(seconds=3)).isoformat(),
+                    market_state_sha256="c" * 64,
+                    affected_input_ids=("input-a",),
+                    gate="normal",
+                )
+
+            self.assertEqual(active.progress_path.read_bytes(), progress_bytes)
+            self.assertEqual(active.pre_action_book_path.read_bytes(), pre_action_bytes)
+            self.assertEqual(stale._progress, stale_progress)
+            active.close()
+            stale.close()
+
     def test_constructor_requires_durable_registered_intent_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

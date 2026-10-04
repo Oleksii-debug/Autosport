@@ -1916,39 +1916,6 @@ class SQLiteMarketStore:
                 "causal replay cutoff rows lack canonical committed transitions"
             )
 
-    @staticmethod
-    def _require_independent_cutoff_issuance(
-        authority: MonotonicWorkspaceAuthority,
-        *,
-        cutoff_id: str,
-        expected_binding_sha256: str,
-    ) -> None:
-        matches = tuple(
-            record
-            for record in authority.read_history()
-            if record.phase is AuthorityPhase.COMMIT
-            and record.semantic_binding_sha256 == expected_binding_sha256
-        )
-        if len(matches) != 1:
-            raise MonotonicAuthorityRollbackError(
-                "causal replay cutoff lacks unique independent product issuance authority"
-            )
-
-        issued = matches[0]
-        tx_prefix = f"{cutoff_id[:32]}-"
-        tx_suffix = (
-            issued.tx_id[len(tx_prefix) :]
-            if issued.tx_id.startswith(tx_prefix)
-            else ""
-        )
-        if (
-            len(tx_suffix) != 32
-            or re.fullmatch(r"[0-9a-f]{32}", tx_suffix) is None
-        ):
-            raise MonotonicAuthorityRollbackError(
-                "causal replay cutoff committed transaction identity is invalid"
-            )
-
     def _rebuild_current_quotes(
         self,
         *,
@@ -2524,23 +2491,6 @@ class SQLiteMarketStore:
                     stored_as_of, max_generation = current_row
                     if stored_as_of != canonical_as_of:
                         raise ValueError("causal replay cutoff authority is invalid")
-                    self._require_committed_append_authority_through(
-                        append_authority,
-                        max_generation,
-                    )
-                    corpus_sha256 = self._frozen_replay_corpus_sha256(max_generation)
-                    expected_binding_sha256 = _replay_cutoff_binding_sha256(
-                        cutoff_id=cutoff_id,
-                        canonical_as_of=canonical_as_of,
-                        max_append_generation=max_generation,
-                        corpus_sha256=corpus_sha256,
-                    )
-                    self._require_independent_cutoff_issuance(
-                        authority,
-                        cutoff_id=cutoff_id,
-                        expected_binding_sha256=expected_binding_sha256,
-                    )
-
                     qualified_columns = ",".join(
                         f"m.{column}" for column in _HISTORY_COLUMNS
                     )

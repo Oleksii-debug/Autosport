@@ -1681,16 +1681,6 @@ class PersistentLiveDecisionLoop:
                 self.authority.contract,
                 self.authority.risk_policy,
             )
-            durable_record_market_generation = durable_record.payload.get(
-                "market_append_generation"
-            )
-            if durable_record_market_generation is not None and (
-                type(durable_record_market_generation) is not int
-                or durable_record_market_generation < 0
-            ):
-                raise DecisionLedgerIntegrityError(
-                    "append-pending durable market frontier is invalid"
-                )
             if (
                 durable_record.decision_id != progress.decision_id
                 or durable_record.payload.get("plan_sha256")
@@ -2269,7 +2259,6 @@ class PersistentLiveDecisionLoop:
             "mode": self.mode.value,
             "gate": gate,
             "market_state_sha256": market_state_sha256,
-            "market_append_generation": progress_market_append_generation,
             "decision_context_sha256": decision_context_sha256,
             "intent_strategy_version_id": provenance.strategy_version_id,
             "intent_model_version_id": provenance.model_version_id,
@@ -2431,43 +2420,6 @@ class PersistentLiveDecisionLoop:
                     raise DecisionLedgerIntegrityError(
                         "durable live decision execution-adoption evidence changed"
                     )
-                existing_market_generation = existing.payload.get(
-                    "market_append_generation"
-                )
-                if existing_market_generation is not None and (
-                    type(existing_market_generation) is not int
-                    or existing_market_generation < 0
-                ):
-                    raise DecisionLedgerIntegrityError(
-                        "durable live decision market frontier is invalid"
-                    )
-                if (
-                    durable_progress.market_append_generation
-                    != existing_market_generation
-                ):
-                    # The frontier is causal provenance, not economic identity.  If
-                    # the same visible state/plan is reached after a future or
-                    # unrelated append, the existing immutable DecisionRecord owns
-                    # the canonical evidence for this duplicate identity.
-                    durable_progress = _Progress(
-                        loop_id=self.loop_id,
-                        phase=_PHASE_APPEND_PENDING,
-                        decision_ts=plan.decision_ts,
-                        market_state_sha256=market_state_sha256,
-                        market_append_generation=existing_market_generation,
-                        decision_context_sha256=decision_context_sha256,
-                        affected_input_ids=affected_input_ids,
-                        registered_input_ids=self.dependencies.input_ids,
-                        decision_id=decision_id,
-                        plan_sha256=plan.plan_sha256,
-                        ledger_offset=ledger_offset,
-                        gate=gate,
-                    )
-                    atomic_write_json(
-                        self.progress_path,
-                        durable_progress.to_dict(),
-                    )
-                    self._progress = durable_progress
                 duplicate = True
             else:
                 self.decision_ledger.append_economic(record, self.authority)
@@ -2918,8 +2870,6 @@ class PersistentLiveDecisionLoop:
             or existing.payload.get("gate") != progress.gate
             or existing.payload.get("market_state_sha256")
             != progress.market_state_sha256
-            or existing.payload.get("market_append_generation")
-            != progress.market_append_generation
             or existing.payload.get("decision_context_sha256")
             != progress.decision_context_sha256
             or existing.payload.get("affected_input_ids")

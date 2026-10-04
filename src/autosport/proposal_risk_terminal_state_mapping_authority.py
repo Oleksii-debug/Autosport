@@ -1271,7 +1271,13 @@ def _resolve_product_proposal_risk_terminal_state_mapping_values(
     return values
 
 
-def _make_public_resolver(_bind_mapping):
+def _make_public_resolver(
+    _bind_mapping,
+    _resolve_core,
+):
+    _bind_code = getattr(_bind_mapping, "__code__", None)
+    _resolve_core_code = getattr(_resolve_core, "__code__", None)
+
     def resolver(
         workspace: Path,
         *,
@@ -1279,7 +1285,15 @@ def _make_public_resolver(_bind_mapping):
         authorities: tuple[MarketSettlementOutcomeAuthority, ...],
         member_market_state_ids: tuple[tuple[str, ...], ...],
     ) -> ProductProposalRiskTerminalStateMapping:
-        values = _resolve_product_proposal_risk_terminal_state_mapping_values(
+        if (
+            getattr(_bind_mapping, "__code__", None) is not _bind_code
+            or getattr(_resolve_core, "__code__", None)
+            is not _resolve_core_code
+        ):
+            raise ProductProposalRiskTerminalStateMappingError(
+                "terminal mapping public resolver closure changed"
+            )
+        values = _resolve_core(
             workspace,
             precommit=precommit,
             authorities=authorities,
@@ -1301,7 +1315,8 @@ def _make_public_resolver(_bind_mapping):
 
 
 resolve_product_proposal_risk_terminal_state_mapping = _make_public_resolver(
-    _BIND_MAPPING
+    _BIND_MAPPING,
+    _resolve_product_proposal_risk_terminal_state_mapping_values,
 )
 _PUBLIC_RESOLVER = resolve_product_proposal_risk_terminal_state_mapping
 _PUBLIC_RESOLVER_CODE = getattr(_PUBLIC_RESOLVER, "__code__", None)

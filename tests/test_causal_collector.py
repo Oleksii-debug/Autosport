@@ -2889,6 +2889,49 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertEqual(len(reopened_market.events("e1")), 1)
             reopened_market.close()
 
+    def test_consumer_reproves_existing_receipt_after_delivery_callback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            receipt_store = DurableApplicationReceiptStore(root / "receipts.json")
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = self.make_delta(payload=payload)
+            collector.append(delta)
+            receipt = DesktopApplicationReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                receipt_id="receipt-d1",
+                applied_at="2026-01-01T00:00:05+00:00",
+            )
+            receipt_store.put(receipt)
+            deliveries = []
+
+            def remove_receipt_after_delivery(_delta, _receipt):
+                deliveries.append("delivered")
+                receipt_store.path.write_text("{}\n", encoding="utf-8")
+
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda _: event,
+                apply_event=lambda *_: self.fail(
+                    "apply_event must not run when durable receipt exists"
+                ),
+                lookup_application_receipt=receipt_store.get,
+                on_application_receipt=remove_receipt_after_delivery,
+            )
+
+            with self.assertRaisesRegex(
+                ApplicationReceiptError,
+                "durable application receipt disappeared before desktop acknowledgement",
+            ):
+                consumer.drain(as_of="2026-01-01T00:00:06+00:00")
+
+            self.assertEqual(deliveries, ["delivered"])
+            self.assertFalse(checkpoint.has_ack(delta.delta_id))
+
     def test_consumer_reproves_recoverable_receipt_after_post_delivery_clock(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

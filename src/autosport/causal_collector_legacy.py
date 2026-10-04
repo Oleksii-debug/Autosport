@@ -908,6 +908,65 @@ class DesktopDeltaCheckpointStore(_JsonAtomicStore):
         _text(delta_id, "delta_id")
         return any(item.get("delta_id") == delta_id for item in self._read()["acks"])
 
+    def _validated_ack_receipt_impl(
+        self,
+        delta: CollectorDelta,
+        *,
+        _delta_validate,
+        _receipt_type,
+        _receipt_validate,
+        _instant_parser,
+    ) -> DesktopApplicationReceipt | None:
+        """Return one fully verified durable ACK receipt or fail closed on corruption."""
+        _delta_validate(delta)
+        raw = self._read()
+        acks = raw.get("acks")
+        if type(acks) is not list:
+            raise ApplicationReceiptError("desktop acknowledgement index is malformed")
+        matches: list[dict[str, Any]] = []
+        for item in acks:
+            if type(item) is not dict:
+                raise ApplicationReceiptError("desktop acknowledgement entry is malformed")
+            if item.get("delta_id") == delta.delta_id:
+                matches.append(item)
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise AckConflictError(
+                f"multiple desktop acknowledgements exist for delta {delta.delta_id}"
+            )
+        item = matches[0]
+        try:
+            receipt = _receipt_type(
+                delta_id=item["delta_id"],
+                canonical_event_digest=item["canonical_event_digest"],
+                receipt_id=item["application_receipt_id"],
+                applied_at=item["applied_at"],
+            )
+            _receipt_validate(receipt)
+            acknowledged = _instant_parser(
+                item["acknowledged_at"],
+                "acknowledged_at",
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ApplicationReceiptError(
+                "desktop acknowledgement entry is malformed"
+            ) from exc
+        if receipt.canonical_event_digest != delta.canonical_event_digest:
+            raise AckConflictError(
+                "existing desktop ack disagrees with collector evidence"
+            )
+        available = _instant_parser(
+            delta.desktop_available_at,
+            "desktop_available_at",
+        )
+        applied = _instant_parser(receipt.applied_at, "applied_at")
+        if not (available <= applied <= acknowledged):
+            raise ApplicationReceiptError(
+                "existing desktop acknowledgement timing is invalid"
+            )
+        return receipt
+
     def application_receipt(self, delta: CollectorDelta) -> DesktopApplicationReceipt | None:
         for item in self._read()["acks"]:
             if item.get("delta_id") != delta.delta_id:
@@ -981,6 +1040,39 @@ class DesktopDeltaCheckpointStore(_JsonAtomicStore):
     def stream_checkpoint(self, source_id: str, stream_epoch: str) -> StreamCheckpoint | None:
         raw = self._read()["streams"].get(f"{source_id}|{stream_epoch}")
         return None if raw is None else StreamCheckpoint(**raw)
+
+
+def _bind_desktop_checkpoint_validated_ack(implementation):
+    """Seal durable ACK validation roots outside mutable runtime dispatch."""
+
+    delta_validate = CollectorDelta.validate
+    receipt_type = DesktopApplicationReceipt
+    receipt_validate = DesktopApplicationReceipt.validate
+    instant_parser = _instant
+
+    def validated_ack_receipt(
+        self: DesktopDeltaCheckpointStore,
+        delta: CollectorDelta,
+    ) -> DesktopApplicationReceipt | None:
+        return implementation(
+            self,
+            delta,
+            _delta_validate=delta_validate,
+            _receipt_type=receipt_type,
+            _receipt_validate=receipt_validate,
+            _instant_parser=instant_parser,
+        )
+
+    return validated_ack_receipt
+
+
+DesktopDeltaCheckpointStore.validated_ack_receipt = (
+    _bind_desktop_checkpoint_validated_ack(
+        DesktopDeltaCheckpointStore._validated_ack_receipt_impl
+    )
+)
+del DesktopDeltaCheckpointStore._validated_ack_receipt_impl
+del _bind_desktop_checkpoint_validated_ack
 
 
 class DesktopDeltaConsumer:
@@ -1081,6 +1173,7 @@ class DesktopDeltaConsumer:
         _market_event_type,
         _acknowledged_at,
         _instant_parser,
+        _validated_ack_receipt,
     ) -> tuple[str, ...]:
         now = _instant_parser(as_of, "as_of")
         available = self.collector.deltas_available_through(as_of=as_of, view=view)
@@ -1108,7 +1201,7 @@ class DesktopDeltaConsumer:
             # then either adopts that completed evidence or owns apply+ack atomically
             # with respect to all cooperating Autosport desktop consumers.
             with self.checkpoint._workspace_lock():
-                if self.checkpoint.has_ack(delta.delta_id):
+                if _validated_ack_receipt(self.checkpoint, delta) is not None:
                     continue
 
                 durable_receipt = self.lookup_application_receipt(delta)
@@ -1248,6 +1341,7 @@ def _bind_desktop_delta_consumer_drain(implementation):
     market_event_type = MarketEvent
     acknowledged_at = DesktopDeltaConsumer._acknowledged_at
     instant_parser = _instant
+    validated_ack_receipt = DesktopDeltaCheckpointStore.validated_ack_receipt
 
     def drain(
         self,
@@ -1265,6 +1359,7 @@ def _bind_desktop_delta_consumer_drain(implementation):
             _market_event_type=market_event_type,
             _acknowledged_at=acknowledged_at,
             _instant_parser=instant_parser,
+            _validated_ack_receipt=validated_ack_receipt,
         )
 
     return drain

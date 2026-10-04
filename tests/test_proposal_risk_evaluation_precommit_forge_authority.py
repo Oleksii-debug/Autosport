@@ -115,6 +115,25 @@ class ProductProposalRiskEvaluationPrecommitForgeTests(unittest.TestCase):
         finally:
             authority.hashlib.sha256 = original_sha256
 
+    def test_native_path_factory_output_is_accepted(self) -> None:
+        workspace = Path.cwd().resolve()
+        self.assertIs(type(workspace), authority._PATH_TYPE)
+        self.assertEqual(authority._workspace_path(workspace), workspace.expanduser())
+
+    def test_path_method_dispatch_rebinding_fails_closed(self) -> None:
+        for name in ("expanduser", "is_absolute"):
+            with self.subTest(name=name):
+                original = getattr(authority._PATH_TYPE, name)
+                try:
+                    setattr(authority._PATH_TYPE, name, lambda *args, **kwargs: True)
+                    with self.assertRaisesRegex(
+                        authority.ProductProposalRiskEvaluationPrecommitError,
+                        "pathlib authority changed",
+                    ):
+                        authority._REQUIRE_DISPATCH_ORIGINAL()
+                finally:
+                    setattr(authority._PATH_TYPE, name, original)
+
     def test_workspace_lock_transitive_dispatch_rebinding_fails_closed(self) -> None:
         for name in (
             "__init__",

@@ -39,6 +39,16 @@ _AGENT = "autosport.proposal-risk-evaluation-precommit-authority.v1"
 _ACTION_PREFIX = "proposal-risk-evaluation-precommit-v1:"
 _HEX = frozenset("0123456789abcdef")
 _MAX_DECIMAL_TEXT = 256
+_PATH_TYPE = type(Path("."))
+_PATH_METHOD_WITNESSES = tuple(
+    (
+        name,
+        getattr(_PATH_TYPE, name),
+        getattr(getattr(_PATH_TYPE, name), "__code__", None),
+    )
+    for name in ("expanduser", "is_absolute")
+)
+_PATH_METHOD_WITNESSES_EXPECTED = _PATH_METHOD_WITNESSES
 _PROPOSAL_EVALUATION_SCOPE = (
     "EXACT_PROPOSAL_TARGET_FIXED_STAKE_VECTOR_COUNTERFACTUAL_V1"
 )
@@ -415,7 +425,7 @@ def _digest(value: object) -> str:
 
 
 def _workspace_path(value: object) -> Path:
-    if type(value) is not Path:
+    if type(value) is not _PATH_TYPE:
         raise ProductProposalRiskEvaluationPrecommitError(
             "workspace must be an exact pathlib.Path"
         )
@@ -430,6 +440,8 @@ def _workspace_path(value: object) -> Path:
 def _require_dispatch() -> None:
     if (
         _PROTOCOL_CONSTANTS != _PROTOCOL_CONSTANTS_EXPECTED
+        or _PATH_TYPE is not type(Path("."))
+        or _PATH_METHOD_WITNESSES is not _PATH_METHOD_WITNESSES_EXPECTED
         or _SCHEMA != _PROTOCOL_CONSTANTS_EXPECTED[0]
         or _ACTION != _PROTOCOL_CONSTANTS_EXPECTED[1]
         or _AGENT != _PROTOCOL_CONSTANTS_EXPECTED[2]
@@ -469,6 +481,14 @@ def _require_dispatch() -> None:
         raise ProductProposalRiskEvaluationPrecommitError(
             "proposal risk evaluation precommit authority dispatch changed"
         )
+
+    for name, expected, code in _PATH_METHOD_WITNESSES_EXPECTED:
+        current = getattr(_PATH_TYPE, name, None)
+        if current is not expected or getattr(current, "__code__", None) is not code:
+            raise ProductProposalRiskEvaluationPrecommitError(
+                "proposal risk evaluation precommit pathlib "
+                f"authority changed: {name}"
+            )
 
     for name, expected, code in _LOCK_METHOD_WITNESSES_EXPECTED:
         current = WorkspaceEconomicLock.__dict__.get(name)

@@ -690,6 +690,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 raise PaperExecutionStateError(
                     "attempt requires exactly one durable reservation"
                 )
+            reservation_event = reservations[0]
             _, existing_attempts = self._attempts_in_event_order(
                 run_events
             )
@@ -735,14 +736,66 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     raise PaperExecutionStateError(
                         "attempt conflicts with reserved synthetic authority"
                     )
-            elif (
-                attempt.evidence_grade is EvidenceGrade.SYNTHETIC
-                or attempt.evidence_id != evidence_id
-                or attempt.evidence_sha256 is None
-            ):
-                raise PaperExecutionStateError(
-                    "attempt conflicts with reserved observed authority"
+            else:
+                if (
+                    attempt.evidence_grade is EvidenceGrade.SYNTHETIC
+                    or attempt.evidence_id != evidence_id
+                    or attempt.evidence_sha256 is None
+                ):
+                    raise PaperExecutionStateError(
+                        "attempt conflicts with reserved observed authority"
+                    )
+                evidence_events = [
+                    event
+                    for event in events
+                    if (
+                        event["event_type"]
+                        == "OBSERVATION_EVIDENCE_REGISTERED"
+                        and event["payload"]["evidence_id"]
+                        == evidence_id
+                    )
+                ]
+                if (
+                    len(evidence_events) != 1
+                    or evidence_events[0]["sequence"]
+                    >= reservation_event["sequence"]
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "reserved observation evidence was not durable before "
+                        "RUN_RESERVED"
+                    )
+                record = PaperExecutionEvidenceRecord.from_dict(
+                    evidence_events[0]["payload"]["record"]
                 )
+                if (
+                    record.evidence_id != attempt.evidence_id
+                    or record.evidence_sha256
+                    != attempt.evidence_sha256
+                    or record.action_id != attempt.action_id
+                    or record.bookmaker_id != attempt.bookmaker_id
+                    or record.account_id != attempt.account_id
+                    or record.event_id != attempt.event_id
+                    or record.market_id != attempt.market_id
+                    or record.selection_id != attempt.selection_id
+                    or record.side != attempt.side
+                    or record.quote_id != attempt.decision_quote_id
+                    or record.outcome is not attempt.outcome
+                    or record.observed_at
+                    != attempt.execution_observed_at
+                    or record.evidence_grade
+                    is not attempt.evidence_grade
+                    or record.evidence_source
+                    != attempt.evidence_source
+                    or record.accepted_odds
+                    != attempt.execution_odds
+                    or record.accepted_stake
+                    != attempt.execution_stake
+                    or record.suspended is not attempt.suspended
+                    or record.reason != attempt.reason
+                ):
+                    raise PaperExecutionStateError(
+                        "attempt conflicts with durable observed evidence"
+                    )
             if retry_existing:
                 if existing_attempts[attempt.sequence] != attempt:
                     raise PaperExecutionIntegrityError(

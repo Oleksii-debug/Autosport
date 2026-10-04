@@ -863,6 +863,9 @@ class SQLiteMarketStore:
                 )
             self.connection.execute("BEGIN IMMEDIATE")
             try:
+                history_count_before = self.connection.execute(
+                    "SELECT COUNT(*) FROM market_events"
+                ).fetchone()[0]
                 preexisting: set[str] = set()
                 canonical_by_dedupe: dict[str, MarketEvent] = {}
                 for event in canonical_events:
@@ -882,6 +885,12 @@ class SQLiteMarketStore:
                         preexisting.add(event.dedupe_key)
 
                 accepted = self.append_batch_accepted(batch)
+                if not self.connection.in_transaction:
+                    raise RuntimeError(
+                        "live append hook relinquished transaction ownership"
+                    )
+                if type(accepted) is not list:
+                    raise TypeError("live append hook must return an exact list")
 
                 expected: list[MarketEvent] = []
                 for dedupe_key, canonical_event in canonical_by_dedupe.items():
@@ -902,6 +911,14 @@ class SQLiteMarketStore:
                         )
                     expected.append(stored)
 
+                history_count_after = self.connection.execute(
+                    "SELECT COUNT(*) FROM market_events"
+                ).fetchone()[0]
+                if history_count_after - history_count_before != len(expected):
+                    raise RuntimeError(
+                        "live append hook changed market history outside the canonical batch"
+                    )
+
                 if any(type(event) is not MarketEvent for event in accepted):
                     raise TypeError(
                         "live append hook must return exact MarketEvent instances"
@@ -915,6 +932,17 @@ class SQLiteMarketStore:
 
                 for event in expected:
                     self._insert_live_receipt_authority(event)
+                for event in expected:
+                    receipt = self.connection.execute(
+                        """SELECT ingest_ts,authority
+                           FROM market_event_live_receipts
+                           WHERE dedupe_key=?""",
+                        (event.dedupe_key,),
+                    ).fetchone()
+                    if receipt != (event.ingest_ts, _LIVE_RECEIPT_AUTHORITY):
+                        raise RuntimeError(
+                            "live receipt writer did not persist canonical authority"
+                        )
             except Exception:
                 self.connection.rollback()
                 raise
@@ -971,8 +999,8 @@ class SQLiteMarketStore:
         return sorted(events, key=_event_order_key)
 
     def has_trusted_live_receipt(self, event: MarketEvent) -> bool:
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event must be a MarketEvent")
+        if type(event) is not MarketEvent:
+            raise TypeError("event must be an exact MarketEvent")
         with self._connection_lock:
             row = self.connection.execute(
                 f"""SELECT {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)},r.ingest_ts,r.authority

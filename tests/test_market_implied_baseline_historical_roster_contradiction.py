@@ -31,6 +31,7 @@ class MarketImpliedHistoricalRosterContradictionTests(unittest.TestCase):
                 "eventTypeId": "2593174",
                 "marketType": "MATCH_ODDS",
                 "status": "OPEN",
+                "complete": True,
                 # Deliberately omit the canonical durable selection "draw".
                 "runners": [{"id": "away"}, {"id": "home"}],
             },

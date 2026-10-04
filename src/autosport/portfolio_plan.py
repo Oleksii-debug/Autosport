@@ -1725,10 +1725,12 @@ class PortfolioPlan:
                     "robust proposal must bind the exact portfolio stake vector"
                 )
         if self.terminal_economics is not None:
-            if not isinstance(self.terminal_economics, VerifiedTerminalEconomics):
+            if type(self.terminal_economics) is not VerifiedTerminalEconomics:
                 raise ValueError(
-                    "terminal_economics must be VerifiedTerminalEconomics"
+                    "terminal_economics must be exact VerifiedTerminalEconomics"
                 )
+            if self.terminal_economics.outcome_authority_sha256s:
+                _assert_authoritative_terminal_economics(self.terminal_economics)
             terminal_evidence = self.terminal_economics.completeness_evidence
             if self.portfolio_sha256 != terminal_evidence.portfolio_sha256:
                 raise ValueError(

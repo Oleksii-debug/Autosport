@@ -32,10 +32,10 @@ from .workspace_lock import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ANCHOR_SCHEMA_VERSION = 1
 _PENDING_SCHEMA_VERSION = 1
-PROTOCOL_VERSION = "autosport-physical-nvda-manual-review-v1"
+PROTOCOL_VERSION = "autosport-physical-nvda-manual-review-v2"
 EVENT_TYPE = "MANUAL_NVDA_DECISION"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -66,6 +66,8 @@ _PAYLOAD_KEYS = frozenset(
         "source_sha",
         "structural_status",
         "structural_human_tester_attestation_sha256",
+        "webview2_runtime_browser_version",
+        "webview2_runtime_witness_sha256",
         "windows_version",
         "nvda_version",
     }
@@ -127,6 +129,8 @@ class ManualNvdaDecisionRecord:
     source_sha: str
     structural_status: str
     structural_human_tester_attestation_sha256: str
+    webview2_runtime_browser_version: str
+    webview2_runtime_witness_sha256: str
     windows_version: str
     nvda_version: str
     event_sha256: str
@@ -344,21 +348,28 @@ def _structural_result(
     *,
     expected_artifact_sha256: str,
     expected_source_sha: str,
+    expected_webview2_runtime_witness_sha256: str,
 ):
     artifact = _require_sha256(
         "expected_artifact_sha256", expected_artifact_sha256
     )
     source = _require_git_commit_sha("expected_source_sha", expected_source_sha)
+    runtime_witness = _require_sha256(
+        "expected_webview2_runtime_witness_sha256",
+        expected_webview2_runtime_witness_sha256,
+    )
     try:
         result = validate_human_nvda_acceptance_transcript(
             transcript,
             expected_artifact_sha256=artifact,
             expected_source_sha=source,
+            expected_webview2_runtime_witness_sha256=runtime_witness,
         )
         return verify_human_nvda_acceptance_structural_result(
             result,
             expected_artifact_sha256=artifact,
             expected_source_sha=source,
+            expected_webview2_runtime_witness_sha256=runtime_witness,
         )
     except NvdaHumanAcceptanceError as exc:
         raise NvdaManualAcceptanceStateError(
@@ -396,10 +407,16 @@ def _decision_payload(
         "structural_human_tester_attestation_sha256": (
             structural.human_tester_attestation_sha256
         ),
+        "webview2_runtime_browser_version": (
+            structural.webview2_runtime_browser_version
+        ),
+        "webview2_runtime_witness_sha256": (
+            structural.webview2_runtime_witness_sha256
+        ),
         "windows_version": structural.windows_version,
         "nvda_version": structural.nvda_version,
     }
-    decision_id = "manual-nvda-decision-v1-" + _digest(
+    decision_id = "manual-nvda-decision-v2-" + _digest(
         {"schema": "autosport.manual_nvda_decision", **body}
     )
     return {"decision_id": decision_id, **body}
@@ -437,11 +454,11 @@ def _record_from_event(event: dict[str, Any]) -> ManualNvdaDecisionRecord:
 
     try:
         decision_id = _require_text("decision_id", payload["decision_id"])
-        if not decision_id.startswith("manual-nvda-decision-v1-"):
+        if not decision_id.startswith("manual-nvda-decision-v2-"):
             raise NvdaManualAcceptanceStateError(
                 "decision_id has an invalid namespace"
             )
-        digest_part = decision_id.removeprefix("manual-nvda-decision-v1-")
+        digest_part = decision_id.removeprefix("manual-nvda-decision-v2-")
         _require_sha256("decision_id digest", digest_part)
         decision = ManualNvdaDecision(payload["decision"])
         reviewer_ref = _require_text("reviewer_ref", payload["reviewer_ref"])
@@ -468,6 +485,14 @@ def _record_from_event(event: dict[str, Any]) -> ManualNvdaDecisionRecord:
             "structural_human_tester_attestation_sha256",
             payload["structural_human_tester_attestation_sha256"],
         )
+        webview2_runtime_browser_version = _require_text(
+            "webview2_runtime_browser_version",
+            payload["webview2_runtime_browser_version"],
+        )
+        webview2_runtime_witness_sha256 = _require_sha256(
+            "webview2_runtime_witness_sha256",
+            payload["webview2_runtime_witness_sha256"],
+        )
         windows_version = _require_text(
             "windows_version", payload["windows_version"]
         )
@@ -477,7 +502,7 @@ def _record_from_event(event: dict[str, Any]) -> ManualNvdaDecisionRecord:
             "manual NVDA decision payload is invalid"
         ) from exc
 
-    expected_decision_id = "manual-nvda-decision-v1-" + _digest(
+    expected_decision_id = "manual-nvda-decision-v2-" + _digest(
         {
             "schema": "autosport.manual_nvda_decision",
             **{key: payload[key] for key in payload if key != "decision_id"},
@@ -509,6 +534,8 @@ def _record_from_event(event: dict[str, Any]) -> ManualNvdaDecisionRecord:
         source_sha=source_sha,
         structural_status=payload["structural_status"],
         structural_human_tester_attestation_sha256=structural_attestation,
+        webview2_runtime_browser_version=webview2_runtime_browser_version,
+        webview2_runtime_witness_sha256=webview2_runtime_witness_sha256,
         windows_version=windows_version,
         nvda_version=nvda_version,
         event_sha256=event_sha,
@@ -568,6 +595,12 @@ def _resolution_fingerprint(resolution: ManualNvdaAcceptanceResolution) -> str:
                 "structural_human_tester_attestation_sha256": (
                     record.structural_human_tester_attestation_sha256
                 ),
+                "webview2_runtime_browser_version": (
+                    record.webview2_runtime_browser_version
+                ),
+                "webview2_runtime_witness_sha256": (
+                    record.webview2_runtime_witness_sha256
+                ),
                 "windows_version": record.windows_version,
                 "nvda_version": record.nvda_version,
                 "event_sha256": record.event_sha256,
@@ -587,6 +620,7 @@ def _make_resolution_verifier(lookup_witness):
         *,
         expected_artifact_sha256: str,
         expected_source_sha: str,
+        expected_webview2_runtime_witness_sha256: str,
         expected_transcript_sha256: str,
     ) -> ManualNvdaAcceptanceResolution:
         """Verify one live resolver-issued projection for an exact candidate."""
@@ -596,6 +630,10 @@ def _make_resolution_verifier(lookup_witness):
         )
         source_sha = _require_git_commit_sha(
             "expected_source_sha", expected_source_sha
+        )
+        runtime_witness_sha = _require_sha256(
+            "expected_webview2_runtime_witness_sha256",
+            expected_webview2_runtime_witness_sha256,
         )
         transcript_sha = _require_sha256(
             "expected_transcript_sha256", expected_transcript_sha256
@@ -618,6 +656,7 @@ def _make_resolution_verifier(lookup_witness):
         if (
             record.artifact_sha256 != artifact
             or record.source_sha != source_sha
+            or record.webview2_runtime_witness_sha256 != runtime_witness_sha
             or record.transcript_sha256 != transcript_sha
         ):
             raise NvdaManualAcceptanceStateError(
@@ -696,6 +735,10 @@ def _make_resolution_verifier(lookup_witness):
                 and current.structural_status == record.structural_status
                 and current.structural_human_tester_attestation_sha256
                 == record.structural_human_tester_attestation_sha256
+                and current.webview2_runtime_browser_version
+                == record.webview2_runtime_browser_version
+                and current.webview2_runtime_witness_sha256
+                == record.webview2_runtime_witness_sha256
                 and current.windows_version == record.windows_version
                 and current.nvda_version == record.nvda_version
             )
@@ -1087,6 +1130,7 @@ class ManualNvdaAcceptanceLedger:
         transcript: object,
         expected_artifact_sha256: str,
         expected_source_sha: str,
+        expected_webview2_runtime_witness_sha256: str,
         reviewer_ref: str,
         reviewer_attestation: str,
         reviewed_at: str,
@@ -1097,6 +1141,9 @@ class ManualNvdaAcceptanceLedger:
             transcript,
             expected_artifact_sha256=expected_artifact_sha256,
             expected_source_sha=expected_source_sha,
+            expected_webview2_runtime_witness_sha256=(
+                expected_webview2_runtime_witness_sha256
+            ),
         )
         payload = _decision_payload(
             structural=structural,
@@ -1157,12 +1204,16 @@ class ManualNvdaAcceptanceLedger:
         transcript: object,
         expected_artifact_sha256: str,
         expected_source_sha: str,
+        expected_webview2_runtime_witness_sha256: str,
         protocol_version: str = PROTOCOL_VERSION,
     ) -> ManualNvdaAcceptanceResolution | None:
         structural = _structural_result(
             transcript,
             expected_artifact_sha256=expected_artifact_sha256,
             expected_source_sha=expected_source_sha,
+            expected_webview2_runtime_witness_sha256=(
+                expected_webview2_runtime_witness_sha256
+            ),
         )
         protocol = _require_protocol(protocol_version)
         matching = [
@@ -1176,6 +1227,10 @@ class ManualNvdaAcceptanceLedger:
                 and record.structural_status == structural.status
                 and record.structural_human_tester_attestation_sha256
                 == structural.human_tester_attestation_sha256
+                and record.webview2_runtime_browser_version
+                == structural.webview2_runtime_browser_version
+                and record.webview2_runtime_witness_sha256
+                == structural.webview2_runtime_witness_sha256
                 and record.windows_version == structural.windows_version
                 and record.nvda_version == structural.nvda_version
             )
@@ -1286,6 +1341,7 @@ def _seal_resolution_issuance(register_witness) -> None:
         transcript: object,
         expected_artifact_sha256: str,
         expected_source_sha: str,
+        expected_webview2_runtime_witness_sha256: str,
         protocol_version: str = PROTOCOL_VERSION,
     ) -> ManualNvdaAcceptanceResolution | None:
         if (
@@ -1302,6 +1358,9 @@ def _seal_resolution_issuance(register_witness) -> None:
             transcript=transcript,
             expected_artifact_sha256=expected_artifact_sha256,
             expected_source_sha=expected_source_sha,
+            expected_webview2_runtime_witness_sha256=(
+                expected_webview2_runtime_witness_sha256
+            ),
             protocol_version=protocol_version,
         )
         require_reader_graph(self)

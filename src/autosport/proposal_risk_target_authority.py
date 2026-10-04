@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -171,6 +171,27 @@ _AUTHORITY_METHOD_WITNESSES = tuple(
 _AUTHORITY_METHOD_WITNESSES_EXPECTED = _AUTHORITY_METHOD_WITNESSES
 
 
+def _make_target_identity_capability():
+    """Return closure-private bind/check functions for resolver-issued DTO truth."""
+
+    token = object()
+
+    def proven(instance: object) -> bool:
+        return (
+            getattr(instance, "_proposal_target_identity_capability", None)
+            is token
+        )
+
+    def bind(instance: object) -> None:
+        object.__setattr__(instance, "_proposal_target_identity_capability", token)
+
+    return proven, bind
+
+
+_TARGET_IDENTITY_PROVEN, _BIND_TARGET_IDENTITY = _make_target_identity_capability()
+del _make_target_identity_capability
+
+
 class ProductProposalRiskTargetError(RuntimeError):
     """A proposal-specific pre-risk target cannot be issued or re-resolved safely."""
 
@@ -198,6 +219,11 @@ class ProductProposalRiskTarget:
     signal_strengths: tuple[Decimal, ...]
     evaluated_stakes: tuple[Decimal, ...]
     target_sha256: str
+    _proposal_target_identity_capability: object = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __new__(cls, *args: object, **kwargs: object) -> "ProductProposalRiskTarget":
         raise TypeError(
@@ -206,8 +232,11 @@ class ProductProposalRiskTarget:
         )
 
     @property
-    def proposal_target_identity_proven(self) -> bool:
-        return True
+    def proposal_target_identity_proven(
+        self,
+        _proven=_TARGET_IDENTITY_PROVEN,
+    ) -> bool:
+        return _proven(self)
 
     @property
     def proposal_target_counterfactual_execution_proven(self) -> bool:
@@ -1205,6 +1234,7 @@ def _build_target(
     policy: PaperRiskPolicy,
     book: PaperBook,
     expected_target_sha256: str,
+    _bind_identity=_BIND_TARGET_IDENTITY,
 ) -> ProductProposalRiskTarget:
     payload = record.payload
     allowed_payload_fields = {
@@ -1409,6 +1439,7 @@ def _build_target(
     }
     for name in _TARGET_FIELDS:
         object.__setattr__(instance, name, values[name])
+    _bind_identity(instance)
     return instance
 
 
@@ -1724,3 +1755,8 @@ _PROPOSAL_TARGET_HELPER_WITNESSES = tuple(
 )
 
 _PROPOSAL_TARGET_HELPER_WITNESSES_EXPECTED = _PROPOSAL_TARGET_HELPER_WITNESSES
+
+# Keep issuance capability out of the mutable module namespace after import.
+# The property and canonical builder retain only closure/default references.
+del _TARGET_IDENTITY_PROVEN
+del _BIND_TARGET_IDENTITY

@@ -686,6 +686,40 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             active.close()
             stale.close()
 
+    def test_failed_unregister_restores_exact_dependency_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            loop.register_input("input-b", selection_ids="selection-b")
+            loop.register_input("input-c", selection_ids="selection-c")
+            expected_ids = ("input-a", "input-b", "input-c")
+            self.assertEqual(loop.dependencies.input_ids, expected_ids)
+
+            loop._write_pending(
+                decision_ts=(self.START + timedelta(seconds=1)).isoformat(),
+                market_state_sha256="c" * 64,
+                affected_input_ids=expected_ids,
+                gate="normal",
+            )
+            inputs_before = loop.inputs_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "cannot mutate live dependency registry while a decision is unfinished",
+            ):
+                loop.unregister_input("input-b")
+
+            self.assertEqual(loop.dependencies.input_ids, expected_ids)
+            self.assertEqual(tuple(loop._input_specs), expected_ids)
+            self.assertEqual(loop.inputs_path.read_bytes(), inputs_before)
+            loop.close()
+
     def test_constructor_requires_durable_registered_intent_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

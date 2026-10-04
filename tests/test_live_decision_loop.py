@@ -3999,6 +3999,34 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 )
             self.assertEqual(identity_observer.calls, 0)
 
+            extra_event_events = json.loads(json.dumps(execution_events))
+            forged_event = json.loads(json.dumps(execution_events[-1]))
+            forged_event["event_type"] = "FORGED_COMMITTED_RUN_EVENT"
+            forged_event["event_key"] = (
+                forged_event["run_id"] + ":forged-event"
+            )
+            forged_event["payload"] = {}
+            extra_event_events.append(forged_event)
+            rewrite_execution_events(extra_event_events)
+
+            extra_event_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "run contains noncanonical events",
+            ):
+                self._loop(
+                    workspace,
+                    observer=extra_event_observer,
+                    factory=_PositiveIntentFactory(
+                        self.INTENT_CONFIG_SHA256
+                    ),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                    book=resumed_book,
+                    authority=authority,
+                    paper_execution=resumed_execution,
+                )
+            self.assertEqual(extra_event_observer.calls, 0)
+
             rewrite_execution_events(execution_events)
             truncated_execution = execution_events[:-1]
             execution_ledger.path.write_text(

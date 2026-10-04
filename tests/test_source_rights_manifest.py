@@ -9,7 +9,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.source_rights_manifest as source_rights_module
 from autosport.source_rights_manifest import (
+    SourceRightsAuthorization,
+    SourceRightsManifest,
     SourceRightsManifestError,
     authorize_source_use,
     load_source_rights_manifest,
@@ -318,6 +321,106 @@ class SourceRightsManifestTests(unittest.TestCase):
                     required_scope="historical.read",
                     at=datetime(2026, 9, 21),
                 )
+
+
+    def test_runtime_authority_graph_resists_coordinated_module_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(Path(tmp))
+            manifest = load_source_rights_manifest(path)
+            canonical_manifest_type = SourceRightsManifest
+            canonical_authorization_type = SourceRightsAuthorization
+
+            class ForgedPath:
+                def __init__(self, *args, **kwargs) -> None:
+                    raise AssertionError("forged Path must not execute")
+
+            class ForgedManifest:
+                pass
+
+            class ForgedAuthorization:
+                pass
+
+            class ForgedHashlib:
+                @staticmethod
+                def sha256(payload: bytes) -> object:
+                    raise AssertionError("forged sha256 must not execute")
+
+            class ForgedJson:
+                @staticmethod
+                def loads(*args, **kwargs) -> object:
+                    raise AssertionError("forged json.loads must not execute")
+
+            forged_issuer = object()
+            with (
+                patch.object(source_rights_module, "Path", ForgedPath),
+                patch.object(source_rights_module, "SourceRightsManifest", ForgedManifest),
+                patch.object(
+                    source_rights_module,
+                    "SourceRightsAuthorization",
+                    ForgedAuthorization,
+                ),
+                patch.object(source_rights_module, "hashlib", ForgedHashlib),
+                patch.object(source_rights_module, "json", ForgedJson),
+                patch.object(source_rights_module, "_AUTHORIZATION_ISSUER", forged_issuer),
+                patch.object(
+                    source_rights_module,
+                    "_canonical_text",
+                    lambda *args, **kwargs: "forged",
+                ),
+                patch.object(
+                    source_rights_module,
+                    "_runtime_timestamp",
+                    lambda *args, **kwargs: datetime(2099, 1, 1, tzinfo=timezone.utc),
+                ),
+                patch.object(
+                    source_rights_module,
+                    "_validated_projection",
+                    lambda *args, **kwargs: ("forged",),
+                ),
+                patch.object(
+                    source_rights_module,
+                    "_validated_manifest_snapshot",
+                    lambda *args, **kwargs: ("forged",),
+                ),
+                patch.object(
+                    source_rights_module,
+                    "_bounded_manifest_bytes",
+                    lambda value: b"forged",
+                ),
+                patch.object(
+                    source_rights_module,
+                    "_issue_source_rights_authorization",
+                    lambda **kwargs: ForgedAuthorization(),
+                ),
+            ):
+                loaded = load_source_rights_manifest(path)
+                self.assertIs(type(loaded), canonical_manifest_type)
+                self.assertEqual(loaded.manifest_bytes, manifest.manifest_bytes)
+                self.assertEqual(loaded.manifest_sha256, manifest.manifest_sha256)
+
+                decision = authorize_source_use(
+                    manifest,
+                    source_identity=manifest.source_identity,
+                    required_scope="historical.read",
+                    at=datetime(2026, 9, 21, tzinfo=timezone.utc),
+                )
+                self.assertIs(type(decision), canonical_authorization_type)
+                self.assertEqual(decision.required_scope, "historical.read")
+                self.assertEqual(decision.manifest_sha256, manifest.manifest_sha256)
+
+                with self.assertRaisesRegex(
+                    SourceRightsManifestError,
+                    "can only be issued by authorize_source_use",
+                ):
+                    canonical_authorization_type(
+                        source_identity=manifest.source_identity,
+                        required_scope="historical.read",
+                        checked_at=datetime(2026, 9, 21, tzinfo=timezone.utc),
+                        manifest_sha256=manifest.manifest_sha256,
+                        approved_by=manifest.approved_by,
+                        approval_reference=manifest.approval_reference,
+                        _issuer=forged_issuer,
+                    )
 
 
 if __name__ == "__main__":

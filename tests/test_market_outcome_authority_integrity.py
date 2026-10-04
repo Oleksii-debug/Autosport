@@ -862,11 +862,10 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "mutated after verified issuance"):
             authority.assert_issued_integrity()
 
-    def test_mutated_authority_rejects_sha256_payload_code_mutation_mask(
+    def test_mutated_authority_rejects_sha256_payload_code_mutation(
         self,
     ) -> None:
         authority = self._authority()
-        issued_digest = authority.authority_sha256
         object.__setattr__(
             authority,
             "selection_ids",
@@ -874,22 +873,20 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
         )
         helper = market_outcomes_module._sha256_payload
         original_code = helper.__code__
-        hostile_calls: list[object] = []
 
-        def forged_digest(payload):
-            hostile_calls.append(payload)
-            return issued_digest
+        def hostile_digest(payload):
+            del payload
+            raise AssertionError("hostile sha256 payload helper executed")
 
         self.assertEqual(original_code.co_freevars, ())
-        self.assertEqual(forged_digest.__code__.co_freevars, ())
-        helper.__code__ = forged_digest.__code__
+        self.assertEqual(hostile_digest.__code__.co_freevars, ())
+        helper.__code__ = hostile_digest.__code__
         try:
             with self.assertRaisesRegex(ValueError, "digest helper was replaced"):
                 authority.assert_issued_integrity()
         finally:
             helper.__code__ = original_code
 
-        self.assertEqual(hostile_calls, [])
         with self.assertRaisesRegex(ValueError, "mutated after verified issuance"):
             authority.assert_issued_integrity()
 

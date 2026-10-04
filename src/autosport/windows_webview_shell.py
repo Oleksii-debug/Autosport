@@ -2212,6 +2212,14 @@ class AutosportWebController:
 
 _WEB_CONTROLLER_AUTHORITY_CLASS = AutosportWebController
 _WEB_CONTROLLER_AUTHORITY_METHOD_NAMES = ("close", "dispatch", "state")
+_WEB_CONTROLLER_BASE_METHOD_WITNESSES = tuple(
+    (
+        name,
+        getattr(AutosportWebController, name),
+        getattr(getattr(AutosportWebController, name), "__code__", None),
+    )
+    for name in _WEB_CONTROLLER_AUTHORITY_METHOD_NAMES
+)
 _WEB_BRIDGE_CONTROLLER_REGISTRY = weakref.WeakKeyDictionary()
 _WEB_BRIDGE_CONTROLLER_REGISTRY_LOCK = threading.RLock()
 
@@ -2220,6 +2228,8 @@ def _canonical_product_controller_type(
     controller: object,
     *,
     _base_type=_WEB_CONTROLLER_AUTHORITY_CLASS,
+    _names=_WEB_CONTROLLER_AUTHORITY_METHOD_NAMES,
+    _base_witnesses=_WEB_CONTROLLER_BASE_METHOD_WITNESSES,
 ):
     """Resolve the only product controller classes authorized for WebView launch."""
 
@@ -2228,10 +2238,21 @@ def _canonical_product_controller_type(
     if (
         AutosportWebController is not _base_type
         or _WEB_CONTROLLER_AUTHORITY_CLASS is not _base_type
+        or _WEB_CONTROLLER_AUTHORITY_METHOD_NAMES is not _names
+        or _WEB_CONTROLLER_BASE_METHOD_WITNESSES is not _base_witnesses
     ):
         raise WindowsWebBridgeTrustError(
             "The WebView bridge canonical controller class authority changed"
         )
+    for name, expected, expected_code in _base_witnesses:
+        current = getattr(_base_type, name, None)
+        if (
+            current is not expected
+            or getattr(current, "__code__", None) is not expected_code
+        ):
+            raise WindowsWebBridgeTrustError(
+                "The WebView bridge canonical base controller method authority changed"
+            )
     if type(controller) is _base_type:
         return _base_type
 
@@ -2290,6 +2311,7 @@ class AutosportWebBridge:
         *,
         _base_type=_WEB_CONTROLLER_AUTHORITY_CLASS,
         _names=_WEB_CONTROLLER_AUTHORITY_METHOD_NAMES,
+        _base_witnesses=_WEB_CONTROLLER_BASE_METHOD_WITNESSES,
         _registry=_WEB_BRIDGE_CONTROLLER_REGISTRY,
         _registry_lock=_WEB_BRIDGE_CONTROLLER_REGISTRY_LOCK,
     ) -> tuple[object, object | None, tuple[tuple[str, object], ...]]:
@@ -2299,6 +2321,7 @@ class AutosportWebBridge:
             AutosportWebController is not _base_type
             or _WEB_CONTROLLER_AUTHORITY_CLASS is not _base_type
             or _WEB_CONTROLLER_AUTHORITY_METHOD_NAMES is not _names
+            or _WEB_CONTROLLER_BASE_METHOD_WITNESSES is not _base_witnesses
             or _WEB_BRIDGE_CONTROLLER_REGISTRY is not _registry
             or _WEB_BRIDGE_CONTROLLER_REGISTRY_LOCK is not _registry_lock
         ):
@@ -2325,6 +2348,16 @@ class AutosportWebBridge:
             )
 
         if controller_type is not None:
+            for name, expected, expected_code in _base_witnesses:
+                current_base = getattr(_base_type, name, None)
+                if (
+                    current_base is not expected
+                    or getattr(current_base, "__code__", None) is not expected_code
+                ):
+                    self._trust_revoked = True
+                    raise WindowsWebBridgeTrustError(
+                        "The WebView bridge canonical base controller method authority changed"
+                    )
             if type(controller) is not controller_type:
                 self._trust_revoked = True
                 raise WindowsWebBridgeTrustError(

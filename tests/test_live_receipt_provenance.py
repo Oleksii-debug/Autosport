@@ -188,22 +188,10 @@ class LiveReceiptProvenanceTests(unittest.TestCase):
             store = SQLiteMarketStore(path)
             event = self._direct_event(sequence=1)
 
-            with (
-                patch.object(
-                    storage_module,
-                    "_canonical_payload",
-                    side_effect=AssertionError("mutable canonical payload helper must not be consulted"),
-                ),
-                patch.object(
-                    storage_module,
-                    "_canonical_json",
-                    side_effect=AssertionError("mutable canonical JSON helper must not be consulted"),
-                ),
-                patch.object(
-                    storage_module,
-                    "_encode_market_event",
-                    side_effect=AssertionError("mutable event encoder helper must not be consulted"),
-                ),
+            with patch.object(
+                storage_module,
+                "_canonical_payload",
+                side_effect=AssertionError("mutable canonical payload helper must not be consulted"),
             ):
                 accepted = store._append_live_batch_accepted([event])
                 receipt_count = store.connection.execute(

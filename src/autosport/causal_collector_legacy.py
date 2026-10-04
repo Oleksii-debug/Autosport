@@ -1014,13 +1014,7 @@ class CanonicalDesktopApplication:
             if current == expected_after:
                 self._state.mark_health_applied(delta)
             elif current == expected_before:
-                outcome = self._outcome(
-                    delta,
-                    event,
-                    applied_at=progress["prepared_at"],
-                    health_before=expected_before,
-                )
-                recorded = outcome.record_health(self.health_store)
+                recorded = reproved_outcome.record_health(self.health_store)
                 if recorded != expected_after:
                     raise ApplicationReceiptError(
                         "canonical health authority returned an unexpected post-state"

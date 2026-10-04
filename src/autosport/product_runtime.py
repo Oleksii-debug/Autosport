@@ -1512,6 +1512,34 @@ def _build_autonomous_product_runtime_impl(
                     "source resolver authority changed after product composition"
                 )
 
+        source_fetch_catalog_page = source.fetch_catalog_page
+        source_fetch_deltas = source.fetch_deltas
+
+        class ProductCollectorSourceProxy:
+            __slots__ = ()
+
+            @property
+            def source_id(self) -> str:
+                return source_id
+
+            @property
+            def stream_epoch(self) -> str:
+                return getattr(source, "stream_epoch")
+
+            def fetch_catalog_page(self, checkpoint):
+                require_source_resolver_authority()
+                page = source_fetch_catalog_page(checkpoint)
+                require_source_resolver_authority()
+                return page
+
+            def fetch_deltas(self, checkpoint, records, max_items):
+                require_source_resolver_authority()
+                deltas = source_fetch_deltas(checkpoint, records, max_items)
+                require_source_resolver_authority()
+                return deltas
+
+        collector_source = ProductCollectorSourceProxy()
+
         lifecycle = _lifecycle_type(root / "catalog.json")
         market_store = _market_store_type(root / "market.db")
         lease_stack.callback(market_store.close)
@@ -1566,7 +1594,7 @@ def _build_autonomous_product_runtime_impl(
         collector = ProductCollectorService(
             delta_store=collector_store,
             lifecycle=lifecycle,
-            source=source,
+            source=collector_source,
             state_path=root / "collector_state.json",
             run_id=f"product:{source_id}",
             clock=resolved_clock,

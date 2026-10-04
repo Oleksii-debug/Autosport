@@ -2426,6 +2426,13 @@ def _verify_terminal_economics(
                     "outcome-independent execution assumptions do not match verified completeness",
                 )
 
+    current_portfolio_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    if current_portfolio_sha256 != portfolio_sha256:
+        return (
+            None,
+            "current portfolio changed before terminal economics evaluation",
+        )
+
     tickets = [
         ticket
         for ticket in book.tickets.values()
@@ -2451,6 +2458,11 @@ def _verify_terminal_economics(
             return (
                 None,
                 f"authoritative terminal-state model is not executable: {exc}",
+            )
+        if PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book) != portfolio_sha256:
+            return (
+                None,
+                "current portfolio changed during terminal economics evaluation",
             )
         proof = _issue_authoritative_terminal_economics(
             completeness_evidence=evidence,
@@ -2499,6 +2511,11 @@ def _verify_terminal_economics(
             f"verified terminal-state model is not executable: {exc}",
         )
 
+    if PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book) != portfolio_sha256:
+        return (
+            None,
+            "current portfolio changed during terminal economics evaluation",
+        )
     proof = VerifiedTerminalEconomics(
         completeness_evidence=evidence,
         report_mode=report.mode,

@@ -498,18 +498,24 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
     if not isinstance(receipt, BetfairMarketBookDepthObservation):
         raise TypeError("receipt must be BetfairMarketBookDepthObservation")
     acquisition_started_at = market_book_depth_acquisition_started_at(receipt)
-    decision_at = assert_market_book_depth_authoritative(receipt)
+    # Provider provenance is necessary but must not choose the decision epoch.
+    # The independently durable PLAN_RESERVED event is the causal publication
+    # boundary for DECISION_EVIDENCE semantics.
+    assert_market_book_depth_authoritative(receipt)
     _require_aware(acquisition_started_at, "acquisition_started_at")
-    _require_aware(decision_at, "decision_at")
     bound.verify_binding()
     try:
-        saga = ledger.saga(bound.execution_plan.plan_id)
+        plan_view = ledger.verified_execution_view(
+            bound.execution_plan.plan_id
+        )
     except KeyError as exc:
         raise ValueError(
             "product-owned feasibility requires a durably reserved execution plan"
         ) from exc
-    if saga.plan_fingerprint != bound.execution_plan.fingerprint:
+    if plan_view.plan_fingerprint != bound.execution_plan.fingerprint:
         raise ValueError("durable execution-plan fingerprint mismatch")
+    decision_at = _provider_timestamp(plan_view.plan_reserved_at)
+    _require_aware(decision_at, "decision_at")
 
     action = bound.action_for(action_id)
     try:
@@ -633,6 +639,9 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
             "provider_limit_authority_available": False,
             "plan_id": bound.execution_plan.plan_id,
             "plan_fingerprint": bound.execution_plan.fingerprint,
+            "plan_reserved_event_id": plan_view.plan_reserved_event_id,
+            "plan_reserved_at": plan_view.plan_reserved_at,
+            "ledger_snapshot_sha256": plan_view.snapshot_sha256,
             "venue_id": binding.venue_id,
             "account_id": binding.account_id,
             "adapter_id": binding.adapter_id,

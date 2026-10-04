@@ -209,6 +209,41 @@ def _build_product_coordinator_type(
     base_init = base_type.__init__
     missing = object()
 
+    class ProductCoordinatorClassIdentity:
+        __slots__ = ()
+
+        def __get__(self, _instance, owner=None):
+            return owner
+
+        def __set__(self, _instance, _value) -> None:
+            raise error_type("product coordinator class identity is immutable")
+
+        def __delete__(self, _instance) -> None:
+            raise error_type("product coordinator class identity is immutable")
+
+    class ProductCoordinatorClassGuard:
+        __slots__ = ("descriptor", "name")
+
+        def __init__(self, name: str, descriptor: object) -> None:
+            self.name = name
+            self.descriptor = descriptor
+
+        def __get__(self, _instance, _owner=None):
+            return self.descriptor
+
+        def __set__(self, _instance, _value) -> None:
+            raise error_type(
+                f"product coordinator class member {self.name!r} is immutable"
+            )
+
+        def __delete__(self, _instance) -> None:
+            raise error_type(
+                f"product coordinator class member {self.name!r} is immutable"
+            )
+
+    class ProductCoordinatorMeta(type(base_type)):
+        pass
+
     def require_snapshot(self) -> tuple[tuple[str, object], ...]:
         snapshot = snapshots.get(self)
         if snapshot is None:
@@ -226,8 +261,13 @@ def _build_product_coordinator_type(
                 )
         return snapshot
 
-    class ProductContinuousSessionCoordinator(base_type):
+    class ProductContinuousSessionCoordinator(
+        base_type,
+        metaclass=ProductCoordinatorMeta,
+    ):
         """Product-only coordinator with immutable composed authority references."""
+
+        __class__ = ProductCoordinatorClassIdentity()
 
         def __init__(self, *args, **kwargs) -> None:
             base_init(self, *args, **kwargs)
@@ -256,6 +296,14 @@ def _build_product_coordinator_type(
                     f"product coordinator authority field {name!r} is immutable"
                 )
             object.__setattr__(self, name, value)
+
+    for name in ("__getattribute__", "__setattr__"):
+        descriptor = ProductContinuousSessionCoordinator.__dict__[name]
+        type.__setattr__(
+            ProductCoordinatorMeta,
+            name,
+            ProductCoordinatorClassGuard(name, descriptor),
+        )
 
     return ProductContinuousSessionCoordinator
 

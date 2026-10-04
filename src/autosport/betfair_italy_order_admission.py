@@ -77,6 +77,7 @@ def _build_italian_limit_batch_admission_meta():
             "__dataclass_fields__",
             "__init__",
             "__post_init__",
+            "ruleset_satisfied_unbound",
             "admissible",
             "jurisdiction_bound",
             "account_currency_bound",
@@ -126,9 +127,14 @@ class ItalianLimitBatchAdmission(metaclass=_ItalianLimitBatchAdmissionMeta):
     reason_codes: tuple[str, ...]
     preselected_returns_eur: tuple[Decimal, ...]
 
-    def __post_init__(self) -> None:
-        if type(self.state) is not ItalianLimitAdmissionState:
-            raise ItalianOrderAdmissionError(
+    def __post_init__(
+        self,
+        _state_type=ItalianLimitAdmissionState,
+        _decimal_type=Decimal,
+        _error_type=ItalianOrderAdmissionError,
+    ) -> None:
+        if type(self.state) is not _state_type:
+            raise _error_type(
                 "state must be exact ItalianLimitAdmissionState"
             )
         if type(self.reason_codes) is not tuple or any(
@@ -139,35 +145,35 @@ class ItalianLimitBatchAdmission(metaclass=_ItalianLimitBatchAdmissionMeta):
                 "reason_codes must be an exact tuple of non-empty strings"
             )
         if type(self.preselected_returns_eur) is not tuple or any(
-            type(value) is not Decimal
+            type(value) is not _decimal_type
             or not value.is_finite()
             or value <= 0
             for value in self.preselected_returns_eur
         ):
-            raise ItalianOrderAdmissionError(
+            raise _error_type(
                 "preselected_returns_eur must contain positive finite Decimals"
             )
         if (
-            self.state is ItalianLimitAdmissionState.RULESET_SATISFIED_UNBOUND
+            self.state is _state_type.RULESET_SATISFIED_UNBOUND
             and self.reason_codes
         ):
-            raise ItalianOrderAdmissionError(
+            raise _error_type(
                 "RULESET_SATISFIED_UNBOUND cannot carry rejection reasons"
             )
         if (
-            self.state is ItalianLimitAdmissionState.REJECTED
+            self.state is _state_type.REJECTED
             and not self.reason_codes
         ):
-            raise ItalianOrderAdmissionError(
+            raise _error_type(
                 "REJECTED result requires a reason"
             )
 
     @property
-    def ruleset_satisfied_unbound(self) -> bool:
-        return (
-            self.state
-            is ItalianLimitAdmissionState.RULESET_SATISFIED_UNBOUND
-        )
+    def ruleset_satisfied_unbound(
+        self,
+        _state_type=ItalianLimitAdmissionState,
+    ) -> bool:
+        return self.state is _state_type.RULESET_SATISFIED_UNBOUND
 
     # These claims are intentionally hard-false. Keep their getters out of
     # mutable Python bytecode and their backing values off instance slots.

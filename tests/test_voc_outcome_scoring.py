@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from unittest.mock import patch
 from decimal import Decimal, ROUND_DOWN, localcontext
 from pathlib import Path
+from market_outcome_test_support import issue_synthetic_market_outcome_authority
 from typing import Any
 
 from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger

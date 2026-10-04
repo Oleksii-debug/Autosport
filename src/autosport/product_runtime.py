@@ -528,6 +528,7 @@ def _desktop_applied_current_for_source(
     collector_store: CollectorDeltaStore,
     canonical_application: CanonicalDesktopApplication,
     _delta_type=CollectorDelta,
+    _event_type=MarketEvent,
     _receipt_type=DesktopApplicationReceipt,
     _deltas_after_commit=CollectorDeltaStore.deltas_after_commit,
     _lookup_receipt=CanonicalDesktopApplication.lookup_receipt,
@@ -606,7 +607,7 @@ def _desktop_applied_current_for_source(
         if event.source_id != source_id:
             continue
         try:
-            if type(event) is not MarketEvent:
+            if type(event) is not _event_type:
                 raise TypeError("market history returned a non-canonical event type")
             if _dedupe_getter is None or _quote_getter is None:
                 raise RuntimeError("canonical MarketEvent identity descriptor is unavailable")

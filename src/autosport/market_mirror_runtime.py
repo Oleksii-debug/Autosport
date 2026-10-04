@@ -222,6 +222,11 @@ class FocusedMirrorDependencyIndex:
                 keys.update(self._matched_keys.get(input_id, set()))
         return tuple(sorted(keys))
 
+    def causal_view(self, input_id: str) -> MirrorSnapshot:
+        """Read current product-issued state before freshness/status gating."""
+        dependency = self._dependency(input_id)
+        return self._mirror.causal_view(**self._selectors(dependency))
+
     def decision_view(
         self,
         input_id: str,

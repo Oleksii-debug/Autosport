@@ -142,6 +142,58 @@ def test_product_runtime_entry_rejects_coherent_status_code_mutation(
         runtime.close()
 
 
+def test_product_runtime_entry_rejects_coordinated_status_closure_retargeting(
+    tmp_path: Path,
+) -> None:
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=_Source(),
+        clock=lambda: "2026-09-27T05:45:00+00:00",
+        sleep=lambda _: None,
+        initial_bankroll="100",
+    )
+    canonical_tick = type.__getattribute__(
+        AutonomousProductRuntime,
+        "__dict__",
+    )["tick"]
+    canonical_inner = canonical_tick.__wrapped__
+    closure = canonical_inner.__closure__
+    assert closure is not None
+    cells = dict(
+        zip(canonical_inner.__code__.co_freevars, closure, strict=True)
+    )
+    assert {
+        "canonical_coherent_status",
+        "canonical_coherent_status_code",
+    } <= set(cells)
+    originals = {
+        name: cells[name].cell_contents
+        for name in (
+            "canonical_coherent_status",
+            "canonical_coherent_status_code",
+        )
+    }
+
+    def hostile_status(self, **_kwargs):
+        del self
+        raise AssertionError("hostile coherent status executed")
+
+    try:
+        cells["canonical_coherent_status"].cell_contents = hostile_status
+        cells["canonical_coherent_status_code"].cell_contents = (
+            hostile_status.__code__
+        )
+        with pytest.raises(
+            ProductCompositionError,
+            match="inner closure target changed",
+        ):
+            tick_autonomous_product_runtime(runtime)
+    finally:
+        for name, original in originals.items():
+            cells[name].cell_contents = original
+        runtime.close()
+
+
 def test_product_runtime_entry_rejects_direct_tick_slot_replacement(tmp_path: Path) -> None:
     runtime = build_autonomous_product_runtime(
         workspace=tmp_path,

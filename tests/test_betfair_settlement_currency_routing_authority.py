@@ -314,3 +314,44 @@ def test_k07_verifier_closure_drift_is_rejected_before_permissive_execution(
         assert calls == []
     finally:
         cell.cell_contents = original
+
+
+def test_nested_k07_authority_closure_drift_is_rejected_before_execution(
+    monkeypatch,
+) -> None:
+    client, _provider = _client(monkeypatch)
+    capture = _qualified_capture(client)
+    assert origin_guard._currency_for_capture(capture) == "USD"
+
+    verifier = origin_guard._REQUIRE_IDENTITY
+    verifier_closure = verifier.__closure__
+    assert verifier_closure is not None
+    verifier_freevars = verifier.__code__.co_freevars
+    authority = verifier_closure[verifier_freevars.index("is_authoritative")].cell_contents
+
+    authority_closure = authority.__closure__
+    assert authority_closure is not None
+    authority_freevars = authority.__code__.co_freevars
+    assert "context_is_current" in authority_freevars
+    cell = authority_closure[authority_freevars.index("context_is_current")]
+    original = cell.cell_contents
+    calls: list[object] = []
+
+    def permissive_context(*args, **kwargs):
+        calls.append((args, kwargs))
+        return True
+
+    client._credentials = BetfairSessionCredentials(
+        "app-key-rotated",
+        "session-token-rotated",
+    )
+    cell.cell_contents = permissive_context
+    try:
+        with pytest.raises(
+            BetfairSettlementRevisionError,
+            match="authenticated identity verifier authority changed",
+        ):
+            origin_guard._currency_for_capture(capture)
+        assert calls == []
+    finally:
+        cell.cell_contents = original

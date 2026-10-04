@@ -535,6 +535,87 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.close()
 
+    def test_provider_gap_pending_restart_uses_frozen_market_frontier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            strategy = self._strategy_version()
+            registry = self._scientific_registry(workspace, strategy)
+            provider = _EmptyProvider()
+            provider.error = ProviderUnavailableError("simulated provider outage")
+            first = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with patch.object(
+                first,
+                "_persist_plan",
+                side_effect=RuntimeError("simulated loss after provider-gap pending"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated loss after provider-gap pending",
+                ):
+                    first.run_cycle()
+
+            pending = json.loads(first.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(pending["phase"], "pending")
+            self.assertEqual(pending["gate"], "provider_gap")
+            self.assertEqual(pending["market_append_generation"], 1)
+            first.close()
+
+            peer_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                peer_store.append(
+                    self._event(
+                        sequence=2,
+                        odds="2.10",
+                        observed=self.START + timedelta(milliseconds=500),
+                    )
+                )
+            finally:
+                peer_store.close()
+
+            resumed_provider = _EmptyProvider()
+            resumed_factory = _EmptyIntentFactory()
+            resumed = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=resumed_factory,
+                scientific_registry=registry,
+                provider=resumed_provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            recovered = resumed.run_cycle()
+
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(resumed_provider.calls, 0)
+            self.assertEqual(resumed_factory.calls, [])
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertEqual(record.payload["gate"], "provider_gap")
+            self.assertEqual(record.payload["market_append_generation"], 1)
+            resumed.close()
+
     def test_decision_frontier_reconciles_peer_append_after_observer_returns(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

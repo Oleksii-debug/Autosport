@@ -267,22 +267,21 @@ class FocusedMirrorDependencyIndex:
             **self._selectors(dependency),
         )
 
-    def current_history_decision_state(
+    def decision_state_from_proven_history(
         self,
         input_id: str,
-        store: SQLiteMarketStore,
+        events_with_generation: tuple[tuple[MarketEvent, int], ...],
         *,
         as_of: datetime,
         max_age: timedelta,
     ) -> tuple[MirrorSnapshot, datetime | None]:
-        """Resolve live state and its earliest future causal transition in one scan."""
+        """Resolve one input from a caller-owned snapshot already proven by storage."""
 
         dependency = self._dependency(input_id)
         boundary, age_limit = MarketMirror._decision_boundary(
             as_of=as_of,
             max_age=max_age,
         )
-        events_with_generation = tuple(store.events_with_append_generation())
         snapshot = MarketMirror._decision_view_from_proven_history(
             events_with_generation,
             boundary=boundary,
@@ -300,6 +299,23 @@ class FocusedMirrorDependencyIndex:
             if boundary < available_at:
                 future_boundaries.append(available_at)
         return snapshot, min(future_boundaries) if future_boundaries else None
+
+    def current_history_decision_state(
+        self,
+        input_id: str,
+        store: SQLiteMarketStore,
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+    ) -> tuple[MirrorSnapshot, datetime | None]:
+        """Resolve live state and its earliest future transition from verified history."""
+
+        return self.decision_state_from_proven_history(
+            input_id,
+            tuple(store.events_with_append_generation()),
+            as_of=as_of,
+            max_age=max_age,
+        )
 
     def decision_view(
         self,

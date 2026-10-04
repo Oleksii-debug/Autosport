@@ -1613,6 +1613,7 @@ class PersistentLiveDecisionLoop:
             else self.dependencies.decision_view
         )
         history_store: SQLiteMarketStore | None = None
+        history_events: tuple[tuple[MarketEvent, int], ...] | None = None
         owns_history_store = False
         try:
             for input_id in input_ids:
@@ -1628,12 +1629,16 @@ class PersistentLiveDecisionLoop:
                                 self.workspace / "market.db"
                             )
                             owns_history_store = True
+                    if history_events is None:
+                        history_events = tuple(
+                            history_store.events_with_append_generation()
+                        )
                     (
                         snapshot,
                         next_history_availability,
-                    ) = self.dependencies.current_history_decision_state(
+                    ) = self.dependencies.decision_state_from_proven_history(
                         input_id,
-                        history_store,
+                        history_events,
                         as_of=as_of,
                         max_age=self.max_quote_age,
                     )

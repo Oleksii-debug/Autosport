@@ -1789,6 +1789,74 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(factory.calls, [("input-a", (("selection-a", 2, "open"),))])
             loop.close()
 
+    def test_multiple_future_inputs_share_one_verified_history_scan_per_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            first_a = self._event(selection="selection-a", sequence=1)
+            first_b = self._event(selection="selection-b", sequence=1)
+            future_a = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-a",
+                decimal_odds=Decimal("2.10"),
+                observed_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                source_id="provider-a",
+                sequence=2,
+                status="open",
+                source_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=4)).isoformat(),
+            )
+            future_b = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-b",
+                decimal_odds=Decimal("2.20"),
+                observed_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                source_id="provider-a",
+                sequence=2,
+                status="open",
+                source_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=5)).isoformat(),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(first_a, first_b), (future_a, future_b)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            self._register_two(loop)
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            original = SQLiteMarketStore.events_with_append_generation
+            calls = {"count": 0}
+
+            def counted(store, *args, **kwargs):
+                calls["count"] += 1
+                return original(store, *args, **kwargs)
+
+            clock.value = self.START + timedelta(seconds=2)
+            with patch.object(
+                SQLiteMarketStore,
+                "events_with_append_generation",
+                new=counted,
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(calls["count"], 1)
+            self.assertEqual(
+                loop._availability_deadlines["input-a"],
+                self.START + timedelta(seconds=4),
+            )
+            self.assertEqual(
+                loop._availability_deadlines["input-b"],
+                self.START + timedelta(seconds=5),
+            )
+            loop.close()
+
     def test_normal_live_hot_path_does_not_scan_durable_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

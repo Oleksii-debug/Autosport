@@ -36,6 +36,13 @@ from autosport.risk_path_observation_authority import (
     resolve_product_run_capital_path_evidence,
     verify_product_run_capital_path_evidence,
 )
+from autosport.risk_iid_qualification_authority import (
+    ProductFixedNIidQualificationAuthority,
+    ProductFixedNIidQualificationError,
+    resolve_product_fixed_n_iid_qualification,
+    verify_product_fixed_n_iid_qualification,
+)
+import autosport.risk_iid_qualification_authority as iid_qualification
 from autosport.risk_sampling_membership import ResolvedFixedNRiskMembership
 from autosport.risk_sampling_occurrence_authority import (
     issue_product_iid_run_admission,
@@ -116,7 +123,12 @@ def _membership() -> ResolvedFixedNRiskMembership:
     )
 
 
-def _sampling_manifest(*, randomization_root_sha256: str) -> str:
+def _sampling_manifest(
+    *,
+    randomization_root_sha256: str,
+    initial_capital_state_sha256: str = "5" * 64,
+    stake_policy_sha256: str = "6" * 64,
+) -> str:
     payload = {
         "kind": "autosport-risk-iid-resample-with-replacement-v1",
         "experiment_id": "iid-risk-exp-001",
@@ -131,8 +143,8 @@ def _sampling_manifest(*, randomization_root_sha256: str) -> str:
         "dataset_snapshot_id": "risk-fixed-n-dataset",
         "dataset_manifest_sha256": "3" * 64,
         "sampling_frame_sha256": SAMPLING_FRAME_SHA256,
-        "initial_capital_state_sha256": "5" * 64,
-        "stake_policy_sha256": "6" * 64,
+        "initial_capital_state_sha256": initial_capital_state_sha256,
+        "stake_policy_sha256": stake_policy_sha256,
         "horizon_sha256": HORIZON_SHA256,
         "sampler_kind": "IID_RESAMPLE_WITH_REPLACEMENT_V1",
         "with_replacement": True,
@@ -153,7 +165,13 @@ def _sampling_manifest(*, randomization_root_sha256: str) -> str:
     )
 
 
-def _product_precommit(tmp_path, monkeypatch):
+def _product_precommit(
+    tmp_path,
+    monkeypatch,
+    *,
+    initial_capital_state_sha256: str = "5" * 64,
+    stake_policy_sha256: str = "6" * 64,
+):
     membership = _membership()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -184,6 +202,8 @@ def _product_precommit(tmp_path, monkeypatch):
     )
     manifest = _sampling_manifest(
         randomization_root_sha256=issued.randomization_root_sha256,
+        initial_capital_state_sha256=initial_capital_state_sha256,
+        stake_policy_sha256=stake_policy_sha256,
     )
     admission = issue_product_iid_run_admission(
         membership,

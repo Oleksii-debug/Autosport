@@ -748,8 +748,15 @@ class CanonicalDesktopApplication:
         _dedupe_getter,
         _health_store_type,
         _health_get,
+        _application_store_type,
+        _state_receipt,
+        _state_health_after,
     ) -> DesktopApplicationReceipt | None:
-        receipt = self._state.receipt(delta)
+        if type(self._state) is not _application_store_type:
+            raise ApplicationReceiptError(
+                "completed canonical application lacks canonical journal authority"
+            )
+        receipt = _state_receipt(self._state, delta)
         if receipt is None:
             return None
 
@@ -797,7 +804,7 @@ class CanonicalDesktopApplication:
             raise ApplicationReceiptError(
                 "completed canonical application lacks canonical health authority"
             )
-        expected_health = self._state.health_after(delta)
+        expected_health = _state_health_after(self._state, delta)
         try:
             actual_health = _health_get(self.health_store, delta.source_id)
         except Exception as exc:
@@ -823,8 +830,14 @@ class CanonicalDesktopApplication:
         _health_store_type,
         _health_read,
         _application_read,
+        _application_store_type,
+        _completed_receipts,
     ) -> tuple[DesktopApplicationReceipt, ...]:
-        receipts = self._state.completed_receipts_for_source(source_id)
+        if type(self._state) is not _application_store_type:
+            raise ApplicationReceiptError(
+                "completed canonical applications lack canonical journal authority"
+            )
+        receipts = _completed_receipts(self._state, source_id)
         if not receipts:
             return ()
 
@@ -857,6 +870,14 @@ class CanonicalDesktopApplication:
             if type(item) is not dict:
                 raise ApplicationReceiptError(
                     "completed canonical application entry disappeared"
+                )
+            if (
+                receipt.canonical_event_digest != item.get("canonical_event_digest")
+                or receipt.receipt_id != item.get("receipt_id")
+                or receipt.applied_at != item.get("completed_at")
+            ):
+                raise ApplicationReceiptError(
+                    "completed canonical application receipt conflicts with journal evidence"
                 )
             expected_health = item.get("health_after")
             if not any(
@@ -1135,6 +1156,9 @@ def _bind_canonical_desktop_application_lookup_receipt(implementation):
     dedupe_getter = MarketEvent.dedupe_key.fget
     health_store_type = SourceHealthStore
     health_get = SourceHealthStore.get
+    application_store_type = _CanonicalDesktopApplicationStore
+    state_receipt = _CanonicalDesktopApplicationStore.receipt
+    state_health_after = _CanonicalDesktopApplicationStore.health_after
 
     def lookup_receipt(
         self: CanonicalDesktopApplication,
@@ -1155,6 +1179,9 @@ def _bind_canonical_desktop_application_lookup_receipt(implementation):
             _dedupe_getter=dedupe_getter,
             _health_store_type=health_store_type,
             _health_get=health_get,
+            _application_store_type=application_store_type,
+            _state_receipt=state_receipt,
+            _state_health_after=state_health_after,
         )
 
     return lookup_receipt
@@ -1177,6 +1204,8 @@ def _bind_verified_completed_receipts_for_source(implementation):
     health_store_type = SourceHealthStore
     health_read = SourceHealthStore._read
     application_read = _JsonAtomicStore._read
+    application_store_type = _CanonicalDesktopApplicationStore
+    completed_receipts = _CanonicalDesktopApplicationStore.completed_receipts_for_source
 
     def verified_completed_receipts_for_source(
         self: CanonicalDesktopApplication,
@@ -1188,6 +1217,8 @@ def _bind_verified_completed_receipts_for_source(implementation):
             _health_store_type=health_store_type,
             _health_read=health_read,
             _application_read=application_read,
+            _application_store_type=application_store_type,
+            _completed_receipts=completed_receipts,
         )
 
     return verified_completed_receipts_for_source

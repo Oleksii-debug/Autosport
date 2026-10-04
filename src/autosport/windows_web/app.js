@@ -88,9 +88,20 @@
     const fallback = usableSectionHeading
       ? sectionHeading
       : (errorNode.hidden ? statusNode : errorNode);
+    // Plain section headings are not natively focusable. Make the fallback
+    // programmatically focusable without adding it to the Tab order so a hidden
+    // or disabled requested destination never leaves keyboard/NVDA focus behind.
     fallback.tabIndex = -1;
     fallback.focus();
-    return document.activeElement === fallback;
+    if (document.activeElement === fallback) return true;
+
+    // If the section heading cannot accept focus for any host/browser reason,
+    // retain one deterministic accessible fallback rather than silently keeping
+    // focus on the unavailable control.
+    const statusFallback = errorNode.hidden ? statusNode : errorNode;
+    statusFallback.tabIndex = -1;
+    statusFallback.focus();
+    return document.activeElement === statusFallback;
   }
 
   function syncRuntimeActionAvailability(startButton, stopButton, canStart, canStop) {
@@ -583,9 +594,12 @@
     byId(306).focus();
   });
   byId(329).addEventListener("click", () => {
+    // Move focus to the disclosure trigger before hiding the subtree that
+    // currently contains focus. This avoids a transient body/document focus
+    // loss that screen readers can announce as an empty context.
+    byId(305).focus();
     ownerPanel.hidden = true;
     byId(305).setAttribute("aria-expanded", "false");
-    byId(305).focus();
   });
   document.querySelectorAll("[data-owner-field]").forEach((node) => {
     node.addEventListener("input", markOwnerFieldEdited);
@@ -628,9 +642,9 @@
     byId(331).focus();
   });
   byId(336).addEventListener("click", () => {
+    byId(330).focus();
     manualPanel.hidden = true;
     byId(330).setAttribute("aria-expanded", "false");
-    byId(330).focus();
   });
   byId(333).addEventListener("click", () => {
     dispatch("manual.calculate", {

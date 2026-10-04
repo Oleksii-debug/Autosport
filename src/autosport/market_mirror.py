@@ -7,7 +7,7 @@ from enum import Enum
 from threading import RLock
 
 from .domain import MarketEvent, _quote_identity
-from .storage import SQLiteMarketStore
+from .storage import SQLiteMarketStore, _timezone_aware_instant
 
 
 class MirrorUpdate(str, Enum):
@@ -81,10 +81,8 @@ class MarketMirror:
     def _utc_timestamp(value: str) -> datetime | None:
         """Parse one provider/observation timestamp, failing closed on bad input."""
         try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except (AttributeError, ValueError):
-            return None
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            parsed = _timezone_aware_instant(value, "timestamp")
+        except ValueError:
             return None
         return parsed.astimezone(timezone.utc)
 

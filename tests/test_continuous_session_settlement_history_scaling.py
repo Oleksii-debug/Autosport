@@ -119,3 +119,94 @@ def test_unrelated_checkpoint_does_not_rewrite_full_settlement_history() -> None
         "a no-new-settlement operational checkpoint rewrote historical receipt "
         f"population instead of bounded active state: small={small}, large={large}"
     )
+
+def test_unrelated_failure_checkpoint_preserves_history_file_bytes() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _LARGE_HISTORY)
+        history_path = root / "continuous_session.json"
+        before = history_path.read_bytes()
+
+        state.record_failure(code="SYNTHETIC_PROVIDER_FAILURE")
+
+        assert history_path.read_bytes() == before
+        operational_path = root / "continuous_session.operational.json"
+        operational = json.loads(operational_path.read_text(encoding="utf-8"))
+        assert operational["last_error_code"] == "SYNTHETIC_PROVIDER_FAILURE"
+        assert len(state.snapshot().settlement_evidence) == _LARGE_HISTORY
+
+
+def test_operational_failure_state_survives_restart_without_history_rewrite() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        history_path = root / "continuous_session.json"
+        before = history_path.read_bytes()
+        state.record_failure(code="SYNTHETIC_PROVIDER_FAILURE")
+
+        restarted = continuous_session._ContinuousSessionState(
+            history_path,
+            session_id="session-history-scaling",
+            source_id="provider-a",
+            clock=lambda: _AT,
+        )
+
+        assert history_path.read_bytes() == before
+        assert (
+            restarted.operational_snapshot().last_error_code
+            == "SYNTHETIC_PROVIDER_FAILURE"
+        )
+        assert len(restarted.snapshot().settlement_evidence) == _SMALL_HISTORY
+
+
+def test_success_without_settlement_evidence_is_bounded_operational_state() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _LARGE_HISTORY)
+        history_path = root / "continuous_session.json"
+        before = history_path.read_bytes()
+
+        state.record_success(
+            at=_AT,
+            full_refresh=False,
+            settlement_evidence=(),
+        )
+
+        assert history_path.read_bytes() == before
+        snapshot = state.operational_snapshot()
+        assert snapshot.cycles_completed == _LARGE_HISTORY + 1
+        assert snapshot.last_success_at == "2026-09-22T06:20:00+00:00"
+        assert snapshot.last_error_code is None
+
+
+def test_runtime_history_replacement_blocks_bounded_operational_mutation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        state = _state_with_history(root, _SMALL_HISTORY)
+        history_path = root / "continuous_session.json"
+        history_path.write_text(
+            history_path.read_text(encoding="utf-8") + " ",
+            encoding="utf-8",
+        )
+
+        try:
+            state.record_failure(code="SHOULD_NOT_COMMIT")
+        except continuous_session.ContinuousSessionError:
+            pass
+        else:
+            raise AssertionError(
+                "operational mutation accepted a changed history checkpoint"
+            )
+
+
+def test_empty_settlement_validation_does_not_scan_history() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        state = _state_with_history(Path(directory), _LARGE_HISTORY)
+
+        with patch.object(
+            state,
+            "_read",
+            side_effect=AssertionError("history scan is forbidden for empty input"),
+        ):
+            state.validate_settlement_evidence(settlement_evidence=())
+

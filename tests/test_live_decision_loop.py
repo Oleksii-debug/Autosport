@@ -526,6 +526,227 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.close()
 
+    def test_decision_frontier_reconciles_peer_append_after_observer_returns(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            factory = _EmptyIntentFactory()
+            provider = _EmptyProvider()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=self._scientific_registry(
+                    workspace,
+                    self._strategy_version(),
+                ),
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            refresh = loop._refresh_cycle_authorities
+            refresh_calls = 0
+
+            def refresh_and_publish_after_observation() -> None:
+                nonlocal refresh_calls
+                refresh()
+                refresh_calls += 1
+                if refresh_calls != 2:
+                    return
+                peer_store = SQLiteMarketStore(workspace / "market.db")
+                try:
+                    MarketEventBus(peer_store).publish_many(
+                        (
+                            self._event(
+                                sequence=2,
+                                odds="2.10",
+                                observed=self.START + timedelta(seconds=2),
+                            ),
+                        )
+                    )
+                finally:
+                    peer_store.close()
+
+            clock.value = self.START + timedelta(seconds=2)
+            with patch.object(
+                loop,
+                "_refresh_cycle_authorities",
+                side_effect=refresh_and_publish_after_observation,
+            ):
+                second = loop.run_cycle()
+
+            self.assertEqual(refresh_calls, 2)
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls[-1],
+                ("input-a", (("selection-a", 2, "open"),)),
+            )
+            loop.close()
+
+    def test_decision_frontier_retries_peer_append_after_candidate_clock_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            factory = _EmptyIntentFactory()
+            provider = _EmptyProvider()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=self._scientific_registry(
+                    workspace,
+                    self._strategy_version(),
+                ),
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            sample_clock = loop._sample_clock
+            sample_calls = 0
+
+            def sample_and_publish_after_candidate() -> datetime:
+                nonlocal sample_calls
+                sampled = sample_clock()
+                sample_calls += 1
+                if sample_calls != 2:
+                    return sampled
+                peer_store = SQLiteMarketStore(workspace / "market.db")
+                try:
+                    MarketEventBus(peer_store).publish_many(
+                        (
+                            self._event(
+                                sequence=2,
+                                odds="2.10",
+                                observed=self.START + timedelta(seconds=2),
+                            ),
+                        )
+                    )
+                finally:
+                    peer_store.close()
+                return sampled
+
+            clock.value = self.START + timedelta(seconds=2)
+            with patch.object(
+                loop,
+                "_sample_clock",
+                side_effect=sample_and_publish_after_candidate,
+            ):
+                second = loop.run_cycle()
+
+            self.assertGreaterEqual(sample_calls, 3)
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls[-1],
+                ("input-a", (("selection-a", 2, "open"),)),
+            )
+            loop.close()
+
+    def test_provider_gap_frontier_reconciles_peer_append_after_failed_observer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            provider = _EmptyProvider()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=self._scientific_registry(
+                    workspace,
+                    self._strategy_version(),
+                ),
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            refresh = loop._refresh_cycle_authorities
+            refresh_calls = 0
+
+            def refresh_and_publish_after_failed_observation() -> None:
+                nonlocal refresh_calls
+                refresh()
+                refresh_calls += 1
+                if refresh_calls != 2:
+                    return
+                peer_store = SQLiteMarketStore(workspace / "market.db")
+                try:
+                    MarketEventBus(peer_store).publish_many(
+                        (
+                            self._event(
+                                sequence=2,
+                                odds="2.10",
+                                observed=self.START + timedelta(seconds=2),
+                            ),
+                        )
+                    )
+                finally:
+                    peer_store.close()
+
+            provider.error = ProviderUnavailableError("simulated provider outage")
+            clock.value = self.START + timedelta(seconds=2)
+            with patch.object(
+                loop,
+                "_refresh_cycle_authorities",
+                side_effect=refresh_and_publish_after_failed_observation,
+            ):
+                gap = loop.run_cycle()
+
+            self.assertEqual(refresh_calls, 2)
+            self.assertEqual(gap.status, LiveCycleStatus.PROVIDER_GAP)
+            visible = loop.dependencies.decision_view(
+                "input-a",
+                as_of=clock.value,
+                max_age=timedelta(seconds=5),
+            )
+            self.assertEqual(
+                tuple((event.selection_id, event.sequence) for event in visible.events),
+                (("selection-a", 2),),
+            )
+            latest = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[-1]
+            self.assertEqual(latest.payload["gate"], "provider_gap")
+            self.assertEqual(
+                latest.payload["market_state_sha256"],
+                loop._market_state_sha256(),
+            )
+            loop.close()
+
     def test_stale_instance_cannot_overwrite_newer_pending_progress(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

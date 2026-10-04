@@ -1047,6 +1047,69 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_direct_settle_uses_captured_durable_book_save(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="result:save-rebind",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                coordinator.tick()
+                leg = TicketLeg(
+                    event_id="event-1",
+                    market_id="winner",
+                    selection_id="home",
+                    locked_odds=Decimal("2.00"),
+                    sport="table_tennis",
+                )
+                book = PaperBook("100")
+                ticket = book.open_ticket(
+                    (leg,),
+                    Decimal("10"),
+                    placed_at="2026-09-19T21:19:30+00:00",
+                    provider_source_ids=("provider-a",),
+                )
+                book.save(root / "paper_book.json")
+                resolution = SettlementResolution(
+                    event_identity=event.identity,
+                    settlement_ref="result:save-rebind",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="save-rebind-evidence",
+                    evidence_sha256="a" * 64,
+                    available_at="2026-09-19T21:19:30+00:00",
+                )
+                with patch.object(
+                    PaperBook,
+                    "save",
+                    lambda *_args, **_kwargs: None,
+                ):
+                    settled, evidence_ids = coordinator._settle(
+                        resolutions=(resolution,),
+                        settled_at=clock(),
+                    )
+                self.assertEqual(settled, (ticket.ticket_id,))
+                self.assertEqual(evidence_ids, ("save-rebind-evidence",))
+                durable = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(durable.balance, Decimal("110"))
+                self.assertEqual(
+                    durable.tickets[ticket.ticket_id].status.value,
+                    "won",
+                )
+            finally:
+                store.close()
+
     def test_settlement_validation_injection_argument_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

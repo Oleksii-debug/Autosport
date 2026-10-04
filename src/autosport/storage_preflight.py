@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -24,20 +23,25 @@ def _absolute_root(value: str | Path, *, label: str) -> Path:
 
 
 def probe_workspace_writable(workspace: str | Path) -> None:
-    """Prove canonical durable state can use the product's atomic publication boundary."""
+    """Prove canonical durable state can publish directly in the workspace root."""
 
     root = _absolute_root(workspace, label="workspace")
-    probe_directory: Path | None = None
+    destination: Path | None = None
+    lock_path: Path | None = None
 
     root.mkdir(parents=True, exist_ok=True)
     try:
-        probe_directory = Path(
-            tempfile.mkdtemp(
-                dir=root,
-                prefix=".autosport-workspace-write-probe-",
-            )
-        )
-        destination = probe_directory / "probe.json"
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=root,
+            prefix=".autosport-workspace-write-probe-",
+            suffix=".json",
+            delete=False,
+        ) as reservation:
+            destination = Path(reservation.name)
+        destination.unlink()
+        lock_path = destination.with_name(f".{destination.name}.lock")
+
         atomic_write_json(destination, _WORKSPACE_PROBE_PAYLOAD)
 
         try:
@@ -51,8 +55,13 @@ def probe_workspace_writable(workspace: str | Path) -> None:
                 "workspace canonical atomic publication probe readback did not match"
             )
     finally:
-        if probe_directory is not None and probe_directory.exists():
-            shutil.rmtree(probe_directory)
+        for candidate in (destination, lock_path):
+            if candidate is None:
+                continue
+            try:
+                candidate.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def probe_webview_storage_writable(storage_path: str | Path) -> None:

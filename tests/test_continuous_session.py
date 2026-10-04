@@ -27,6 +27,7 @@ from autosport.continuous_session import (
     SessionPausedError,
     SettlementResolution,
     SessionState,
+    _ContinuousSessionState,
 )
 from autosport.decision_ledger import (
     ECONOMIC_DECISION_KIND,
@@ -922,7 +923,6 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     coordinator.tick()
             finally:
                 store.close()
-
 
     def test_source_projection_rejects_non_tuple_batch_before_checkpoint_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

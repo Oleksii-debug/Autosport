@@ -5,7 +5,7 @@ import heapq
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, ROUND_FLOOR
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from enum import Enum
 from pathlib import Path
 from time import monotonic
@@ -38,7 +38,12 @@ from .paper_execution_adoption import (
     PaperExecutionAdoptionRuntime,
     PreparedPaperExecution,
 )
-from .paper_execution_reality import PaperExecutionIntegrityError
+from .paper_execution_reality import (
+    PaperExecutionIntegrityError,
+    PaperLegAttempt,
+    RecoveryDecision,
+    _derive_run_economics,
+)
 from .portfolio_plan import (
     PortfolioDependencyGraph,
     PortfolioPlan,
@@ -3030,6 +3035,90 @@ class PersistentLiveDecisionLoop:
             raise DecisionLedgerIntegrityError(
                 "committed live decision #623 reservation conflicts with "
                 "decision evidence"
+            )
+
+        attempt_events = tuple(
+            event
+            for event in execution_events
+            if event.get("event_type") == "ATTEMPT_RECORDED"
+        )
+        completions = tuple(
+            event
+            for event in execution_events
+            if event.get("event_type") == "RUN_COMPLETED"
+        )
+        try:
+            attempts = tuple(
+                sorted(
+                    (
+                        PaperLegAttempt.from_dict(event.get("payload"))
+                        for event in attempt_events
+                    ),
+                    key=lambda item: item.sequence,
+                )
+            )
+            derived = _derive_run_economics(
+                tuple(action_ids),
+                attempts,
+            )
+        except (TypeError, ValueError, PaperExecutionIntegrityError) as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 attempts are invalid"
+            ) from exc
+        if len(completions) != 1 or not derived.can_complete:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision lacks terminal #623 completion"
+            )
+        completion = completions[0]
+        if any(
+            event.get("sequence", -1) > completion.get("sequence", -1)
+            for event in attempt_events
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision has #623 attempt after completion"
+            )
+        completion_payload = completion.get("payload")
+        if (
+            type(completion_payload) is not dict
+            or set(completion_payload)
+            != {
+                "pending_action_ids",
+                "recovery_decision",
+                "worst_case_exposure",
+            }
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 completion payload is invalid"
+            )
+        try:
+            pending_action_ids = tuple(
+                completion_payload["pending_action_ids"]
+            )
+            recovery_decision = RecoveryDecision(
+                completion_payload["recovery_decision"]
+            )
+            worst_case_exposure = Decimal(
+                completion_payload["worst_case_exposure"]
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            InvalidOperation,
+        ) as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 completion economics are invalid"
+            ) from exc
+        if (
+            not worst_case_exposure.is_finite()
+            or worst_case_exposure < 0
+            or pending_action_ids != derived.pending_action_ids
+            or recovery_decision is not derived.recovery_decision
+            or worst_case_exposure != derived.worst_case_exposure
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 completion conflicts with "
+                "durable attempt economics"
             )
 
         scope = scopes[0].get("payload")

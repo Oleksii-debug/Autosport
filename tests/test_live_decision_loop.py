@@ -3660,7 +3660,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 )
             self.assertEqual(resumed_observer.calls, 0)
 
-            model_envelope = original_envelope
+            model_envelope = json.loads(json.dumps(original_envelope))
             model_record = model_envelope["record"]
             model_record["payload"]["paper_execution"]["model_fingerprint"] = (
                 "0" * 64
@@ -3696,6 +3696,118 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     paper_execution=resumed_execution,
                 )
             self.assertEqual(model_observer.calls, 0)
+
+            ledger_path.write_text(
+                json.dumps(
+                    original_envelope,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            execution_events = list(execution_ledger.events())
+            self.assertEqual(
+                execution_events[-1]["event_type"],
+                "RUN_COMPLETED",
+            )
+            truncated_execution = execution_events[:-1]
+            execution_ledger.path.write_text(
+                "".join(
+                    json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                    for item in truncated_execution
+                ),
+                encoding="utf-8",
+            )
+            execution_ledger._write_anchor_unlocked(
+                truncated_execution
+            )
+            self.assertNotIn(
+                "RUN_COMPLETED",
+                tuple(
+                    item["event_type"]
+                    for item in execution_ledger.events()
+                ),
+            )
+
+            incomplete_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "lacks terminal #623 completion",
+            ):
+                self._loop(
+                    workspace,
+                    observer=incomplete_observer,
+                    factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                    book=resumed_book,
+                    authority=authority,
+                    paper_execution=resumed_execution,
+                )
+            self.assertEqual(incomplete_observer.calls, 0)
+
+            tampered_completion = json.loads(
+                json.dumps(execution_events[-1])
+            )
+            tampered_completion["payload"]["worst_case_exposure"] = "999"
+            completion_body = {
+                key: value
+                for key, value in tampered_completion.items()
+                if key != "event_sha256"
+            }
+            tampered_completion["event_sha256"] = hashlib.sha256(
+                json.dumps(
+                    completion_body,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            tampered_execution = [
+                *truncated_execution,
+                tampered_completion,
+            ]
+            execution_ledger.path.write_text(
+                "".join(
+                    json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                    for item in tampered_execution
+                ),
+                encoding="utf-8",
+            )
+            execution_ledger._write_anchor_unlocked(
+                tampered_execution
+            )
+            execution_ledger.events()
+
+            economics_observer = _DurableObserver(workspace, [()])
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "completion conflicts with durable attempt economics",
+            ):
+                self._loop(
+                    workspace,
+                    observer=economics_observer,
+                    factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                    book=resumed_book,
+                    authority=authority,
+                    paper_execution=resumed_execution,
+                )
+            self.assertEqual(economics_observer.calls, 0)
 
     def test_pending_restart_recovers_before_polling_new_quote(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

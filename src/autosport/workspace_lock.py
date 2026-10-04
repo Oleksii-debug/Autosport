@@ -138,6 +138,8 @@ class WorkspaceEconomicLock:
             or not selected_name
             or "\x00" in selected_name
             or selected_name in {".", ".."}
+            or "/" in selected_name
+            or "\\" in selected_name
             or Path(selected_name).name != selected_name
         ):
             raise WorkspaceEconomicLockError(

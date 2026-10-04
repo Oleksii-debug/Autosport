@@ -390,6 +390,70 @@ def test_resolver_uses_captured_observation_slots_against_type_setattr_bypass() 
             )
 
 
+def test_resolver_uses_raw_tuple_slots_against_getitem_rebinding() -> None:
+    item = observation()
+    had_getitem = "__getitem__" in BetfairProviderConstraintObservation.__dict__
+    original_getitem = BetfairProviderConstraintObservation.__dict__.get(
+        "__getitem__"
+    )
+    try:
+        # Bypass the sealing metaclass deliberately, matching the existing
+        # descriptor-bypass adversary. operator.itemgetter would dispatch here.
+        type.__setattr__(
+            BetfairProviderConstraintObservation,
+            "__getitem__",
+            lambda self, key: (
+                Decimal("999")
+                if key == 3
+                else tuple.__getitem__(self, key)
+            ),
+        )
+        assert item.min_standard_size == Decimal("999")
+
+        result = resolve(item)
+        assert result.state is BetfairConstraintResolutionState.CONSISTENT_UNVERIFIED
+        assert result.min_standard_size == Decimal("1")
+        assert result.currency_code == "GBP"
+        assert result.jurisdiction_scope == "UK_INTERNATIONAL"
+    finally:
+        if had_getitem:
+            type.__setattr__(
+                BetfairProviderConstraintObservation,
+                "__getitem__",
+                original_getitem,
+            )
+        else:
+            type.__delattr__(
+                BetfairProviderConstraintObservation,
+                "__getitem__",
+            )
+
+
+def test_ordinary_dunder_rebinding_cannot_spoof_structural_or_authority_reads() -> None:
+    item = observation()
+    result = resolve(item)
+
+    for cls in (
+        BetfairProviderConstraintObservation,
+        type(result),
+    ):
+        with pytest.raises(TypeError, match="authority surface is sealed"):
+            cls.__getitem__ = lambda _self, _key: True
+        with pytest.raises(TypeError, match="authority surface is sealed"):
+            cls.__getattribute__ = lambda _self, _name: True
+        with pytest.raises(TypeError, match="authority surface is sealed"):
+            cls.__iter__ = lambda _self: iter(())
+        with pytest.raises(TypeError, match="authority surface is sealed"):
+            cls.__len__ = lambda _self: 0
+
+    assert item.min_standard_size == Decimal("1")
+    assert item.current_constraint_authority is False
+    assert item.execution_authorized is False
+    assert result.min_standard_size == Decimal("1")
+    assert result.current_constraint_authority is False
+    assert result.execution_authorized is False
+
+
 def test_resolution_constructor_rejects_noncanonical_digest() -> None:
     result = resolve(observation())
     resolution_type = type(result)

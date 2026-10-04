@@ -1708,17 +1708,27 @@ class SQLiteMarketStore:
         return len(self.append_batch_accepted(events))
 
     def events(self, event_id: str | None = None) -> list[MarketEvent]:
-        with self._connection_lock:
-            if event_id is None:
-                rows = self.connection.execute(
-                    f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
-                ).fetchall()
-            else:
-                rows = self.connection.execute(
-                    f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE event_id=?",
-                    (event_id,),
-                ).fetchall()
-            events = [_event_from_history_row(row) for row in rows]
+        """Read only history proven against the independent append authority."""
+
+        authority = self._market_append_authority()
+        # A read must not recover or inspect the transient PREPARE of a live writer.
+        # Take the same sibling issuance lock used by append, then prove the exact
+        # canonical history before any row escapes to long-lived mirror/replay users.
+        with self._market_append_issuance_lock(authority):
+            with self._connection_lock:
+                _validate_canonical_table(self.connection, "market_events")
+                self._validate_causal_replay_state()
+                self._require_product_issued_positive_history(authority)
+                if event_id is None:
+                    rows = self.connection.execute(
+                        f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
+                    ).fetchall()
+                else:
+                    rows = self.connection.execute(
+                        f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE event_id=?",
+                        (event_id,),
+                    ).fetchall()
+                events = [_event_from_history_row(row) for row in rows]
         return sorted(events, key=_event_order_key)
 
     def replay_events_at_frozen_cutoff(self, *, as_of: str) -> list[MarketEvent]:

@@ -335,35 +335,6 @@ class ScenarioSearchEngine:
         ):
             raise ValueError("market outcome authority set changed during analysis boundary")
 
-        open_tickets = _snapshot_open_tickets_for_analysis(tickets)
-        if not open_tickets:
-            zero = Decimal("0")
-            outcome_space_exact = all(
-                authority.terminal_space_exact for authority in ordered
-            )
-            return ScenarioSearchReport(
-                mode=(
-                    "authoritative-exact-enumeration"
-                    if outcome_space_exact
-                    else "authoritative-conservative-enumeration"
-                ),
-                total_states=1,
-                nodes_explored=1,
-                observed_worst=zero,
-                observed_best=zero,
-                conservative_floor=zero,
-                conservative_ceiling=zero,
-                worst_proven=True,
-                best_proven=True,
-                expected_case=None,
-                expected_mode=None,
-                outcome_space_exhaustive=True,
-                outcome_space_exact=outcome_space_exact,
-                outcome_authority_sha256s=tuple(
-                    authority.authority_sha256 for authority in ordered
-                ),
-            )
-
         market_groups: dict[
             tuple[str, str, str, str],
             list[MarketSettlementOutcomeAuthority],
@@ -374,11 +345,6 @@ class ScenarioSearchEngine:
                 [],
             ).append(authority)
 
-        ticket_quote_keys = {
-            leg.quote_key
-            for ticket in open_tickets
-            for leg in ticket.legs
-        }
         coverage: dict[
             str,
             tuple[
@@ -426,6 +392,40 @@ class ScenarioSearchEngine:
             state_authorities.append(baseline)
             state_counts.append(baseline.terminal_state_count)
 
+        open_tickets = _snapshot_open_tickets_for_analysis(tickets)
+        if not open_tickets:
+            zero = Decimal("0")
+            outcome_space_exact = all(
+                authority.terminal_space_exact for authority in state_authorities
+            )
+            return ScenarioSearchReport(
+                mode=(
+                    "authoritative-exact-enumeration"
+                    if outcome_space_exact
+                    else "authoritative-conservative-enumeration"
+                ),
+                total_states=1,
+                nodes_explored=1,
+                observed_worst=zero,
+                observed_best=zero,
+                conservative_floor=zero,
+                conservative_ceiling=zero,
+                worst_proven=True,
+                best_proven=True,
+                expected_case=None,
+                expected_mode=None,
+                outcome_space_exhaustive=True,
+                outcome_space_exact=outcome_space_exact,
+                outcome_authority_sha256s=tuple(
+                    authority.authority_sha256 for authority in ordered
+                ),
+            )
+
+        ticket_quote_keys = {
+            leg.quote_key
+            for ticket in open_tickets
+            for leg in ticket.legs
+        }
         missing = ticket_quote_keys.difference(coverage)
         if missing:
             raise ValueError(

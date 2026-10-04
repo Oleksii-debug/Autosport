@@ -1820,7 +1820,7 @@ class CollectorDeltaTests(unittest.TestCase):
                 consumer.drain(as_of="2026-01-01T00:00:05+00:00"),
                 ("d1",),
             )
-            self.assertEqual(lookup_calls, ["d1"])
+            self.assertEqual(lookup_calls, ["d1", "d1"])
 
     def test_ack_rejects_application_before_desktop_availability(self):
         with tempfile.TemporaryDirectory() as tmp:

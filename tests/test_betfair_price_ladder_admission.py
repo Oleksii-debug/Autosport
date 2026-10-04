@@ -133,6 +133,18 @@ def _canonical_receipt(
     return receipt, client
 
 
+def _canonical_read(
+    client: BetfairReadOnlyClient,
+    transport: PriceLadderTransport,
+):
+    original_opener = urllib_request._opener
+    try:
+        urllib_request._opener = _CanonicalUrlOpenerHarness(transport)
+        return client.read_market_price_ladder("1.234")
+    finally:
+        urllib_request._opener = original_opener
+
+
 def _injected_receipt(transport: PriceLadderTransport):
     client = BetfairReadOnlyClient(
         BetfairSessionCredentials("app-key", "session-token"),
@@ -273,6 +285,75 @@ def test_tick_admission_is_independent_of_mutable_decimal_context(
         is BetfairPriceLadderAdmissionState.PRICE_LADDER_ADMISSIBLE
     )
     assert client is not None
+
+
+def test_same_market_definition_reread_preserves_current_generation():
+    transport = PriceLadderTransport("CLASSIC")
+    first_receipt, client = _canonical_receipt(transport)
+    first_result = _assess(first_receipt, Decimal("2.00"))
+    assert first_result.admissible is True
+
+    second_receipt = _canonical_read(client, transport)
+    second_result = _assess(second_receipt, Decimal("2.00"))
+
+    assert second_result.admissible is True
+    assert first_result.admissible is True
+
+
+def test_incompatible_market_definition_revision_invalidates_old_generation_and_aba():
+    transport = PriceLadderTransport("CLASSIC")
+    first_receipt, client = _canonical_receipt(transport)
+    first_result = _assess(first_receipt, Decimal("2.00"))
+    assert first_result.admissible is True
+
+    transport.ladder_type = "FINEST"
+    second_receipt = _canonical_read(client, transport)
+    second_result = _assess(second_receipt, Decimal("2.01"))
+    assert second_result.admissible is True
+
+    assert (
+        first_result.state
+        is BetfairPriceLadderAdmissionState.PRICE_LADDER_ADMISSIBLE
+    )
+    assert first_result.admissible is False
+    with pytest.raises(BetfairReadOnlyError, match="current canonical"):
+        _assess(first_receipt, Decimal("2.00"))
+
+    transport.ladder_type = "CLASSIC"
+    third_receipt = _canonical_read(client, transport)
+    third_result = _assess(third_receipt, Decimal("2.00"))
+    assert third_result.admissible is True
+
+    assert first_result.admissible is False
+    assert second_result.admissible is False
+    with pytest.raises(BetfairReadOnlyError, match="current canonical"):
+        _assess(first_receipt, Decimal("2.00"))
+    with pytest.raises(BetfairReadOnlyError, match="current canonical"):
+        _assess(second_receipt, Decimal("2.01"))
+
+
+def test_line_range_metadata_revision_invalidates_prior_receipt():
+    transport = PriceLadderTransport(
+        "LINE_RANGE",
+        line_range=("1.5", "10.5", "0.5", "points"),
+    )
+    first_receipt, client = _canonical_receipt(transport)
+    first_result = _assess(first_receipt, Decimal("2.0"))
+    assert (
+        first_result.state
+        is BetfairPriceLadderAdmissionState.UNSUPPORTED_LADDER_SEMANTICS
+    )
+
+    transport.line_range = ("1.5", "10.5", "1.0", "points")
+    second_receipt = _canonical_read(client, transport)
+    second_result = _assess(second_receipt, Decimal("2.0"))
+    assert (
+        second_result.state
+        is BetfairPriceLadderAdmissionState.UNSUPPORTED_LADDER_SEMANTICS
+    )
+
+    with pytest.raises(BetfairReadOnlyError, match="current canonical"):
+        _assess(first_receipt, Decimal("2.0"))
 
 
 def test_line_range_is_explicitly_unsupported_even_with_complete_metadata():

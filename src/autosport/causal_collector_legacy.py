@@ -989,7 +989,8 @@ class CanonicalDesktopApplication:
                 health_before=health_before,
             )
             health_after = outcome.health_before.after_success(outcome).to_state()
-            progress = _state_prepare(state,
+            progress = _state_prepare(
+                state,
                 delta,
                 prepared_at=prepared_at,
                 health_before=health_before,
@@ -997,7 +998,7 @@ class CanonicalDesktopApplication:
             )
 
         expected_before = _state_health_before(state, delta)
-        expected_after = _state_health_after(self._state, delta)
+        expected_after = _state_health_after(state, delta)
         reproved_outcome = _outcome_builder(
             delta,
             event,
@@ -1097,7 +1098,7 @@ class CanonicalDesktopApplication:
             raise ApplicationReceiptError(
                 "canonical health effect changed before application completion"
             )
-        market_store = getattr(self.market_bus, "store", None)
+        market_store = getattr(market_bus, "store", None)
         if type(market_store) is not _market_store_type:
             raise ApplicationReceiptError(
                 "canonical application cannot reprove market storage before completion"
@@ -1133,7 +1134,7 @@ class CanonicalDesktopApplication:
             )
 
         _state_mark_complete(state, delta, completed_at=completed_at)
-        receipt = _state_receipt(self._state, delta)
+        receipt = _state_receipt(state, delta)
         if receipt is None:
             raise ApplicationReceiptError("canonical application did not reach durable completion")
         return receipt

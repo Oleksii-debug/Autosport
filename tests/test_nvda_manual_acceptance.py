@@ -586,6 +586,33 @@ def test_structural_verifier_rebinding_cannot_mint_manual_decision(
     assert ledger.events() == ()
 
 
+def test_record_decision_rejects_structural_result_global_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger = _ledger(tmp_path)
+    hostile_called = False
+
+    def hostile_structural(*_args, **_kwargs):
+        nonlocal hostile_called
+        hostile_called = True
+        raise AssertionError("hostile structural result executed")
+
+    monkeypatch.setattr(
+        nvda_manual_module,
+        "_structural_result",
+        hostile_structural,
+    )
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="decision issuance authority changed",
+    ):
+        _record(ledger, _transcript())
+    assert hostile_called is False
+    assert ledger.events() == ()
+
+
 def test_resolution_registry_is_not_module_visible() -> None:
     assert not hasattr(nvda_manual_module, "_ISSUED_RESOLUTIONS")
     assert not hasattr(nvda_manual_module, "_REGISTER_RESOLUTION_WITNESS")

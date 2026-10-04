@@ -35,7 +35,7 @@ def _checkpoint_payload(history_size: int) -> dict[str, object]:
         "state": "RUNNING",
         "started_at": _AT,
         "cycles_completed": history_size,
-        "last_success_at": _AT,
+        "last_success_at": _AT if history_size else None,
         "last_error_code": None,
         "last_full_refresh_at": None,
         "settlement_evidence": receipts,

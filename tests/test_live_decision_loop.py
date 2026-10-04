@@ -613,7 +613,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 workspace / "decisions.jsonl"
             ).verified_records()[0]
             self.assertEqual(record.payload["gate"], "provider_gap")
-            self.assertEqual(record.payload["market_append_generation"], 1)
+            self.assertNotIn("market_append_generation", record.payload)
             resumed.close()
 
     def test_decision_frontier_reconciles_peer_append_after_observer_returns(self) -> None:
@@ -837,7 +837,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.close()
 
-    def test_duplicate_visible_state_reuses_existing_ledger_market_frontier(self) -> None:
+    def test_duplicate_visible_state_keeps_market_frontier_out_of_ledger_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             seed_store = SQLiteMarketStore(workspace / "market.db")
@@ -871,7 +871,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             first_record = JsonlDecisionLedger(
                 workspace / "decisions.jsonl"
             ).verified_records()[0]
-            self.assertEqual(first_record.payload["market_append_generation"], 1)
+            self.assertNotIn("market_append_generation", first_record.payload)
 
             peer_store = SQLiteMarketStore(workspace / "market.db")
             try:
@@ -899,18 +899,18 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 workspace / "decisions.jsonl"
             ).verified_records()
             self.assertEqual(len(records), 1)
-            self.assertEqual(records[0].payload["market_append_generation"], 1)
+            self.assertNotIn("market_append_generation", records[0].payload)
 
             committed = json.loads(loop.progress_path.read_text(encoding="utf-8"))
             self.assertEqual(committed["phase"], "committed")
-            self.assertEqual(committed["market_append_generation"], 1)
+            self.assertEqual(committed["market_append_generation"], 2)
             self.assertEqual(
                 factory.calls[-1],
                 ("input-a", (("selection-a", 1, "open"),)),
             )
             loop.close()
 
-    def test_duplicate_append_pending_restart_canonicalizes_ledger_market_frontier(self) -> None:
+    def test_duplicate_append_pending_restart_tolerates_recovery_frontier_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             seed_store = SQLiteMarketStore(workspace / "market.db")
@@ -1003,12 +1003,12 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 workspace / "decisions.jsonl"
             ).verified_records()
             self.assertEqual(len(records), 1)
-            self.assertEqual(records[0].payload["market_append_generation"], 1)
+            self.assertNotIn("market_append_generation", records[0].payload)
             committed = json.loads(
                 resumed.progress_path.read_text(encoding="utf-8")
             )
             self.assertEqual(committed["phase"], "committed")
-            self.assertEqual(committed["market_append_generation"], 1)
+            self.assertEqual(committed["market_append_generation"], 2)
             resumed.close()
 
     def test_decision_frontier_leaves_post_cutoff_peer_commit_for_next_cycle(self) -> None:
@@ -3451,7 +3451,11 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             ledger = JsonlDecisionLedger(workspace / "decisions.jsonl")
             records = ledger.verified_records()
             self.assertEqual(len(records), 1)
-            self.assertEqual(records[0].payload["market_append_generation"], 1)
+            self.assertNotIn("market_append_generation", records[0].payload)
+            committed = json.loads(
+                resumed.progress_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(committed["market_append_generation"], 1)
 
             advanced = resumed.run_cycle()
             self.assertEqual(advanced.status, LiveCycleStatus.DECIDED)

@@ -1,5 +1,16 @@
 """Autosport paper/replay laboratory."""
 
+import sys as _bootstrap_sys
+
+_betfair_timeout_bootstrap_name = (
+    f"{__name__}.betfair_timeout_reconciliation"
+)
+if _betfair_timeout_bootstrap_name in _bootstrap_sys.modules:
+    raise ImportError(
+        "Autosport refuses a preloaded Betfair timeout authority module"
+    )
+del _betfair_timeout_bootstrap_name, _bootstrap_sys
+
 __version__ = "0.1.0"
 
 # Install the PAPER execution durability/freshness guards before the public
@@ -198,3 +209,7 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# Final provider/execution consumers must preserve Python LOAD_GLOBAL semantics too:
+# a late global shadow of a builtin/missing name must fail before economic dispatch.
+from . import _provider_execution_name_resolution_guard as _provider_execution_name_resolution_guard  # noqa: F401,E402

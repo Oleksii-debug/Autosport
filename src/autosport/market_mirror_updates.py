@@ -2,17 +2,12 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
 from enum import Enum
 from threading import RLock
 
 from .domain import MarketEvent
 from .market_mirror import MarketMirror, MirrorApplyResult
-from .storage import SQLiteMarketStore
-
-
-_SQLITE_INTEGER_MIN = -(2**63)
-_SQLITE_INTEGER_MAX = 2**63 - 1
+from .storage import SQLiteMarketStore, _validate_incoming_event
 
 
 class _DurableStoreFailure(RuntimeError):
@@ -103,21 +98,8 @@ class MarketMirrorUpdateBuffer:
 
     @staticmethod
     def _validate_durable_event(event: MarketEvent) -> None:
-        """Fail terminal malformed input before entering the durable append boundary."""
-        if isinstance(event.sequence, bool) or not isinstance(event.sequence, int):
-            raise ValueError("market event sequence must be a non-boolean int")
-        if event.sequence < _SQLITE_INTEGER_MIN or event.sequence > _SQLITE_INTEGER_MAX:
-            raise ValueError("market event sequence must fit signed 64-bit SQLite INTEGER")
-        for field_name, value in (
-            ("observed_ts", event.observed_ts),
-            ("ingest_ts", event.ingest_ts),
-        ):
-            try:
-                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except (AttributeError, ValueError) as exc:
-                raise ValueError(f"{field_name} must be valid ISO-8601") from exc
-            if parsed.tzinfo is None or parsed.utcoffset() is None:
-                raise ValueError(f"{field_name} must be timezone-aware ISO-8601")
+        """Use the exact canonical store-admission contract before durable I/O."""
+        _validate_incoming_event(event)
 
     def _durable_duplicate_conflict(self, event: MarketEvent) -> bool:
         """Use authoritative history to distinguish event conflict from store damage."""

@@ -329,6 +329,107 @@ def test_recovery_does_not_commit_published_prefix_until_reflush_succeeds(
     assert history[-1].intended_state_sha256 == intended
 
 
+def test_bootstrap_rejects_bytes_changed_during_durability_barrier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str((tmp_path / "machine-authority").resolve()),
+    )
+
+    initial_fixture = SourceHealthStore(
+        tmp_path / "fixture-initial" / "source-health.json"
+    )
+    initial_bytes = initial_fixture.path.read_bytes()
+
+    changed_fixture = SourceHealthStore(
+        tmp_path / "fixture-changed" / "source-health.json"
+    )
+    _record_success(changed_fixture)
+    changed_bytes = changed_fixture.path.read_bytes()
+    assert changed_bytes != initial_bytes
+
+    path = tmp_path / "bootstrap-race" / "source-health.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(initial_bytes)
+
+    canonical_sync = health_module._sync_existing_file
+
+    def replace_after_sync(sync_path: Path) -> None:
+        canonical_sync(sync_path)
+        if sync_path == path:
+            path.write_bytes(changed_bytes)
+
+    monkeypatch.setattr(health_module, "_sync_existing_file", replace_after_sync)
+
+    with pytest.raises(
+        MonotonicAuthorityRollbackError,
+        match="changed during authority bootstrap",
+    ):
+        SourceHealthStore(path)
+
+    # The raced bytes must not acquire a COMMIT from the digest that was validated
+    # before the durability barrier.
+    probe = object.__new__(SourceHealthStore)
+    probe.path = path
+    probe._lock_path = path.with_name(path.name + ".lock")
+    assert probe._monotonic_authority().read_history() == ()
+
+
+def test_recovery_rehashes_after_barrier_before_committing_prepared_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path, monkeypatch, "recovery-race-target")
+    _record_success(store)
+    observed_bytes = store.path.read_bytes()
+    observed = _sha256(observed_bytes)
+
+    future = _store(tmp_path, monkeypatch, "recovery-race-future")
+    _record_success(future)
+    _record_provider_failure(future)
+    intended_bytes = future.path.read_bytes()
+    intended = _sha256(intended_bytes)
+
+    authority = store._monotonic_authority()
+    binding = store._authority_binding(observed, intended, kind="PUBLISH")
+    authority.prepare(
+        tx_id="test-recovery-barrier-race",
+        observed_state_sha256=observed,
+        intended_state_sha256=intended,
+        semantic_binding_sha256=binding,
+    )
+    store.path.write_bytes(intended_bytes)
+
+    canonical_sync = health_module._sync_existing_file
+
+    def restore_previous_after_sync(sync_path: Path) -> None:
+        canonical_sync(sync_path)
+        if sync_path == store.path:
+            store.path.write_bytes(observed_bytes)
+
+    monkeypatch.setattr(
+        health_module,
+        "_sync_existing_file",
+        restore_previous_after_sync,
+    )
+
+    reopened = SourceHealthStore(store.path)
+    assert reopened.get("provider-a").status == "healthy"
+
+    history = authority.read_history()
+    assert history[-1].phase is AuthorityPhase.ABORT
+    assert history[-1].previous_committed_state_sha256 == observed
+    assert all(
+        not (
+            record.phase is AuthorityPhase.COMMIT
+            and record.intended_state_sha256 == intended
+        )
+        for record in history
+    )
+
+
 def test_continuous_observation_rejects_health_rollback_before_provider_io(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

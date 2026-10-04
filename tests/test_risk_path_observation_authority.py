@@ -455,6 +455,300 @@ def _completed_run_with_settlement_bridge(
     return tx, bridge, ticket
 
 
+def _frozen_runtime_design_hashes(tmp_path) -> tuple[str, str]:
+    probe_path = tmp_path / "frozen-initial-paper-book.json"
+    PaperBook("100").save(probe_path)
+    initial_capital_sha256 = hashlib.sha256(
+        probe_path.read_bytes()
+    ).hexdigest()
+    goal = EconomicGoalContract(
+        goal_id="risk-path-goal",
+        revision=1,
+        bankroll_id="risk-path-bankroll",
+        currency="USD",
+    )
+    stake_policy_sha256 = PaperRiskPolicy(
+        economic_goal=goal,
+    ).provenance_sha256
+    return initial_capital_sha256, stake_policy_sha256
+
+
+def _qualified_fixed_n_fixture(tmp_path, monkeypatch):
+    initial_capital_sha256, stake_policy_sha256 = (
+        _frozen_runtime_design_hashes(tmp_path)
+    )
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(
+            tmp_path,
+            monkeypatch,
+            initial_capital_state_sha256=initial_capital_sha256,
+            stake_policy_sha256=stake_policy_sha256,
+        )
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
+    return (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        bridge,
+        initial_capital_sha256,
+        stake_policy_sha256,
+    )
+
+
+def test_fixed_n_iid_qualification_promotes_complete_product_owned_set(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        bridge,
+        initial_capital_sha256,
+        stake_policy_sha256,
+    ) = _qualified_fixed_n_fixture(tmp_path, monkeypatch)
+
+    qualification = resolve_product_fixed_n_iid_qualification(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+
+    assert type(qualification) is ProductFixedNIidQualificationAuthority
+    assert qualification.planned_member_ids == (RUN_ID,)
+    assert qualification.initial_capital_state_sha256 == initial_capital_sha256
+    assert qualification.stake_policy_sha256 == stake_policy_sha256
+    assert len(qualification.member_execution_receipt_sha256) == 1
+    assert len(qualification.member_path_evidence_sha256) == 1
+    assert len(qualification.occurrence_root_sha256) == 64
+    assert len(qualification.qualification_sha256) == 64
+    assert qualification.product_precommit_bound is True
+    assert qualification.fixed_n_complete is True
+    assert qualification.occurrence_ancestry_proven is True
+    assert qualification.initial_capital_state_bound is True
+    assert qualification.stake_policy_bound is True
+    assert qualification.iid_qualified is True
+    assert qualification.grants_real_money_authority is False
+
+
+def test_fixed_n_iid_qualification_rejects_unfrozen_runtime_capital(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(tmp_path, monkeypatch)
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
+
+    with pytest.raises(
+        ProductFixedNIidQualificationError,
+        match="initial capital state differs",
+    ):
+        resolve_product_fixed_n_iid_qualification(
+            membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridges=(bridge,),
+            authority_root=authority_root,
+        )
+
+
+def test_fixed_n_iid_qualification_rejects_unfrozen_stake_policy(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    initial_capital_sha256, _stake_policy_sha256 = (
+        _frozen_runtime_design_hashes(tmp_path)
+    )
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(
+            tmp_path,
+            monkeypatch,
+            initial_capital_state_sha256=initial_capital_sha256,
+        )
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
+
+    with pytest.raises(
+        ProductFixedNIidQualificationError,
+        match="stake policy differs",
+    ):
+        resolve_product_fixed_n_iid_qualification(
+            membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridges=(bridge,),
+            authority_root=authority_root,
+        )
+
+
+def test_fixed_n_iid_qualification_rejects_missing_frozen_member(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        _bridge,
+        _initial_capital_sha256,
+        _stake_policy_sha256,
+    ) = _qualified_fixed_n_fixture(tmp_path, monkeypatch)
+
+    with pytest.raises(
+        ProductFixedNIidQualificationError,
+        match="all frozen fixed-N members require",
+    ):
+        resolve_product_fixed_n_iid_qualification(
+            membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridges=(),
+            authority_root=authority_root,
+        )
+
+
+def test_fixed_n_iid_qualification_truth_cannot_be_caller_minted_or_subclassed() -> None:
+    with pytest.raises(TypeError, match="product-resolved"):
+        ProductFixedNIidQualificationAuthority(
+            experiment_id="forged",
+            planned_member_ids=(RUN_ID,),
+            member_execution_receipt_sha256=("1" * 64,),
+            member_path_evidence_sha256=("2" * 64,),
+            occurrence_root_sha256="3" * 64,
+            sampling_manifest_sha256="4" * 64,
+            initial_capital_state_sha256="5" * 64,
+            stake_policy_sha256="6" * 64,
+            qualification_sha256="7" * 64,
+        )
+
+    with pytest.raises(TypeError, match="must not be subclassed"):
+        class ForgedQualification(ProductFixedNIidQualificationAuthority):
+            pass
+
+
+def test_fixed_n_iid_qualification_verifier_rejects_object_new_forgery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        bridge,
+        _initial_capital_sha256,
+        _stake_policy_sha256,
+    ) = _qualified_fixed_n_fixture(tmp_path, monkeypatch)
+    canonical = resolve_product_fixed_n_iid_qualification(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+    forged = object.__new__(ProductFixedNIidQualificationAuthority)
+    for field_name in ProductFixedNIidQualificationAuthority.__dataclass_fields__:
+        object.__setattr__(forged, field_name, getattr(canonical, field_name))
+    object.__setattr__(forged, "qualification_sha256", "0" * 64)
+
+    with pytest.raises(
+        ProductFixedNIidQualificationError,
+        match="differs from canonical durable evidence",
+    ):
+        verify_product_fixed_n_iid_qualification(
+            forged,
+            membership=membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridges=(bridge,),
+            authority_root=authority_root,
+        )
+
+
+def test_fixed_n_iid_qualification_verifier_rejects_resolver_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (
+        membership,
+        workspace,
+        registry_path,
+        authority_root,
+        manifest,
+        bridge,
+        _initial_capital_sha256,
+        _stake_policy_sha256,
+    ) = _qualified_fixed_n_fixture(tmp_path, monkeypatch)
+    candidate = resolve_product_fixed_n_iid_qualification(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=manifest,
+        sampling_frame_json=SAMPLING_FRAME_JSON,
+        horizon_json=HORIZON_JSON,
+        settlement_bridges=(bridge,),
+        authority_root=authority_root,
+    )
+    attacker_called = False
+
+    def forged_resolver(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        return candidate
+
+    monkeypatch.setattr(
+        iid_qualification,
+        "resolve_product_fixed_n_iid_qualification",
+        forged_resolver,
+    )
+
+    with pytest.raises(
+        ProductFixedNIidQualificationError,
+        match="verifier authority dispatch changed",
+    ):
+        verify_product_fixed_n_iid_qualification(
+            candidate,
+            membership=membership,
+            registry_path=registry_path,
+            workspace=workspace,
+            sampling_manifest_json=manifest,
+            sampling_frame_json=SAMPLING_FRAME_JSON,
+            horizon_json=HORIZON_JSON,
+            settlement_bridges=(bridge,),
+            authority_root=authority_root,
+        )
+    assert attacker_called is False
+
+
 def test_product_run_capital_path_re_resolves_completed_settlement(
     tmp_path,
     monkeypatch,

@@ -1074,7 +1074,7 @@ def _build_main(*, module_globals, admit_impl, cancel_impl, output_writer, api_t
     api_init = api_type.__dict__.get("__init__")
     api_init_code = getattr(api_init, "__code__", None)
 
-    def main(argv: list[str] | None = None) -> int:
+    def main(argv: list[str] | None) -> int:
         parser = argparse.ArgumentParser()
         parser.add_argument("--pr-number", type=int, required=True)
         parser.add_argument("--event-head-sha", required=True)
@@ -1158,4 +1158,4 @@ main = _build_main(
 del _build_main
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

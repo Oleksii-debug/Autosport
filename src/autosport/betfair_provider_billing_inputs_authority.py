@@ -67,10 +67,10 @@ def _build_observation_authority():
     credentials_cls = BetfairSessionCredentials
     transport_cls = UrllibBetfairHttpTransport
 
-    # Capture known production executable identities before any provider read as
-    # defense in depth. The public lower-level client intentionally remains
-    # injectable for deterministic adapters/tests; the supported positive API does
-    # not accept that injection. These checks are not an arbitrary-code sandbox.
+    # #1496 moved the canonical credential-bearing transport from the mutable
+    # module-global urllib opener to one instance-owned no-redirect opener. Bind
+    # exactly that executable graph here; do not resurrect the obsolete urlopen
+    # or urllib.request._opener authority boundary.
     client_init = client_cls.__dict__["__init__"]
     client_new = client_cls.__dict__.get("__new__")
     transport_init = transport_cls.__dict__["__init__"]
@@ -79,60 +79,23 @@ def _build_observation_authority():
     readonly_client_export = _readonly.__dict__["BetfairReadOnlyClient"]
     readonly_transport_export = _readonly.__dict__["UrllibBetfairHttpTransport"]
     request_ctor = _readonly.__dict__["Request"]
-    network_open = _readonly.__dict__["urlopen"]
+    readonly_build_opener = _readonly.__dict__["build_opener"]
+    redirect_handler_cls = _readonly.__dict__["_RejectAuthenticatedRedirects"]
+    redirect_request = redirect_handler_cls.__dict__["redirect_request"]
+
     stdlib_opener_cls = _urllib_request.__dict__["OpenerDirector"]
     stdlib_opener_open = stdlib_opener_cls.__dict__["open"]
-    stdlib_build_opener = _urllib_request.__dict__["build_opener"]
+    stdlib_opener_internal_open = stdlib_opener_cls.__dict__["_open"]
+    stdlib_opener_call_chain = stdlib_opener_cls.__dict__["_call_chain"]
+    stdlib_opener_error = stdlib_opener_cls.__dict__["error"]
+    stdlib_redirect_handler_cls = _urllib_request.__dict__["HTTPRedirectHandler"]
     stdlib_https_handler_cls = _urllib_request.__dict__["HTTPSHandler"]
     stdlib_https_handler_open = stdlib_https_handler_cls.__dict__["https_open"]
+    stdlib_https_handler_request = stdlib_https_handler_cls.__dict__["https_request"]
     stdlib_abstract_http_handler_cls = _urllib_request.__dict__["AbstractHTTPHandler"]
     stdlib_abstract_http_do_open = stdlib_abstract_http_handler_cls.__dict__["do_open"]
-
-    # ``urllib.request.urlopen`` otherwise resolves the mutable module-global
-    # ``_opener`` at call time. Own that exact dispatch root up front so public
-    # ``install_opener(...)`` cannot redirect positive provider issuance while the
-    # captured ``urlopen``/class/method identities remain unchanged. The object is
-    # closure-retained and identity-fenced before and after every provider read.
-    product_opener = stdlib_build_opener()
-    if type(product_opener) is not stdlib_opener_cls or "open" in vars(product_opener):
-        raise BetfairProviderBillingInputsAuthorityError(
-            "provider billing canonical network opener is invalid"
-        )
-
-    # OpenerDirector stores handler objects and resolves their protocol methods
-    # dynamically. Owning only the opener object is therefore insufficient:
-    # rebinding HTTPSHandler.https_open (or swapping the opener handler dispatch
-    # tables) would otherwise gain execution while _opener identity stayed
-    # unchanged. Seal the exact HTTPS handler executable and dispatch graph.
-    product_handlers = tuple(product_opener.handlers)
-    product_https_handlers = tuple(
-        handler
-        for handler in product_handlers
-        if type(handler) is stdlib_https_handler_cls
-    )
-    if len(product_https_handlers) != 1:
-        raise BetfairProviderBillingInputsAuthorityError(
-            "provider billing canonical HTTPS handler is invalid"
-        )
-    product_https_handler = product_https_handlers[0]
-    if "https_open" in vars(product_https_handler):
-        raise BetfairProviderBillingInputsAuthorityError(
-            "provider billing canonical HTTPS handler is shadowed"
-        )
-    product_handler_ids = tuple(id(handler) for handler in product_handlers)
-    product_https_dispatch = tuple(
-        (getattr(handler, "handler_order", None), id(handler))
-        for handler in product_opener.handle_open.get("https", ())
-    )
-    if not any(
-        handler_id == id(product_https_handler)
-        for _order, handler_id in product_https_dispatch
-    ):
-        raise BetfairProviderBillingInputsAuthorityError(
-            "provider billing canonical HTTPS dispatch is invalid"
-        )
-
-    _urllib_request.__dict__["_opener"] = product_opener
+    stdlib_http_error_processor_cls = _urllib_request.__dict__["HTTPErrorProcessor"]
+    stdlib_https_response = stdlib_http_error_processor_cls.__dict__["https_response"]
 
     now_utc = datetime.now
     utc = timezone.utc
@@ -145,7 +108,7 @@ def _build_observation_authority():
     # authoritative. The stored projection detects object.__setattr__ tampering.
     issued: dict[int, tuple[object, tuple[object, ...]]] = {}
 
-    def assert_executable_authority() -> None:
+    def assert_static_executable_authority() -> None:
         """Fail fast on known executable drift inside the trusted-process boundary."""
 
         if (
@@ -166,18 +129,32 @@ def _build_observation_authority():
             raise error_cls("provider billing transport executable drifted")
         if _readonly.__dict__.get("Request") is not request_ctor:
             raise error_cls("provider billing HTTP request executable drifted")
-        if _readonly.__dict__.get("urlopen") is not network_open:
-            raise error_cls("provider billing network opener drifted")
+        if _readonly.__dict__.get("build_opener") is not readonly_build_opener:
+            raise error_cls("provider billing network opener factory drifted")
+        if (
+            _readonly.__dict__.get("_RejectAuthenticatedRedirects")
+            is not redirect_handler_cls
+            or redirect_handler_cls.__dict__.get("redirect_request")
+            is not redirect_request
+        ):
+            raise error_cls("provider billing redirect policy executable drifted")
         if (
             _urllib_request.__dict__.get("OpenerDirector") is not stdlib_opener_cls
             or stdlib_opener_cls.__dict__.get("open") is not stdlib_opener_open
+            or stdlib_opener_cls.__dict__.get("_open") is not stdlib_opener_internal_open
+            or stdlib_opener_cls.__dict__.get("_call_chain")
+            is not stdlib_opener_call_chain
+            or stdlib_opener_cls.__dict__.get("error") is not stdlib_opener_error
         ):
             raise error_cls("provider billing lower network opener drifted")
+        if _urllib_request.__dict__.get("HTTPRedirectHandler") is not stdlib_redirect_handler_cls:
+            raise error_cls("provider billing redirect handler executable drifted")
         if (
-            _urllib_request.__dict__.get("HTTPSHandler")
-            is not stdlib_https_handler_cls
+            _urllib_request.__dict__.get("HTTPSHandler") is not stdlib_https_handler_cls
             or stdlib_https_handler_cls.__dict__.get("https_open")
             is not stdlib_https_handler_open
+            or stdlib_https_handler_cls.__dict__.get("https_request")
+            is not stdlib_https_handler_request
         ):
             raise error_cls("provider billing HTTPS handler executable drifted")
         if (
@@ -188,23 +165,147 @@ def _build_observation_authority():
         ):
             raise error_cls("provider billing lower HTTP handler executable drifted")
         if (
-            _urllib_request.__dict__.get("_opener") is not product_opener
-            or type(product_opener) is not stdlib_opener_cls
-            or "open" in vars(product_opener)
+            _urllib_request.__dict__.get("HTTPErrorProcessor")
+            is not stdlib_http_error_processor_cls
+            or stdlib_http_error_processor_cls.__dict__.get("https_response")
+            is not stdlib_https_response
         ):
-            raise error_cls("provider billing installed network opener drifted")
+            raise error_cls("provider billing HTTPS response executable drifted")
+
+    def opener_dispatch_snapshot(
+        opener: object,
+    ) -> tuple[tuple[str, object, tuple[object, ...]], ...] | None:
+        records: list[tuple[str, object, tuple[object, ...]]] = []
+        for map_name in ("handle_open", "process_request", "process_response"):
+            mapping = getattr(opener, map_name, None)
+            if type(mapping) is not dict:
+                return None
+            for key, handlers in mapping.items():
+                if type(key) not in (str, int) or type(handlers) is not list:
+                    return None
+                records.append((map_name, key, tuple(handlers)))
+        error_mapping = getattr(opener, "handle_error", None)
+        if type(error_mapping) is not dict:
+            return None
+        for protocol, by_code in error_mapping.items():
+            if type(protocol) not in (str, int) or type(by_code) is not dict:
+                return None
+            for code, handlers in by_code.items():
+                if type(code) not in (str, int) or type(handlers) is not list:
+                    return None
+                records.append((f"handle_error:{protocol}", code, tuple(handlers)))
+        records.sort(key=lambda item: (item[0], type(item[1]).__name__, str(item[1])))
+        return tuple(records)
+
+    def transport_snapshot(
+        transport: object,
+    ) -> tuple[object, tuple[object, ...], tuple[tuple[str, object, tuple[object, ...]], ...]]:
+        assert_static_executable_authority()
+        if type(transport) is not transport_cls:
+            raise error_cls("provider billing production transport is not canonical")
+        state = vars(transport)
+        if set(state) != {"_max_response_bytes", "_opener"}:
+            raise error_cls("provider billing production transport state drifted")
+        max_response_bytes = state.get("_max_response_bytes")
+        if type(max_response_bytes) is not int or max_response_bytes <= 0:
+            raise error_cls("provider billing production transport size limit drifted")
+
+        opener = state.get("_opener")
+        if type(opener) is not stdlib_opener_cls or any(
+            name in vars(opener) for name in ("open", "_open", "_call_chain", "error")
+        ):
+            raise error_cls("provider billing private network opener drifted")
+        handlers = getattr(opener, "handlers", None)
+        if type(handlers) is not list:
+            raise error_cls("provider billing private opener handlers drifted")
+        handler_tuple = tuple(handlers)
+
+        redirect_handlers = tuple(
+            handler
+            for handler in handler_tuple
+            if isinstance(handler, stdlib_redirect_handler_cls)
+        )
         if (
-            tuple(id(handler) for handler in product_opener.handlers)
-            != product_handler_ids
-            or tuple(
-                (getattr(handler, "handler_order", None), id(handler))
-                for handler in product_opener.handle_open.get("https", ())
-            )
-            != product_https_dispatch
-            or type(product_https_handler) is not stdlib_https_handler_cls
-            or "https_open" in vars(product_https_handler)
+            len(redirect_handlers) != 1
+            or type(redirect_handlers[0]) is not redirect_handler_cls
+            or "redirect_request" in vars(redirect_handlers[0])
         ):
-            raise error_cls("provider billing HTTPS handler dispatch drifted")
+            raise error_cls("provider billing no-redirect policy drifted")
+
+        https_handlers = tuple(
+            handler for handler in handler_tuple if isinstance(handler, stdlib_https_handler_cls)
+        )
+        if len(https_handlers) != 1 or type(https_handlers[0]) is not stdlib_https_handler_cls:
+            raise error_cls("provider billing canonical HTTPS handler is invalid")
+        https_handler = https_handlers[0]
+        if any(name in vars(https_handler) for name in ("https_open", "https_request", "do_open")):
+            raise error_cls("provider billing canonical HTTPS handler is shadowed")
+
+        dispatch = opener_dispatch_snapshot(opener)
+        if dispatch is None:
+            raise error_cls("provider billing private opener dispatch is invalid")
+        https_open_handlers = tuple(
+            values
+            for map_name, key, values in dispatch
+            if map_name == "handle_open" and key == "https"
+        )
+        https_request_handlers = tuple(
+            values
+            for map_name, key, values in dispatch
+            if map_name == "process_request" and key == "https"
+        )
+        https_response_handlers = tuple(
+            values
+            for map_name, key, values in dispatch
+            if map_name == "process_response" and key == "https"
+        )
+        if (
+            len(https_open_handlers) != 1
+            or len(https_open_handlers[0]) != 1
+            or https_open_handlers[0][0] is not https_handler
+            or len(https_request_handlers) != 1
+            or len(https_request_handlers[0]) != 1
+            or https_request_handlers[0][0] is not https_handler
+            or len(https_response_handlers) != 1
+            or len(https_response_handlers[0]) != 1
+            or type(https_response_handlers[0][0]) is not stdlib_http_error_processor_cls
+            or "https_response" in vars(https_response_handlers[0][0])
+            or any(
+                not any(handler is registered for registered in handler_tuple)
+                for _map_name, _key, values in dispatch
+                for handler in values
+            )
+        ):
+            raise error_cls("provider billing private opener dispatch drifted")
+        return opener, handler_tuple, dispatch
+
+    def assert_transport_unchanged(
+        transport: object,
+        expected: tuple[
+            object,
+            tuple[object, ...],
+            tuple[tuple[str, object, tuple[object, ...]], ...],
+        ],
+    ) -> None:
+        current_opener, current_handlers, current_dispatch = transport_snapshot(transport)
+        expected_opener, expected_handlers, expected_dispatch = expected
+        if current_opener is not expected_opener or len(current_handlers) != len(expected_handlers):
+            raise error_cls("provider billing private opener identity drifted")
+        if any(
+            current is not wanted
+            for current, wanted in zip(current_handlers, expected_handlers)
+        ):
+            raise error_cls("provider billing private opener handlers drifted")
+        if len(current_dispatch) != len(expected_dispatch):
+            raise error_cls("provider billing private opener dispatch drifted")
+        for current, wanted in zip(current_dispatch, expected_dispatch):
+            if current[0] != wanted[0] or current[1] != wanted[1]:
+                raise error_cls("provider billing private opener dispatch drifted")
+            if len(current[2]) != len(wanted[2]) or any(
+                handler is not expected_handler
+                for handler, expected_handler in zip(current[2], wanted[2])
+            ):
+                raise error_cls("provider billing private opener dispatch drifted")
 
     def projection(source: object) -> tuple[object, ...]:
         entitlement = get_attr(source, "entitlement")
@@ -229,8 +330,6 @@ def _build_observation_authority():
             raise error_cls(
                 "canonical provider billing read returned unexpected observation type"
             )
-        # Re-run the closure-backed canonical structural/digest validator before the
-        # observation enters the private issuance relation.
         validate_structure(source)
         issued[id(source)] = (source, projection(source))
         return source
@@ -244,29 +343,18 @@ def _build_observation_authority():
         statement_from: str | None = None,
         statement_to: str | None = None,
     ):
-        """Run one product-owned provider read and register its exact result.
-
-        Positive issuance deliberately does not accept a caller-created
-        ``BetfairReadOnlyClient``. That client supports transport/clock injection for
-        lower-level deterministic testing, so accepting it here would let a caller
-        turn synthetic JSON and caller time into positive provider provenance.
-        """
+        """Run one product-owned provider read and register its exact result."""
 
         if type(credentials) is not credentials_cls:
             raise TypeError("credentials must be exact BetfairSessionCredentials")
-        assert_executable_authority()
+        assert_static_executable_authority()
 
         def product_clock():
             return now_utc(utc)
 
-        # Bypass mutable class-call dispatch and invoke the captured canonical
-        # constructors directly. The class dictionaries are also fenced above, so
-        # a caller cannot replace the public constructors and have that replacement
-        # execute on this authority path.
         transport = object_new(transport_cls)
         transport_init(transport)
-        if type(transport) is not transport_cls or "post" in vars(transport):
-            raise error_cls("provider billing production transport is not canonical")
+        transport_origin = transport_snapshot(transport)
 
         client = object_new(client_cls)
         client_init(
@@ -291,6 +379,7 @@ def _build_observation_authority():
         ):
             raise error_cls("provider billing production client state drifted")
 
+        assert_transport_unchanged(transport, transport_origin)
         source = read_impl(
             client,
             from_record=from_record,
@@ -298,9 +387,9 @@ def _build_observation_authority():
             statement_from=statement_from,
             statement_to=statement_to,
         )
-        # A persistent executable/global-opener rebind that occurs during provider
-        # I/O cannot be legitimized merely because the returned JSON is valid.
-        assert_executable_authority()
+        # Persistent executable or private-opener mutation during provider I/O
+        # cannot be legitimized merely because returned JSON is structurally valid.
+        assert_transport_unchanged(transport, transport_origin)
         return register(source)
 
     def validate(source: object):
@@ -310,10 +399,6 @@ def _build_observation_authority():
             raise TypeError(
                 "source must be exact BetfairProviderBillingInputsObservation"
             )
-        # Structural/digest validation is repeated at every authority use so an
-        # issued object cannot be mutated and still rely on its original registry
-        # entry. The registry projection additionally prevents recomputed-field
-        # tampering from replacing the exact issued identity.
         validate_structure(source)
         registered = issued.get(id(source))
         if registered is None or registered[0] is not source:

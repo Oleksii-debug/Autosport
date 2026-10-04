@@ -336,20 +336,20 @@ def test_caller_injected_client_transport_cannot_enter_verified_provider_issuanc
         read_verified_betfair_provider_billing_inputs(caller_client)
 
 
-def test_rebound_module_network_opener_cannot_mint_provider_issuance(
+def test_rebound_readonly_opener_factory_cannot_mint_provider_issuance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     called = False
 
-    def fake_urlopen(*_args: object, **_kwargs: object):
+    def fake_build_opener(*_args: object, **_kwargs: object):
         nonlocal called
         called = True
-        raise AssertionError("rebound network opener must not execute")
+        raise AssertionError("rebound opener factory must not execute")
 
-    monkeypatch.setattr(_readonly, "urlopen", fake_urlopen)
+    monkeypatch.setattr(_readonly, "build_opener", fake_build_opener)
     with pytest.raises(
         BetfairProviderBillingInputsAuthorityError,
-        match="network opener drifted",
+        match="network opener factory drifted",
     ):
         read_verified_betfair_provider_billing_inputs(
             BetfairSessionCredentials("k", "t")
@@ -398,7 +398,8 @@ def test_rebound_https_handler_dispatch_cannot_mint_provider_issuance(
         )
     assert called is False
 
-def test_public_installed_opener_cannot_mint_provider_issuance() -> None:
+
+def test_public_installed_opener_is_not_private_transport_authority() -> None:
     called = False
 
     class _AttackerOpener:
@@ -408,18 +409,47 @@ def test_public_installed_opener_cannot_mint_provider_issuance() -> None:
             raise AssertionError("installed attacker opener must not execute")
 
     previous_opener = _urllib_request.__dict__.get("_opener")
+    attacker = _AttackerOpener()
     try:
-        _urllib_request.install_opener(_AttackerOpener())
-        with pytest.raises(
-            BetfairProviderBillingInputsAuthorityError,
-            match="installed network opener drifted",
-        ):
-            read_verified_betfair_provider_billing_inputs(
-                BetfairSessionCredentials("k", "t")
-            )
+        _urllib_request.install_opener(attacker)
+        transport = UrllibBetfairHttpTransport()
+        assert transport._opener is not attacker
+        assert type(transport._opener) is _urllib_request.OpenerDirector
+        redirect_handlers = tuple(
+            handler
+            for handler in transport._opener.handlers
+            if isinstance(handler, _urllib_request.HTTPRedirectHandler)
+        )
+        assert len(redirect_handlers) == 1
+        assert type(redirect_handlers[0]) is _readonly._RejectAuthenticatedRedirects
         assert called is False
     finally:
         _urllib_request.__dict__["_opener"] = previous_opener
+
+
+def test_rebound_redirect_policy_cannot_mint_provider_issuance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def fake_redirect(*_args: object, **_kwargs: object):
+        nonlocal called
+        called = True
+        raise AssertionError("rebound redirect policy must not execute")
+
+    monkeypatch.setattr(
+        _readonly._RejectAuthenticatedRedirects,
+        "redirect_request",
+        fake_redirect,
+    )
+    with pytest.raises(
+        BetfairProviderBillingInputsAuthorityError,
+        match="redirect policy executable drifted",
+    ):
+        read_verified_betfair_provider_billing_inputs(
+            BetfairSessionCredentials("k", "t")
+        )
+    assert called is False
 
 
 def test_rebound_client_constructor_cannot_mint_provider_issuance(

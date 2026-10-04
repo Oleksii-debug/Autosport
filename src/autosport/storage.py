@@ -1738,6 +1738,7 @@ class SQLiteMarketStore:
         authority: MonotonicWorkspaceAuthority,
         observed_state_sha256: str | None,
         *,
+        append_authority: MonotonicWorkspaceAuthority,
         cutoff_rows: tuple[tuple[str, str, int], ...],
     ) -> None:
         try:
@@ -1788,6 +1789,15 @@ class SQLiteMarketStore:
                     "causal replay cutoff PREPARE semantic binding is invalid"
                 )
 
+            # Recovery itself is an irreversible machine-authority effect.
+            # Prove that the pending cutoff's generation is already an exact
+            # independently committed append transition before converting PREPARE to
+            # COMMIT. Otherwise a forged/unissued SQLite tail could permanently poison
+            # cutoff authority even though the subsequent read would fail closed.
+            self._require_committed_append_authority_through(
+                append_authority,
+                max_generation,
+            )
             authority.recover(
                 observed_state_sha256=observed_state_sha256,
                 tx_id=pending.tx_id,
@@ -2214,6 +2224,7 @@ class SQLiteMarketStore:
                 self._recover_replay_cutoff_authority(
                     authority,
                     observed_state_sha256,
+                    append_authority=append_authority,
                     cutoff_rows=cutoff_rows,
                 )
 
@@ -2250,6 +2261,7 @@ class SQLiteMarketStore:
                         self._recover_replay_cutoff_authority(
                             authority,
                             observed_state_sha256,
+                            append_authority=append_authority,
                             cutoff_rows=cutoff_rows,
                         )
                         current_row = next(
@@ -2343,6 +2355,7 @@ class SQLiteMarketStore:
                     self._recover_replay_cutoff_authority(
                         authority,
                         observed_state_sha256,
+                        append_authority=append_authority,
                         cutoff_rows=cutoff_rows,
                     )
 
@@ -2362,6 +2375,7 @@ class SQLiteMarketStore:
                     self._recover_replay_cutoff_authority(
                         authority,
                         observed_state_sha256,
+                        append_authority=append_authority,
                         cutoff_rows=cutoff_rows,
                     )
                     current_row = next(

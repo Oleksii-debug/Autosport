@@ -2731,7 +2731,50 @@ def _build_autonomous_product_runtime_impl(
             "_bounded_provider_call": product_bounded_provider_call,
         }
 
-        class ProductCollectorService(_collector_service_type):
+        class ProductCollectorClassIdentity:
+            __slots__ = ()
+
+            def __get__(self, _instance, owner=None):
+                return owner
+
+            def __set__(self, _instance, _value) -> None:
+                raise ProductCompositionError(
+                    "product collector class identity is immutable"
+                )
+
+            def __delete__(self, _instance) -> None:
+                raise ProductCompositionError(
+                    "product collector class identity is immutable"
+                )
+
+        class ProductCollectorClassGuard:
+            __slots__ = ("descriptor", "name")
+
+            def __init__(self, name: str, descriptor: object) -> None:
+                self.name = name
+                self.descriptor = descriptor
+
+            def __get__(self, _instance, _owner=None):
+                return self.descriptor
+
+            def __set__(self, _instance, _value) -> None:
+                raise ProductCompositionError(
+                    f"product collector class member {self.name!r} is immutable"
+                )
+
+            def __delete__(self, _instance) -> None:
+                raise ProductCompositionError(
+                    f"product collector class member {self.name!r} is immutable"
+                )
+
+        class ProductCollectorMeta(type(_collector_service_type)):
+            pass
+
+        class ProductCollectorService(
+            _collector_service_type,
+            metaclass=ProductCollectorMeta,
+        ):
+            __class__ = ProductCollectorClassIdentity()
             def __init__(self, *args, **kwargs) -> None:
                 super().__init__(*args, **kwargs)
                 collector_snapshots[self] = tuple(
@@ -2761,6 +2804,14 @@ def _build_autonomous_product_runtime_impl(
                         f"product collector authority field {name!r} is immutable"
                     )
                 object.__setattr__(self, name, value)
+
+        for name in ("__getattribute__", "__setattr__"):
+            descriptor = ProductCollectorService.__dict__[name]
+            type.__setattr__(
+                ProductCollectorMeta,
+                name,
+                ProductCollectorClassGuard(name, descriptor),
+            )
 
         collector = ProductCollectorService(
             delta_store=collector_store,

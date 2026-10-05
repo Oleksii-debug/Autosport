@@ -6,7 +6,10 @@ from pathlib import Path
 
 from .domain import PaperTicket, TicketLeg
 from .paper import PaperBook
+from .recovery import transaction_history_requires_recovery
 from .risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskDecision
+from .run_registry import RunRegistry, UnresolvedExperimentError
+from .run_transaction import RunTransaction
 from .workspace_lock import WorkspaceEconomicLock
 
 
@@ -16,6 +19,7 @@ class PaperAdmissionResult:
 
     risk: RiskDecision
     ticket: PaperTicket | None
+    book: PaperBook
 
     @property
     def admitted(self) -> bool:
@@ -35,18 +39,6 @@ def _positive_decimal(value: Decimal | str) -> Decimal:
     if not amount.is_finite() or amount <= 0:
         raise ValueError("stake must be a finite positive decimal")
     return amount
-
-
-def _sync_book_state(target: PaperBook, source: PaperBook) -> None:
-    """Refresh one exact caller view from the validated canonical durable book."""
-
-    PaperBook._validate_loaded_state(source)
-    target.initial_bankroll = source.initial_bankroll
-    target.balance = source.balance
-    target.tickets = dict(source.tickets)
-    target._lifecycle = list(source._lifecycle)
-    target._settlement_times = dict(source._settlement_times)
-    PaperBook._validate_loaded_state(target)
 
 
 def _same_semantic_book_state(expected: PaperBook, observed: PaperBook) -> bool:
@@ -150,6 +142,40 @@ def admit_paper_ticket(
     book_path = root / "paper_book.json"
 
     with WorkspaceEconomicLock(root):
+        # No independent PAPER writer may advance the canonical book while an older
+        # transaction is unresolved. AutosportSession applies the same two durable
+        # start gates before beginning economic work; reuse those authorities here
+        # while already holding the canonical workspace lock.
+        registry_path = root / "run_registry.json"
+        registry_missing = False
+        try:
+            registry_path.lstat()
+        except FileNotFoundError:
+            registry_missing = True
+        else:
+            if RunRegistry(registry_path).in_progress():
+                raise UnresolvedExperimentError(
+                    "Workspace has an unresolved economic run; repair it before PAPER admission."
+                )
+        if transaction_history_requires_recovery(root):
+            raise UnresolvedExperimentError(
+                "Workspace has unresolved transaction history; repair it before PAPER admission."
+            )
+        if registry_missing:
+            transaction_root = root / RunTransaction.ROOT_NAME
+            try:
+                first_transaction = next(transaction_root.iterdir())
+            except FileNotFoundError:
+                pass
+            except StopIteration:
+                pass
+            else:
+                del first_transaction
+                raise UnresolvedExperimentError(
+                    "Workspace run registry is missing while transaction history exists; "
+                    "repair it before PAPER admission."
+                )
+
         # The lock alone is insufficient if this caller was constructed before a
         # different process committed a newer PaperBook. Re-read the one durable
         # workspace book only after owning the economic writer lock.
@@ -160,12 +186,35 @@ def admit_paper_ticket(
             )
         canonical_book = PaperBook.load(book_path)
 
-        decision = risk_policy.evaluate(canonical_book, amount, context=context)
-        if not decision.allowed:
-            _sync_book_state(book, canonical_book)
-            return PaperAdmissionResult(risk=decision, ticket=None)
+        # A caller that still carries the exact current durable generation can remain
+        # the mutable working view. Its normal PaperBook.save() then advances the same
+        # generation binding after publication. A stale or unbound caller is never
+        # rebound by copying fields into it: use the freshly loaded canonical view and
+        # return that authority-bearing object to the caller instead.
+        try:
+            _REQUIRE_CURRENT_BINDING(book, book_path)
+        except (TypeError, ValueError):
+            working_book = canonical_book
+        else:
+            if not _same_semantic_book_state(canonical_book, book):
+                raise ValueError(
+                    "supplied current PaperBook does not match canonical durable state"
+                )
+            working_book = book
 
-        opened = canonical_book.open_ticket(
+        # Owner-facing instance dispatch is sealed by the canonical risk-root
+        # composition before product admission can execute. That gate is closureless,
+        # rejects its own executable/default retargeting before mutation, and
+        # revalidates the exact evaluate root on lookup and retained invocation.
+        decision = risk_policy.evaluate(working_book, amount, context=context)
+        if not decision.allowed:
+            return PaperAdmissionResult(
+                risk=decision,
+                ticket=None,
+                book=working_book,
+            )
+
+        opened = working_book.open_ticket(
             legs,
             amount,
             reason=reason,
@@ -176,21 +225,32 @@ def admit_paper_ticket(
             currency=currency,
         )
         # Publish the mutation while the same lock is still held. PaperBook.save
-        # uses atomic replacement; a save failure leaves the prior durable state
-        # intact and the caller view has not yet been mutated.
-        canonical_book.save(book_path)
+        # uses atomic replacement and advances the binding of the exact working book
+        # when that caller was already current.
+        working_book.save(book_path)
         persisted = PaperBook.load(book_path)
         persisted_ticket = persisted.tickets.get(opened.ticket_id)
         if persisted_ticket is None:
             raise RuntimeError(
                 "persisted PaperBook lost the ticket opened inside admission"
             )
-        if not _same_semantic_book_state(canonical_book, persisted):
+        if not _same_semantic_book_state(working_book, persisted):
             raise RuntimeError(
                 "persisted PaperBook state does not match the admitted mutation"
             )
-        _sync_book_state(book, persisted)
+        result_book = book if working_book is book else persisted
         return PaperAdmissionResult(
             risk=decision,
-            ticket=book.tickets[persisted_ticket.ticket_id],
+            ticket=result_book.tickets[persisted_ticket.ticket_id],
+            book=result_book,
         )
+
+
+# Resolve PaperBook generation binding from the already-sealed persistence graph on
+# every admission call. The public consumer itself carries no mutable positive verifier.
+from ._paperbook_current_binding_verifier import (
+    seal_current_binding_consumer as _seal_current_binding_consumer,
+)
+
+admit_paper_ticket = _seal_current_binding_consumer(admit_paper_ticket)
+del _seal_current_binding_consumer

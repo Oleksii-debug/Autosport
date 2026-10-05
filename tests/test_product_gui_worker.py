@@ -365,3 +365,19 @@ def test_product_gui_message_rejects_noncanonical_stop_reason(reason: str) -> No
             status=_status(SessionState.STOPPED, cycles=1),
             stop_reason=reason,
         )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["", "operator stop", "UPPER", "x" * 65],
+)
+def test_worker_rejects_noncanonical_stop_reason_before_state_change(
+    tmp_path: Path,
+    reason: str,
+) -> None:
+    worker = ProductGuiWorker(runtime_builder=lambda *_args: _FakeRuntime())
+
+    with pytest.raises(ValueError):
+        worker.request_stop(reason)
+
+    assert worker.busy is False

@@ -2401,5 +2401,38 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(resolved.current_equity, Decimal("100"))
 
 
+    def test_durable_resolver_rejects_rebound_path_dispatch_before_use(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper_book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with patch.object(
+                risk_reporting,
+                "Path",
+                side_effect=AssertionError("rebound Path executed"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "canonical durable equity resolver path dispatch changed",
+                ):
+                    resolve_durable_product_issued_paper_equity_path(
+                        paper_book_path=str(paper_path),
+                        workspace=str(workspace),
+                    )
+
+            resolved = resolve_durable_product_issued_paper_equity_path(
+                paper_book_path=str(paper_path),
+                workspace=str(workspace),
+            )
+
+        self.assertEqual(resolved.initial_equity, Decimal("100"))
+        self.assertEqual(resolved.current_equity, Decimal("100"))
+
+
 if __name__ == "__main__":
     unittest.main()

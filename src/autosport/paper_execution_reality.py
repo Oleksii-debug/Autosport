@@ -26,6 +26,12 @@ ObservedPaperExecution = _impl.ObservedPaperExecution
 PaperLegAttempt = _impl.PaperLegAttempt
 PaperExecutionRun = _impl.PaperExecutionRun
 _LegacyPaperExecutionEvidenceRegistry = _impl.PaperExecutionEvidenceRegistry
+_LEGACY_LEDGER_REGISTER_OBSERVATION_EVIDENCE = (
+    _impl.PaperExecutionLedger.register_observation_evidence
+)
+_LEGACY_LEDGER_RESOLVE_OBSERVATION_EVIDENCE = (
+    _impl.PaperExecutionLedger.resolve_observation_evidence
+)
 
 
 def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
@@ -376,7 +382,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             )
         # Persist the reconstructed snapshot, never the caller-owned object that
         # may be mutated after validation.
-        super().register_observation_evidence(canonical_record)
+        _LEGACY_LEDGER_REGISTER_OBSERVATION_EVIDENCE(self, canonical_record)
 
     def resolve_observation_evidence(
         self,
@@ -385,7 +391,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         if type(self) is not PaperExecutionLedger:
             raise TypeError("ledger must be exact PaperExecutionLedger")
         evidence_id = _impl._text(evidence_id, "evidence_id")
-        return super().resolve_observation_evidence(evidence_id)
+        return _LEGACY_LEDGER_RESOLVE_OBSERVATION_EVIDENCE(self, evidence_id)
 
     def reserve_run(
         self,

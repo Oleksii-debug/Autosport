@@ -1209,3 +1209,62 @@ def test_in_place_bound_constructor_mutation_is_rejected_before_execution() -> N
 
     assert attacker_called is False
 
+def test_in_place_workspace_lock_acquire_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    acquire = issuance_module.WorkspaceEconomicLock.acquire
+    original_code = acquire.__code__
+    attacker_called = False
+
+    def attacker_acquire(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        return None
+
+    try:
+        acquire.__code__ = attacker_acquire.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        acquire.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_in_place_durable_path_lock_body_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    body = issuance_module.durable_path_lock.__wrapped__
+    original_code = body.__code__
+    attacker_called = False
+
+    def attacker_lock(_path):
+        nonlocal attacker_called
+        attacker_called = True
+        yield
+
+    try:
+        body.__code__ = attacker_lock.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        body.__code__ = original_code
+
+    assert attacker_called is False
+

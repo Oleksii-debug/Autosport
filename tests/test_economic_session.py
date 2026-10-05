@@ -374,6 +374,27 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
 
         self.assertEqual(calls, 0)
 
+    def test_state_payload_helper_rebinding_fails_before_publication(self) -> None:
+        import autosport.economic_session as economic_session
+
+        store = self._store()
+        original = economic_session._state_payload
+
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("hostile state payload helper executed")
+
+        economic_session._state_payload = forbidden
+        try:
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.current()
+        finally:
+            economic_session._state_payload = original
+
+        self.assertFalse(store.state_path.exists())
+
     def test_pure_helper_rebinding_fails_before_execution(self) -> None:
         import autosport.economic_session as economic_session
 

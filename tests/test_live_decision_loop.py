@@ -10095,6 +10095,77 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             loop.close()
 
 
+    def test_live_ledger_offset_reader_rejects_non_record_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            loop.decision_ledger.append(
+                DecisionRecord(
+                    replay_run_id="probe",
+                    agent="probe",
+                    observed_ts=self.START.isoformat(),
+                    action="OBSERVE",
+                    payload={"probe": True},
+                    context_hash="probe",
+                    decision_id="probe-decision",
+                )
+            )
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "not a record boundary",
+            ):
+                loop._verified_ledger_record_at_offset(1)
+            loop.close()
+
+    def test_live_ledger_helpers_reject_bound_pathname_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            loop.decision_ledger.append(
+                DecisionRecord(
+                    replay_run_id="probe",
+                    agent="probe",
+                    observed_ts=self.START.isoformat(),
+                    action="OBSERVE",
+                    payload={"probe": True},
+                    context_hash="probe",
+                    decision_id="probe-decision",
+                )
+            )
+            path = workspace / "decisions.jsonl"
+            original = path.read_bytes()
+            path.unlink()
+            path.write_bytes(original)
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "file identity changed",
+            ):
+                loop._ledger_end_offset()
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "file identity changed",
+            ):
+                loop._verified_latest_ledger_record()
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "file identity changed",
+            ):
+                loop._verified_ledger_record_at_offset(0)
+            loop.close()
+
+
     def test_cycle_entry_rejects_observation_authority_rebinding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

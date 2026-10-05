@@ -124,11 +124,15 @@ def test_evidence_serialization_is_deterministic_and_truth_bounded() -> None:
 def test_require_ignores_public_resolver_and_evidence_method_rebinding(monkeypatch) -> None:
     body = _body()
     evidence = resolve_betfair_standard_lay_limit_price_bound(body)
-    calls = {"resolver": 0, "to_dict": 0, "validate": 0}
+    calls = {"resolver": 0, "issuer": 0, "to_dict": 0, "validate": 0}
 
     def hostile_resolver(*args, **kwargs):
         calls["resolver"] += 1
         raise AssertionError("live resolver dispatch reached authority consumer")
+
+    def hostile_issuer(*args, **kwargs):
+        calls["issuer"] += 1
+        raise AssertionError("live evidence issuer dispatch reached authority consumer")
 
     def hostile_to_dict(*args, **kwargs):
         calls["to_dict"] += 1
@@ -142,6 +146,12 @@ def test_require_ignores_public_resolver_and_evidence_method_rebinding(monkeypat
         lay_bound_module,
         "resolve_betfair_standard_lay_limit_price_bound",
         hostile_resolver,
+    )
+    monkeypatch.setattr(lay_bound_module, "_issue_evidence", hostile_issuer)
+    monkeypatch.setattr(
+        lay_bound_module,
+        "_CANONICAL_EVIDENCE_VALIDATE",
+        hostile_validate,
     )
     monkeypatch.setattr(
         BetfairStandardLayLimitPriceBoundEvidence,
@@ -158,7 +168,7 @@ def test_require_ignores_public_resolver_and_evidence_method_rebinding(monkeypat
 
     assert canonical is not evidence
     assert canonical.request_sha256 == evidence.request_sha256
-    assert calls == {"resolver": 0, "to_dict": 0, "validate": 0}
+    assert calls == {"resolver": 0, "issuer": 0, "to_dict": 0, "validate": 0}
 
 def test_forged_exact_evidence_cannot_authorize_without_request_re_resolution() -> None:
     body = _body()

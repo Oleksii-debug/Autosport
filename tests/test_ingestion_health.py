@@ -122,6 +122,74 @@ class IngestionHealthTests(unittest.TestCase):
 
             self.assertFalse((root / "foreign.lock").exists())
 
+    def test_source_health_rejects_preexisting_temporary_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SourceHealthStore(root / "source-health.json")
+            target = root / "foreign-target.json"
+            target.write_text("sentinel", encoding="utf-8")
+            temporary = store._temporary_path_authority
+            try:
+                temporary.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("file symlinks are unavailable")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "temporary persistence path already exists",
+            ):
+                store.record_failure(
+                    "source-a",
+                    now="2026-09-12T12:00:00+00:00",
+                    error=RuntimeError("offline"),
+                )
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "sentinel")
+            self.assertTrue(temporary.is_symlink())
+
+    def test_source_health_rejects_preexisting_temporary_regular_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SourceHealthStore(root / "source-health.json")
+            temporary = store._temporary_path_authority
+            temporary.write_text("stale", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "temporary persistence path already exists",
+            ):
+                store.record_failure(
+                    "source-a",
+                    now="2026-09-12T12:00:00+00:00",
+                    error=RuntimeError("offline"),
+                )
+
+            self.assertEqual(temporary.read_text(encoding="utf-8"), "stale")
+
+    def test_source_health_rejects_writer_lock_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SourceHealthStore(root / "source-health.json")
+            store._lock_path.unlink(missing_ok=True)
+            target = root / "foreign-lock-target"
+            target.write_text("sentinel", encoding="utf-8")
+            try:
+                store._lock_path.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("file symlinks are unavailable")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "writer-lock path is unavailable|regular file",
+            ):
+                store.record_failure(
+                    "source-a",
+                    now="2026-09-12T12:00:00+00:00",
+                    error=RuntimeError("offline"),
+                )
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "sentinel")
+
     def test_source_health_relative_path_survives_cwd_change(self):
         original_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as tmp:

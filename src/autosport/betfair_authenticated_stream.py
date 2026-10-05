@@ -50,6 +50,8 @@ _SECRET_KEY_FRAGMENTS = (
     "appkey",
     "app_key",
 )
+_WALL_TIME_NS = time.time_ns
+_MONOTONIC_NS = time.monotonic_ns
 
 
 class BetfairAuthenticatedStreamError(RuntimeError):
@@ -650,7 +652,9 @@ def _consumer_lag_rejection_reason(
 ) -> str | None:
     if type(received_monotonic_ns) is not int or received_monotonic_ns <= 0:
         return "authenticated frame receive monotonic evidence is invalid"
-    now_ns = time.monotonic_ns()
+    if time.monotonic_ns is not _MONOTONIC_NS:
+        return "local monotonic clock dispatch changed"
+    now_ns = _MONOTONIC_NS()
     if type(now_ns) is not int or now_ns <= 0:
         return "local monotonic clock is invalid"
     if now_ns < received_monotonic_ns:
@@ -718,7 +722,11 @@ def _transport_generation(transport: BetfairStreamTlsTransport) -> int:
 
 
 def _wall_time_ms() -> int:
-    value = time.time_ns() // 1_000_000
+    if time.time_ns is not _WALL_TIME_NS:
+        raise BetfairAuthenticatedStreamError(
+            "product wall-clock dispatch changed"
+        )
+    value = _WALL_TIME_NS() // 1_000_000
     if type(value) is not int or value <= 0:
         raise BetfairAuthenticatedStreamError("product wall clock is unavailable")
     return value

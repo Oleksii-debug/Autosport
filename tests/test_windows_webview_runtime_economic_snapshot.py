@@ -12,7 +12,11 @@ import pytest
 import autosport.product_gui_worker as worker_module
 
 from autosport.causal_collector import GapState, SyncState
-from autosport.continuous_session import ContinuousTickResult
+from autosport.continuous_session import (
+    ContinuousSessionStatus,
+    ContinuousTickResult,
+    SessionState,
+)
 from autosport.domain import TicketLeg
 from autosport.paper import PaperBook
 from autosport.product_gui_worker import (
@@ -441,9 +445,17 @@ def test_unprofiled_exact_runtime_tick_cannot_mint_economic_snapshot(
             worker._stop_event.set()
         return _tick(cycle_index=calls)
 
-    monkeypatch.setattr(AutonomousProductRuntime, "start", lambda _self: status)
+    monkeypatch.setattr(
+        AutonomousProductRuntime,
+        "start",
+        lambda _self: started_status,
+    )
     monkeypatch.setattr(AutonomousProductRuntime, "tick", tick)
-    monkeypatch.setattr(AutonomousProductRuntime, "stop", lambda _self, _reason: status)
+    monkeypatch.setattr(
+        AutonomousProductRuntime,
+        "stop",
+        lambda _self, _reason: stopped_status,
+    )
     monkeypatch.setattr(AutonomousProductRuntime, "close", lambda _self: None)
 
     worker._run(
@@ -474,7 +486,26 @@ def test_profile_revocation_during_tick_preserves_stop_not_error(
     runtime = _runtime(tmp_path)
     object.__setattr__(runtime, "_operation_fence", threading.RLock())
     worker = ProductGuiWorker()
-    status = SimpleNamespace(session_id="session-1", source_id="source-1")
+    started_status = ContinuousSessionStatus(
+        session_id="session-1",
+        source_id="source-1",
+        state=SessionState.RUNNING,
+        cycles_completed=0,
+        last_success_at=None,
+        last_error_code=None,
+        last_full_refresh_at=None,
+        settlement_evidence=(),
+    )
+    stopped_status = ContinuousSessionStatus(
+        session_id="session-1",
+        source_id="source-1",
+        state=SessionState.STOPPED,
+        cycles_completed=0,
+        last_success_at=None,
+        last_error_code=None,
+        last_full_refresh_at=None,
+        settlement_evidence=(),
+    )
     profile = object()
 
     monkeypatch.setattr(
@@ -625,3 +656,42 @@ def test_runtime_worker_keeps_tick_and_snapshot_inside_one_operation_fence() -> 
     assert _capture_runtime_economic_snapshot.__kwdefaults__ is None
     assert type(_capture_runtime_economic_snapshot.__defaults__) is tuple
     assert "AutosportSession" not in source
+
+
+def test_terminal_session_close_failure_quarantines_visible_economics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _controller(tmp_path, None)
+    controller.product_worker = _IdleWorker()
+    controller.strategy_id = "baseline-v1"
+    controller.research_plan = None
+
+    class _Book:
+        balance = Decimal("100")
+        committed_stake = Decimal("0")
+
+    class _CloseFailSession:
+        def __init__(self, workspace, *_args, **_kwargs) -> None:
+            self.workspace = Path(workspace)
+            self.strategy_id = "baseline-v1"
+            self.book = _Book()
+
+        def close(self) -> None:
+            raise RuntimeError("close uncertainty")
+
+    monkeypatch.setattr(
+        "autosport.windows_webview_shell.AutosportSession",
+        _CloseFailSession,
+    )
+    monkeypatch.setattr(
+        "autosport.windows_webview_shell.ticket_lines",
+        lambda _session: ["apparently healthy ticket"],
+    )
+
+    controller._refresh_economic_projection()
+
+    assert tmp_path in controller._recovery_required_workspaces
+    assert "100" not in controller.bank
+    assert controller.tickets != ["apparently healthy ticket"]
+    assert "віднов" in controller.status.casefold()

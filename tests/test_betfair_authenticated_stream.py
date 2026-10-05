@@ -1011,3 +1011,82 @@ def test_second_runtime_cannot_claim_same_authenticated_reader(
 
     assert first.subscription is subscription
     assert transport.is_authenticated
+
+
+def test_concurrent_evaluation_waits_for_valid_inflight_frame_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autosport import betfair_authenticated_stream as auth
+
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, fake = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(pt=publish_time_ms)
+        + _delta_mcm(pt=publish_time_ms + 1, price=2.2),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+    old_decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert old_decision.decision_eligible
+
+    decode_entered = Event()
+    release_decode = Event()
+    evaluation_done = Event()
+    read_errors: list[BaseException] = []
+    evaluation_results: list[object] = []
+    original_decode = auth._decode_exact_transport_frame
+
+    def blocking_decode(frame):
+        decode_entered.set()
+        assert release_decode.wait(2.0)
+        return original_decode(frame)
+
+    monkeypatch.setattr(auth, "_decode_exact_transport_frame", blocking_decode)
+
+    def read_valid_frame() -> None:
+        try:
+            runtime.read_and_ingest()
+        except BaseException as exc:
+            read_errors.append(exc)
+
+    def evaluate_current() -> None:
+        try:
+            evaluation_results.append(
+                runtime.evaluate(
+                    _identity(),
+                    policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+                )
+            )
+        except BaseException as exc:
+            evaluation_results.append(exc)
+        finally:
+            evaluation_done.set()
+
+    reader = Thread(target=read_valid_frame)
+    reader.start()
+    assert decode_entered.wait(2.0)
+
+    evaluator = Thread(target=evaluate_current)
+    evaluator.start()
+    assert not evaluation_done.wait(0.05)
+
+    release_decode.set()
+    reader.join(2.0)
+    evaluator.join(2.0)
+
+    assert not reader.is_alive()
+    assert not evaluator.is_alive()
+    assert read_errors == []
+    assert len(evaluation_results) == 1
+    current = evaluation_results[0]
+    assert isinstance(current, BetfairAuthenticatedFreshnessDecision)
+    assert current.decision_eligible
+    assert current.evidence_id != old_decision.evidence_id
+    assert not old_decision.decision_eligible
+    assert transport.is_authenticated
+    assert not fake.closed

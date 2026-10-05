@@ -96,6 +96,61 @@ class ContinuousObservationTests(unittest.TestCase):
 
             self.assertFalse(workspace.exists())
 
+    def test_invalid_run_id_fails_before_workspace_creation(self):
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(ValueError, "run_id"):
+                self._run(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    run_id=" invalid ",
+                )
+
+            self.assertFalse(workspace.exists())
+            self.assertEqual(provider.calls, 0)
+
+    def test_noncallable_runtime_hook_fails_before_workspace_creation(self):
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(TypeError, "waiter must be callable"):
+                run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    waiter=object(),
+                    reporter=None,
+                )
+
+            self.assertFalse(workspace.exists())
+            self.assertEqual(provider.calls, 0)
+
+    def test_invalid_stop_event_contract_fails_before_workspace_creation(self):
+        class InvalidStopEvent:
+            is_set = object()
+            wait = object()
+
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(TypeError, "stop_event is_set must be callable"):
+                run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    stop_event=InvalidStopEvent(),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    reporter=None,
+                )
+
+            self.assertFalse(workspace.exists())
+            self.assertEqual(provider.calls, 0)
+
     def test_provider_identity_substitution_fails_before_workspace_creation(self):
         class SourceId(str):
             pass

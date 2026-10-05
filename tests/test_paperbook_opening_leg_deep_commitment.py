@@ -1220,6 +1220,42 @@ def test_open_ticket_rejects_in_place_identity_or_clock_code_mutation_before_exe
     assert book.tickets == {}
 
 
+def test_open_ticket_never_executes_rebound_ticket_constructor(monkeypatch) -> None:
+    book = PaperBook("100")
+    attacker_calls = 0
+
+    class HostilePaperTicket:
+        def __init__(self, **_kwargs):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("rebound ticket constructor executed")
+
+    monkeypatch.setattr(paper_module, "PaperTicket", HostilePaperTicket)
+
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+
+    assert type(ticket).__name__ == "PaperTicket"
+    assert attacker_calls == 0
+    assert book.balance == Decimal("90")
+
+
+def test_open_ticket_rejects_in_place_ticket_constructor_code_mutation_before_execution() -> None:
+    book = PaperBook("100")
+    constructor = paper_module.PaperTicket.__init__
+    original_code = constructor.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        constructor.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="ticket constructor authority changed"):
+            book.open_ticket([_leg()], "10", placed_at=_TS)
+    finally:
+        constructor.__code__ = original_code
+
+    assert book.balance == Decimal("100")
+    assert book.tickets == {}
+
+
 def test_open_ticket_never_executes_rebound_opening_write_authority(monkeypatch) -> None:
     book = PaperBook("100")
     attacker_calls = 0

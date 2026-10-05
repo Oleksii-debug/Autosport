@@ -797,9 +797,9 @@ class PersistentLiveDecisionLoop:
             self.workspace / "decisions.jsonl"
         )
         if paper_execution is not None:
-            if not isinstance(paper_execution, PaperExecutionAdoptionRuntime):
+            if type(paper_execution) is not PaperExecutionAdoptionRuntime:
                 raise TypeError(
-                    "paper_execution must be PaperExecutionAdoptionRuntime or None"
+                    "paper_execution must be exact PaperExecutionAdoptionRuntime or None"
                 )
             if paper_execution.book is not book:
                 raise ValueError(
@@ -1356,9 +1356,9 @@ class PersistentLiveDecisionLoop:
         runtime = self.paper_execution
         if runtime is None:
             return None
-        if not isinstance(runtime, PaperExecutionAdoptionRuntime):
+        if type(runtime) is not PaperExecutionAdoptionRuntime:
             raise LiveDecisionProgressError(
-                "paper_execution runtime authority changed type"
+                "paper_execution runtime authority changed exact type"
             )
         if runtime.book is not self.book:
             raise LiveDecisionProgressError(

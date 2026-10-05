@@ -305,7 +305,7 @@ def test_source_configuration_change_is_blocked_while_runtime_busy(
         _product_source_id_to_display={
             "parlayapi-table-tennis": "Parlay API — настільний теніс"
         },
-        workspace=tmp_path / "workspace",
+        workspace=restored_workspace,
         bell=lambda: None,
         _append_log=lambda _message: None,
     )
@@ -354,7 +354,8 @@ def test_valid_source_save_uses_stable_registry_identity(tmp_path: Path) -> None
 
 def test_product_stop_restores_prior_active_strategy_session(tmp_path: Path) -> None:
     calls: list[tuple[str, object]] = []
-    restored_session = object()
+    restored_workspace = tmp_path / "workspace"
+    restored_session = SimpleNamespace(workspace=restored_workspace)
     research_plan = object()
     surface = SimpleNamespace(
         _product_close_pending=False,
@@ -449,3 +450,68 @@ def test_worker_start_interrupt_restores_session_before_unwind(
 
     assert events == ["start", "restore"]
     assert surface._product_expected_provider_source_id is None
+
+
+def test_quarantined_prior_workspace_is_not_reopened_after_product_stop(
+    tmp_path: Path,
+) -> None:
+    restore_workspace = tmp_path / "workspace"
+    open_calls: list[str] = []
+    surface = SimpleNamespace(
+        _product_close_pending=False,
+        _product_restore_workspace=restore_workspace,
+        session=None,
+        _active_strategy_id="baseline-v1",
+        _active_research_plan=None,
+        workspace=restore_workspace,
+        product_status=_Value(),
+        status=_Value(),
+        bank=_Value(),
+        _workspace_requires_recovery=lambda workspace: Path(workspace) == restore_workspace,
+        _open_session=lambda _strategy_id, _plan: open_calls.append("open"),
+        _bank_text=lambda: "bank",
+        _refresh_tickets=lambda: None,
+        _block_workspace_for_recovery=lambda _workspace: None,
+        _append_log=lambda _message: None,
+    )
+
+    assert not ProductWindowsAutosportApp._restore_base_session_after_product(surface)
+
+    assert open_calls == []
+    assert surface.session is None
+    assert "відновіть карантинований workspace" in surface.product_status.value
+
+
+def test_restore_rejects_session_workspace_identity_drift(tmp_path: Path) -> None:
+    expected_workspace = tmp_path / "expected"
+    wrong_workspace = tmp_path / "wrong"
+    close_calls: list[str] = []
+    blocked: list[Path] = []
+    restored = SimpleNamespace(
+        workspace=wrong_workspace,
+        close=lambda: close_calls.append("close"),
+    )
+    surface = SimpleNamespace(
+        _product_close_pending=False,
+        _product_restore_workspace=expected_workspace,
+        session=None,
+        _active_strategy_id="research-plan-v1",
+        _active_research_plan=object(),
+        workspace=tmp_path / "workspace",
+        product_status=_Value(),
+        status=_Value(),
+        bank=_Value(),
+        _workspace_requires_recovery=lambda _workspace: False,
+        _open_session=lambda _strategy_id, _plan: restored,
+        _bank_text=lambda: "bank",
+        _refresh_tickets=lambda: None,
+        _block_workspace_for_recovery=blocked.append,
+        _append_log=lambda _message: None,
+    )
+
+    assert not ProductWindowsAutosportApp._restore_base_session_after_product(surface)
+
+    assert close_calls == ["close"]
+    assert surface.session is None
+    assert blocked == [expected_workspace]
+    assert "не вдалося" in surface.product_status.value

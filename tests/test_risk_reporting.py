@@ -24,6 +24,7 @@ from autosport.risk_reporting import (
     build_product_issued_paper_equity_path,
     resolve_durable_product_issued_paper_drawdown_evidence,
     resolve_durable_product_issued_paper_equity_path,
+    verified_settled_minimum_equity,
     verify_product_issued_paper_drawdown_evidence,
     verify_product_issued_paper_equity_path,
 )
@@ -703,6 +704,63 @@ class PaperRiskReportingTests(unittest.TestCase):
                 paper_book_path="paper-book.json",
                 workspace=Path("workspace"),  # type: ignore[arg-type]
             )
+
+    def test_verified_minimum_equity_requires_complete_settled_causal_path(self) -> None:
+        settled = PaperBook("100")
+        loser = settled.open_ticket(
+            (self._leg(65),),
+            Decimal("35"),
+            placed_at="2026-09-21T13:20:00+00:00",
+        )
+        settled.settle(
+            loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T13:25:00+00:00",
+        )
+        goal = self._goal()
+        evidence = build_product_issued_paper_equity_path(settled, goal)
+
+        minimum, point_id = verified_settled_minimum_equity(
+            settled,
+            goal,
+            evidence,
+        )
+
+        self.assertEqual(minimum, Decimal("65"))
+        self.assertEqual(point_id, evidence.minimum_equity_point_id)
+
+    def test_verified_minimum_equity_rejects_open_exposure(self) -> None:
+        book = PaperBook("100")
+        book.open_ticket(
+            (self._leg(66),),
+            Decimal("10"),
+            placed_at="2026-09-21T13:30:00+00:00",
+        )
+        goal = self._goal()
+        evidence = build_product_issued_paper_equity_path(book, goal)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "all economically material PAPER tickets settled",
+        ):
+            verified_settled_minimum_equity(book, goal, evidence)
+
+    def test_verified_minimum_equity_rejects_missing_settlement_availability(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(67),),
+            Decimal("10"),
+            placed_at="2026-09-21T13:40:00+00:00",
+        )
+        book.settle(ticket.ticket_id, set())
+        goal = self._goal()
+        evidence = build_product_issued_paper_equity_path(book, goal)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "complete durable availability chronology",
+        ):
+            verified_settled_minimum_equity(book, goal, evidence)
 
     def test_restart_preserves_exact_report_identity_and_values(self) -> None:
         book = PaperBook("100")

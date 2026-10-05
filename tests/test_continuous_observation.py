@@ -74,15 +74,23 @@ class ContinuousObservationTests(unittest.TestCase):
 
     @staticmethod
     def _run(provider, config, **kwargs):
-        return run_continuous_observation(
-            provider,
-            config,
-            ingestion_clock=lambda: _NOW,
-            monotonic=lambda: 0.0,
-            waiter=lambda _seconds: False,
-            reporter=None,
-            **kwargs,
-        )
+        now = [0.0]
+
+        def monotonic():
+            return now[0]
+
+        def waiter(seconds):
+            now[0] += seconds
+            return False
+
+        options = {
+            "ingestion_clock": lambda: _NOW,
+            "monotonic": monotonic,
+            "waiter": waiter,
+            "reporter": None,
+        }
+        options.update(kwargs)
+        return run_continuous_observation(provider, config, **options)
 
     def test_noncallable_provider_read_fails_before_workspace_creation(self):
         class Provider:
@@ -507,7 +515,7 @@ class ContinuousObservationTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ValueError,
-                "waiter returned before provider backoff elapsed",
+                "waiter returned before requested delay elapsed",
             ):
                 run_continuous_observation(
                     second_provider,
@@ -588,7 +596,7 @@ class ContinuousObservationTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ValueError,
-                "waiter returned before provider backoff elapsed",
+                "waiter returned before requested delay elapsed",
             ):
                 run_continuous_observation(
                     provider,
@@ -652,6 +660,86 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertEqual(result.attempted_cycles, 1)
             self.assertEqual(result.successful_cycles, 0)
             poll.assert_called_once()
+
+    def test_regular_interval_rejects_waiter_that_skips_elapsed_delay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = SequenceProvider(
+                [
+                    _batch(_quote(), cursor="first"),
+                    _batch(_quote(sequence=2), cursor="must-not-run"),
+                ]
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "waiter returned before requested delay elapsed",
+            ):
+                run_continuous_observation(
+                    provider,
+                    self._config(Path(tmp), max_cycles=2),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    waiter=lambda _seconds: False,
+                    reporter=None,
+                )
+
+            self.assertEqual(provider.calls, 1)
+
+    def test_regular_interval_accepts_waiter_with_elapsed_monotonic_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = SequenceProvider(
+                [
+                    _batch(_quote(), cursor="first"),
+                    _batch(_quote(sequence=2, odds="1.81"), cursor="second"),
+                ]
+            )
+            now = [0.0]
+
+            def wait_and_advance(seconds: float) -> bool:
+                now[0] += seconds
+                return False
+
+            result = run_continuous_observation(
+                provider,
+                self._config(Path(tmp), max_cycles=2),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: now[0],
+                waiter=wait_and_advance,
+                reporter=None,
+            )
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.successful_cycles, 2)
+            self.assertEqual(provider.calls, 2)
+
+    def test_custom_stop_event_wait_cannot_skip_regular_interval(self):
+        class NonWaitingStopEvent:
+            def is_set(self):
+                return False
+
+            def wait(self, _seconds):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = SequenceProvider(
+                [
+                    _batch(_quote(), cursor="first"),
+                    _batch(_quote(sequence=2), cursor="must-not-run"),
+                ]
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "waiter returned before requested delay elapsed",
+            ):
+                run_continuous_observation(
+                    provider,
+                    self._config(Path(tmp), max_cycles=2),
+                    stop_event=NonWaitingStopEvent(),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    reporter=None,
+                )
+
+            self.assertEqual(provider.calls, 1)
 
     def test_operator_stop_during_wait_prevents_second_provider_cycle(self):
         with tempfile.TemporaryDirectory() as tmp:

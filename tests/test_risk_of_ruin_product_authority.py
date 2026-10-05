@@ -169,6 +169,97 @@ def _single_evidence(policy: PaperRiskPolicy, book: PaperBook, context: Proposed
     )
 
 
+
+def test_risk_state_graph_ignores_rebound_paperbook_economic_roots(monkeypatch) -> None:
+    book = PaperBook("100")
+    context = _context(1)
+    book.open_ticket(
+        context.legs,
+        Decimal("1"),
+        placed_at=PROPOSAL_TS,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+    baseline_state = PaperRiskPolicy._book_state(book)
+    baseline_metrics = PaperRiskPolicy._historical_risk_metrics(book)
+    baseline_shadow = PaperRiskPolicy._shadow_book_for_allocation(book)
+    assert baseline_state is not None
+    assert baseline_metrics is not None
+    assert baseline_shadow is not None
+
+    calls = {
+        "validate": 0,
+        "lifecycle": 0,
+        "debit": 0,
+        "settlement": 0,
+    }
+
+    def hostile_validate(cls, candidate):
+        calls["validate"] += 1
+        raise AssertionError("live PaperBook state validator reached risk graph")
+
+    def hostile_lifecycle(cls, entry):
+        calls["lifecycle"] += 1
+        raise AssertionError("live PaperBook lifecycle validator reached risk graph")
+
+    def hostile_debit(cls, balance, amount):
+        calls["debit"] += 1
+        raise AssertionError("live PaperBook debit dispatch reached risk graph")
+
+    def hostile_settlement(cls, ticket, balance, winners, voids):
+        calls["settlement"] += 1
+        raise AssertionError("live PaperBook settlement dispatch reached risk graph")
+
+    monkeypatch.setattr(PaperBook, "_validate_loaded_state", classmethod(hostile_validate))
+    monkeypatch.setattr(
+        PaperBook,
+        "_validate_lifecycle_entry",
+        classmethod(hostile_lifecycle),
+    )
+    monkeypatch.setattr(PaperBook, "_debit_balance", classmethod(hostile_debit))
+    monkeypatch.setattr(
+        PaperBook,
+        "_settlement_result",
+        classmethod(hostile_settlement),
+    )
+
+    assert PaperRiskPolicy._book_state(book) == baseline_state
+    assert PaperRiskPolicy._historical_risk_metrics(book) == baseline_metrics
+    shadow = PaperRiskPolicy._shadow_book_for_allocation(book)
+    assert shadow is not None
+    assert shadow.balance == baseline_shadow.balance
+    assert calls == {
+        "validate": 0,
+        "lifecycle": 0,
+        "debit": 0,
+        "settlement": 0,
+    }
+
+
+def test_vector_shadow_reservation_ignores_rebound_open_ticket(monkeypatch) -> None:
+    policy = _policy(max_risk_of_ruin=Decimal("1"))
+    book = PaperBook("100")
+    context = _context(1)
+    calls = {"open_ticket": 0}
+
+    def hostile_open_ticket(self, *args, **kwargs):
+        calls["open_ticket"] += 1
+        raise AssertionError("live PaperBook.open_ticket dispatch reached vector allocation")
+
+    monkeypatch.setattr(PaperBook, "open_ticket", hostile_open_ticket)
+
+    decision = policy.derive_goal_stake_vector(
+        book,
+        (Decimal("0.01"),),
+        contexts=(context,),
+    )
+
+    assert decision.action == "STAKE_VECTOR"
+    assert decision.stakes == (Decimal("1.00"),)
+    assert calls == {"open_ticket": 0}
+
+
 def test_caller_cannot_mint_single_candidate_risk_of_ruin_authority() -> None:
     """Freeze #955: public hashes plus a caller bound must not grant authority."""
 

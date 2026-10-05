@@ -12,6 +12,7 @@ from .storage import (
     SQLiteMarketStore,
     _timezone_aware_instant,
     _validate_local_receipt_order,
+    _validate_persistable_sequence,
 )
 
 
@@ -211,6 +212,7 @@ class MarketMirror:
             raise TypeError("event must be a MarketEvent")
         if type(decision_causal) is not bool:
             raise TypeError("decision_causal must be a bool")
+        _validate_persistable_sequence(event.sequence)
         _validate_local_receipt_order(event)
 
         key = self._key(event)

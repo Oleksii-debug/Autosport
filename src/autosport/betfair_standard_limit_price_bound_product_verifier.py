@@ -43,6 +43,7 @@ def _build_product_entrypoint():
     canonical_ledger_init = canonical_ledger_type.__init__
     canonical_ledger_init_code = canonical_ledger_init.__code__
     path_factory = Path
+    object_new = object.__new__
 
     def authority_graph_unchanged() -> bool:
         return (
@@ -163,9 +164,9 @@ def _build_product_entrypoint():
             raise BetfairStandardLimitPriceBoundError(
                 "canonical Betfair product verifier reopen authority changed"
             )
-        canonical_store = canonical_store_type.__new__(canonical_store_type)
+        canonical_store = object_new(canonical_store_type)
         canonical_store_init(canonical_store, workspace)
-        canonical_ledger = canonical_ledger_type.__new__(canonical_ledger_type)
+        canonical_ledger = object_new(canonical_ledger_type)
         canonical_ledger_init(canonical_ledger, ledger_path)
         if not reopen_graph_unchanged():
             raise BetfairStandardLimitPriceBoundError(

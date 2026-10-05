@@ -937,6 +937,54 @@ class MarketMirrorTests(unittest.TestCase):
 
         self.assertEqual(mirror.snapshot(), (first,))
 
+    def test_same_sequence_authority_transition_is_material(self) -> None:
+        event = self.event()
+        mirror = MarketMirror()
+
+        initial = mirror._apply_with_causal_authority(
+            event,
+            decision_causal=False,
+        )
+        self.assertEqual(initial.status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.causal_view().events, ())
+
+        promoted = mirror._apply_with_causal_authority(
+            event,
+            decision_causal=True,
+        )
+        self.assertEqual(promoted.status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.causal_view().events, (event,))
+
+        demoted = mirror._apply_with_causal_authority(
+            event,
+            decision_causal=False,
+        )
+        self.assertEqual(demoted.status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.causal_view().events, ())
+
+    def test_persist_and_apply_duplicate_requires_durable_authority_for_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self.event()
+            try:
+                accepted = store.append_batch_accepted((event,))
+                self.assertEqual(len(accepted), 1)
+
+                mirror = MarketMirror()
+                mirror._apply_with_causal_authority(
+                    event,
+                    decision_causal=False,
+                )
+                self.assertEqual(mirror.causal_view().events, ())
+
+                result = mirror.persist_and_apply(store, event)
+
+                self.assertEqual(result.status, MirrorUpdate.APPLIED)
+                self.assertEqual(mirror.causal_view().events, (event,))
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
+
     def test_persist_and_apply_inverted_receipt_has_no_durable_or_live_side_effect(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

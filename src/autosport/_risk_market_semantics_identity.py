@@ -272,6 +272,36 @@ def _risk_of_ruin_candidate_sha256(
         return None
 
 
+
+def _risk_of_ruin_candidate_vector_sha256(
+    cls: type,
+    contexts: object,
+    _policy_type=_POLICY_TYPE,
+    _context_type=_CONTEXT_TYPE,
+    _candidate_digest=_risk_of_ruin_candidate_sha256,
+    _digest=_CANONICAL_SHA256_PAYLOAD,
+) -> str | None:
+    if cls is not _policy_type or type(contexts) is not tuple or not contexts:
+        return None
+    candidate_hashes: list[str] = []
+    for context in contexts:
+        if type(context) is not _context_type:
+            return None
+        candidate_sha256 = _candidate_digest(context)
+        if candidate_sha256 is None:
+            return None
+        candidate_hashes.append(candidate_sha256)
+    try:
+        return _digest(
+            {
+                "schema": "autosport.risk-candidate-vector.v1",
+                "candidate_sha256": candidate_hashes,
+            }
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+
+
 def _quote_risk_decision(
     goal: object,
     context: object,
@@ -300,6 +330,11 @@ def _install() -> None:
         _POLICY_TYPE,
         "risk_of_ruin_candidate_sha256",
         staticmethod(_risk_of_ruin_candidate_sha256),
+    )
+    setattr(
+        _POLICY_TYPE,
+        "risk_of_ruin_candidate_vector_sha256",
+        classmethod(_risk_of_ruin_candidate_vector_sha256),
     )
     setattr(
         _POLICY_TYPE,

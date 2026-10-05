@@ -2241,3 +2241,83 @@ def test_save_rejects_rebound_directory_fsync_helper_before_execution(
 
     assert attacker_calls == 0
 
+
+
+_SNAPSHOT_HELPER_AUTHORITY_NAMES = (
+    "_require_finite",
+    "_require_canonical_text",
+    "_validate_timestamp",
+    "_validate_ticket_leg",
+    "_validate_lifecycle_entry",
+    "_validate_lifecycle_reachability",
+    "_validate_loaded_state",
+    "_parse_lifecycle_key_list",
+    "_parse_lifecycle",
+    "_parse_snapshot_decimal",
+    "_required_snapshot_field",
+    "_parse_snapshot_legs",
+    "_parse_snapshot_provider_accounts",
+    "_parse_snapshot_status",
+)
+
+
+@pytest.mark.parametrize("helper_name", _SNAPSHOT_HELPER_AUTHORITY_NAMES)
+def test_load_bytes_rejects_rebound_snapshot_helper_before_execution(
+    monkeypatch,
+    helper_name: str,
+) -> None:
+    payload = (
+        b'{"schema_version":7,"initial_bankroll":"100","balance":"100",'
+        b'"tickets":[],"lifecycle":[]}'
+    )
+    descriptor = PaperBook.__dict__[helper_name]
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError(f"rebound snapshot helper executed: {helper_name}")
+
+    if type(descriptor) is classmethod:
+        replacement = classmethod(hostile)
+    elif type(descriptor) is staticmethod:
+        replacement = staticmethod(hostile)
+    else:
+        replacement = hostile
+
+    monkeypatch.setattr(PaperBook, helper_name, replacement)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"snapshot helper dispatch changed: {helper_name}",
+    ):
+        PaperBook.load_bytes(payload)
+
+    assert attacker_calls == 0
+
+
+@pytest.mark.parametrize("helper_name", _SNAPSHOT_HELPER_AUTHORITY_NAMES)
+def test_load_bytes_rejects_in_place_snapshot_helper_code_mutation(
+    helper_name: str,
+) -> None:
+    payload = (
+        b'{"schema_version":7,"initial_bankroll":"100","balance":"100",'
+        b'"tickets":[],"lifecycle":[]}'
+    )
+    descriptor = PaperBook.__dict__[helper_name]
+    if type(descriptor) in {classmethod, staticmethod}:
+        authority = descriptor.__func__
+    else:
+        authority = descriptor
+    original_code = authority.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        authority.__code__ = hostile.__code__
+        with pytest.raises(
+            ValueError,
+            match=rf"snapshot helper authority changed: {helper_name}",
+        ):
+            PaperBook.load_bytes(payload)
+    finally:
+        authority.__code__ = original_code

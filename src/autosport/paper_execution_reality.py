@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
+_DECIMAL_TYPE = Decimal
+
 from . import _paper_execution_reality_legacy as _impl
 from .exchange_exposure import locked_capital_for_exchange_side
 _LOCKED_CAPITAL_FOR_EXCHANGE_SIDE = locked_capital_for_exchange_side
@@ -58,7 +60,7 @@ _LEGACY_LEDGER_RESOLVE_OBSERVATION_EVIDENCE = (
 
 
 def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
-    if type(value) is not Decimal:
+    if type(value) is not _DECIMAL_TYPE:
         raise ValueError("Decimal must be an exact canonical Decimal")
     if not value.is_finite():
         raise ValueError("Decimal must be finite")
@@ -75,7 +77,7 @@ def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
 def _decimal_from_coefficient(coefficient: int, exponent: int) -> Decimal:
     sign = 1 if coefficient < 0 else 0
     digits = tuple(int(ch) for ch in str(abs(coefficient)))
-    value = Decimal((sign, digits, exponent))
+    value = _DECIMAL_TYPE((sign, digits, exponent))
     _RESOURCE_BOUND_VALIDATOR(value)
     return value
 
@@ -155,8 +157,8 @@ def _derive_run_economics(
     if len(attempts) > len(action_ids):
         raise PaperExecutionIntegrityError("durable attempts exceed reserved action list")
 
-    known_exposure = Decimal("0")
-    worst_case = Decimal("0")
+    known_exposure = _DECIMAL_TYPE("0")
+    worst_case = _DECIMAL_TYPE("0")
     terminal_seen = False
     for index, attempt in enumerate(attempts):
         if attempt.sequence != index or attempt.action_id != action_ids[index]:
@@ -803,7 +805,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             )
         if type(recovery_decision) is not RecoveryDecision:
             raise TypeError("recovery_decision must be exact RecoveryDecision")
-        if type(worst_case_exposure) is not Decimal:
+        if type(worst_case_exposure) is not _DECIMAL_TYPE:
             raise TypeError("worst_case_exposure must be exact Decimal")
         try:
             _RESOURCE_BOUND_VALIDATOR(worst_case_exposure)
@@ -1224,10 +1226,10 @@ def _synthetic_attempt(
             )
             odds_margin = _decimal_subtract_exact(
                 action.requested_odds,
-                Decimal("1"),
+                _DECIMAL_TYPE("1"),
             )
             execution_odds = _decimal_add_exact(
-                Decimal("1"),
+                _DECIMAL_TYPE("1"),
                 _decimal_scale_bps_exact(
                     odds_margin,
                     10_000 - slippage_bps,
@@ -1685,8 +1687,8 @@ def execute_paper_plan(
         assert result is not None
         return result
 
-    known_exposure = Decimal("0")
-    worst_case_exposure = Decimal("0")
+    known_exposure = _DECIMAL_TYPE("0")
+    worst_case_exposure = _DECIMAL_TYPE("0")
     for prior in attempts:
         assert prior.outcome is PaperAttemptOutcome.ACCEPTED
         known_exposure = _decimal_add_exact(

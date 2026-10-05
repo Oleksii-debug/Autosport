@@ -351,6 +351,53 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             ]
             self.assertEqual(len(run_events), 1)
 
+    def test_preflight_decision_mutation_fails_before_live_materialization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("preflight-decision-mutation", side="BACK")
+            current_prepared = prepared(runtime, current)
+            original_preflight = lay_guard._preflight_materialization_batch
+            original_materialize = runtime._materialize_attempt
+            materialize_calls = 0
+
+            def preflight_then_mutate(*args, **kwargs):
+                result = original_preflight(*args, **kwargs)
+                object.__setattr__(
+                    current_prepared.execution_plan,
+                    "decision_id",
+                    "redirected-after-preflight",
+                )
+                return result
+
+            def count_materialize(*args, **kwargs):
+                nonlocal materialize_calls
+                materialize_calls += 1
+                return original_materialize(*args, **kwargs)
+
+            with patch.object(
+                lay_guard,
+                "_preflight_materialization_batch",
+                preflight_then_mutate,
+            ), patch.object(
+                runtime,
+                "_materialize_attempt",
+                count_materialize,
+            ):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "authority changed after mint",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="preflight-decision-mutation",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertEqual(materialize_calls, 0)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
     def test_existing_ticket_with_forged_decision_provenance_is_not_restart_equivalent(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, _ledger, runtime = self.runtime(tmp)

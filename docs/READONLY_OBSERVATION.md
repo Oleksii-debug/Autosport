@@ -47,6 +47,8 @@ Useful bounded controls:
 
 The textual output includes source id, health state, received/accepted/rejected counts, quality flags, current quote count, latest source timestamp, cursor and a bounded set of current quote lines.
 
+Accessible live quote rows expose sport and exchange side in addition to event/market/selection identity, odds and source time. Missing optional identity dimensions are announced explicitly rather than silently omitted.
+
 ## Windows GUI live snapshot
 
 The Windows GUI exposes one manual read-only refresh at a time. The mode is explicitly selected as either:
@@ -56,9 +58,11 @@ The Windows GUI exposes one manual read-only refresh at a time. The mode is expl
 
 Authenticated mode reads only `AUTOSPORT_PARLAYAPI_KEY` from the process environment. No secret entry field exists in the GUI.
 
-`OneShotObservationWorker` performs acquisition on a daemon worker thread. That worker never calls Tk. `observe_workspace_once()` opens its own short-lived SQLite WAL connection and SourceHealthStore, performs the bounded snapshot, closes the market connection and returns an immutable result through a thread-safe queue.
+`OneShotObservationWorker` performs acquisition on a non-daemon worker thread. That worker never calls Tk. Non-daemon ownership is intentional: interpreter shutdown must not kill a live observation while it may be crossing a durable persistence boundary. `observe_workspace_once()` opens its own short-lived SQLite WAL connection and SourceHealthStore, performs the bounded snapshot, closes the market connection and returns an ownership-isolated `ObservationResult` through a thread-safe queue.
 
 The Tk main thread polls the queue with `after()`, then updates accessible status text and the live quote Listbox. The refresh control stays disabled until the terminal worker message is consumed, preventing overlapping manual snapshots from one GUI instance.
+
+Before publication, the worker revalidates the exact `ObservationResult` and snapshots ingestion statistics, source-health state and current quotes so caller-owned mutable references cannot change already-published live truth. Current quote ordering uses the full canonical `quote_key`, including sport/exchange-side identity where present.
 
 Keyboard navigation:
 

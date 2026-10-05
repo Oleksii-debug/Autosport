@@ -593,6 +593,33 @@ def verify_product_issued_paper_drawdown_evidence(
     return resolved
 
 
+def _same_canonical_paperbook_state(left: PaperBook, right: PaperBook) -> bool:
+    """Compare complete validated PAPER state for durable read-race detection.
+
+    The canonical risk digest remains the published risk identity. This exact
+    value comparison is intentionally only a resolver race detector because the
+    current risk digest can omit non-risk leg dimensions that still matter to
+    product evidence identity.
+    """
+
+    if type(left) is not PaperBook or type(right) is not PaperBook:
+        return False
+    try:
+        _require_product_issued_paper_state(left)
+        _require_product_issued_paper_state(right)
+        PaperBook._validate_loaded_state(left)
+        PaperBook._validate_loaded_state(right)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return False
+    return (
+        left.initial_bankroll == right.initial_bankroll
+        and left.balance == right.balance
+        and left.tickets == right.tickets
+        and left._lifecycle == right._lifecycle
+        and left._settlement_times == right._settlement_times
+    )
+
+
 def _durable_source_pair(
     *,
     paper_book_path: str,
@@ -616,7 +643,11 @@ def _durable_source_pair(
         raise ValueError("durable PaperBook cannot issue canonical equity-path evidence")
     book_after = PaperBook.load(Path(paper_book_path))
     after_state = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book_after)
-    if after_state is None or after_state != before_state:
+    if (
+        after_state is None
+        or after_state != before_state
+        or not _same_canonical_paperbook_state(book, book_after)
+    ):
         raise ValueError("durable PaperBook changed during equity-path resolution")
 
     # Close the cross-file read interval after the final PaperBook read. Without

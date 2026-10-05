@@ -1907,6 +1907,48 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertEqual(ticket.currency, "EUR")
         self.assertEqual(book.balance, Decimal("60.00"))
 
+    def test_lay_economics_bypass_rebound_domain_and_decimal_symbols(self):
+        import autosport._paperbook_lay_economics_guard as lay_economics_guard
+
+        book = PaperBook(Decimal("100"))
+        hostile_calls = 0
+
+        def forbidden(*_args, **_kwargs):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            raise AssertionError("rebound LAY type/decimal symbol executed")
+
+        targets = (
+            "Decimal",
+            "PaperTicket",
+            "TicketLeg",
+            "TicketStatus",
+            "localcontext",
+        )
+        patches = [
+            patch.object(lay_economics_guard, name, forbidden)
+            for name in targets
+        ]
+        for current_patch in patches:
+            current_patch.start()
+        try:
+            ticket = book.open_ticket(
+                [self._lay_leg()],
+                Decimal("10"),
+                placed_at=QUOTE_AT,
+            )
+            committed = book.committed_capital
+            settled = book.settle(ticket.ticket_id, set())
+        finally:
+            for current_patch in reversed(patches):
+                current_patch.stop()
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(committed, Decimal("40.00"))
+        self.assertEqual(settled.status, TicketStatus.WON)
+        self.assertEqual(settled.payout, Decimal("50.00"))
+        self.assertEqual(book.balance, Decimal("110.00"))
+
     def test_lay_economics_bypass_rebound_locked_capital_helper(self):
         import autosport._paperbook_lay_economics_guard as lay_economics_guard
 

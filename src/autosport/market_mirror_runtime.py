@@ -227,21 +227,38 @@ class FocusedMirrorDependencyIndex:
         # the initial view but before registration became visible, a post-publication
         # coherent catch-up observes those keys. Later advances are covered by normal
         # invalidation routing because the dependency is already registered.
-        catch_up = self._mirror.view()
-        if catch_up.revision != initial_view.revision:
-            catch_up_keys = {
-                (event.source_id, event.quote_key)
-                for event in catch_up.events
-                if dependency.matches(event)
-            }
+        try:
+            catch_up = self._mirror.view()
+            if catch_up.revision != initial_view.revision:
+                catch_up_keys = {
+                    (event.source_id, event.quote_key)
+                    for event in catch_up.events
+                    if dependency.matches(event)
+                }
+                with self._lock:
+                    if (
+                        self._dependencies.get(normalized_id) == dependency
+                        and self._dependency_revisions.get(normalized_id)
+                        == dependency_revision
+                    ):
+                        self._matched_keys[normalized_id].update(catch_up_keys)
+                        self._matched_revisions[normalized_id] = catch_up.revision
+        except BaseException:
+            # Registration is one transactional publication. If post-publication
+            # catch-up cannot complete, retract only the exact incarnation created
+            # by this call; never delete a concurrent replacement.
             with self._lock:
                 if (
                     self._dependencies.get(normalized_id) == dependency
                     and self._dependency_revisions.get(normalized_id)
                     == dependency_revision
                 ):
-                    self._matched_keys[normalized_id].update(catch_up_keys)
-                    self._matched_revisions[normalized_id] = catch_up.revision
+                    self._dependencies.pop(normalized_id, None)
+                    self._matched_keys.pop(normalized_id, None)
+                    self._matched_revisions.pop(normalized_id, None)
+                    self._dependency_revisions.pop(normalized_id, None)
+                    self._registry_revision += 1
+            raise
         return dependency
 
     def unregister(self, input_id: str) -> bool:

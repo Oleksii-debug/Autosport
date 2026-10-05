@@ -641,9 +641,11 @@ class DeterministicResearchCritic:
                 ]
                 selected_ids = tuple(item.evidence_id for item in included)
                 selected_hashes = tuple(item.content_sha256 for item in included)
-                if len(included) < self.policy.minimum_evidence_per_leg:
-                    reasons.append("insufficient causal evidence linked by forecast hash")
                 included_hashes = {item.content_sha256 for item in included}
+                if len(included_hashes) < self.policy.minimum_evidence_per_leg:
+                    reasons.append(
+                        "insufficient unique causal evidence linked by forecast hash"
+                    )
                 missing_declared_hashes = sorted(
                     forecast_evidence_hashes.difference(included_hashes)
                 )
@@ -743,6 +745,11 @@ class ResearchDecisionPipeline:
         _validate_canonical_string(decision_ts, "decision_ts")
         parse_iso_timestamp(decision_ts)
         evidence_items = tuple(evidence)
+        if any(not isinstance(item, ResearchEvidence) for item in evidence_items):
+            raise TypeError("evidence must contain ResearchEvidence items")
+        evidence_ids = [item.evidence_id for item in evidence_items]
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("research evidence_id values must be unique")
         goal = self.risk_policy.economic_goal
         quote_items = tuple(market_quotes or ())
         proposal_context: ProposedTicketRiskContext | None = None

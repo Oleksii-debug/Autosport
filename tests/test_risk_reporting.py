@@ -729,6 +729,54 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(actual_path, expected_path)
         self.assertEqual(actual_drawdown, expected_drawdown)
 
+    def test_durable_resolver_bypasses_rebound_source_loaders(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(97),),
+            Decimal("12"),
+            placed_at="2026-09-21T18:50:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T18:55:00+00:00",
+        )
+        goal = self._goal()
+        expected_path = build_product_issued_paper_equity_path(book, goal)
+        expected_drawdown = build_product_issued_paper_drawdown_evidence(book, goal)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper_book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with (
+                patch.object(
+                    PaperBook,
+                    "load",
+                    side_effect=AssertionError("rebound PaperBook.load executed"),
+                ),
+                patch.object(
+                    EconomicGoalStore,
+                    "load",
+                    side_effect=AssertionError("rebound EconomicGoalStore.load executed"),
+                ),
+            ):
+                actual_path = resolve_durable_product_issued_paper_equity_path(
+                    paper_book_path=str(paper_path),
+                    workspace=str(workspace),
+                )
+                actual_drawdown = resolve_durable_product_issued_paper_drawdown_evidence(
+                    paper_book_path=str(paper_path),
+                    workspace=str(workspace),
+                )
+
+        self.assertEqual(actual_path, expected_path)
+        self.assertEqual(actual_drawdown, expected_drawdown)
+
     def test_durable_resolver_rejects_alternate_paper_filename(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

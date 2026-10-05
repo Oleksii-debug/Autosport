@@ -1790,6 +1790,14 @@ def _place_action_with_final_durable_authority(
     """Hold durable attempt/approval authority through the irreversible send."""
 
     def operation() -> BetfairPlaceExecutionReport:
+        client_namespace = object.__getattribute__(client, "__dict__")
+        if (
+            type(client_namespace) is not dict
+            or "place_action" in client_namespace
+        ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client shadows canonical place_action dispatch"
+            )
         view = ledger.verified_execution_view(bound.execution_plan.plan_id)
         if view.plan_fingerprint != bound.execution_plan.fingerprint:
             raise ExecutionStateError(

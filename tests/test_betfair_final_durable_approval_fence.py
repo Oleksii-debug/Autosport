@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import hashlib
 import multiprocessing
@@ -556,6 +557,55 @@ def test_second_local_gate_denial_is_not_mislabeled_provider_unknown(
             bound.execution_plan.plan_id,
             "attempt-local-final-denial",
         )
+
+
+
+def test_report_request_digest_mismatch_becomes_unknown_without_evidence(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        original_place_action = client.place_action
+
+        def mismatched_report(*args, **kwargs):
+            report = original_place_action(*args, **kwargs)
+            replacement = (
+                "f" * 64
+                if report.request_sha256 != "f" * 64
+                else "e" * 64
+            )
+            return replace(report, request_sha256=replacement)
+
+        monkeypatch.setattr(client, "place_action", mismatched_report)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-report-request-digest-mismatch",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.evidence_id is None
+        view = ledger.verified_execution_view(
+            bound.execution_plan.plan_id
+        )
+        attempt = next(
+            item
+            for item in view.attempts
+            if item.attempt.attempt_id
+            == "attempt-report-request-digest-mismatch"
+        )
+        assert attempt.state is AttemptState.UNKNOWN
+        assert attempt.submitted_request_sha256 is not None
+        assert attempt.provider_evidence is None
+
 
 
 def test_unexpected_transport_exception_after_submitted_becomes_unknown() -> None:

@@ -265,6 +265,52 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(book.tickets, {})
             self.assertEqual(book.balance, Decimal("100.00"))
 
+    def test_runtime_ledger_replacement_fails_before_any_redirected_durable_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("ledger-replacement", side="BACK"))
+            redirected = PaperExecutionLedger(Path(tmp) / "redirected-paper-execution.jsonl")
+            runtime.ledger = redirected
+            original_events = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "runtime authority object changed",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="ledger-replacement",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), original_events)
+            self.assertEqual(redirected.events(), [])
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_runtime_book_replacement_fails_before_execution_or_materialization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("book-replacement", side="BACK"))
+            runtime.book = PaperBook("100.00")
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "runtime authority object changed",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="book-replacement",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
     def test_paper_value_rejects_mutated_side_subclass_without_comparison_hooks(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

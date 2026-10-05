@@ -1938,5 +1938,115 @@ class RealExecutionLedgerTests(unittest.TestCase):
 
 
 
+    def test_submitted_request_digest_survives_restart_in_verified_view(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-digest",
+                reserved_at=RESERVED_AT,
+            )
+            digest = "a" * 64
+            ledger.mark_submitted(
+                "try-digest",
+                submitted_at=SUBMITTED_AT,
+                submitted_request_sha256=digest,
+            )
+
+            restarted = RealExecutionLedger(path)
+            view = restarted.verified_execution_view("p1")
+
+            self.assertEqual(len(view.attempts), 1)
+            self.assertEqual(
+                view.attempts[0].submitted_request_sha256,
+                digest,
+            )
+            self.assertEqual(view.attempts[0].submitted_at, SUBMITTED_AT)
+
+    def test_legacy_submission_without_request_digest_remains_non_authoritative(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-legacy-submit",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted(
+                "try-legacy-submit",
+                submitted_at=SUBMITTED_AT,
+            )
+
+            view = RealExecutionLedger(path).verified_execution_view("p1")
+
+            self.assertIsNone(view.attempts[0].submitted_request_sha256)
+
+    def test_restart_rejects_hash_valid_invalid_submitted_request_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-tampered-submit",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted(
+                "try-tampered-submit",
+                submitted_at=SUBMITTED_AT,
+                submitted_request_sha256="b" * 64,
+            )
+
+            lines = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            submitted = next(
+                envelope
+                for envelope in lines
+                if envelope["event"]["event_type"]
+                == EventType.ATTEMPT_SUBMITTED.value
+            )
+            submitted["event"]["payload"]["submitted_request_sha256"] = "not-a-sha256"
+
+            import hashlib
+
+            body = json.dumps(
+                submitted["event"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            submitted["sha256"] = hashlib.sha256(body.encode()).hexdigest()
+            path.write_text(
+                "\n".join(
+                    json.dumps(
+                        envelope,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for envelope in lines
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            restarted = RealExecutionLedger(path)
+            with self.assertRaisesRegex(
+                (ExecutionLedgerIntegrityError, ValueError),
+                "submitted_request_sha256",
+            ):
+                restarted.verify_integrity()
+
+
+
 if __name__ == "__main__":
     unittest.main()

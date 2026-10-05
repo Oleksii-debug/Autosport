@@ -298,6 +298,84 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             ]
             self.assertEqual(len(run_events), 1)
 
+    def test_decision_id_mutation_after_execution_cannot_rewrite_materialized_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("post-run-decision-mutation", side="BACK")
+            current_prepared = prepared(runtime, current)
+            original_execute = adoption_module.execute_paper_plan
+
+            def execute_then_mutate(**kwargs):
+                run = original_execute(**kwargs)
+                object.__setattr__(
+                    current_prepared.execution_plan,
+                    "decision_id",
+                    "redirected-decision",
+                )
+                return run
+
+            with patch.object(
+                adoption_module,
+                "execute_paper_plan",
+                execute_then_mutate,
+            ):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "materialization decision_id changed after prepared authority mint",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="post-run-decision-mutation",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+            run_events = [
+                event
+                for event in ledger.events()
+                if event["event_type"] == "RUN_COMPLETED"
+            ]
+            self.assertEqual(len(run_events), 1)
+
+    def test_existing_ticket_with_forged_decision_provenance_is_not_restart_equivalent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("forged-ticket-decision", side="BACK")
+            current_prepared = prepared(runtime, current)
+
+            first = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="forged-ticket-decision",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+            self.assertEqual(len(first.ticket_ids), 1)
+            ticket = next(iter(book.tickets.values()))
+            object.__setattr__(
+                ticket,
+                "strategy_reason",
+                ticket.strategy_reason.replace(
+                    "decision_id=decision-1",
+                    "decision_id=forged-decision",
+                ),
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "existing PaperBook exposure conflicts with durable execution attempt",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="forged-ticket-decision",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(len(book.tickets), 1)
+            self.assertEqual(book.balance, Decimal("85.00"))
+
     def test_runtime_book_replacement_after_attempt_fails_before_materialization(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

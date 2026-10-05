@@ -490,3 +490,104 @@ def test_truncated_transition_advances_bridge_state_only_for_exposed_page(
     assert provider._sequence == 2
     assert set(provider._open_by_identity) == {identities[0], identities[1]}
     assert identities[2] not in provider._open_by_identity
+
+
+def test_uncommitted_truncated_page_reset_replays_same_bridge_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = BetfairAuthenticatedMarketProvider(
+        _runtime(),
+        freshness_policy=BetfairStreamFreshnessPolicy(max_age_ms=5_000),
+    )
+    provider.bind_durable_current({})
+    identities = tuple(
+        BetfairQuoteIdentity(
+            BETFAIR_STREAM_SOURCE_ID,
+            "1.23456789",
+            301 + index,
+            Decimal("0"),
+            BetfairQuoteSide.BACK,
+            Decimal("2"),
+        )
+        for index in range(2)
+    )
+    quotes = tuple(
+        ProviderQuote(
+            provider_event_id=_event_token(identity.market_id),
+            provider_market_id=identity.market_id,
+            provider_selection_id=_identity_token(identity),
+            decimal_odds=Decimal("2"),
+            observed_ts="2026-10-05T12:00:00+00:00",
+            sequence=index + 1,
+            status="open",
+            source_ts="2026-10-05T11:59:59+00:00",
+            metadata=_metadata(identity, evidence_id=f"rollback-{index}"),
+            exchange_side="back",
+        )
+        for index, identity in enumerate(identities)
+    )
+    monkeypatch.setattr(provider, "_build_transition", lambda: quotes)
+
+    first = provider.read_batch(1)
+    assert provider._sequence == 1
+    assert identities[0] in provider._open_by_identity
+
+    provider.reset_pending_snapshot()
+
+    assert provider._sequence == 0
+    assert provider._open_by_identity == {}
+    assert provider._pending_offset == 0
+
+    replayed = provider.read_batch(1)
+    assert replayed == first
+    assert provider._sequence == 1
+    assert set(provider._open_by_identity) == {identities[0]}
+
+
+def test_uncommitted_terminal_page_reset_restores_consumed_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = BetfairAuthenticatedMarketProvider(
+        _runtime(),
+        freshness_policy=BetfairStreamFreshnessPolicy(max_age_ms=5_000),
+    )
+    provider.bind_durable_current({})
+    identity = BetfairQuoteIdentity(
+        BETFAIR_STREAM_SOURCE_ID,
+        "1.23456789",
+        401,
+        Decimal("0"),
+        BetfairQuoteSide.BACK,
+        Decimal("2"),
+    )
+    quote = ProviderQuote(
+        provider_event_id=_event_token(identity.market_id),
+        provider_market_id=identity.market_id,
+        provider_selection_id=_identity_token(identity),
+        decimal_odds=Decimal("2"),
+        observed_ts="2026-10-05T12:00:00+00:00",
+        sequence=1,
+        status="open",
+        source_ts="2026-10-05T11:59:59+00:00",
+        metadata=_metadata(identity, evidence_id="terminal-rollback"),
+        exchange_side="back",
+    )
+    calls = 0
+
+    def build_once() -> tuple[ProviderQuote, ...]:
+        nonlocal calls
+        calls += 1
+        return (quote,)
+
+    monkeypatch.setattr(provider, "_build_transition", build_once)
+
+    first = provider.read_batch(10)
+    assert first.quality_flags == ()
+    assert provider._pending == ()
+
+    provider.reset_pending_snapshot()
+    replayed = provider.read_batch(10)
+
+    assert replayed == first
+    assert calls == 1
+    assert provider._sequence == 1

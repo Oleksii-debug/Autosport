@@ -90,7 +90,7 @@ def test_in_place_now_code_mutation_cannot_choose_reservation_epoch(
     forged_time = "2001-01-01T00:00:00+00:00"
 
     def forged_now() -> str:
-        return forged_time
+        return "2001-01-01T00:00:00+00:00"
 
     monkeypatch.setattr(ledger_module._now, "__code__", forged_now.__code__)
 

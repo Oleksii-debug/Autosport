@@ -210,6 +210,29 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                     decision_id="decision-lay",
                 )
 
+    def test_runtime_rejects_prepared_execution_subclass_before_field_access(self):
+        class HostilePrepared(PreparedPaperExecution):
+            def __getattribute__(self, name):
+                if name not in {"__class__"}:
+                    raise AssertionError("hostile prepared fields must not be read")
+                return super().__getattribute__(name)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            hostile = object.__new__(HostilePrepared)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "prepared must be exact PreparedPaperExecution",
+            ):
+                runtime._mint_prepared(hostile)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "prepared must be exact PreparedPaperExecution",
+            ):
+                runtime._require_minted(hostile)
+
     def test_constructor_rejects_model_config_subclass_before_access(self):
         class HostileConfig(PaperExecutionModelConfig):
             def __getattribute__(self, name):

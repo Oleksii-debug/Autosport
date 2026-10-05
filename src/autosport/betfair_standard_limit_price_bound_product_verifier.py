@@ -238,6 +238,7 @@ def _build_product_entrypoint():
             raise BetfairStandardLimitPriceBoundError(
                 "canonical Betfair product verifier reopen authority changed"
             )
+        expected_issuance_directory = workspace / "supervised-plan-issuance"
         if (
             type(
                 exact_instance_field(
@@ -259,6 +260,20 @@ def _build_product_entrypoint():
                 "canonical product issuance store",
             )
             is not None
+            or type(
+                exact_instance_field(
+                    canonical_store,
+                    "directory",
+                    "canonical product issuance store",
+                )
+            )
+            is not canonical_path_type
+            or exact_instance_field(
+                canonical_store,
+                "directory",
+                "canonical product issuance store",
+            )
+            != expected_issuance_directory
             or type(
                 exact_instance_field(
                     canonical_ledger,

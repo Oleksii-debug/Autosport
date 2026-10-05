@@ -2171,3 +2171,73 @@ def test_save_rejects_rebound_snapshot_path_helper_before_execution(
 
     assert attacker_calls == 0
 
+def test_save_rejects_rebound_lifecycle_serializer_before_execution(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    attacker_calls = 0
+
+    def hostile(self):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound lifecycle serializer executed")
+
+    monkeypatch.setattr(PaperBook, "_lifecycle_to_json", hostile)
+
+    with pytest.raises(ValueError, match="lifecycle serializer dispatch changed"):
+        book.save(tmp_path / "never-published.json")
+
+    assert attacker_calls == 0
+
+
+def test_save_rejects_rebound_parent_durability_helper_before_execution(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    attacker_calls = 0
+
+    def hostile(cls, directory):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound parent durability helper executed")
+
+    monkeypatch.setattr(
+        PaperBook,
+        "_ensure_snapshot_parent_durable",
+        classmethod(hostile),
+    )
+
+    with pytest.raises(ValueError, match="parent durability dispatch changed"):
+        book.save(tmp_path / "never-published.json")
+
+    assert attacker_calls == 0
+
+
+def test_save_rejects_rebound_directory_fsync_helper_before_execution(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    attacker_calls = 0
+
+    def hostile(directory):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound directory fsync helper executed")
+
+    monkeypatch.setattr(
+        PaperBook,
+        "_fsync_snapshot_directory",
+        staticmethod(hostile),
+    )
+
+    with pytest.raises(ValueError, match="directory fsync dispatch changed"):
+        book.save(tmp_path / "never-published.json")
+
+    assert attacker_calls == 0
+

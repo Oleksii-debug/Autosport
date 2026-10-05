@@ -1491,5 +1491,28 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         self.assertEqual(ticket.status.value, "open")
         self.assertEqual(ticket.payout, Decimal("0"))
 
+
+    def test_windows_post_replace_fsync_reopens_snapshot_with_write_access(self):
+        book = PaperBook("100")
+        destination = Path(self._tmp.name) / "windows-fsync-reopen.json"
+        calls: list[tuple[Path, int]] = []
+        canonical_open = paper_module._CANONICAL_OS_OPEN
+
+        def record_open(path: object, flags: int):
+            calls.append((Path(path), flags))
+            return canonical_open(path, flags)
+
+        with (
+            patch.object(paper_module, "_CANONICAL_OS_NAME", "nt"),
+            patch.object(paper_module, "_CANONICAL_OS_OPEN", side_effect=record_open),
+        ):
+            book.save(destination)
+
+        published = [flags for path, flags in calls if path == destination]
+        self.assertEqual(published, [os.O_RDWR])
+        self.assertTrue(destination.exists())
+        self.assertEqual(PaperBook.load(destination).balance, Decimal("100"))
+
+
 if __name__ == "__main__":
     unittest.main()

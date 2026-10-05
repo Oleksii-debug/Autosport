@@ -384,6 +384,25 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("100.00"))
         self.assertEqual(book.committed_capital, Decimal("0"))
 
+    def test_open_lay_snapshot_round_trip_preserves_liability_and_side(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-book.json"
+            book = PaperBook(Decimal("100"))
+            ticket = book.open_ticket(
+                [self._lay_leg()],
+                Decimal("10"),
+                placed_at=QUOTE_AT,
+            )
+            book.save(path)
+
+            loaded = PaperBook.load(path)
+            loaded_ticket = loaded.tickets[ticket.ticket_id]
+
+            self.assertEqual(loaded_ticket.legs[0].exchange_side, "lay")
+            self.assertEqual(loaded_ticket.stake, Decimal("10"))
+            self.assertEqual(loaded.balance, Decimal("60.00"))
+            self.assertEqual(loaded.committed_capital, Decimal("40.00"))
+
 
 if __name__ == "__main__":
     unittest.main()

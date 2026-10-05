@@ -17,6 +17,7 @@ account attestation, settlement, execution, or real-money authority.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from hashlib import sha256
 import json
@@ -450,6 +451,8 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
         ] = {}
         self._market_status_by_id: dict[str, str] = {}
         self._market_open_sequence: dict[str, int] = {}
+        self._runner_status_by_key: dict[tuple[str, int, Decimal], str] = {}
+        self._runner_active_sequence: dict[tuple[str, int, Decimal], int] = {}
         # The subscription acknowledgement is required to be authenticated frame 1.
         # Every later market frame must therefore be consumed by this runtime without
         # gaps; otherwise an unseen delta could make the local market image false.
@@ -493,6 +496,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                         )
                     accepted_ms = _wall_time_ms()
                     market_status_updates = _market_status_updates(raw)
+                    runner_status_updates = _runner_status_updates(raw)
                     self._require_current_connection()
                     issued = self._freshness.ingest_raw(
                         raw,
@@ -501,6 +505,10 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                     )
                     self._commit_market_status_updates(
                         market_status_updates,
+                        frame.frame_sequence,
+                    )
+                    self._commit_runner_status_updates(
+                        runner_status_updates,
                         frame.frame_sequence,
                     )
                     for evidence in issued:
@@ -611,6 +619,26 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                     transport_frame_sha256=frame_sha,
                     evaluated_at_ms=evaluated_at_ms,
                 )
+            runner_key = (market_id, identity.selection_id, identity.handicap)
+            if self._runner_status_by_key.get(runner_key) != "ACTIVE":
+                return BetfairAuthenticatedFreshnessDecision(
+                    verdict=BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED,
+                    reason="Betfair runner status is not authoritatively ACTIVE",
+                    evidence_id=structural.evidence_id,
+                    subscription_id=self._subscription.subscription_id,
+                    transport_frame_sha256=frame_sha,
+                    evaluated_at_ms=evaluated_at_ms,
+                )
+            active_sequence = self._runner_active_sequence.get(runner_key)
+            if active_sequence is None or frame_sequence < active_sequence:
+                return BetfairAuthenticatedFreshnessDecision(
+                    verdict=BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED,
+                    reason="quote predates the current Betfair ACTIVE runner epoch",
+                    evidence_id=structural.evidence_id,
+                    subscription_id=self._subscription.subscription_id,
+                    transport_frame_sha256=frame_sha,
+                    evaluated_at_ms=evaluated_at_ms,
+                )
             if self._transport.identity.app_key_class != "LIVE":
                 return BetfairAuthenticatedFreshnessDecision(
                     verdict=BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED,
@@ -668,6 +696,20 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                     self._market_open_sequence[market_id] = frame_sequence
                 continue
             self._market_open_sequence.pop(market_id, None)
+
+    def _commit_runner_status_updates(
+        self,
+        updates: dict[tuple[str, int, Decimal], str],
+        frame_sequence: int,
+    ) -> None:
+        for runner_key, status in updates.items():
+            prior = self._runner_status_by_key.get(runner_key)
+            self._runner_status_by_key[runner_key] = status
+            if status == "ACTIVE":
+                if prior != "ACTIVE":
+                    self._runner_active_sequence[runner_key] = frame_sequence
+                continue
+            self._runner_active_sequence.pop(runner_key, None)
 
     def _bound_frame_binding(
         self,
@@ -737,6 +779,12 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             open_sequence = self._market_open_sequence.get(market_id)
             if open_sequence is None or frame_sequence < open_sequence:
                 return False
+            runner_key = (market_id, identity.selection_id, identity.handicap)
+            if self._runner_status_by_key.get(runner_key) != "ACTIVE":
+                return False
+            active_sequence = self._runner_active_sequence.get(runner_key)
+            if active_sequence is None or frame_sequence < active_sequence:
+                return False
             if (
                 _consumer_lag_rejection_reason(
                     received_monotonic_ns,
@@ -791,6 +839,87 @@ def _market_status_updates(raw_message: dict[str, Any]) -> dict[str, str]:
                 "Betfair marketDefinition status is unsupported"
             )
         updates[market_id] = status
+    return updates
+
+
+def _runner_status_updates(
+    raw_message: dict[str, Any],
+) -> dict[tuple[str, int, Decimal], str]:
+    market_changes = raw_message.get("mc", [])
+    if type(market_changes) is not list:
+        raise BetfairAuthenticatedStreamError(
+            "authenticated market-change mc must be a list"
+        )
+    updates: dict[tuple[str, int, Decimal], str] = {}
+    allowed = {
+        "ACTIVE",
+        "WINNER",
+        "LOSER",
+        "PLACED",
+        "REMOVED_VACANT",
+        "REMOVED",
+        "HIDDEN",
+    }
+    for change in market_changes:
+        if type(change) is not dict:
+            raise BetfairAuthenticatedStreamError(
+                "authenticated market change must be an object"
+            )
+        definition = change.get("marketDefinition")
+        if definition is None:
+            continue
+        if type(definition) is not dict:
+            raise BetfairAuthenticatedStreamError(
+                "Betfair marketDefinition must be an object"
+            )
+        market_id = change.get("id")
+        if type(market_id) is not str or not market_id or market_id.strip() != market_id:
+            raise BetfairAuthenticatedStreamError(
+                "Betfair runner definition requires canonical market id"
+            )
+        runners = definition.get("runners")
+        if runners is None:
+            continue
+        if type(runners) is not list:
+            raise BetfairAuthenticatedStreamError(
+                "Betfair marketDefinition runners must be a list"
+            )
+        for runner in runners:
+            if type(runner) is not dict:
+                raise BetfairAuthenticatedStreamError(
+                    "Betfair runner definition must be an object"
+                )
+            selection_id = runner.get("id")
+            if type(selection_id) is not int or selection_id <= 0:
+                raise BetfairAuthenticatedStreamError(
+                    "Betfair runner definition id must be positive"
+                )
+            raw_handicap = runner.get("hc")
+            if raw_handicap is None:
+                handicap = Decimal("0")
+            elif isinstance(raw_handicap, bool) or not isinstance(
+                raw_handicap, (int, float, str)
+            ):
+                raise BetfairAuthenticatedStreamError(
+                    "Betfair runner definition handicap is invalid"
+                )
+            else:
+                try:
+                    handicap = Decimal(str(raw_handicap))
+                except (InvalidOperation, ValueError):
+                    raise BetfairAuthenticatedStreamError(
+                        "Betfair runner definition handicap is invalid"
+                    ) from None
+                if not handicap.is_finite():
+                    raise BetfairAuthenticatedStreamError(
+                        "Betfair runner definition handicap is invalid"
+                    )
+            status = runner.get("status")
+            if type(status) is not str or status not in allowed:
+                raise BetfairAuthenticatedStreamError(
+                    "Betfair runner definition status is unsupported"
+                )
+            updates[(market_id, selection_id, handicap)] = status
     return updates
 
 

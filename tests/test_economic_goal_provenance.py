@@ -73,6 +73,26 @@ def test_provenance_verifies_after_durable_restart_readback(tmp_path) -> None:
     assert restored == goal
 
 
+def test_provenance_trust_roots_are_detached_from_live_rebinding(monkeypatch) -> None:
+    import autosport.economic_goal_provenance as provenance
+
+    goal = _goal()
+    expected = provenance.provenance_for(goal)
+    calls = 0
+
+    def forbidden(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("hostile provenance trust root executed")
+
+    monkeypatch.setattr(provenance, "economic_goal_to_payload", forbidden)
+    monkeypatch.setattr(provenance, "contract_sha256", forbidden)
+    monkeypatch.setattr(provenance, "EconomicGoalContract", forbidden)
+
+    assert provenance.provenance_for(goal) == expected
+    provenance.verify_provenance(goal, expected)
+    assert calls == 0
+
 def test_provenance_fails_closed_after_contract_tampering() -> None:
     goal = _goal()
     evidence = provenance_for(goal)

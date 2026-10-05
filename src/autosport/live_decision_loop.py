@@ -915,6 +915,16 @@ class PersistentLiveDecisionLoop:
                 )
             self._input_specs[spec.input_id] = spec
 
+        self._pending_dependency_revisions: tuple[tuple[str, int], ...] | None = None
+        if (
+            self._progress is not None
+            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+        ):
+            self._pending_dependency_revisions = tuple(
+                (dependency.input_id, revision)
+                for dependency, revision in self.dependencies.registry_state_snapshot()
+            )
+
         if observation_runner is None:
             assert provider is not None
 
@@ -1745,15 +1755,22 @@ class PersistentLiveDecisionLoop:
             )
         durable_input_specs = self._load_input_registry() or ()
         current_input_specs = tuple(self._input_specs.values())
+        focused_dependency_state = self.dependencies.registry_state_snapshot()
         focused_input_specs = tuple(
             _InputSpec.from_dependency(dependency)
-            for dependency in self.dependencies.registry_snapshot()
+            for dependency, _revision in focused_dependency_state
+        )
+        focused_dependency_revisions = tuple(
+            (dependency.input_id, revision)
+            for dependency, revision in focused_dependency_state
         )
         durable_input_ids = tuple(spec.input_id for spec in durable_input_specs)
         if (
             progress.registered_input_ids != durable_input_ids
             or current_input_specs != durable_input_specs
             or focused_input_specs != durable_input_specs
+            or self._pending_dependency_revisions is None
+            or focused_dependency_revisions != self._pending_dependency_revisions
         ):
             raise LiveDecisionProgressError(
                 "unfinished live decision requires exact durable dependency registry"
@@ -2514,9 +2531,14 @@ class PersistentLiveDecisionLoop:
             durable_progress = self._load_progress()
             durable_input_specs = self._load_input_registry() or ()
             current_input_specs = tuple(self._input_specs.values())
+            focused_dependency_state = self.dependencies.registry_state_snapshot()
             focused_input_specs = tuple(
                 _InputSpec.from_dependency(dependency)
-                for dependency in self.dependencies.registry_snapshot()
+                for dependency, _revision in focused_dependency_state
+            )
+            focused_dependency_revisions = tuple(
+                (dependency.input_id, revision)
+                for dependency, revision in focused_dependency_state
             )
             durable_input_ids = tuple(spec.input_id for spec in durable_input_specs)
             if (
@@ -2534,6 +2556,8 @@ class PersistentLiveDecisionLoop:
                 or durable_progress.registered_input_ids != durable_input_ids
                 or current_input_specs != durable_input_specs
                 or focused_input_specs != durable_input_specs
+                or self._pending_dependency_revisions is None
+                or focused_dependency_revisions != self._pending_dependency_revisions
                 or durable_progress.gate != gate
             ):
                 raise LiveDecisionProgressError(
@@ -2684,6 +2708,7 @@ class PersistentLiveDecisionLoop:
             )
             atomic_write_json(self.progress_path, committed.to_dict())
             self._progress = committed
+            self._pending_dependency_revisions = None
 
         return LiveCycleResult(
             LiveCycleStatus.DUPLICATE_DECISION if duplicate else LiveCycleStatus.DECIDED,
@@ -2724,7 +2749,7 @@ class PersistentLiveDecisionLoop:
         if owns_store:
             store = SQLiteMarketStore(self.workspace / "market.db")
 
-        def publish_pending() -> _Progress:
+        def publish_pending() -> tuple[_Progress, tuple[tuple[str, int], ...]]:
             with WorkspaceEconomicLock(self.workspace):
                 durable_control = self._load_control()
                 if durable_control is None:
@@ -2758,7 +2783,15 @@ class PersistentLiveDecisionLoop:
                 expected_input_ids = tuple(
                     spec.input_id for spec in bound_input_specs
                 )
-                current_dependencies = self.dependencies.registry_snapshot()
+                current_dependency_state = self.dependencies.registry_state_snapshot()
+                current_dependencies = tuple(
+                    dependency
+                    for dependency, _revision in current_dependency_state
+                )
+                pending_dependency_revisions = tuple(
+                    (dependency.input_id, revision)
+                    for dependency, revision in current_dependency_state
+                )
                 if (
                     tuple(
                         _InputSpec.from_dependency(dependency)
@@ -2844,11 +2877,11 @@ class PersistentLiveDecisionLoop:
                     gate=gate,
                 )
                 atomic_write_json(self.progress_path, pending.to_dict())
-                return pending
+                return pending, pending_dependency_revisions
 
         try:
             if market_append_generation is None:
-                pending = publish_pending()
+                pending, pending_dependency_revisions = publish_pending()
             else:
                 assert store is not None
                 # The guard spans both the complete current-tail proof and durable
@@ -2883,12 +2916,13 @@ class PersistentLiveDecisionLoop:
                             "decision-visible market state is not durable at "
                             "sampled append frontier"
                         )
-                    pending = publish_pending()
+                    pending, pending_dependency_revisions = publish_pending()
         finally:
             if owns_store:
                 assert store is not None
                 store.close()
         self._progress = pending
+        self._pending_dependency_revisions = pending_dependency_revisions
 
     def _load_input_registry(self) -> tuple[_InputSpec, ...] | None:
         if not self.inputs_path.exists():

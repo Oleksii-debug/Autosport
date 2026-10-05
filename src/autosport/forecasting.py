@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -23,11 +24,21 @@ _SHA256_HEX = frozenset("0123456789abcdef")
 
 
 def parse_iso_timestamp(value: str) -> datetime:
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise ValueError("timestamp must be a non-empty trimmed string")
+    for match in re.finditer(r"[.,]([0-9]+)", value):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(
+                "timestamp precision finer than microseconds is unsupported"
+            )
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(f"invalid ISO timestamp: {value}") from exc
-    if parsed.tzinfo is None:
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("timestamps must include timezone")
     return parsed
 

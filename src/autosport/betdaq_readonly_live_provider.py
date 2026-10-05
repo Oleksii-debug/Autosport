@@ -95,6 +95,15 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
     def last_catalogue_evidence(self) -> BetdaqCatalogueEvidence | None:
         return self._last_catalogue_evidence
 
+    def _rate_admission_receipt(self) -> str | None:
+        receipt = super()._rate_admission_receipt()
+        admission = self._live_transport.last_rate_admission
+        if admission is not None and admission.method != "GetPrices":
+            raise ValueError(
+                "live BETDAQ GetPrices acquisition bound wrong rate admission"
+            )
+        return receipt
+
     def _binding_for_market(
         self,
         market: object,

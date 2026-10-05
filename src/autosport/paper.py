@@ -825,10 +825,6 @@ def _seal_paperbook_json_decode_authority(method):
     raw_snapshot_decode_code = raw_snapshot_decode.__code__
     type_authority = _require_paperbook_type_authority
     type_authority_code = type_authority.__code__
-    canonical_load_bytes = _decode_canonical_paperbook_bytes
-    canonical_load_bytes_code = canonical_load_bytes.__code__
-    canonical_snapshot_path = _canonical_paperbook_snapshot_path
-    canonical_snapshot_path_code = canonical_snapshot_path.__code__
 
     def require_type(target: object) -> None:
         if type_authority.__code__ is not type_authority_code:

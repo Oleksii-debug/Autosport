@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+import autosport.supervised_plan_issuance as issuance_module
+
 from autosport.betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundError,
     resolve_betfair_standard_limit_price_bound,
@@ -252,4 +254,24 @@ def test_product_verifier_rejects_runtime_workspace_descriptor_rebinding_before_
             )
 
     assert attacker_called is False
+
+def test_product_verifier_rejects_reopened_store_directory_redirection(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    bound, action, store, ledger, evidence = _case(monkeypatch, tmp_path)
+
+    with _active_runtime_profile(store.workspace) as runtime_profile:
+        monkeypatch.setattr(issuance_module, "_DIRECTORY", "attacker-issuance")
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="reopen state changed",
+        ):
+            verify_product_betfair_standard_limit_price_bound(
+                evidence=evidence,
+                ledger=ledger,
+                issuance_store=store,
+                runtime_profile=runtime_profile,
+                execution_plan_id=bound.execution_plan.plan_id,
+                action_id=action.action_id,
+            )
 

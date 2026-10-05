@@ -3589,9 +3589,11 @@ class PersistentLiveDecisionLoop:
         *,
         expected_previous: tuple[_InputSpec, ...],
     ) -> None:
+        self._assert_canonical_persistence_authority()
         candidate = tuple(self._input_specs.values())
         payload = self._input_registry_payload(candidate)
-        with WorkspaceEconomicLock(self.workspace):
+        with WorkspaceEconomicLock(self._workspace_authority):
+            self._assert_canonical_persistence_authority()
             durable_progress = self._load_progress()
             if durable_progress != self._progress:
                 raise LiveDecisionProgressError(
@@ -5028,8 +5030,10 @@ class PersistentLiveDecisionLoop:
             ) from exc
 
     def _persist_control(self, state: LiveControlState) -> None:
+        self._assert_canonical_persistence_authority()
         candidate = _Control(self.loop_id, state)
-        with WorkspaceEconomicLock(self.workspace):
+        with WorkspaceEconomicLock(self._workspace_authority):
+            self._assert_canonical_persistence_authority()
             durable = self._load_control()
             if durable is not None:
                 if durable.loop_id != self.loop_id:

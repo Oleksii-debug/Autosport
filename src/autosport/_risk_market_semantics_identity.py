@@ -13,7 +13,7 @@ issue risk evidence, widen an EconomicGoalContract, or create execution permissi
 
 from __future__ import annotations
 
-from types import FunctionType
+from types import FunctionType, MethodType
 
 from . import domain as _domain
 from . import paper as _paper
@@ -46,6 +46,26 @@ if (
 ):
     raise RuntimeError("canonical PaperRiskPolicy quote-risk root is unavailable")
 _CANONICAL_QUOTE_RISK_DECISION = _original_quote_descriptor.__func__
+
+
+def _capture_function_witness(value: object) -> tuple[object, ...]:
+    """Snapshot executable metadata for one captured transitive authority helper."""
+
+    if type(value) is FunctionType:
+        function = value
+    elif type(value) is MethodType:
+        function = value.__func__
+    else:
+        raise RuntimeError("market-semantics authority helper is not a Python function")
+    if type(function) is not FunctionType:
+        raise RuntimeError("market-semantics authority helper executable is invalid")
+    return (
+        function,
+        function.__code__,
+        function.__defaults__,
+        function.__kwdefaults__,
+        function.__closure__,
+    )
 
 
 def _leg_settlement_key(
@@ -124,6 +144,24 @@ def _context_post_init(
     _validator(self)
 
 
+_CONTEXT_MARKET_SEMANTICS_HELPER_WITNESSES = tuple(
+    _capture_function_witness(helper)
+    for helper in (
+        _validate_context_market_semantics,
+        _leg_settlement_key,
+        _quote_settlement_key,
+        _CANONICAL_CONTEXT_VALIDATOR,
+        _CANONICAL_PROPOSED_LEG_VALIDATOR,
+        _CANONICAL_SEMANTIC_IDENTITY,
+        _CANONICAL_MARKET_SETTLEMENT_KEY,
+        _CANONICAL_QUOTE_TO_DICT,
+        _CANONICAL_QUOTE_FROM_DICT,
+        _CANONICAL_LEG_QUOTE_KEY,
+        _CANONICAL_QUOTE_QUOTE_KEY,
+    )
+)
+
+
 def _portfolio_payload(
     book: object,
     _book_type=_BOOK_TYPE,
@@ -195,15 +233,37 @@ def _portfolio_payload(
     }
 
 
+_PORTFOLIO_HELPER_WITNESSES = tuple(
+    _capture_function_witness(helper)
+    for helper in (
+        _portfolio_payload,
+        _CANONICAL_BOOK_VALIDATE_STATE,
+        _CANONICAL_BOOK_VALIDATE_LIFECYCLE_ENTRY,
+        _CANONICAL_SHA256_PAYLOAD,
+    )
+)
+
+
 def _risk_of_ruin_portfolio_sha256(
     cls: type,
     book: object,
     _policy_type=_POLICY_TYPE,
     _payload_builder=_portfolio_payload,
     _digest=_CANONICAL_SHA256_PAYLOAD,
+    _helper_witnesses=_PORTFOLIO_HELPER_WITNESSES,
+    _function_type=FunctionType,
 ) -> str | None:
     if cls is not _policy_type or type(book) is not _BOOK_TYPE:
         return None
+    for function, code, defaults, kwdefaults, closure in _helper_witnesses:
+        if (
+            type(function) is not _function_type
+            or function.__code__ is not code
+            or function.__defaults__ is not defaults
+            or function.__kwdefaults__ is not kwdefaults
+            or function.__closure__ is not closure
+        ):
+            return None
     try:
         return _digest(_payload_builder(book))
     except (ArithmeticError, AttributeError, TypeError, ValueError):
@@ -258,18 +318,47 @@ def _candidate_payload(
     }
 
 
+_CANDIDATE_HELPER_WITNESSES = (
+    _CONTEXT_MARKET_SEMANTICS_HELPER_WITNESSES
+    + (
+        _capture_function_witness(_candidate_payload),
+        _capture_function_witness(_CANONICAL_SHA256_PAYLOAD),
+    )
+)
+
+
 def _risk_of_ruin_candidate_sha256(
     context: object,
     _context_type=_CONTEXT_TYPE,
     _payload_builder=_candidate_payload,
     _digest=_CANONICAL_SHA256_PAYLOAD,
+    _helper_witnesses=_CANDIDATE_HELPER_WITNESSES,
+    _function_type=FunctionType,
 ) -> str | None:
     if type(context) is not _context_type:
         return None
+    for function, code, defaults, kwdefaults, closure in _helper_witnesses:
+        if (
+            type(function) is not _function_type
+            or function.__code__ is not code
+            or function.__defaults__ is not defaults
+            or function.__kwdefaults__ is not kwdefaults
+            or function.__closure__ is not closure
+        ):
+            return None
     try:
         return _digest(_payload_builder(context))
     except (ArithmeticError, AttributeError, TypeError, ValueError):
         return None
+
+
+_VECTOR_HELPER_WITNESSES = tuple(
+    _capture_function_witness(helper)
+    for helper in (
+        _risk_of_ruin_candidate_sha256,
+        _CANONICAL_SHA256_PAYLOAD,
+    )
+)
 
 
 def _risk_of_ruin_candidate_vector_sha256(
@@ -279,9 +368,20 @@ def _risk_of_ruin_candidate_vector_sha256(
     _context_type=_CONTEXT_TYPE,
     _candidate_digest=_risk_of_ruin_candidate_sha256,
     _digest=_CANONICAL_SHA256_PAYLOAD,
+    _helper_witnesses=_VECTOR_HELPER_WITNESSES,
+    _function_type=FunctionType,
 ) -> str | None:
     if cls is not _policy_type or type(contexts) is not tuple or not contexts:
         return None
+    for function, code, defaults, kwdefaults, closure in _helper_witnesses:
+        if (
+            type(function) is not _function_type
+            or function.__code__ is not code
+            or function.__defaults__ is not defaults
+            or function.__kwdefaults__ is not kwdefaults
+            or function.__closure__ is not closure
+        ):
+            return None
     candidate_hashes: list[str] = []
     for context in contexts:
         if type(context) is not _context_type:
@@ -301,13 +401,30 @@ def _risk_of_ruin_candidate_vector_sha256(
         return None
 
 
+_QUOTE_RISK_HELPER_WITNESSES = (
+    _CONTEXT_MARKET_SEMANTICS_HELPER_WITNESSES
+    + (_capture_function_witness(_CANONICAL_QUOTE_RISK_DECISION),)
+)
+
+
 def _quote_risk_decision(
     goal: object,
     context: object,
     _validator=_validate_context_market_semantics,
     _delegate=_CANONICAL_QUOTE_RISK_DECISION,
     _decision_type=_risk.RiskDecision,
+    _helper_witnesses=_QUOTE_RISK_HELPER_WITNESSES,
+    _function_type=FunctionType,
 ):
+    for function, code, defaults, kwdefaults, closure in _helper_witnesses:
+        if (
+            type(function) is not _function_type
+            or function.__code__ is not code
+            or function.__defaults__ is not defaults
+            or function.__kwdefaults__ is not kwdefaults
+            or function.__closure__ is not closure
+        ):
+            return _decision_type(False, "proposed ticket quote risk evidence is invalid")
     try:
         _validator(context)
     except (AttributeError, TypeError, ValueError):
@@ -376,3 +493,4 @@ _install()
 del _install
 del _policy_namespace
 del _original_quote_descriptor
+del _capture_function_witness

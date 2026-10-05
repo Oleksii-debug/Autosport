@@ -1609,3 +1609,26 @@ def test_save_rejects_in_place_json_serializer_code_mutation(tmp_path) -> None:
         authority.__code__ = original_code
 
     assert not destination.exists()
+
+def test_serialized_operation_rejects_in_place_closure_callable_code_mutation() -> None:
+    book = PaperBook("100")
+    serialized = PaperBook.committed_stake.fget
+    assert serialized is not None
+    inner = next(
+        cell.cell_contents
+        for cell in serialized.__closure__ or ()
+        if callable(cell.cell_contents)
+        and getattr(cell.cell_contents, "__name__", None) == "committed_stake"
+    )
+    original_code = inner.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        inner.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="operation callable authority changed"):
+            _ = book.committed_stake
+    finally:
+        inner.__code__ = original_code
+
+    assert book.balance == Decimal("100")
+

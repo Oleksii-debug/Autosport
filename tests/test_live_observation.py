@@ -568,6 +568,94 @@ class LiveObservationTests(unittest.TestCase):
         self.assertEqual(provider.read_count, 1)
         self.assertTrue(wrapped.has_inflight)
 
+    def test_final_sqlite_failure_does_not_reset_after_provider_source_drift(self):
+        batch = ProviderBatch(
+            source_id="live-fixture",
+            quotes=(),
+            cursor="cursor-1",
+        )
+
+        class Provider:
+            def __init__(self) -> None:
+                self.source_id = "live-fixture"
+                self.reset_calls = 0
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                self.reset_calls += 1
+
+        provider = Provider()
+
+        class Engine:
+            def __init__(self) -> None:
+                self.attempt = 0
+
+            def poll_once(self, wrapped, max_items: int = 1000):
+                self.attempt += 1
+                wrapped.read_batch(max_items=max_items)
+                if self.attempt == 1:
+                    raise sqlite3.OperationalError("database-locked")
+                provider.source_id = "mutated-source"
+                raise sqlite3.OperationalError("database-still-locked")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(provider)
+        with self.assertRaisesRegex(
+            sqlite3.OperationalError,
+            "database-still-locked",
+        ) as raised:
+            live_observation_module._poll_acknowledged(
+                Engine(),
+                wrapped,
+                max_items=1,
+            )
+
+        self.assertEqual(provider.reset_calls, 0)
+        self.assertFalse(wrapped.has_inflight)
+        self.assertTrue(
+            any(
+                "provider source identity changed before pending-snapshot reset"
+                in note
+                for note in getattr(raised.exception, "__notes__", ())
+            )
+        )
+
+    def test_abandon_uncommitted_rejects_equal_string_subclass_source_identity(self):
+        class SourceId(str):
+            pass
+
+        batch = ProviderBatch(
+            source_id="live-fixture",
+            quotes=(),
+            cursor="cursor-1",
+        )
+
+        class Provider:
+            def __init__(self) -> None:
+                self.source_id = "live-fixture"
+                self.reset_calls = 0
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                self.reset_calls += 1
+
+        provider = Provider()
+        wrapped = live_observation_module._ReplayableBatchProvider(provider)
+        self.assertIs(wrapped.read_batch(max_items=1), batch)
+        provider.source_id = SourceId("live-fixture")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "source identity changed before pending-snapshot reset",
+        ):
+            wrapped.abandon_uncommitted()
+
+        self.assertEqual(provider.reset_calls, 0)
+        self.assertFalse(wrapped.has_inflight)
+
     def test_sqlite_retry_preserves_primary_failure_when_provider_reset_fails(self):
         batch = ProviderBatch(
             source_id="live-fixture",

@@ -140,6 +140,22 @@ class ExchangeLockedCapitalTests(unittest.TestCase):
             Decimal("40.0000"),
         )
 
+    def test_canonical_lay_liability_matrix(self):
+        for odds, expected in (
+            ("1.5", "5.0"),
+            ("2", "10"),
+            ("5", "40"),
+        ):
+            with self.subTest(odds=odds):
+                self.assertEqual(
+                    locked_capital_for_exchange_side(
+                        stake=Decimal("10"),
+                        odds=Decimal(odds),
+                        exchange_side="LAY",
+                    ),
+                    Decimal(expected),
+                )
+
     def test_invalid_or_inexact_inputs_fail_closed(self):
         with self.assertRaises(TypeError):
             locked_capital_for_exchange_side(
@@ -672,6 +688,32 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("60.00"))
         self.assertEqual(book.committed_capital, Decimal("40.00"))
         self.assertEqual(ticket.status, TicketStatus.OPEN)
+
+    def test_lay_open_accepts_exact_liability_bankroll(self):
+        book = PaperBook(Decimal("40"))
+        ticket = book.open_ticket(
+            [self._lay_leg()],
+            Decimal("10"),
+            placed_at=QUOTE_AT,
+        )
+
+        self.assertEqual(ticket.stake, Decimal("10"))
+        self.assertEqual(book.balance, Decimal("0"))
+        self.assertEqual(book.committed_capital, Decimal("40.00"))
+
+    def test_lay_open_rejects_bankroll_below_liability_without_mutation(self):
+        book = PaperBook(Decimal("39.99"))
+
+        with self.assertRaisesRegex(ValueError, "insufficient virtual bankroll"):
+            book.open_ticket(
+                [self._lay_leg()],
+                Decimal("10"),
+                placed_at=QUOTE_AT,
+            )
+
+        self.assertEqual(book.balance, Decimal("39.99"))
+        self.assertEqual(book.tickets, {})
+        self.assertEqual(book.committed_capital, Decimal("0"))
 
     def test_lay_selection_loses_returns_liability_plus_lay_stake(self):
         book = PaperBook(Decimal("100"))

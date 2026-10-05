@@ -1478,6 +1478,25 @@ class LiveObservationTests(unittest.TestCase):
         self.assertEqual(result.health.status, canonical.stats.health_status)
         result.validate()
 
+    def test_worker_publishes_owned_observation_result_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            caller_result = self._observe(tmp)
+
+        original_received = caller_result.stats.received
+        worker = OneShotObservationWorker()
+        self.assertTrue(worker.start(lambda: caller_result))
+
+        message = self._wait_for_message(worker)
+        self.assertIsNotNone(message.result)
+        self.assertIsNot(message.result, caller_result)
+        self.assertIsNot(message.result.stats, caller_result.stats)
+
+        object.__setattr__(caller_result.stats, "received", -1)
+
+        self.assertEqual(message.result.stats.received, original_received)
+        message.result.validate()
+        self.assertFalse(worker.busy)
+
     def test_worker_revalidates_mutated_observation_stats_before_success(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self._observe(tmp)

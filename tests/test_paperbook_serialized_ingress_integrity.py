@@ -63,6 +63,27 @@ class PaperBookSerializedIngressIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported PaperBook snapshot schema_version"):
             PaperBook.load_bytes(self._encoded(payload))
 
+    def test_schema2_rejects_unknown_root_field_instead_of_ignoring_it(self) -> None:
+        payload = self._payload()
+        payload["future_root_semantics"] = "smuggled"
+
+        with self.assertRaisesRegex(ValueError, "schema 2 root contains unexpected fields"):
+            PaperBook.load_bytes(self._encoded(payload))
+
+    def test_schema2_rejects_unknown_ticket_field_instead_of_ignoring_it(self) -> None:
+        payload = self._payload()
+        payload["tickets"][0]["provider_source_ids"] = ["future-source"]
+
+        with self.assertRaisesRegex(ValueError, "schema 2 ticket contains unexpected fields"):
+            PaperBook.load_bytes(self._encoded(payload))
+
+    def test_schema2_rejects_unknown_leg_field_instead_of_ignoring_it(self) -> None:
+        payload = self._payload()
+        payload["tickets"][0]["legs"][0]["sport"] = "tennis"
+
+        with self.assertRaisesRegex(ValueError, "schema 2 ticket leg contains unexpected fields"):
+            PaperBook.load_bytes(self._encoded(payload))
+
     def test_schema2_rejects_non_string_decimal_forms_in_every_economic_field(self) -> None:
         mutations = (
             ("initial_bankroll", lambda payload: payload.__setitem__("initial_bankroll", 100)),

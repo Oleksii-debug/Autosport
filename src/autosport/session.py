@@ -164,6 +164,30 @@ class ObservationResult:
     health: SourceHealthState
     current_quotes: tuple[MarketEvent, ...]
 
+    def __post_init__(self) -> None:
+        if type(self.stats) is not IngestionStats:
+            raise TypeError("observation stats must be an exact IngestionStats")
+        if type(self.health) is not SourceHealthState:
+            raise TypeError("observation health must be an exact SourceHealthState")
+        if type(self.current_quotes) is not tuple:
+            raise TypeError("observation current_quotes must be an exact tuple")
+        if any(type(event) is not MarketEvent for event in self.current_quotes):
+            raise TypeError(
+                "observation current_quotes must contain exact MarketEvent values"
+            )
+        if self.stats.source_id != self.health.source_id:
+            raise ValueError(
+                "observation stats and health must belong to the same source"
+            )
+        if self.stats.health_status != self.health.status:
+            raise ValueError(
+                "observation stats health status must match durable source health"
+            )
+        if any(event.source_id != self.stats.source_id for event in self.current_quotes):
+            raise ValueError(
+                "observation current quotes must belong to the observed source"
+            )
+
 
 class AutosportSession(metaclass=_AutosportSessionMeta):
     """V1 runtime for causal replay, paper simulation and read-only market observation."""

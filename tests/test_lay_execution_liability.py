@@ -2837,5 +2837,66 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertEqual(book._lifecycle, [])
 
 
+    def test_lay_open_rejects_in_place_liability_calculator_code_mutation_before_execution(self):
+        book = PaperBook(Decimal("100"))
+        calculator = lay_guard._ORIGINAL_LOCKED_CAPITAL
+        original_code = calculator.__code__
+        attacker_calls = 0
+
+        def hostile_calculator(*, stake, odds, exchange_side):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            return Decimal("0.01")
+
+        try:
+            calculator.__code__ = hostile_calculator.__code__
+            with self.assertRaisesRegex(
+                ValueError,
+                "LAY liability authority changed",
+            ):
+                book.open_ticket(
+                    [self._lay_leg()],
+                    Decimal("10"),
+                    placed_at=QUOTE_AT,
+                )
+        finally:
+            calculator.__code__ = original_code
+
+        self.assertEqual(attacker_calls, 0)
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+        self.assertEqual(book._lifecycle, [])
+
+    def test_lay_open_rejects_in_place_decimal_resource_validator_mutation_before_execution(self):
+        book = PaperBook(Decimal("100"))
+        validator = lay_guard._ORIGINAL_DECIMAL_RESOURCE_BOUND
+        original_code = validator.__code__
+        attacker_calls = 0
+
+        def hostile_validator(_value):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            return None
+
+        try:
+            validator.__code__ = hostile_validator.__code__
+            with self.assertRaisesRegex(
+                ValueError,
+                "Decimal resource authority changed",
+            ):
+                book.open_ticket(
+                    [self._lay_leg()],
+                    Decimal("10"),
+                    placed_at=QUOTE_AT,
+                )
+        finally:
+            validator.__code__ = original_code
+
+        self.assertEqual(attacker_calls, 0)
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+        self.assertEqual(book._lifecycle, [])
+
+
 if __name__ == "__main__":
     unittest.main()

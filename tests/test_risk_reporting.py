@@ -859,6 +859,128 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(path.history_view, HISTORY_VIEW_RESTATED_CURRENT)
         self.assertFalse(path.historical_as_known_supported)
 
+    def test_equity_source_identity_binds_sport_even_when_risk_digest_aliases(self) -> None:
+        tennis = PaperBook("100")
+        soccer = PaperBook("100")
+        with patch("autosport.paper.uuid.uuid4", return_value="fixed-ticket-id"):
+            tennis_ticket = tennis.open_ticket(
+                (
+                    TicketLeg(
+                        "event-identity",
+                        "market-identity",
+                        "selection-identity",
+                        Decimal("2"),
+                        sport="tennis",
+                        exchange_side="back",
+                    ),
+                ),
+                Decimal("10"),
+                placed_at="2026-09-21T16:50:00+00:00",
+                bankroll_id="paper-bankroll",
+                currency="USD",
+            )
+        with patch("autosport.paper.uuid.uuid4", return_value="fixed-ticket-id"):
+            soccer_ticket = soccer.open_ticket(
+                (
+                    TicketLeg(
+                        "event-identity",
+                        "market-identity",
+                        "selection-identity",
+                        Decimal("2"),
+                        sport="soccer",
+                        exchange_side="back",
+                    ),
+                ),
+                Decimal("10"),
+                placed_at="2026-09-21T16:50:00+00:00",
+                bankroll_id="paper-bankroll",
+                currency="USD",
+            )
+        tennis.settle(
+            tennis_ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T16:55:00+00:00",
+        )
+        soccer.settle(
+            soccer_ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T16:55:00+00:00",
+        )
+        goal = self._goal()
+
+        self.assertEqual(
+            PaperRiskPolicy.risk_of_ruin_portfolio_sha256(tennis),
+            PaperRiskPolicy.risk_of_ruin_portfolio_sha256(soccer),
+        )
+        tennis_path = build_product_issued_paper_equity_path(tennis, goal)
+        soccer_path = build_product_issued_paper_equity_path(soccer, goal)
+
+        self.assertNotEqual(
+            tennis_path.paperbook_source_state_sha256,
+            soccer_path.paperbook_source_state_sha256,
+        )
+        self.assertNotEqual(tennis_path.path_sha256, soccer_path.path_sha256)
+
+    def test_equity_source_identity_binds_exchange_side_semantics(self) -> None:
+        implicit_back = PaperBook("100")
+        explicit_back = PaperBook("100")
+        with patch("autosport.paper.uuid.uuid4", return_value="fixed-side-ticket"):
+            implicit_ticket = implicit_back.open_ticket(
+                (
+                    TicketLeg(
+                        "event-side",
+                        "market-side",
+                        "selection-side",
+                        Decimal("2"),
+                        sport="tennis",
+                    ),
+                ),
+                Decimal("10"),
+                placed_at="2026-09-21T17:00:00+00:00",
+                bankroll_id="paper-bankroll",
+                currency="USD",
+            )
+        with patch("autosport.paper.uuid.uuid4", return_value="fixed-side-ticket"):
+            explicit_ticket = explicit_back.open_ticket(
+                (
+                    TicketLeg(
+                        "event-side",
+                        "market-side",
+                        "selection-side",
+                        Decimal("2"),
+                        sport="tennis",
+                        exchange_side="back",
+                    ),
+                ),
+                Decimal("10"),
+                placed_at="2026-09-21T17:00:00+00:00",
+                bankroll_id="paper-bankroll",
+                currency="USD",
+            )
+        implicit_back.settle(
+            implicit_ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T17:05:00+00:00",
+        )
+        explicit_back.settle(
+            explicit_ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T17:05:00+00:00",
+        )
+        goal = self._goal()
+
+        self.assertEqual(
+            PaperRiskPolicy.risk_of_ruin_portfolio_sha256(implicit_back),
+            PaperRiskPolicy.risk_of_ruin_portfolio_sha256(explicit_back),
+        )
+        implicit_path = build_product_issued_paper_equity_path(implicit_back, goal)
+        explicit_path = build_product_issued_paper_equity_path(explicit_back, goal)
+        self.assertNotEqual(
+            implicit_path.paperbook_source_state_sha256,
+            explicit_path.paperbook_source_state_sha256,
+        )
+        self.assertNotEqual(implicit_path.path_sha256, explicit_path.path_sha256)
+
     def test_same_numeric_book_state_has_distinct_path_identity_across_money_scope(self) -> None:
         book = PaperBook("100")
         usd_goal = self._goal(bankroll_id="bankroll-usd", currency="USD")

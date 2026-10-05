@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -461,6 +462,79 @@ class IngestionHealthTests(unittest.TestCase):
             )
             self.assertEqual(len(store.events()), 2)
             self.assertEqual(health.get("source").status, "degraded")
+            store.close()
+
+    def test_source_health_locked_success_adds_regression_flag_against_current_high_water(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            health = SourceHealthStore(Path(tmp) / "source-health.json")
+            health.record_success(
+                "source",
+                now="2026-09-12T12:00:00+00:00",
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="high",
+                latest_source_ts="2026-09-12T11:59:59+00:00",
+                quality_flags=(),
+            )
+
+            state = health.record_success(
+                "source",
+                now="2026-09-12T12:00:01+00:00",
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="regressed",
+                latest_source_ts="2026-09-12T11:59:58+00:00",
+                quality_flags=(),
+            )
+
+            self.assertEqual(state.latest_source_ts, "2026-09-12T11:59:59+00:00")
+            self.assertEqual(state.status, "degraded")
+            self.assertIn("SOURCE_TIME_REGRESSION", state.quality_flags)
+
+    def test_ingestion_stats_reflect_health_locked_regression_race(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, health = self._engine(tmp)
+            provider = StaticProvider(
+                "source",
+                [
+                    ProviderBatch(
+                        "source",
+                        (self._quote("2026-09-12T11:59:58+00:00"),),
+                        cursor="poll",
+                    )
+                ],
+            )
+            original_publish = engine.bus.publish_many
+
+            def publish_then_advance_health(events):
+                accepted = original_publish(events)
+                health.record_success(
+                    "source",
+                    now="2026-09-12T12:00:00+00:00",
+                    received=0,
+                    accepted=0,
+                    rejected=0,
+                    cursor="peer",
+                    latest_source_ts="2026-09-12T11:59:59+00:00",
+                    quality_flags=(),
+                )
+                return accepted
+
+            with patch.object(
+                engine.bus,
+                "publish_many",
+                side_effect=publish_then_advance_health,
+            ):
+                stats = engine.poll_once(provider, max_items=10)
+
+            self.assertIn("SOURCE_TIME_REGRESSION", stats.quality_flags)
+            self.assertEqual(stats.health_status, "degraded")
+            self.assertEqual(
+                health.get("source").latest_source_ts,
+                "2026-09-12T11:59:59+00:00",
+            )
             store.close()
 
     def test_source_time_regression_is_detected_without_lowering_high_water_mark(self):

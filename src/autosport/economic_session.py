@@ -71,14 +71,6 @@ _STATE_KEYS: Final = frozenset(
 )
 
 
-_CLOCK_INSTANT = _clock_instant
-_STATE_SHA256 = _state_sha256
-_SEMANTIC_BINDING = _semantic_binding
-_TX_ID = _tx_id
-_CANONICAL_JSON_BYTES = _canonical_json_bytes
-_READ_REGULAR_BYTES = _read_regular_bytes
-_DECODE_STATE = _decode_state
-
 class EconomicSessionError(RuntimeError):
     pass
 
@@ -447,6 +439,14 @@ class ProductEconomicSessionStore:
         self._authority_recover_witness = _AUTHORITY_RECOVER
         self._authority_prepare_witness = _AUTHORITY_PREPARE
         self._authority_commit_witness = _AUTHORITY_COMMIT
+        self._clock_instant_witness = _clock_instant
+        self._state_sha256_witness = _state_sha256
+        self._semantic_binding_witness = _semantic_binding
+        self._tx_id_witness = _tx_id
+        self._canonical_json_bytes_witness = _canonical_json_bytes
+        self._read_regular_bytes_witness = _read_regular_bytes
+        self._decode_state_witness = _decode_state
+        self._state_payload_witness = _state_payload
         self._authority_schema_witness = (
             _STATE_SCHEMA,
             _STATE_SCHEMA_VERSION,
@@ -490,6 +490,14 @@ class ProductEconomicSessionStore:
             or _PAPERBOOK_LOAD is not self._paperbook_load_witness
             or _PAPERBOOK_VALIDATE_LOADED_STATE is not self._paperbook_validate_witness
             or _WORKSPACE_LOCK_TYPE is not self._workspace_lock_type_witness
+            or _clock_instant is not self._clock_instant_witness
+            or _state_sha256 is not self._state_sha256_witness
+            or _semantic_binding is not self._semantic_binding_witness
+            or _tx_id is not self._tx_id_witness
+            or _canonical_json_bytes is not self._canonical_json_bytes_witness
+            or _read_regular_bytes is not self._read_regular_bytes_witness
+            or _decode_state is not self._decode_state_witness
+            or _state_payload is not self._state_payload_witness
             or _UUID4 is not self._uuid4_witness
             or _opening_paperbook_sha256 is not self._opening_paperbook_sha256_witness
             or EconomicGoalStore.load is not self._economic_goal_load_witness
@@ -594,7 +602,7 @@ class ProductEconomicSessionStore:
         self._require_configuration_authority()
         opening_sha256 = self._opening_paperbook_sha256_witness(self._paperbook_path_witness)
         self._require_configuration_authority()
-        payload = _state_payload(
+        payload = self._state_payload_witness(
             workspace_instance_id=self._authority_witness.workspace_instance_id,
             session_id=_UUID4().hex,
             goal_id=goal.goal_id,

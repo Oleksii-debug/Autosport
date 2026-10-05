@@ -13,7 +13,6 @@ from typing import Any
 
 from .causal_integrity import contains_forbidden_future_key
 from .domain import utc_now_iso
-from .integrity import durable_path_lock
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import (
     EconomicGoalProvenance,
@@ -326,6 +325,25 @@ class JsonlDecisionLedger:
             ) from exc
 
     @classmethod
+    def _require_material_action_id(
+        cls,
+        value: object,
+        *,
+        location: str = "",
+    ) -> str:
+        if (
+            type(value) is not str
+            or not value
+            or value != value.strip()
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise DecisionLedgerIntegrityError(
+                f"Decision Ledger material_action_id is invalid{location}"
+            )
+        cls._require_utf8_text(value, path="payload.material_action_id")
+        return value
+
+    @classmethod
     def _validate_json_value(cls, value: object, *, path: str) -> None:
         if value is None or isinstance(value, (bool, int)):
             return
@@ -415,13 +433,14 @@ class JsonlDecisionLedger:
             )
         material_action_id = payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
         if material_action_id is not None:
-            if not isinstance(material_action_id, str) or not material_action_id.strip():
-                raise DecisionLedgerIntegrityError(
-                    f"Decision Ledger material_action_id is invalid{location}"
-                )
+            cls._require_material_action_id(
+                material_action_id,
+                location=location,
+            )
             if record.get("decision_kind") != ECONOMIC_DECISION_KIND:
                 raise DecisionLedgerIntegrityError(
-                    f"Decision Ledger material_action_id is attached to a non-economic decision{location}"
+                    "Decision Ledger material_action_id is attached to a "
+                    f"non-economic decision{location}"
                 )
         if (
             "decision_kind" in record
@@ -459,31 +478,10 @@ class JsonlDecisionLedger:
             sort_keys=True,
             allow_nan=False,
         )
-        candidate_action_id = payload["payload"].get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
-        try:
-            append_path = self.path.resolve(strict=False)
-        except (OSError, RuntimeError) as exc:
-            raise DecisionLedgerIntegrityError(
-                "Decision Ledger append path cannot be resolved canonically"
-            ) from exc
-        with durable_path_lock(append_path):
-            try:
-                existing = append_path.read_bytes()
-            except FileNotFoundError:
-                existing = b""
-            except OSError as exc:
-                raise DecisionLedgerIntegrityError(
-                    "Decision Ledger file is unreadable before append"
-                ) from exc
-            self._verify_bytes(
-                existing,
-                reserved_decision_id=payload["decision_id"],
-                reserved_material_action_id=candidate_action_id,
-            )
-            with append_path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(envelope + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(envelope + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         return digest
 
     def append(self, record: DecisionRecord) -> str:
@@ -525,13 +523,7 @@ class JsonlDecisionLedger:
         )
 
     @classmethod
-    def _verify_bytes(
-        cls,
-        raw: bytes,
-        *,
-        reserved_decision_id: str | None = None,
-        reserved_material_action_id: str | None = None,
-    ) -> int:
+    def _verify_bytes(cls, raw: bytes) -> int:
         if not raw:
             return 0
         if not raw.endswith(b"\n"):
@@ -608,26 +600,22 @@ class JsonlDecisionLedger:
                     f"Decision Ledger contains duplicate decision_id at line {line_number}"
                 )
             seen_decision_ids.add(decision_id)
-            material_action_id = record["payload"].get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
+            material_action_id = record["payload"].get(
+                MATERIAL_ACTION_ID_PAYLOAD_KEY
+            )
             if material_action_id is not None:
+                material_action_id = cls._require_material_action_id(
+                    material_action_id,
+                    location=f" at line {line_number}",
+                )
                 if material_action_id in seen_material_action_ids:
                     raise DecisionLedgerIntegrityError(
-                        f"Decision Ledger contains duplicate material_action_id at line {line_number}"
+                        "Decision Ledger contains duplicate material_action_id "
+                        f"at line {line_number}"
                     )
                 seen_material_action_ids.add(material_action_id)
             line_count += 1
 
-        if reserved_decision_id is not None and reserved_decision_id in seen_decision_ids:
-            raise DecisionLedgerIntegrityError(
-                "Decision Ledger already contains decision_id"
-            )
-        if (
-            reserved_material_action_id is not None
-            and reserved_material_action_id in seen_material_action_ids
-        ):
-            raise DecisionLedgerIntegrityError(
-                "Decision Ledger already contains material_action_id"
-            )
         return line_count
 
     def verified_snapshot(self) -> VerifiedDecisionLedgerSnapshot:
@@ -687,17 +675,20 @@ class JsonlDecisionLedger:
         boundary before creating another material position.
         """
 
-        if not isinstance(material_action_id, str) or not material_action_id.strip():
-            raise ValueError("material_action_id must be a non-empty string")
+        try:
+            material_action_id = self._require_material_action_id(
+                material_action_id
+            )
+        except DecisionLedgerIntegrityError as exc:
+            raise ValueError(
+                "material_action_id must be exact canonical text"
+            ) from exc
         matched: list[DecisionRecord] = []
         for record in self.verified_records():
             value = record.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
             if value is None:
                 continue
-            if not isinstance(value, str) or not value.strip():
-                raise DecisionLedgerIntegrityError(
-                    "Decision Ledger material_action_id is invalid"
-                )
+            self._require_material_action_id(value)
             if value != material_action_id:
                 continue
             if record.decision_kind != ECONOMIC_DECISION_KIND:

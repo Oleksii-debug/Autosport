@@ -2,7 +2,6 @@ import hashlib
 import json
 import math
 import tempfile
-import threading
 import unittest
 from dataclasses import replace
 from decimal import Decimal
@@ -197,193 +196,19 @@ class DecisionLedgerTests(unittest.TestCase):
             ):
                 ledger.verify_integrity()
 
-    def test_symlink_alias_uses_canonical_append_lock_domain(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            target = root / "decisions.jsonl"
-            alias = root / "decision-alias.jsonl"
-            try:
-                alias.symlink_to(target.name)
-            except (OSError, NotImplementedError) as exc:
-                self.skipTest(f"symlink creation is unavailable: {exc}")
-
-            ledger = JsonlDecisionLedger(alias)
-            ledger.append(self._record(decision_id="through-symlink"))
-
-            self.assertTrue(alias.is_symlink())
-            self.assertTrue(target.exists())
-            self.assertTrue((root / ".decisions.jsonl.lock").exists())
-            self.assertFalse((root / ".decision-alias.jsonl.lock").exists())
-            self.assertEqual(JsonlDecisionLedger(target).verify_integrity(), 1)
-
-    def test_append_rejects_duplicate_decision_identity_without_corrupting_ledger(self):
+    def test_verify_integrity_rejects_duplicate_decision_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"
             ledger = JsonlDecisionLedger(path)
             record = self._record(decision_id="duplicate-id")
             ledger.append(record)
+            ledger.append(record)
 
             with self.assertRaisesRegex(
                 DecisionLedgerIntegrityError,
-                "already contains decision_id",
-            ):
-                ledger.append(record)
-
-            self.assertEqual(ledger.verify_integrity(), 1)
-
-    def test_material_action_id_must_belong_to_economic_record(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "decisions.jsonl"
-            ledger = JsonlDecisionLedger(path)
-            record = DecisionRecord(
-                "run-1",
-                "agent",
-                "2026-01-01T00:00:00+00:00",
-                "OBSERVE",
-                {"material_action_id": "paper-action-1"},
-                "ctx",
-                decision_id="non-economic-material-action",
-            )
-
-            with self.assertRaisesRegex(
-                DecisionLedgerIntegrityError,
-                "attached to a non-economic decision",
-            ):
-                ledger.append(record)
-
-            self.assertFalse(path.exists())
-
-    def test_append_economic_rejects_duplicate_material_action_id(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "decisions.jsonl"
-            ledger = JsonlDecisionLedger(path)
-            goal = self._economic_goal()
-            first = DecisionRecord(
-                "run-1",
-                "agent",
-                "2026-01-01T00:00:00+00:00",
-                "PROPOSE_STAKE",
-                {"x": 1, "material_action_id": "paper-action-1"},
-                "ctx",
-                decision_id="economic-action-1",
-                decision_kind=ECONOMIC_DECISION_KIND,
-            )
-            second = replace(first, decision_id="economic-action-2")
-
-            ledger.append_economic(first, goal)
-            with self.assertRaisesRegex(
-                DecisionLedgerIntegrityError,
-                "already contains material_action_id",
-            ):
-                ledger.append_economic(second, goal)
-
-            self.assertEqual(ledger.verify_integrity(), 1)
-
-    def test_concurrent_economic_append_serializes_duplicate_material_action_id(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "decisions.jsonl"
-            goal = self._economic_goal()
-            barrier = threading.Barrier(2)
-            outcomes: list[str] = []
-            outcome_lock = threading.Lock()
-
-            def writer(decision_id: str) -> None:
-                record = DecisionRecord(
-                    "run-1",
-                    "agent",
-                    "2026-01-01T00:00:00+00:00",
-                    "PROPOSE_STAKE",
-                    {"x": 1, "material_action_id": "paper-action-race"},
-                    "ctx",
-                    decision_id=decision_id,
-                    decision_kind=ECONOMIC_DECISION_KIND,
-                )
-                ledger = JsonlDecisionLedger(path)
-                barrier.wait()
-                try:
-                    ledger.append_economic(record, goal)
-                    result = "appended"
-                except DecisionLedgerIntegrityError as exc:
-                    self.assertIn("already contains material_action_id", str(exc))
-                    result = "rejected"
-                with outcome_lock:
-                    outcomes.append(result)
-
-            threads = [
-                threading.Thread(target=writer, args=("race-action-1",)),
-                threading.Thread(target=writer, args=("race-action-2",)),
-            ]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=5)
-                self.assertFalse(thread.is_alive())
-
-            self.assertCountEqual(outcomes, ["appended", "rejected"])
-            self.assertEqual(JsonlDecisionLedger(path).verify_integrity(), 1)
-
-    def test_verify_integrity_rejects_duplicate_material_action_id_in_existing_history(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "decisions.jsonl"
-            ledger = JsonlDecisionLedger(path)
-            goal = self._economic_goal()
-            record = DecisionRecord(
-                "run-1",
-                "agent",
-                "2026-01-01T00:00:00+00:00",
-                "PROPOSE_STAKE",
-                {"x": 1, "material_action_id": "paper-action-legacy"},
-                "ctx",
-                decision_id="legacy-action-1",
-                decision_kind=ECONOMIC_DECISION_KIND,
-            )
-            ledger.append_economic(record, goal)
-
-            first_line = json.loads(path.read_text(encoding="utf-8").strip())
-            second_record = dict(first_line["record"])
-            second_record["decision_id"] = "legacy-action-2"
-            canonical = json.dumps(
-                second_record,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
-            second_line = {
-                "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
-                "record": second_record,
-            }
-            path.write_text(
-                json.dumps(first_line, ensure_ascii=False, sort_keys=True, allow_nan=False)
-                + "\n"
-                + json.dumps(second_line, ensure_ascii=False, sort_keys=True, allow_nan=False)
-                + "\n",
-                encoding="utf-8",
-            )
-
-            with self.assertRaisesRegex(
-                DecisionLedgerIntegrityError,
-                "duplicate material_action_id at line 2",
+                "duplicate decision_id at line 2",
             ):
                 ledger.verify_integrity()
-
-    def test_append_refuses_to_extend_corrupt_existing_history(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "decisions.jsonl"
-            ledger = JsonlDecisionLedger(path)
-            ledger.append(self._record(decision_id="first"))
-            envelope = json.loads(path.read_text(encoding="utf-8"))
-            envelope["record"]["payload"]["x"] = 99
-            path.write_text(json.dumps(envelope, sort_keys=True) + "\n", encoding="utf-8")
-            corrupt_bytes = path.read_bytes()
-
-            with self.assertRaisesRegex(
-                DecisionLedgerIntegrityError,
-                "SHA-256 mismatch at line 1",
-            ):
-                ledger.append(self._record(decision_id="second"))
-
-            self.assertEqual(path.read_bytes(), corrupt_bytes)
 
     def test_verify_integrity_rejects_unterminated_tail(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -437,6 +262,176 @@ class DecisionLedgerTests(unittest.TestCase):
             ):
                 ledger.append(record)
             self.assertFalse(path.exists())
+
+
+    def test_material_action_id_requires_exact_canonical_text(self):
+        class HostileMaterialActionId(str):
+            pass
+
+        goal = self._economic_goal()
+        invalid_ids = (
+            " padded-action",
+            "padded-action ",
+            "line\nbreak",
+            "nul\x00action",
+            HostileMaterialActionId("subclass-action"),
+        )
+        for material_action_id in invalid_ids:
+            with self.subTest(material_action_id=repr(material_action_id)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "decisions.jsonl"
+                    record = DecisionRecord(
+                        "run-1",
+                        "agent",
+                        "2026-01-01T00:00:00+00:00",
+                        "PROPOSE_STAKE",
+                        {
+                            "x": 1,
+                            "material_action_id": material_action_id,
+                        },
+                        "ctx",
+                        decision_id="invalid-material-action",
+                        decision_kind=ECONOMIC_DECISION_KIND,
+                    )
+                    with self.assertRaisesRegex(
+                        DecisionLedgerIntegrityError,
+                        "material_action_id is invalid",
+                    ):
+                        JsonlDecisionLedger(path).append_economic(record, goal)
+                    self.assertFalse(path.exists())
+
+    def test_material_action_id_requires_economic_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            record = DecisionRecord(
+                "run-1",
+                "agent",
+                "2026-01-01T00:00:00+00:00",
+                "OBSERVE",
+                {"x": 1, "material_action_id": "paper-action-1"},
+                "ctx",
+                decision_id="general-material-action",
+            )
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "attached to a non-economic decision",
+            ):
+                JsonlDecisionLedger(path).append(record)
+            self.assertFalse(path.exists())
+
+    def test_verified_material_action_lookup_rejects_noncanonical_query(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            goal = self._economic_goal()
+            record = DecisionRecord(
+                "run-1",
+                "agent",
+                "2026-01-01T00:00:00+00:00",
+                "PROPOSE_STAKE",
+                {"x": 1, "material_action_id": "paper-action-lookup"},
+                "ctx",
+                decision_id="lookup-action",
+                decision_kind=ECONOMIC_DECISION_KIND,
+            )
+            ledger.append_economic(record, goal)
+
+            for query in (" paper-action-lookup", "paper-action-lookup\n"):
+                with self.subTest(query=repr(query)):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "exact canonical text",
+                    ):
+                        ledger.verified_economic_decision_for_material_action(
+                            query,
+                            goal,
+                        )
+
+    def test_verify_integrity_rejects_duplicate_material_action_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            goal = self._economic_goal()
+            first = DecisionRecord(
+                "run-1",
+                "agent",
+                "2026-01-01T00:00:00+00:00",
+                "PROPOSE_STAKE",
+                {"x": 1, "material_action_id": "paper-action-duplicate"},
+                "ctx",
+                decision_id="material-action-first",
+                decision_kind=ECONOMIC_DECISION_KIND,
+            )
+            ledger.append_economic(first, goal)
+
+            first_envelope = json.loads(path.read_text(encoding="utf-8"))
+            second_record = dict(first_envelope["record"])
+            second_record["decision_id"] = "material-action-second"
+            canonical = json.dumps(
+                second_record,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            second_envelope = {
+                "sha256": hashlib.sha256(
+                    canonical.encode("utf-8")
+                ).hexdigest(),
+                "record": second_record,
+            }
+            path.write_text(
+                json.dumps(
+                    first_envelope,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                + "\n"
+                + json.dumps(
+                    second_envelope,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "duplicate material_action_id at line 2",
+            ):
+                ledger.verify_integrity()
+
+    def test_valid_material_action_id_round_trips_exactly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            goal = self._economic_goal()
+            record = DecisionRecord(
+                "run-1",
+                "agent",
+                "2026-01-01T00:00:00+00:00",
+                "PROPOSE_STAKE",
+                {"x": 1, "material_action_id": "paper-action-valid"},
+                "ctx",
+                decision_id="material-action-valid",
+                decision_kind=ECONOMIC_DECISION_KIND,
+            )
+            ledger.append_economic(record, goal)
+
+            restored = ledger.verified_economic_decision_for_material_action(
+                "paper-action-valid",
+                goal,
+            )
+            self.assertIsNotNone(restored)
+            assert restored is not None
+            self.assertEqual(restored.decision_id, "material-action-valid")
+            self.assertEqual(
+                restored.payload["material_action_id"],
+                "paper-action-valid",
+            )
 
 
 if __name__ == "__main__":

@@ -1269,6 +1269,18 @@ class PersistentLiveDecisionLoop:
                 raise ValueError(
                     f"input_id {normalized_id!r} conflicts with durable registration"
                 )
+            focused = tuple(
+                dependency
+                for dependency in self.dependencies.registry_snapshot()
+                if dependency.input_id == normalized_id
+            )
+            if (
+                len(focused) != 1
+                or _InputSpec.from_dependency(focused[0]) != existing
+            ):
+                raise LiveDecisionProgressError(
+                    "live dependency registry is inconsistent during idempotent registration"
+                )
             return
         if (
             self._progress is not None
@@ -1303,6 +1315,13 @@ class PersistentLiveDecisionLoop:
         normalized_id = FocusedMirrorDependencyIndex._input_id(input_id)
         existing = self._input_specs.get(normalized_id)
         if existing is None:
+            if any(
+                dependency.input_id == normalized_id
+                for dependency in self.dependencies.registry_snapshot()
+            ):
+                raise LiveDecisionProgressError(
+                    "live dependency registry contains an undurable ghost registration"
+                )
             return False
         if (
             self._progress is not None

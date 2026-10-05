@@ -16,8 +16,8 @@ _EXCHANGE_SIDES = frozenset({"back", "lay"})
 
 
 def _validate_source_id(source_id: object) -> str:
-    if not isinstance(source_id, str):
-        raise TypeError("source_id must be str")
+    if type(source_id) is not str:
+        raise TypeError("source_id must be an exact str")
     if not source_id or source_id != source_id.strip():
         raise ValueError("source_id must be non-empty and trimmed")
     if "|" in source_id:
@@ -26,8 +26,8 @@ def _validate_source_id(source_id: object) -> str:
 
 
 def _validate_provider_component(value: object, name: str) -> str:
-    if not isinstance(value, str):
-        raise TypeError(f"{name} must be str")
+    if type(value) is not str:
+        raise TypeError(f"{name} must be an exact str")
     if not value or value != value.strip():
         raise ValueError(f"{name} must be non-empty and trimmed")
     if "|" in value:
@@ -53,8 +53,8 @@ def _validate_sequence(value: object) -> int:
 
 
 def _validate_provider_text(value: object, name: str) -> str:
-    if not isinstance(value, str):
-        raise TypeError(f"{name} must be str")
+    if type(value) is not str:
+        raise TypeError(f"{name} must be an exact str")
     if not value or value != value.strip():
         raise ValueError(f"{name} must be non-empty and trimmed")
     return value
@@ -189,8 +189,8 @@ class ProviderBatch:
         for quote in self.quotes:
             if type(quote) is not ProviderQuote:
                 raise TypeError("provider batch quote must be ProviderQuote")
-        if self.cursor is not None and not isinstance(self.cursor, str):
-            raise TypeError("provider batch cursor must be str or None")
+        if self.cursor is not None and type(self.cursor) is not str:
+            raise TypeError("provider batch cursor must be an exact str or None")
         if type(self.quality_flags) is not tuple:
             raise TypeError("provider batch quality_flags must be a tuple of strings")
         for flag in self.quality_flags:

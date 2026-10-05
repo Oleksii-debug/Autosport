@@ -1018,3 +1018,106 @@ def test_rebound_strict_json_integer_limit_is_rejected_before_decode(monkeypatch
             action_id=action.action_id,
         )
 
+def test_rebound_monotonic_root_resolver_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_root(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        return store.workspace / "attacker-authority"
+
+    monkeypatch.setattr(monotonic_module, "resolve_monotonic_authority_root", attacker_root)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_rebound_workspace_binding_resolver_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_resolve(cls, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound workspace binding resolver must never execute")
+
+    monkeypatch.setattr(
+        monotonic_module.WorkspaceIdentityBinding,
+        "resolve",
+        classmethod(attacker_resolve),
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_in_place_root_selection_resolver_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    resolver = monotonic_module.AuthorityRootSelectionBinding.__dict__["resolve"].__func__
+    original_code = resolver.__code__
+    attacker_called = False
+
+    def attacker_resolve(cls, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated root-selection resolver must never execute")
+
+    try:
+        resolver.__code__ = attacker_resolve.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        resolver.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_rebound_monotonic_authority_id_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+
+    monkeypatch.setattr(monotonic_module, "AUTHORITY_ID", "attacker.machine.authority")
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+

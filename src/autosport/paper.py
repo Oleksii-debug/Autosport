@@ -659,6 +659,18 @@ class PaperBook:
             )
         return Path(path)
 
+    @staticmethod
+    def _fsync_snapshot_directory(directory: Path) -> None:
+        """Persist an atomic snapshot rename on filesystems with directory fsync."""
+        directory_flag = getattr(os, "O_DIRECTORY", None)
+        if directory_flag is None:
+            return
+        descriptor = os.open(directory, os.O_RDONLY | directory_flag)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
     @_serialized_paperbook_operation
     def save(self, path: str | Path) -> None:
         # PaperBook and PaperTicket are intentionally mutable during a paper run.
@@ -730,6 +742,8 @@ class PaperBook:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, destination)
+            temporary = None
+            self._fsync_snapshot_directory(destination.parent)
         finally:
             if temporary is not None:
                 try:

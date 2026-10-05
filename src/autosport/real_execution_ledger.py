@@ -497,6 +497,7 @@ class ExecutionAttemptReadView:
     action: ExecutionAction
     state: AttemptState
     submitted_at: str | None
+    submitted_request_sha256: str | None
     unknown_reason: str | None
     unknown_observed_at: str | None
     provider_order_ref: str | None
@@ -1282,10 +1283,26 @@ class RealExecutionLedger:
                         followup["event_type"]
                         == EventType.ATTEMPT_SUBMITTED.value
                     ):
+                        payload_keys = set(followup["payload"])
+                        if payload_keys not in (
+                            {"submitted_at"},
+                            {"submitted_at", "submitted_request_sha256"},
+                        ):
+                            raise ExecutionLedgerIntegrityError(
+                                "ATTEMPT_SUBMITTED payload schema is invalid"
+                            )
                         submitted_time = _timestamp(
                             followup["payload"]["submitted_at"],
                             "submitted_at",
                         )
+                        submitted_request_sha256 = followup["payload"].get(
+                            "submitted_request_sha256"
+                        )
+                        if submitted_request_sha256 is not None:
+                            _sha256_text(
+                                submitted_request_sha256,
+                                "submitted_request_sha256",
+                            )
                         if submitted_time < reserved_time:
                             raise ExecutionLedgerIntegrityError(
                                 "attempt submission precedes reservation"
@@ -2060,10 +2077,19 @@ class RealExecutionLedger:
         return self._mutate(operation)
 
     def mark_submitted(
-        self, attempt_id: str, submitted_at: str | None = None
+        self,
+        attempt_id: str,
+        submitted_at: str | None = None,
+        *,
+        submitted_request_sha256: str | None = None,
     ) -> None:
         actual_submitted_at = submitted_at or _now()
         submitted_time = _timestamp(actual_submitted_at, "submitted_at")
+        if submitted_request_sha256 is not None:
+            _sha256_text(
+                submitted_request_sha256,
+                "submitted_request_sha256",
+            )
 
         def operation() -> None:
             events = self._events()
@@ -2097,7 +2123,14 @@ class RealExecutionLedger:
                 first["plan_id"],
                 first["action_id"],
                 attempt_id,
-                {"submitted_at": actual_submitted_at},
+                {
+                    "submitted_at": actual_submitted_at,
+                    **(
+                        {"submitted_request_sha256": submitted_request_sha256}
+                        if submitted_request_sha256 is not None
+                        else {}
+                    ),
+                },
             )
 
         self._mutate(operation)
@@ -2678,6 +2711,16 @@ class RealExecutionLedger:
             submitted_at = (
                 submitted[0]["payload"]["submitted_at"] if submitted else None
             )
+            submitted_request_sha256 = (
+                submitted[0]["payload"].get("submitted_request_sha256")
+                if submitted
+                else None
+            )
+            if submitted_request_sha256 is not None:
+                _sha256_text(
+                    submitted_request_sha256,
+                    "submitted_request_sha256",
+                )
             unknown_reason = unknown[0]["payload"]["reason"] if unknown else None
             unknown_observed_at = (
                 unknown[0]["payload"]["observed_at"] if unknown else None
@@ -2729,6 +2772,7 @@ class RealExecutionLedger:
                     action=action,
                     state=state,
                     submitted_at=submitted_at,
+                    submitted_request_sha256=submitted_request_sha256,
                     unknown_reason=unknown_reason,
                     unknown_observed_at=unknown_observed_at,
                     provider_order_ref=provider_order_ref,

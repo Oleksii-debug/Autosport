@@ -1794,5 +1794,27 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertFalse((Path(tmp) / "paper-book.json").exists())
 
 
+    def test_multi_accept_batch_preflight_keeps_authorized_success_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            a1 = action("atomic-ok-a1", stake="20.00")
+            a2 = action("atomic-ok-a2", stake="20.00")
+
+            result = runtime.execute(
+                prepared=prepared(runtime, a1, a2),
+                trigger_id="trigger-atomic-ok",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(len(result.ticket_ids), 2)
+            self.assertEqual(len(book.tickets), 2)
+            self.assertEqual(book.balance, Decimal("60.00"))
+            self.assertEqual(book.committed_capital, Decimal("40.00"))
+            durable = PaperBook.load(Path(tmp) / "paper-book.json")
+            self.assertEqual(durable.balance, Decimal("60.00"))
+            self.assertEqual(len(durable.tickets), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

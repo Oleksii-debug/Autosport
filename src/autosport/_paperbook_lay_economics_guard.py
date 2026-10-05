@@ -15,6 +15,7 @@ _PAPER_TICKET_TYPE = PaperTicket
 _TICKET_LEG_TYPE = TicketLeg
 _TICKET_STATUS_TYPE = TicketStatus
 _LOCALCONTEXT = localcontext
+_CANONICAL_LOCALCONTEXT = _LOCALCONTEXT
 
 _ORIGINAL_LOCKED_CAPITAL = locked_capital_for_exchange_side
 _ORIGINAL_LOCKED_CAPITAL_CODE = _ORIGINAL_LOCKED_CAPITAL.__code__
@@ -47,11 +48,21 @@ _ORIGINAL_UUID_TYPE = _paper.uuid.UUID
 _ORIGINAL_UUID_STR = _ORIGINAL_UUID_TYPE.__str__
 _ORIGINAL_UUID_STR_CODE = _ORIGINAL_UUID_STR.__code__
 _ORIGINAL_PAPER_DECIMAL_CONTEXT = _paper._paper_decimal_context
+_ORIGINAL_PAPER_DECIMAL_CONTEXT_CODE = _ORIGINAL_PAPER_DECIMAL_CONTEXT.__code__
 _ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY = _paper._require_ticket_opening_authority
 _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY = _paper._require_paperbook_causal_history_authority
 _ORIGINAL_RECORD_TICKET_OPENING_AUTHORITY = _paper._record_ticket_opening_authority
 _ORIGINAL_ADVANCE_CAUSAL_HISTORY_OPEN = _paper._advance_paperbook_causal_history_open
 _ORIGINAL_ADVANCE_CAUSAL_HISTORY_SETTLE = _paper._advance_paperbook_causal_history_settle
+
+
+def _require_decimal_arithmetic_authority() -> None:
+    if (
+        _LOCALCONTEXT is not _CANONICAL_LOCALCONTEXT
+        or _ORIGINAL_PAPER_DECIMAL_CONTEXT.__code__
+        is not _ORIGINAL_PAPER_DECIMAL_CONTEXT_CODE
+    ):
+        raise ValueError("PaperBook canonical Decimal arithmetic authority changed")
 
 
 def _require_exact_decimal(value: object, label: str) -> Decimal:
@@ -642,7 +653,8 @@ def _settlement_result(
     else:
         status = _TICKET_STATUS_TYPE.WON
         try:
-            with _LOCALCONTEXT(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
+            _require_decimal_arithmetic_authority()
+            with _CANONICAL_LOCALCONTEXT(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
                 payout = locked_capital + ticket.stake
                 if context.flags[Inexact]:
                     raise ValueError("PaperBook LAY payout loses Decimal precision")
@@ -653,7 +665,8 @@ def _settlement_result(
 
     _require_exact_decimal(payout, f"settlement payout for ticket {ticket.ticket_id}")
     try:
-        with _LOCALCONTEXT(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
+        _require_decimal_arithmetic_authority()
+        with _CANONICAL_LOCALCONTEXT(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
             new_balance = balance + payout
             if context.flags[Inexact]:
                 raise ValueError("PaperBook LAY balance credit loses Decimal precision")
@@ -867,7 +880,8 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
             expected_payout = locked_capital
         elif ticket.status is _TICKET_STATUS_TYPE.WON:
             try:
-                with _LOCALCONTEXT(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
+                _require_decimal_arithmetic_authority()
+            with _CANONICAL_LOCALCONTEXT(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
                     expected_payout = locked_capital + ticket.stake
                     if context.flags[Inexact]:
                         raise ValueError(
@@ -892,7 +906,8 @@ def _committed_capital_unlocked(self: _paper.PaperBook) -> Decimal:
     _ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY(self)
     _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY(self)
     try:
-        with _LOCALCONTEXT(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
+        _require_decimal_arithmetic_authority()
+        with _CANONICAL_LOCALCONTEXT(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
             total = _DECIMAL_TYPE("0")
             for ticket in self.tickets.values():
                 if ticket.status is _TICKET_STATUS_TYPE.OPEN:

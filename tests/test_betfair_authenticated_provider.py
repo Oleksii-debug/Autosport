@@ -591,3 +591,56 @@ def test_uncommitted_terminal_page_reset_restores_consumed_transition(
     assert replayed == first
     assert calls == 1
     assert provider._sequence == 1
+
+
+def test_durable_reproof_succeeds_between_truncated_bridge_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = BetfairAuthenticatedMarketProvider(
+        _runtime(),
+        freshness_policy=BetfairStreamFreshnessPolicy(max_age_ms=5_000),
+    )
+    provider.bind_durable_current({})
+    identities = tuple(
+        BetfairQuoteIdentity(
+            BETFAIR_STREAM_SOURCE_ID,
+            "1.23456789",
+            501 + index,
+            Decimal("0"),
+            BetfairQuoteSide.BACK,
+            Decimal("2"),
+        )
+        for index in range(2)
+    )
+    quotes = tuple(
+        ProviderQuote(
+            provider_event_id=_event_token(identity.market_id),
+            provider_market_id=identity.market_id,
+            provider_selection_id=_identity_token(identity),
+            decimal_odds=Decimal("2"),
+            observed_ts="2026-10-05T12:00:00+00:00",
+            sequence=index + 1,
+            status="open",
+            source_ts="2026-10-05T11:59:59+00:00",
+            metadata=_metadata(identity, evidence_id=f"postcommit-{index}"),
+            exchange_side="back",
+        )
+        for index, identity in enumerate(identities)
+    )
+    monkeypatch.setattr(provider, "_build_transition", lambda: quotes)
+
+    first = provider.read_batch(1)
+    first_event = CanonicalNormalizer().normalize(
+        BETFAIR_STREAM_SOURCE_ID,
+        first.quotes[0],
+    )
+    provider.assert_durable_current(
+        {(first_event.source_id, first_event.quote_key): first_event}
+    )
+
+    second = provider.read_batch(1)
+
+    assert second.cursor == "2"
+    assert second.quality_flags == ()
+    assert provider._sequence == 2
+    assert set(provider._open_by_identity) == set(identities)

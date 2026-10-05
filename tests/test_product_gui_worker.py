@@ -11,7 +11,7 @@ from autosport.continuous_session import (
     SessionState,
 )
 from autosport.product_entrypoint import ProductEntrypointError
-from autosport.product_gui_worker import ProductGuiWorker
+from autosport.product_gui_worker import ProductGuiMessage, ProductGuiWorker
 
 
 def _status(state: SessionState, *, cycles: int) -> ContinuousSessionStatus:
@@ -310,4 +310,58 @@ def test_runtime_tick_identity_guard_rejects_string_subclass_source() -> None:
             tick,
             expected_source_id="source-1",
             expected_session_id="session-1",
+        )
+
+
+def test_product_gui_message_rejects_kind_subclass_without_dispatch() -> None:
+    class HostileKind(str):
+        def __hash__(self) -> int:
+            raise AssertionError("kind subtype hashing must not execute")
+
+    with pytest.raises(ValueError):
+        ProductGuiMessage(
+            kind=HostileKind("ERROR"),
+            error_type="RuntimeError",
+        )
+
+
+def test_product_gui_message_rejects_status_subclass() -> None:
+    class StatusSubclass(ContinuousSessionStatus):
+        pass
+
+    status = _status(SessionState.RUNNING, cycles=0)
+    subclass_status = StatusSubclass(
+        session_id=status.session_id,
+        source_id=status.source_id,
+        state=status.state,
+        cycles_completed=status.cycles_completed,
+        last_success_at=status.last_success_at,
+        last_error_code=status.last_error_code,
+        last_full_refresh_at=status.last_full_refresh_at,
+        settlement_evidence=status.settlement_evidence,
+    )
+
+    with pytest.raises(ValueError):
+        ProductGuiMessage(kind="STARTED", status=subclass_status)
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    ["", "Runtime Error", "X" * 65],
+)
+def test_product_gui_message_rejects_unbounded_error_type(error_type: str) -> None:
+    with pytest.raises(ValueError):
+        ProductGuiMessage(kind="ERROR", error_type=error_type)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["", "Operator Stop", "UPPER", "x" * 65],
+)
+def test_product_gui_message_rejects_noncanonical_stop_reason(reason: str) -> None:
+    with pytest.raises(ValueError):
+        ProductGuiMessage(
+            kind="STOPPED",
+            status=_status(SessionState.STOPPED, cycles=1),
+            stop_reason=reason,
         )

@@ -226,6 +226,24 @@ def _runner_status_mcm(
     return json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
 
 
+def _heartbeat_mcm(
+    *,
+    pt: int,
+    clk: str,
+    status: int | None = None,
+) -> bytes:
+    payload: dict[str, object] = {
+        "op": "mcm",
+        "id": 7,
+        "ct": "HEARTBEAT",
+        "clk": clk,
+        "pt": pt,
+    }
+    if status is not None:
+        payload["status"] = status
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
+
+
 def _transport(
     monkeypatch: pytest.MonkeyPatch,
     tail: bytes,
@@ -1569,3 +1587,70 @@ def test_provider_conflation_change_revokes_existing_live_decision(
     assert delayed.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
     assert "conflation does not match" in delayed.reason
     assert not delayed.decision_eligible
+
+
+def test_provider_503_revokes_live_authority_without_disconnect_until_new_quote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, fake = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(pt=publish_time_ms)
+        + _heartbeat_mcm(
+            pt=publish_time_ms + 1,
+            clk="hb1",
+            status=503,
+        )
+        + _heartbeat_mcm(
+            pt=publish_time_ms + 2,
+            clk="hb2",
+        )
+        + _delta_mcm(
+            pt=publish_time_ms + 3,
+            clk="c3",
+            price=2.2,
+        ),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+    initial = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert initial.decision_eligible
+
+    runtime.read_and_ingest()
+    assert not initial.decision_eligible
+    after_503 = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert after_503.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    assert not after_503.decision_eligible
+    assert transport.is_authenticated
+    assert not fake.closed
+
+    runtime.read_and_ingest()
+    after_healthy_heartbeat = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert (
+        after_healthy_heartbeat.verdict
+        is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    )
+    assert not after_healthy_heartbeat.decision_eligible
+    assert transport.is_authenticated
+    assert not fake.closed
+
+    runtime.read_and_ingest()
+    recovered = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert recovered.decision_eligible
+    assert recovered.evidence_id != initial.evidence_id
+    assert transport.is_authenticated
+    assert not fake.closed

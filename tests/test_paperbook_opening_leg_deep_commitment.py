@@ -1462,3 +1462,111 @@ def test_load_rejects_in_place_snapshot_install_authority_code_mutation(
             PaperBook.load(path)
     finally:
         authority.__code__ = original_code
+
+
+def test_load_bytes_never_executes_rebound_json_parser(monkeypatch) -> None:
+    payload = json.dumps(
+        {
+            "schema_version": 7,
+            "initial_bankroll": "100",
+            "balance": "100",
+            "tickets": [],
+            "lifecycle": [],
+        }
+    ).encode("utf-8")
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound JSON parser executed")
+
+    monkeypatch.setattr(paper_module.json, "loads", hostile)
+
+    decoded = PaperBook.load_bytes(payload)
+
+    with pytest.raises(ValueError, match="lacks product-issued opening authority"):
+        _ = decoded.committed_stake
+    assert attacker_calls == 0
+
+
+@pytest.mark.parametrize(
+    "authority_name",
+    (
+        "_reject_duplicate_json_keys",
+        "_reject_nonfinite_json_constant",
+    ),
+)
+def test_load_bytes_never_executes_rebound_json_rejection_hook(
+    monkeypatch,
+    authority_name: str,
+) -> None:
+    payload = json.dumps(
+        {
+            "schema_version": 7,
+            "initial_bankroll": "100",
+            "balance": "100",
+            "tickets": [],
+            "lifecycle": [],
+        }
+    ).encode("utf-8")
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound JSON rejection hook executed")
+
+    monkeypatch.setattr(paper_module, authority_name, hostile)
+
+    decoded = PaperBook.load_bytes(payload)
+
+    with pytest.raises(ValueError, match="lacks product-issued opening authority"):
+        _ = decoded.committed_stake
+    assert attacker_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("authority", "message"),
+    (
+        (paper_module.json.loads, "JSON parser authority changed"),
+        (
+            paper_module._reject_duplicate_json_keys,
+            "duplicate-key authority changed",
+        ),
+        (
+            paper_module._reject_nonfinite_json_constant,
+            "non-finite constant authority changed",
+        ),
+    ),
+)
+def test_load_bytes_rejects_in_place_json_decode_authority_code_mutation(
+    authority,
+    message: str,
+) -> None:
+    payload = b'{"schema_version":7,"initial_bankroll":"100","balance":"100","tickets":[],"lifecycle":[]}'
+    original_code = authority.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        authority.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match=message):
+            PaperBook.load_bytes(payload)
+    finally:
+        authority.__code__ = original_code
+
+
+def test_sealed_json_decode_still_rejects_duplicate_keys_and_nonfinite_constants() -> None:
+    duplicate = (
+        b'{"schema_version":7,"initial_bankroll":"100","initial_bankroll":"200",'
+        b'"balance":"100","tickets":[],"lifecycle":[]}'
+    )
+    nonfinite = (
+        b'{"schema_version":7,"initial_bankroll":"100","balance":NaN,'
+        b'"tickets":[],"lifecycle":[]}'
+    )
+
+    with pytest.raises(ValueError, match="duplicate JSON key: initial_bankroll"):
+        PaperBook.load_bytes(duplicate)
+    with pytest.raises(ValueError, match="non-finite JSON constant: NaN"):
+        PaperBook.load_bytes(nonfinite)

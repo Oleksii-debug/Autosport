@@ -263,12 +263,19 @@ class FocusedMirrorDependencyIndex:
                 for dependency in dependencies
             }
             with self._lock:
+                active_dependencies = tuple(self._dependencies.values())
                 for dependency in dependencies:
                     if self._dependencies.get(dependency.input_id) == dependency:
                         self._matched_keys[dependency.input_id] = rebuilt[
                             dependency.input_id
                         ]
-            return tuple(dependency.input_id for dependency in dependencies)
+            # Return the live registry, not the pre-snapshot registry. A dependency
+            # removed while the fail-safe snapshot was captured must not escape as
+            # stale pending work; a newly registered dependency is conservatively
+            # affected and already owns its own registration catch-up.
+            return tuple(
+                dependency.input_id for dependency in active_dependencies
+            )
         if not batch.changed_keys or not dependencies:
             return ()
 

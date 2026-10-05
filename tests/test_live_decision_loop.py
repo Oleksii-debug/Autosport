@@ -8376,5 +8376,85 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             loop.close()
 
 
+    def test_failed_register_publication_restores_exact_pre_mutation_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            inputs_before = loop.inputs_path.read_bytes()
+
+            with patch.object(
+                loop,
+                "_persist_input_registry",
+                side_effect=RuntimeError("simulated dependency publication failure"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated dependency publication failure",
+                ):
+                    loop.register_input("input-b", selection_ids="selection-b")
+
+            self.assertEqual(loop.dependencies.input_ids, ("input-a",))
+            self.assertEqual(tuple(loop._input_specs), ("input-a",))
+            self.assertEqual(
+                loop.dependencies.registry_snapshot()[0].selection_ids,
+                frozenset({"selection-a"}),
+            )
+            self.assertEqual(loop.inputs_path.read_bytes(), inputs_before)
+            loop.close()
+
+    def test_failed_unregister_publication_restores_exact_pre_mutation_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            loop.register_input("input-b", selection_ids="selection-b")
+            loop.register_input("input-c", selection_ids="selection-c")
+            inputs_before = loop.inputs_path.read_bytes()
+
+            with patch.object(
+                loop,
+                "_persist_input_registry",
+                side_effect=RuntimeError("simulated dependency publication failure"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated dependency publication failure",
+                ):
+                    loop.unregister_input("input-b")
+
+            self.assertEqual(
+                loop.dependencies.input_ids,
+                ("input-a", "input-b", "input-c"),
+            )
+            self.assertEqual(
+                tuple(loop._input_specs),
+                ("input-a", "input-b", "input-c"),
+            )
+            self.assertEqual(
+                tuple(
+                    dependency.selection_ids
+                    for dependency in loop.dependencies.registry_snapshot()
+                ),
+                (
+                    frozenset({"selection-a"}),
+                    frozenset({"selection-b"}),
+                    frozenset({"selection-c"}),
+                ),
+            )
+            self.assertEqual(loop.inputs_path.read_bytes(), inputs_before)
+            loop.close()
+
+
 if __name__ == "__main__":
     unittest.main()

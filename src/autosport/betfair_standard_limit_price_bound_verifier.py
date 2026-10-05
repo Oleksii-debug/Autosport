@@ -74,7 +74,7 @@ def _exact_snapshot(
     evidence: BetfairStandardLimitPriceBoundEvidence,
 ) -> tuple[tuple[str, type[object], object], ...]:
     if type(evidence) is not BetfairStandardLimitPriceBoundEvidence:
-        raise error_cls(
+        raise BetfairStandardLimitPriceBoundError(
             "price-bound evidence must be the exact canonical evidence type"
         )
 
@@ -83,7 +83,7 @@ def _exact_snapshot(
         try:
             value = object.__getattribute__(evidence, field)
         except (AttributeError, TypeError) as exc:
-            raise error_cls(
+            raise BetfairStandardLimitPriceBoundError(
                 "price-bound evidence is incomplete"
             ) from exc
         comparable: object = str(value) if type(value) is Decimal else value
@@ -99,11 +99,11 @@ def _require_execution_state_continuity(
     """Require ledger continuity without allowing ledger rows to mint provenance."""
 
     if type(ledger) is not RealExecutionLedger:
-        raise error_cls(
+        raise BetfairStandardLimitPriceBoundError(
             "ledger must be the exact canonical RealExecutionLedger type"
         )
     if type(bound) is not BoundSupervisedExecutionPlan:
-        raise error_cls(
+        raise BetfairStandardLimitPriceBoundError(
             "issued bound must be the exact canonical BoundSupervisedExecutionPlan type"
         )
 
@@ -111,11 +111,11 @@ def _require_execution_state_continuity(
     try:
         saga = RealExecutionLedger.saga(ledger, bound.execution_plan.plan_id)
     except KeyError as exc:
-        raise error_cls(
+        raise BetfairStandardLimitPriceBoundError(
             "product-issued execution plan is not durably reserved"
         ) from exc
     if saga.plan_fingerprint != bound.execution_plan.fingerprint:
-        raise error_cls(
+        raise BetfairStandardLimitPriceBoundError(
             "durable execution-plan fingerprint mismatches product issuance"
         )
     if not RealExecutionLedger.supervised_approval_is_active(
@@ -124,7 +124,7 @@ def _require_execution_state_continuity(
         approval_id=bound.execution_plan.approval_id,
         approval_fingerprint=bound.approval_fingerprint,
     ):
-        raise error_cls(
+        raise BetfairStandardLimitPriceBoundError(
             "durable supervised approval is missing or revoked"
         )
 
@@ -142,7 +142,7 @@ def _require_issuance_time_provider_request(
         if item.get("action_id") == expected.action_id
     ]
     if len(matches) != 1:
-        raise error_cls(
+        raise BetfairStandardLimitPriceBoundError(
             "Betfair request identity was not durably proven at plan issuance"
         )
     durable = matches[0]
@@ -155,7 +155,7 @@ def _require_issuance_time_provider_request(
         "write_adapter_version": expected.write_adapter_version,
     }
     if durable != expected_request:
-        raise error_cls(
+        raise BetfairStandardLimitPriceBoundError(
             "durable issuance-time Betfair request identity changed"
         )
 

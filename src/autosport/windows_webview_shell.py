@@ -1102,8 +1102,15 @@ class AutosportWebController:
             )
             self.tickets = [text("ui.status.tickets.startup_failure")]
             return
-        workspace = workspace_for_strategy(self.workspace, strategy_id, plan)
-        self._active_workspace = Path(workspace)
+        workspace = Path(
+            workspace_for_strategy(self.workspace, strategy_id, plan)
+        )
+        self._active_workspace = workspace
+        if workspace in self._recovery_required_workspaces:
+            self.bank = text("ui.status.bank.quarantined", workspace=workspace)
+            self.tickets = [text("ui.status.tickets.startup_failure")]
+            self.status = text("ui.status.startup.recovery_required")
+            return
         session: AutosportSession | None = None
         try:
             session = AutosportSession(
@@ -1337,6 +1344,10 @@ class AutosportWebController:
                 if not self._project_product_runtime_source_status(
                     product_message.status
                 ):
+                    continue
+                runtime_workspace = Path(self._active_workspace)
+                if runtime_workspace in self._recovery_required_workspaces:
+                    self._quarantine_product_runtime_truth(runtime_workspace)
                     continue
                 reason = {
                     "operator_stop": "операторська зупинка",

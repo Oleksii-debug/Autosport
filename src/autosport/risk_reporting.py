@@ -93,6 +93,8 @@ class ProductIssuedPaperEquityPath:
     net_equity_authoritative: bool
     correction_lineage_complete: bool
     restated_history_authoritative: bool
+    frozen_scope_complete: bool
+    historical_reresolution_complete: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +127,8 @@ class ProductIssuedPaperDrawdownEvidence:
     net_equity_authoritative: bool
     correction_lineage_complete: bool
     restated_history_authoritative: bool
+    frozen_scope_complete: bool
+    historical_reresolution_complete: bool
     evidence_sha256: str
 
 
@@ -160,6 +164,8 @@ class PaperRiskReport:
     net_equity_authoritative: bool
     correction_lineage_complete: bool
     restated_history_authoritative: bool
+    frozen_scope_complete: bool
+    historical_reresolution_complete: bool
     history_view: str
     historical_as_known_supported: bool
     goal_id: str
@@ -292,6 +298,8 @@ def _equity_path_payload(
     net_equity_authoritative: bool,
     correction_lineage_complete: bool,
     restated_history_authoritative: bool,
+    frozen_scope_complete: bool,
+    historical_reresolution_complete: bool,
 ) -> dict[str, object]:
     return {
         "schema": EQUITY_PATH_SCHEMA,
@@ -314,6 +322,8 @@ def _equity_path_payload(
         "net_equity_authoritative": net_equity_authoritative,
         "correction_lineage_complete": correction_lineage_complete,
         "restated_history_authoritative": restated_history_authoritative,
+        "frozen_scope_complete": frozen_scope_complete,
+        "historical_reresolution_complete": historical_reresolution_complete,
         "points": [
             {
                 "sequence": point.sequence,
@@ -491,6 +501,10 @@ def build_product_issued_paper_equity_path(
     # cannot claim an authoritative corrected/restated historical view.
     correction_lineage_complete = False
     restated_history_authoritative = False
+    # Current resolver has no durable frozen-cutoff record that can be
+    # re-resolved after later legitimate PaperBook history is appended.
+    frozen_scope_complete = False
+    historical_reresolution_complete = False
     payload = _equity_path_payload(
         goal_snapshot=goal_snapshot,
         goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
@@ -506,6 +520,8 @@ def build_product_issued_paper_equity_path(
         net_equity_authoritative=net_equity_authoritative,
         correction_lineage_complete=correction_lineage_complete,
         restated_history_authoritative=restated_history_authoritative,
+        frozen_scope_complete=frozen_scope_complete,
+        historical_reresolution_complete=historical_reresolution_complete,
     )
     path_sha256 = hashlib.sha256(
         json.dumps(
@@ -689,6 +705,8 @@ def _drawdown_evidence_payload(
         "net_equity_authoritative": path.net_equity_authoritative,
         "correction_lineage_complete": path.correction_lineage_complete,
         "restated_history_authoritative": path.restated_history_authoritative,
+        "frozen_scope_complete": path.frozen_scope_complete,
+        "historical_reresolution_complete": path.historical_reresolution_complete,
     }
 
 
@@ -736,6 +754,8 @@ def build_product_issued_paper_drawdown_evidence(
         net_equity_authoritative=path.net_equity_authoritative,
         correction_lineage_complete=path.correction_lineage_complete,
         restated_history_authoritative=path.restated_history_authoritative,
+        frozen_scope_complete=path.frozen_scope_complete,
+        historical_reresolution_complete=path.historical_reresolution_complete,
         evidence_sha256=evidence_sha256,
     )
 
@@ -1166,6 +1186,8 @@ def build_paper_risk_report(
         net_equity_authoritative=equity_path.net_equity_authoritative,
         correction_lineage_complete=equity_path.correction_lineage_complete,
         restated_history_authoritative=equity_path.restated_history_authoritative,
+        frozen_scope_complete=equity_path.frozen_scope_complete,
+        historical_reresolution_complete=equity_path.historical_reresolution_complete,
         history_view=equity_path.history_view,
         historical_as_known_supported=equity_path.historical_as_known_supported,
         goal_id=goal_snapshot.goal_id,

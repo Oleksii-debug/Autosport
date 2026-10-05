@@ -666,11 +666,7 @@ def _validate_lay_execution_surface(
     suspended_action_ids: frozenset[str],
 ) -> None:
     for action in plan.actions:
-        if type(action) is not ExecutionAction or type(action.side) is not str:
-            raise PaperExecutionStateError(
-                "PAPER execution requires canonical ExecutionAction side authority "
-                "before reservation"
-            )
+        _impl._require_canonical_action_surface(action)
         if action.side not in {"BACK", "LAY"}:
             raise PaperExecutionStateError(
                 "PAPER execution requires canonical BACK or LAY action side "

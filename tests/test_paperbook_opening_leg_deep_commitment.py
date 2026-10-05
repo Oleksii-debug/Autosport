@@ -609,3 +609,22 @@ def test_snapshot_lifecycle_rejects_action_str_subclass_before_comparison() -> N
 
     assert _HostileSnapshotText.comparisons == 0
     assert _HostileSnapshotText.hash_calls == 0
+
+
+
+class _HostileSnapshotBytes(bytes):
+    decode_calls = 0
+
+    def decode(self, *args, **kwargs):
+        type(self).decode_calls += 1
+        raise AssertionError("hostile bytes decode must never execute")
+
+
+def test_load_bytes_rejects_bytes_subclass_before_decode() -> None:
+    hostile = _HostileSnapshotBytes(b"{}")
+    _HostileSnapshotBytes.decode_calls = 0
+
+    with pytest.raises(TypeError, match="canonical bytes"):
+        PaperBook.load_bytes(hostile)
+
+    assert _HostileSnapshotBytes.decode_calls == 0

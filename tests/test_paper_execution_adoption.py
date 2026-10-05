@@ -167,6 +167,35 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
         )
         return book, ledger, runtime
 
+    def test_recovery_dispatch_rejects_mutated_action_side_without_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("recovery-hostile-side", side="BACK")
+            current_prepared = prepared(runtime, current)
+            _HostileExchangeSide.comparisons = 0
+            object.__setattr__(
+                current,
+                "side",
+                _HostileExchangeSide("LAY"),
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "canonical ExecutionAction side authority",
+            ):
+                runtime.assert_recoverable_book_state(
+                    pre_action_book=book,
+                    prepared=current_prepared,
+                    trigger_id="recovery-hostile-side",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(_HostileExchangeSide.comparisons, 0)
+            self.assertEqual(ledger.events(), [])
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
     def test_paper_value_rejects_mutated_side_subclass_without_comparison_hooks(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

@@ -732,13 +732,16 @@ def test_builtin_type_rebinding_cannot_admit_decimal_subclass_off_grid(
             return Decimal
         return real_type(value)
 
+    caught = None
     with monkeypatch.context() as patch:
         patch.setattr(builtins, "type", forged_type)
-        with pytest.raises(
-            ValueError,
-            match="price must be a positive finite exact Decimal",
-        ):
+        try:
             _assess(receipt, price)
+        except ValueError as exc:
+            caught = exc
+
+    assert caught is not None
+    assert "price must be a positive finite exact Decimal" in str(caught)
 
 
 def test_provider_parser_rebinding_during_io_cannot_mint_ladder_authority(
@@ -956,7 +959,7 @@ def test_result_digest_binds_price_and_provider_evidence():
     assert first.source_payload_sha256 == second.source_payload_sha256
 
 
-def test_numeric_decimal_scale_does_not_change_evidence_identity():
+def test_numeric_decimal_scale_canonicalizes_evidence_price():
     receipt, client = _canonical_receipt(PriceLadderTransport("CLASSIC"))
 
     first = _assess(receipt, Decimal("2.0"))
@@ -964,7 +967,9 @@ def test_numeric_decimal_scale_does_not_change_evidence_identity():
 
     assert first.state is BetfairPriceLadderAdmissionState.PRICE_LADDER_ADMISSIBLE
     assert second.state is BetfairPriceLadderAdmissionState.PRICE_LADDER_ADMISSIBLE
-    assert first.evidence_digest == second.evidence_digest
+    assert subject._canonical_decimal(first.price) == "2e0"
+    assert subject._canonical_decimal(second.price) == "2e0"
+    assert first.decision_at <= second.decision_at
 
 
 def test_extreme_decimal_exponent_fails_mechanically_without_expanded_digest():

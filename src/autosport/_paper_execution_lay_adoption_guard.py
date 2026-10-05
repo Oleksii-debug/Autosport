@@ -541,28 +541,33 @@ def _preflight_materialization_batch(
                 )
             continue
 
-        shadow.open_ticket(
-            [
-                TicketLeg(
-                    event_id=attempt.event_id,
-                    market_id=attempt.market_id,
-                    selection_id=attempt.selection_id,
-                    locked_odds=attempt.execution_odds,
-                    sport=binding.sport,
-                    exchange_side=side.lower(),
-                )
-            ],
-            attempt.execution_stake,
-            reason=(
-                f"paper execution adoption; decision_id={decision_id}; "
-                f"run_id={attempt.run_id}; {marker}"
-            ),
-            placed_at=attempt.execution_observed_at,
-            provider_source_ids=(attempt.bookmaker_id,),
-            provider_accounts=((attempt.bookmaker_id, attempt.account_id),),
-            bankroll_id=binding.bankroll_id,
-            currency=binding.currency,
-        )
+        try:
+            shadow.open_ticket(
+                [
+                    TicketLeg(
+                        event_id=attempt.event_id,
+                        market_id=attempt.market_id,
+                        selection_id=attempt.selection_id,
+                        locked_odds=attempt.execution_odds,
+                        sport=binding.sport,
+                        exchange_side=side.lower(),
+                    )
+                ],
+                attempt.execution_stake,
+                reason=(
+                    f"paper execution adoption; decision_id={decision_id}; "
+                    f"run_id={attempt.run_id}; {marker}"
+                ),
+                placed_at=attempt.execution_observed_at,
+                provider_source_ids=(attempt.bookmaker_id,),
+                provider_accounts=((attempt.bookmaker_id, attempt.account_id),),
+                bankroll_id=binding.bankroll_id,
+                currency=binding.currency,
+            )
+        except (TypeError, ValueError) as exc:
+            raise PaperExecutionAdoptionError(
+                "accepted PAPER batch cannot be materialized atomically"
+            ) from exc
 
     try:
         type(shadow)._validate_loaded_state(shadow)

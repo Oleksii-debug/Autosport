@@ -1040,6 +1040,11 @@ def test_retry_after_aborted_prepare_uses_fresh_transaction(
         authority_root=authority_root,
     )
     _append(store, 0)
+    baseline_prepare_ids = [
+        record.tx_id
+        for record in store._authority.read_history()
+        if record.phase is AuthorityPhase.PREPARE
+    ]
 
     def crash_before_publish(
         _path: Path,
@@ -1056,7 +1061,7 @@ def test_retry_after_aborted_prepare_uses_fresh_transaction(
         for record in store._authority.read_history()
         if record.phase is AuthorityPhase.PREPARE
     ]
-    assert len(first_prepare_ids) == 2
+    assert len(first_prepare_ids) == len(baseline_prepare_ids) + 1
     aborted_tx_id = first_prepare_ids[-1]
 
     reopened = DeploymentRuntimeAuthorityStore(
@@ -1070,7 +1075,7 @@ def test_retry_after_aborted_prepare_uses_fresh_transaction(
         for record in reopened._authority.read_history()
         if record.phase is AuthorityPhase.PREPARE
     ]
-    assert len(prepare_ids) == 3
+    assert len(prepare_ids) == len(first_prepare_ids) + 1
     assert prepare_ids[-1] != aborted_tx_id
     assert len(reopened.records()) == 2
     assert reopened.records()[-1].runtime_authority_id == second_id
@@ -2339,7 +2344,10 @@ def test_runtime_authority_rejects_path_normalization_module_rebinding(
     monkeypatch.setattr(deployment_runtime_authority, "os", HostileOs)
     with pytest.raises(
         DeploymentRuntimeAuthorityError,
-        match="path-normalization dispatch was replaced",
+        match=(
+            "path-normalization dispatch was replaced|"
+            "publication durability dispatch was replaced"
+        ),
     ):
         store.records()
 

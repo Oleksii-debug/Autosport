@@ -288,11 +288,13 @@ class _ReplayableBatchProvider:
         reset_snapshot = getattr(self._provider, "reset_pending_snapshot", None)
         if not callable(reset_snapshot):
             reset_snapshot = getattr(self._provider, "_clear_pending_snapshot", None)
-        if callable(reset_snapshot):
-            reset_snapshot()
-        self._inflight = None
-        self._inflight_max_items = None
-        self._carried_quality_flags = ()
+        try:
+            if callable(reset_snapshot):
+                reset_snapshot()
+        finally:
+            self._inflight = None
+            self._inflight_max_items = None
+            self._carried_quality_flags = ()
 
 
 def _poll_acknowledged(
@@ -319,7 +321,7 @@ def _poll_acknowledged(
             if provider.has_inflight:
                 provider.acknowledge()
             raise
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
             # SQLiteMarketStore commits its batch transaction before poll_once can
             # proceed to source-health publication. A sqlite3.Error escaping that
             # market transaction is therefore the narrow failure class for which
@@ -327,7 +329,13 @@ def _poll_acknowledged(
             if not provider.has_inflight:
                 raise
             if attempt + 1 >= _MAX_BATCH_ATTEMPTS:
-                provider.abandon_uncommitted()
+                try:
+                    provider.abandon_uncommitted()
+                except Exception as reset_error:
+                    exc.add_note(
+                        "provider pending-snapshot reset also failed: "
+                        f"{type(reset_error).__name__}: {reset_error}"
+                    )
                 raise
             continue
         except Exception:

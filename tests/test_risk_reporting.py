@@ -1387,6 +1387,40 @@ class PaperRiskReportingTests(unittest.TestCase):
         ):
             verify_product_issued_paper_equity_path(book, goal, old)
 
+    def test_minimum_equity_prerequisites_bind_history_authority_flags(self) -> None:
+        path = build_product_issued_paper_equity_path(
+            PaperBook("100"),
+            self._goal(),
+        )
+        prerequisites_ready = replace(
+            path,
+            settled_history_complete=True,
+            availability_complete=True,
+            money_scope_complete=True,
+            opening_capital_authority_complete=True,
+            applicable_costs_complete=True,
+            net_equity_authoritative=True,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "authoritative correction/restatement lineage",
+        ):
+            risk_reporting._require_minimum_equity_prerequisites(
+                prerequisites_ready
+            )
+
+        corrected = replace(
+            prerequisites_ready,
+            correction_lineage_complete=True,
+            restated_history_authoritative=True,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "durable frozen-scope historical re-resolution",
+        ):
+            risk_reporting._require_minimum_equity_prerequisites(corrected)
+
     def test_paper_equity_path_never_claims_correction_lineage_completeness(self) -> None:
         book = PaperBook("100")
         ticket = book.open_ticket(

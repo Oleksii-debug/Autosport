@@ -1140,6 +1140,24 @@ class LiveObservationTests(unittest.TestCase):
                 list(canonical.current_quotes),
             )
 
+    def test_observation_result_rejects_noncanonical_snapshot_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        self.assertGreaterEqual(len(canonical.current_quotes), 2)
+        with self.assertRaisesRegex(ValueError, "unique quote keys"):
+            ObservationResult(
+                canonical.stats,
+                canonical.health,
+                (canonical.current_quotes[0], canonical.current_quotes[0]),
+            )
+        with self.assertRaisesRegex(ValueError, "canonical order"):
+            ObservationResult(
+                canonical.stats,
+                canonical.health,
+                tuple(reversed(canonical.current_quotes)),
+            )
+
     def test_worker_rejects_noncallable_task_before_claiming_slot(self):
         worker = OneShotObservationWorker()
 

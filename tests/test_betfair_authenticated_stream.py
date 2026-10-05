@@ -1935,6 +1935,7 @@ def test_duplicate_sub_image_market_keeps_unique_highest_provider_version(
             "marketDefinition": {
                 "status": "OPEN",
                 "bettingType": "ODDS",
+                "priceLadderDefinition": {"type": "CLASSIC"},
                 "version": version,
                 "runners": [
                     {"id": 1, "hc": 0, "status": "ACTIVE"},
@@ -1991,6 +1992,7 @@ def test_duplicate_sub_image_equal_version_is_ambiguous_and_closes_generation(
             "marketDefinition": {
                 "status": "OPEN",
                 "bettingType": "ODDS",
+                "priceLadderDefinition": {"type": "CLASSIC"},
                 "version": 10,
                 "runners": [
                     {"id": 1, "hc": 0, "status": "ACTIVE"},

@@ -43,6 +43,7 @@ def _build_product_entrypoint():
     canonical_ledger_init = canonical_ledger_type.__init__
     canonical_ledger_init_code = canonical_ledger_init.__code__
     path_factory = Path
+    canonical_path_type = type(Path("."))
     object_new = object.__new__
 
     def authority_graph_unchanged() -> bool:
@@ -127,8 +128,13 @@ def _build_product_entrypoint():
             raise BetfairStandardLimitPriceBoundError(
                 "product issuance store is not canonical"
             )
+        store_workspace_value = object.__getattribute__(issuance_store, "workspace")
+        if type(store_workspace_value) is not canonical_path_type:
+            raise BetfairStandardLimitPriceBoundError(
+                "product issuance store workspace handle is not canonical"
+            )
         try:
-            store_workspace = path_factory(issuance_store.workspace).resolve(strict=False)
+            store_workspace = store_workspace_value.resolve(strict=False)
         except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
             raise BetfairStandardLimitPriceBoundError(
                 "product issuance store is outside the active runtime workspace"
@@ -137,7 +143,7 @@ def _build_product_entrypoint():
             raise BetfairStandardLimitPriceBoundError(
                 "product issuance store is outside the active runtime workspace"
             )
-        if issuance_store.authority_root is not None:
+        if object.__getattribute__(issuance_store, "authority_root") is not None:
             raise BetfairStandardLimitPriceBoundError(
                 "product issuance store must use the product-selected authority root"
             )
@@ -146,8 +152,13 @@ def _build_product_entrypoint():
             raise BetfairStandardLimitPriceBoundError(
                 "execution ledger is not canonical"
             )
+        ledger_path_value = object.__getattribute__(ledger, "path")
+        if type(ledger_path_value) is not canonical_path_type:
+            raise BetfairStandardLimitPriceBoundError(
+                "execution ledger path handle is not canonical"
+            )
         try:
-            ledger_path = path_factory(ledger.path).resolve(strict=False)
+            ledger_path = ledger_path_value.resolve(strict=False)
         except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
             raise BetfairStandardLimitPriceBoundError(
                 "execution ledger is outside the active runtime workspace"
@@ -171,6 +182,18 @@ def _build_product_entrypoint():
         if not reopen_graph_unchanged():
             raise BetfairStandardLimitPriceBoundError(
                 "canonical Betfair product verifier reopen authority changed"
+            )
+        if (
+            type(object.__getattribute__(canonical_store, "workspace"))
+            is not canonical_path_type
+            or object.__getattribute__(canonical_store, "workspace") != workspace
+            or object.__getattribute__(canonical_store, "authority_root") is not None
+            or type(object.__getattribute__(canonical_ledger, "path"))
+            is not canonical_path_type
+            or object.__getattribute__(canonical_ledger, "path") != ledger_path
+        ):
+            raise BetfairStandardLimitPriceBoundError(
+                "canonical Betfair product verifier reopen state changed"
             )
 
         # Re-resolve after path canonicalization/re-open and again after the pure

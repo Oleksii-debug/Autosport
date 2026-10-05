@@ -275,8 +275,8 @@ class LiveIntentProvenance:
             _canonical_timestamp("model_available_at", self.model_available_at)
 
     def assert_available_at(self, as_of: datetime) -> None:
-        if not isinstance(as_of, datetime):
-            raise TypeError("intent provenance as_of must be datetime")
+        if type(as_of) is not datetime:
+            raise TypeError("intent provenance as_of must be an exact datetime")
         if as_of.tzinfo is None or as_of.utcoffset() is None:
             raise ValueError("intent provenance as_of must be timezone-aware")
         cutoff = as_of.astimezone(timezone.utc)
@@ -308,8 +308,8 @@ class LiveIntentProvenance:
         *,
         as_of: datetime,
     ) -> "LiveIntentProvenance":
-        if not isinstance(registry, ScientificRegistry):
-            raise TypeError("scientific_registry must be ScientificRegistry")
+        if type(registry) is not ScientificRegistry:
+            raise TypeError("scientific_registry must be an exact ScientificRegistry")
         wanted = _canonical_text("intent_strategy_version_id", strategy_version_id)
         strategy_entry = registry.get("StrategyVersion", wanted)
         if strategy_entry is None:
@@ -404,8 +404,8 @@ class LiveIntentProvenance:
 
 def _require_utc_clock(clock: Clock) -> datetime:
     now = clock()
-    if not isinstance(now, datetime):
-        raise TypeError("live loop clock must return datetime")
+    if type(now) is not datetime:
+        raise TypeError("live loop clock must return an exact datetime")
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("live loop clock must return a timezone-aware datetime")
     return now.astimezone(timezone.utc)

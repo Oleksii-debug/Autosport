@@ -210,6 +210,27 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                     decision_id="decision-lay",
                 )
 
+    def test_constructor_rejects_paper_execution_ledger_subclass_before_access(self):
+        class HostileLedger(PaperExecutionLedger):
+            def __getattribute__(self, name):
+                if name not in {"__class__"}:
+                    raise AssertionError("hostile ledger attributes must not be read")
+                return super().__getattribute__(name)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hostile = object.__new__(HostileLedger)
+            with self.assertRaisesRegex(
+                TypeError,
+                "ledger must be exact PaperExecutionLedger",
+            ):
+                PaperExecutionAdoptionRuntime(
+                    book=PaperBook("100.00"),
+                    ledger=hostile,
+                    config=config(),
+                    max_quote_age=__import__("datetime").timedelta(seconds=5),
+                    paper_book_path=Path(tmp) / "paper-book.json",
+                )
+
     def test_constructor_rejects_timedelta_subclass_before_comparison(self):
         class HostileTimedelta(timedelta):
             def __le__(self, _other):

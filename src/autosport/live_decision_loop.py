@@ -2209,7 +2209,6 @@ class PersistentLiveDecisionLoop:
                 market_state_sha256=progress.market_state_sha256,
                 gate=progress.gate,
                 decision_context_sha256=progress.decision_context_sha256,
-                health_boundaries=progress.health_boundaries,
             )[1]
             latest_live = self._verified_latest_ledger_record(
                 replay_run_id=f"live:{self.loop_id}",
@@ -2789,7 +2788,6 @@ class PersistentLiveDecisionLoop:
         market_state_sha256: str,
         gate: str,
         decision_context_sha256: str,
-        health_boundaries: tuple[ProviderHealthReplayBoundary, ...] | None,
     ) -> tuple[str, str]:
         provenance = self.intent_provenance
         context_payload = {
@@ -2803,13 +2801,6 @@ class PersistentLiveDecisionLoop:
             "intent_strategy_version_id": provenance.strategy_version_id,
             "intent_model_version_id": provenance.model_version_id,
             "intent_provenance_sha256": provenance.provenance_sha256,
-            "health_boundaries": (
-                None
-                if health_boundaries is None
-                else [
-                    boundary.to_dict() for boundary in health_boundaries
-                ]
-            ),
             "plan_sha256": plan.plan_sha256,
         }
         context_hash = _canonical_json_sha256(context_payload)
@@ -3099,7 +3090,6 @@ class PersistentLiveDecisionLoop:
             market_state_sha256=market_state_sha256,
             gate=gate,
             decision_context_sha256=decision_context_sha256,
-            health_boundaries=decision_health_boundaries,
         )
         prepared_execution: PreparedPaperExecution | None = None
         expected_execution_payload = None
@@ -3369,15 +3359,6 @@ class PersistentLiveDecisionLoop:
                     or existing.payload.get("intent_provenance_sha256")
                     != provenance.provenance_sha256
                     or existing.payload.get("gate") != gate
-                    or existing.payload.get("health_boundaries")
-                    != (
-                        None
-                        if decision_health_boundaries is None
-                        else [
-                            boundary.to_dict()
-                            for boundary in decision_health_boundaries
-                        ]
-                    )
                     or existing.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
                     != decision_id
                 ):
@@ -3388,6 +3369,44 @@ class PersistentLiveDecisionLoop:
                     raise DecisionLedgerIntegrityError(
                         "durable live decision execution-adoption evidence changed"
                     )
+                existing_health_raw = existing.payload.get("health_boundaries")
+                if existing_health_raw is None:
+                    existing_health_boundaries = None
+                else:
+                    if type(existing_health_raw) is not list:
+                        raise DecisionLedgerIntegrityError(
+                            "durable live decision provider-health evidence is invalid"
+                        )
+                    try:
+                        existing_health_boundaries = tuple(
+                            ProviderHealthReplayBoundary.from_dict(value)
+                            for value in existing_health_raw
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise DecisionLedgerIntegrityError(
+                            "durable live decision provider-health evidence is invalid"
+                        ) from exc
+                if existing_health_boundaries != durable_progress.health_boundaries:
+                    durable_progress = _Progress(
+                        loop_id=durable_progress.loop_id,
+                        phase=durable_progress.phase,
+                        decision_ts=durable_progress.decision_ts,
+                        market_state_sha256=durable_progress.market_state_sha256,
+                        market_append_generation=durable_progress.market_append_generation,
+                        health_boundaries=existing_health_boundaries,
+                        decision_context_sha256=durable_progress.decision_context_sha256,
+                        affected_input_ids=durable_progress.affected_input_ids,
+                        registered_input_ids=durable_progress.registered_input_ids,
+                        decision_id=durable_progress.decision_id,
+                        plan_sha256=durable_progress.plan_sha256,
+                        ledger_offset=durable_progress.ledger_offset,
+                        gate=durable_progress.gate,
+                    )
+                    atomic_write_json(
+                        self.progress_path,
+                        durable_progress.to_dict(),
+                    )
+                    self._progress = durable_progress
                 duplicate = True
             else:
                 self.decision_ledger.append_economic(record, self.authority)
@@ -5172,7 +5191,6 @@ class PersistentLiveDecisionLoop:
                         "committed live decision provider-health evidence conflicts "
                         "with durable progress"
                     )
-                context_payload["health_boundaries"] = expected_health_boundaries
 
         expected_context_hash = _canonical_json_sha256(context_payload)
         expected_decision_id = f"live-{expected_context_hash}"

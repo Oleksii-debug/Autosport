@@ -242,6 +242,58 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "_causal_only must be a bool"):
             mirror.view_for_keys((), _causal_only=1)
 
+    def test_affected_routing_uses_one_bounded_mirror_capture(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision")
+        first = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        second = self.event(source_id="provider-b", selection="selection-b", sequence=1)
+        runtime.accept_persisted(first)
+        runtime.accept_persisted(second)
+        batch = runtime.drain()
+
+        with (
+            patch.object(
+                mirror,
+                "event_for_quote_key",
+                side_effect=AssertionError("per-key reads are forbidden"),
+            ),
+            patch.object(
+                mirror,
+                "snapshot",
+                side_effect=AssertionError("whole snapshot is forbidden"),
+            ),
+            patch.object(
+                mirror,
+                "view_for_keys",
+                wraps=mirror.view_for_keys,
+            ) as bounded,
+        ):
+            self.assertEqual(dependencies.affected_inputs(batch), ("decision",))
+
+        bounded.assert_called_once_with(frozenset(batch.changed_keys))
+
+    def test_affected_routing_missing_key_fails_safe_to_all_inputs(self) -> None:
+        mirror = MarketMirror()
+        event = self.event(sequence=1)
+        mirror.apply(event)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("provider-a", source_ids="provider-a")
+        dependencies.register("provider-b", source_ids="provider-b")
+        batch = MirrorInvalidationBatch(
+            changed_keys=(
+                (event.source_id, event.quote_key),
+                ("missing-provider", "missing-quote"),
+            ),
+            full_refresh_required=False,
+            has_more=False,
+        )
+
+        self.assertEqual(
+            dependencies.affected_inputs(batch),
+            ("provider-a", "provider-b"),
+        )
     def test_refresh_only_routing_uses_one_bounded_mirror_capture(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror)

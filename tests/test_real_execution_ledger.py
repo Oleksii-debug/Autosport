@@ -1986,6 +1986,41 @@ class RealExecutionLedgerTests(unittest.TestCase):
 
             self.assertIsNone(view.attempts[0].submitted_request_sha256)
 
+
+    def test_conflicting_submitted_request_digest_replay_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-conflicting-digest",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted(
+                "try-conflicting-digest",
+                submitted_at=SUBMITTED_AT,
+                submitted_request_sha256="c" * 64,
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionIdentityConflict,
+                "different submitted request digest",
+            ):
+                ledger.mark_submitted(
+                    "try-conflicting-digest",
+                    submitted_at=SUBMITTED_AT,
+                    submitted_request_sha256="d" * 64,
+                )
+
+            view = ledger.verified_execution_view("p1")
+            self.assertEqual(
+                view.attempts[0].submitted_request_sha256,
+                "c" * 64,
+            )
+
+
     def test_restart_rejects_hash_valid_invalid_submitted_request_digest(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"

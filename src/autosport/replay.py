@@ -79,7 +79,7 @@ class ReplayLeakageFirewall:
                 raise FutureLeakageError(
                     "Final result firewall can only complete after its claimed replay runs"
                 )
-            if not isinstance(completion_capability, bytes):
+            if type(completion_capability) is not bytes:
                 raise FutureLeakageError("invalid replay completion capability")
             candidate_digest = hashlib.sha256(completion_capability).digest()
             expected_digest = self._active_completion_digest
@@ -115,12 +115,14 @@ def _snapshot_replay_event(event: MarketEvent) -> MarketEvent:
 
 class ReplayEngine:
     def __init__(self, events: Iterable[MarketEvent], firewall: ReplayLeakageFirewall | None = None) -> None:
+        if firewall is not None and type(firewall) is not ReplayLeakageFirewall:
+            raise TypeError("firewall must be an exact ReplayLeakageFirewall or null")
         # Snapshot each yielded value immediately. MarketEvent is frozen but nested
         # metadata is mutable, so retaining caller objects would allow strategy-visible
         # replay bytes to drift after dataset_hash was frozen.
         raw_events = [_snapshot_replay_event(event) for event in events]
         self._events = tuple(sorted(raw_events, key=_replay_order_key))
-        self.firewall = firewall or ReplayLeakageFirewall()
+        self.firewall = firewall if firewall is not None else ReplayLeakageFirewall()
         # Dataset identity preserves the pre-causal-delivery ordering contract.
         # Delivery order may evolve to match live availability semantics without
         # silently changing durable experiment/dataset identity for the same input.

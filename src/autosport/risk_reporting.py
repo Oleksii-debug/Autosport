@@ -197,88 +197,6 @@ def _decimal_text(value: Decimal, label: str) -> str:
     return str(value)
 
 
-def _paperbook_equity_source_sha256(book: PaperBook) -> str:
-    """Commit the complete validated PAPER economic/source state for #1253.
-
-    This deliberately differs from the risk-state digest: equity-path evidence
-    must also bind source-market dimensions such as sport/exchange_side even
-    when those dimensions do not currently change BACK-only risk arithmetic.
-    """
-
-    if type(book) is not PaperBook:
-        raise TypeError("book must be canonical PaperBook")
-    _require_product_issued_paper_state(book)
-    PaperBook._validate_loaded_state(book)
-    tickets: list[dict[str, object]] = []
-    for ticket_id in sorted(book.tickets):
-        ticket = book.tickets[ticket_id]
-        tickets.append(
-            {
-                "ticket_id": ticket.ticket_id,
-                "stake": _decimal_text(ticket.stake, "ticket stake"),
-                "placed_at": ticket.placed_at,
-                "settled_at": ticket.settled_at,
-                "status": ticket.status.value,
-                "payout": _decimal_text(ticket.payout, "ticket payout"),
-                "strategy_reason": ticket.strategy_reason,
-                "provider_source_ids": list(ticket.provider_source_ids),
-                "provider_accounts": [
-                    {"source_id": source_id, "account_id": account_id}
-                    for source_id, account_id in ticket.provider_accounts
-                ],
-                "bankroll_id": ticket.bankroll_id,
-                "currency": ticket.currency,
-                "legs": [
-                    {
-                        "event_id": leg.event_id,
-                        "market_id": leg.market_id,
-                        "selection_id": leg.selection_id,
-                        "locked_odds": _decimal_text(
-                            leg.locked_odds,
-                            "ticket leg locked_odds",
-                        ),
-                        "sport": leg.sport,
-                        "exchange_side": leg.exchange_side,
-                    }
-                    for leg in ticket.legs
-                ],
-            }
-        )
-    lifecycle: list[dict[str, object]] = []
-    for raw_entry in book._lifecycle:
-        action, ticket_id, winners, voids = PaperBook._validate_lifecycle_entry(
-            raw_entry
-        )
-        lifecycle.append(
-            {
-                "action": action,
-                "ticket_id": ticket_id,
-                "winning_quote_keys": list(winners),
-                "void_quote_keys": list(voids),
-                "settled_at": (
-                    book._settlement_times[ticket_id]
-                    if action == "settle"
-                    else None
-                ),
-            }
-        )
-    payload = {
-        "schema": "autosport.paper-equity-source.v1",
-        "initial_bankroll": _decimal_text(book.initial_bankroll, "initial bankroll"),
-        "balance": _decimal_text(book.balance, "balance"),
-        "tickets": tickets,
-        "lifecycle": lifecycle,
-    }
-    return hashlib.sha256(
-        json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-    ).hexdigest()
-
-
 def _paper_equity_source_state_sha256(book: PaperBook) -> str:
     """Hash complete canonical PAPER source state used by equity evidence."""
 
@@ -452,7 +370,7 @@ def build_product_issued_paper_equity_path(
         raise ValueError("canonical economic goal changed during equity-path issuance")
 
     before_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
-    before_source_sha256 = _paperbook_equity_source_sha256(book)
+    before_source_sha256 = _paper_equity_source_state_sha256(book)
     if before_sha256 is None:
         raise ValueError("canonical PAPER risk state cannot issue an equity path")
 
@@ -541,7 +459,7 @@ def build_product_issued_paper_equity_path(
         raise ValueError("canonical PAPER equity path current equity is inconsistent")
 
     after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
-    after_source_sha256 = _paperbook_equity_source_sha256(book)
+    after_source_sha256 = _paper_equity_source_state_sha256(book)
     if after_sha256 is None or after_sha256 != before_sha256:
         raise ValueError("canonical PAPER risk state changed during equity-path issuance")
     if after_source_sha256 != before_source_sha256:

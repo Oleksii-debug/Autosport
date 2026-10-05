@@ -583,7 +583,14 @@ def _durable_source_pair(
     after_state = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book_after)
     if after_state is None or after_state != before_state:
         raise ValueError("durable PaperBook changed during equity-path resolution")
-    return book_after, goal_after
+
+    # Close the cross-file read interval after the final PaperBook read. Without
+    # this last owner-goal read, a durable goal replacement occurring after
+    # goal_after but before book_after could publish a mixed source pair.
+    goal_final = store.load()
+    if provenance_for(goal_final) != goal_before_provenance:
+        raise ValueError("durable economic goal changed during equity-path resolution")
+    return book_after, goal_final
 
 
 def resolve_durable_product_issued_paper_equity_path(

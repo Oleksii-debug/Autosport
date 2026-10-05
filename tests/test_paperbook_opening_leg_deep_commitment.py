@@ -1328,3 +1328,137 @@ def test_save_rejects_in_place_snapshot_candidate_authority_code_mutation(
         authority.__code__ = original_code
 
     assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    "authority_name",
+    (
+        "_revoke_ticket_opening_authority",
+        "_revoke_paperbook_causal_history_authority",
+    ),
+)
+def test_load_bytes_never_executes_rebound_snapshot_revoke_authority(
+    monkeypatch,
+    authority_name: str,
+) -> None:
+    source = PaperBook("100")
+    payload = {
+        "schema_version": 7,
+        "initial_bankroll": "100",
+        "balance": "100",
+        "tickets": [],
+        "lifecycle": [],
+    }
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound snapshot revoke authority executed")
+
+    monkeypatch.setattr(paper_module, authority_name, hostile)
+
+    decoded = PaperBook.load_bytes(json.dumps(payload).encode("utf-8"))
+
+    with pytest.raises(ValueError, match="lacks product-issued opening authority"):
+        _ = decoded.committed_stake
+    assert attacker_calls == 0
+    assert source.balance == Decimal("100")
+
+
+@pytest.mark.parametrize(
+    ("authority_name", "message"),
+    (
+        ("_revoke_ticket_opening_authority", "opening revoke authority changed"),
+        (
+            "_revoke_paperbook_causal_history_authority",
+            "causal-history revoke authority changed",
+        ),
+    ),
+)
+def test_load_bytes_rejects_in_place_snapshot_revoke_authority_code_mutation(
+    authority_name: str,
+    message: str,
+) -> None:
+    payload = json.dumps(
+        {
+            "schema_version": 7,
+            "initial_bankroll": "100",
+            "balance": "100",
+            "tickets": [],
+            "lifecycle": [],
+        }
+    ).encode("utf-8")
+    authority = getattr(paper_module, authority_name)
+    original_code = authority.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        authority.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match=message):
+            PaperBook.load_bytes(payload)
+    finally:
+        authority.__code__ = original_code
+
+
+@pytest.mark.parametrize(
+    "authority_name",
+    (
+        "_install_validated_ticket_opening_authority",
+        "_install_validated_paperbook_causal_history_authority",
+    ),
+)
+def test_load_never_executes_rebound_snapshot_install_authority(
+    monkeypatch,
+    tmp_path,
+    authority_name: str,
+) -> None:
+    path = tmp_path / "snapshot.json"
+    source = PaperBook("100")
+    source.open_ticket([_leg()], "10", placed_at=_TS)
+    source.save(path)
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound snapshot install authority executed")
+
+    monkeypatch.setattr(paper_module, authority_name, hostile)
+
+    loaded = PaperBook.load(path)
+
+    assert loaded.committed_stake == Decimal("10")
+    assert attacker_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("authority_name", "message"),
+    (
+        (
+            "_install_validated_ticket_opening_authority",
+            "opening install authority changed",
+        ),
+        (
+            "_install_validated_paperbook_causal_history_authority",
+            "causal-history install authority changed",
+        ),
+    ),
+)
+def test_load_rejects_in_place_snapshot_install_authority_code_mutation(
+    tmp_path,
+    authority_name: str,
+    message: str,
+) -> None:
+    path = tmp_path / "snapshot.json"
+    PaperBook("100").save(path)
+    authority = getattr(paper_module, authority_name)
+    original_code = authority.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        authority.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match=message):
+            PaperBook.load(path)
+    finally:
+        authority.__code__ = original_code

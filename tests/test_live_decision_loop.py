@@ -9891,5 +9891,101 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertFalse(loop.progress_path.exists())
             loop.close()
 
+
+    def test_append_pending_recovery_rejects_orphan_execution_before_decision_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+            model = PaperExecutionModelConfig(
+                model_id="append-pending-orphan-execution-test",
+                model_version="1",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="append-pending-orphan-execution-test",
+                seed="append-pending-orphan-execution",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            book = PaperBook("1000")
+            execution_ledger = PaperExecutionLedger(
+                workspace / "paper-execution.jsonl"
+            )
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=execution_ledger,
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            goal = EconomicGoalContract(
+                goal_id="goal-append-pending-orphan-execution",
+                revision=1,
+                bankroll_id="bankroll-live-test",
+                currency="EUR",
+                max_risk_of_ruin=Decimal("1"),
+            )
+            authority = EconomicDecisionAuthority(
+                goal,
+                PaperRiskPolicy(economic_goal=goal),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(event,)]),
+                factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                book=book,
+                authority=authority,
+                paper_execution=execution,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            with patch.object(
+                loop.decision_ledger,
+                "append_economic",
+                side_effect=RuntimeError(
+                    "simulated process loss before Decision Ledger append"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "before Decision Ledger append",
+                ):
+                    loop.run_cycle()
+
+            progress = json.loads(loop.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(progress["phase"], "append_pending")
+            self.assertEqual(
+                JsonlDecisionLedger(
+                    workspace / "decisions.jsonl"
+                ).verified_records(),
+                (),
+            )
+
+            with patch.object(
+                execution_ledger,
+                "events",
+                return_value=({"event_type": "RUN_RESERVED"},),
+            ):
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "without durable Decision Ledger has orphan #623 execution history",
+                ):
+                    loop.run_cycle()
+
+            self.assertEqual(
+                JsonlDecisionLedger(
+                    workspace / "decisions.jsonl"
+                ).verified_records(),
+                (),
+            )
+            progress = json.loads(loop.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(progress["phase"], "append_pending")
+            loop.close()
+
 if __name__ == "__main__":
     unittest.main()

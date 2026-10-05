@@ -86,6 +86,12 @@ _CANONICAL_ECONOMIC_GOAL_STORE = EconomicGoalStore
 _CANONICAL_ECONOMIC_GOAL_STORE_INIT = EconomicGoalStore.__dict__["__init__"]
 _CANONICAL_ECONOMIC_GOAL_STORE_LOAD = EconomicGoalStore.load
 _CANONICAL_PATH = Path
+_CANONICAL_PATH_TYPE = type(Path("."))
+_CANONICAL_PATH_NEW = _CANONICAL_PATH.__new__
+_CANONICAL_PATH_IS_ABSOLUTE = _CANONICAL_PATH_TYPE.is_absolute
+_CANONICAL_PATH_TRUEDIV = _CANONICAL_PATH_TYPE.__truediv__
+_CANONICAL_PATH_STR = _CANONICAL_PATH_TYPE.__str__
+_CANONICAL_PATH_FSPATH = _CANONICAL_PATH_TYPE.__fspath__
 _CANONICAL_NORMCASE = os.path.normcase
 _CANONICAL_NORMPATH = os.path.normpath
 
@@ -131,6 +137,11 @@ _CANONICAL_DURABLE_RESOLVER_CODE_WITNESSES = tuple(
         _CANONICAL_PAPERBOOK_LOAD,
         _CANONICAL_ECONOMIC_GOAL_STORE_INIT,
         _CANONICAL_ECONOMIC_GOAL_STORE_LOAD,
+        _CANONICAL_PATH_NEW,
+        _CANONICAL_PATH_IS_ABSOLUTE,
+        _CANONICAL_PATH_TRUEDIV,
+        _CANONICAL_PATH_STR,
+        _CANONICAL_PATH_FSPATH,
         _CANONICAL_NORMCASE,
         _CANONICAL_NORMPATH,
     )
@@ -140,6 +151,11 @@ _CANONICAL_DURABLE_RESOLVER_CODE_WITNESSES = tuple(
 def _require_canonical_durable_resolver_code_authority() -> None:
     if (
         Path is not _CANONICAL_PATH
+        or _CANONICAL_PATH.__new__ is not _CANONICAL_PATH_NEW
+        or _CANONICAL_PATH_TYPE.is_absolute is not _CANONICAL_PATH_IS_ABSOLUTE
+        or _CANONICAL_PATH_TYPE.__truediv__ is not _CANONICAL_PATH_TRUEDIV
+        or _CANONICAL_PATH_TYPE.__str__ is not _CANONICAL_PATH_STR
+        or _CANONICAL_PATH_TYPE.__fspath__ is not _CANONICAL_PATH_FSPATH
         or os.path.normcase is not _CANONICAL_NORMCASE
         or os.path.normpath is not _CANONICAL_NORMPATH
     ):

@@ -2612,14 +2612,24 @@ class PersistentLiveDecisionLoop:
             self.dependencies.registry_mutation_guard(),
         ):
             focused_dependency_state = self.dependencies.registry_state_snapshot()
+            durable_progress = self._load_progress()
             if (
-                decision_context_sha256_override is None
+                durable_progress is not None
+                and durable_progress.phase == _PHASE_PENDING
                 and self._decision_context_sha256() != decision_context_sha256
             ):
                 raise LiveDecisionProgressError(
                     "PaperBook/runtime context changed before promotion lock"
                 )
-            durable_progress = self._load_progress()
+            if (
+                durable_progress is not None
+                and durable_progress.phase == _PHASE_APPEND_PENDING
+                and decision_context_sha256_override is None
+                and self._decision_context_sha256() != decision_context_sha256
+            ):
+                raise LiveDecisionProgressError(
+                    "PaperBook/runtime context changed before promotion lock"
+                )
             durable_input_specs = self._load_input_registry() or ()
             current_input_specs = tuple(self._input_specs.values())
             focused_input_specs = tuple(

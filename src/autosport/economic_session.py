@@ -35,7 +35,7 @@ from .workspace_lock import WorkspaceEconomicLock, _open_read_only_descriptor
 
 
 _STATE_SCHEMA: Final = "autosport.risk.economic-session"
-_STATE_SCHEMA_VERSION: Final = 1
+_STATE_SCHEMA_VERSION: Final = 2
 _AUTHORITY_DOMAIN: Final = "portfolio.risk.economic-session"
 _STATE_FILE_NAME: Final = "economic_session.json"
 _MAX_STATE_BYTES: Final = 64 * 1024
@@ -67,6 +67,9 @@ _STATE_KEYS: Final = frozenset(
         "started_at",
         "opening_paperbook_sha256",
         "product_clock_authoritative",
+        "predecessor_session_id",
+        "predecessor_state_sha256",
+        "predecessor_ended_at",
     }
 )
 
@@ -124,6 +127,9 @@ class ProductEconomicSession:
     state_sha256: str
     authority_generation: int
     product_clock_authoritative: bool
+    predecessor_session_id: str | None
+    predecessor_state_sha256: str | None
+    predecessor_ended_at: str | None
 
     def __post_init__(
         self,
@@ -160,6 +166,39 @@ class ProductEconomicSession:
             if not _sha_validator(getattr(self, field)):
                 raise EconomicSessionIntegrityError(f"{field} must be canonical SHA-256")
         _instant_parser(self.started_at)
+        predecessor_values = (
+            self.predecessor_session_id,
+            self.predecessor_state_sha256,
+            self.predecessor_ended_at,
+        )
+        if predecessor_values == (None, None, None):
+            pass
+        elif any(value is None for value in predecessor_values):
+            raise EconomicSessionIntegrityError(
+                "predecessor session identity must be complete or absent"
+            )
+        else:
+            assert self.predecessor_session_id is not None
+            assert self.predecessor_state_sha256 is not None
+            assert self.predecessor_ended_at is not None
+            if (
+                type(self.predecessor_session_id) is not str
+                or not self.predecessor_session_id
+                or self.predecessor_session_id != self.predecessor_session_id.strip()
+            ):
+                raise EconomicSessionIntegrityError(
+                    "predecessor_session_id must be canonical text"
+                )
+            if not _sha_validator(self.predecessor_state_sha256):
+                raise EconomicSessionIntegrityError(
+                    "predecessor_state_sha256 must be canonical SHA-256"
+                )
+            ended = _instant_parser(self.predecessor_ended_at)
+            started = _instant_parser(self.started_at)
+            if ended != started:
+                raise EconomicSessionIntegrityError(
+                    "successor must start exactly at predecessor terminal boundary"
+                )
 
     @property
     def session_turnover_authoritative(self) -> bool:
@@ -364,6 +403,9 @@ def _state_payload(
     opening_paperbook_sha256: str,
     product_clock_authoritative: bool,
     transition_id: str,
+    predecessor_session_id: str | None = None,
+    predecessor_state_sha256: str | None = None,
+    predecessor_ended_at: str | None = None,
     _schema=_STATE_SCHEMA,
     _version=_STATE_SCHEMA_VERSION,
 ) -> dict[str, object]:
@@ -381,6 +423,9 @@ def _state_payload(
         "started_at": started_at,
         "opening_paperbook_sha256": opening_paperbook_sha256,
         "product_clock_authoritative": product_clock_authoritative,
+        "predecessor_session_id": predecessor_session_id,
+        "predecessor_state_sha256": predecessor_state_sha256,
+        "predecessor_ended_at": predecessor_ended_at,
     }
 
 
@@ -424,9 +469,30 @@ def _decode_state(
         or not _sha_validator(parsed["goal_contract_sha256"])
         or not _sha_validator(parsed["opening_paperbook_sha256"])
         or type(parsed["product_clock_authoritative"]) is not bool
+        or (
+            (
+                parsed["predecessor_session_id"],
+                parsed["predecessor_state_sha256"],
+                parsed["predecessor_ended_at"],
+            )
+            != (None, None, None)
+            and (
+                type(parsed["predecessor_session_id"]) is not str
+                or not parsed["predecessor_session_id"]
+                or not _sha_validator(parsed["predecessor_state_sha256"])
+                or type(parsed["predecessor_ended_at"]) is not str
+                or not parsed["predecessor_ended_at"]
+            )
+        )
     ):
         raise EconomicSessionIntegrityError("economic-session state identity is invalid")
-    _parse(parsed["started_at"])
+    started_at = _parse(parsed["started_at"])
+    if parsed["predecessor_ended_at"] is not None:
+        predecessor_ended_at = _parse(parsed["predecessor_ended_at"])
+        if predecessor_ended_at != started_at:
+            raise EconomicSessionIntegrityError(
+                "successor must start exactly at predecessor terminal boundary"
+            )
     canonical = _payload(
         workspace_instance_id=workspace_instance_id,
         session_id=str(parsed["session_id"]),
@@ -439,6 +505,21 @@ def _decode_state(
         opening_paperbook_sha256=str(parsed["opening_paperbook_sha256"]),
         product_clock_authoritative=bool(parsed["product_clock_authoritative"]),
         transition_id=str(parsed["transition_id"]),
+        predecessor_session_id=(
+            None
+            if parsed["predecessor_session_id"] is None
+            else str(parsed["predecessor_session_id"])
+        ),
+        predecessor_state_sha256=(
+            None
+            if parsed["predecessor_state_sha256"] is None
+            else str(parsed["predecessor_state_sha256"])
+        ),
+        predecessor_ended_at=(
+            None
+            if parsed["predecessor_ended_at"] is None
+            else str(parsed["predecessor_ended_at"])
+        ),
     )
     if parsed != canonical or raw != _canonical(canonical):
         raise EconomicSessionIntegrityError("economic-session state is not canonical")
@@ -652,6 +733,129 @@ class ProductEconomicSessionStore:
                 )
             return self._publish_new(goal, provenance.contract_sha256)
 
+    def transition_to_current_goal(
+        self,
+        previous: ProductEconomicSession,
+    ) -> ProductEconomicSession:
+        """Explicitly terminate one session and publish its owner-authorized successor."""
+        if type(previous) is not ProductEconomicSession:
+            raise EconomicSessionMismatchError(
+                "previous must be exact ProductEconomicSession evidence"
+            )
+        self._require_configuration_authority()
+        with _WORKSPACE_LOCK_TYPE(self._workspace_witness):
+            self._require_configuration_authority()
+            if not self._lexists_witness(self._state_path_witness):
+                raise EconomicSessionIntegrityError(
+                    "economic-session state is missing; transition cannot mint a predecessor"
+                )
+            raw = self._read_regular_bytes_witness(
+                self._state_path_witness,
+                limit=_MAX_STATE_BYTES,
+                label="economic-session state",
+            )
+            payload = self._decode_state_witness(
+                raw,
+                workspace_instance_id=self._authority_witness.workspace_instance_id,
+            )
+            observed = self._sha256_witness(raw).hexdigest()
+            recovery = _AUTHORITY_RECOVER(
+                self._authority_witness,
+                observed_state_sha256=observed,
+                tx_id=self._tx_id_witness(payload),
+                semantic_binding_sha256=self._semantic_binding_witness(payload),
+            )
+            if recovery.disposition not in {
+                RecoveryDisposition.CURRENT,
+                RecoveryDisposition.ABORTED_PREPARE,
+                RecoveryDisposition.COMMITTED_PREPARE,
+            }:
+                raise EconomicSessionIntegrityError(
+                    "economic-session predecessor is not a recoverable authority tip"
+                )
+            current_evidence = self._evidence(
+                payload, observed, recovery.committed_generation
+            )
+            if previous != current_evidence:
+                raise EconomicSessionMismatchError(
+                    "explicit transition predecessor does not match current durable session"
+                )
+
+            goal = _ECONOMIC_GOAL_LOAD(self._goal_store_witness)
+            provenance = self._provenance_for_witness(goal)
+            if (
+                payload["goal_id"] == goal.goal_id
+                and payload["goal_revision"] == goal.revision
+                and payload["bankroll_id"] == goal.bankroll_id
+                and payload["currency"] == goal.currency
+                and payload["goal_contract_sha256"] == provenance.contract_sha256
+            ):
+                raise EconomicSessionMismatchError(
+                    "owner EconomicGoal is unchanged; explicit transition is not authorized"
+                )
+            if not self._paperbook_path_witness.exists():
+                raise EconomicSessionIntegrityError(
+                    "canonical paper_book.json is required before economic-session transition"
+                )
+            terminal_at = self._clock_instant_witness(self._clock)
+            if _parse_instant(terminal_at) < _parse_instant(previous.started_at):
+                raise EconomicSessionIntegrityError(
+                    "economic-session transition clock precedes predecessor start"
+                )
+            opening_sha256 = self._opening_paperbook_sha256_witness(
+                self._paperbook_path_witness
+            )
+            successor = self._state_payload_witness(
+                workspace_instance_id=self._authority_witness.workspace_instance_id,
+                session_id=_UUID4().hex,
+                goal_id=goal.goal_id,
+                goal_revision=goal.revision,
+                bankroll_id=goal.bankroll_id,
+                currency=goal.currency,
+                goal_contract_sha256=provenance.contract_sha256,
+                started_at=terminal_at,
+                opening_paperbook_sha256=opening_sha256,
+                product_clock_authoritative=self._product_clock,
+                transition_id=_UUID4().hex,
+                predecessor_session_id=previous.session_id,
+                predecessor_state_sha256=previous.state_sha256,
+                predecessor_ended_at=terminal_at,
+            )
+            intended = self._state_sha256_witness(successor)
+            binding = self._semantic_binding_witness(successor)
+            tx_id = self._tx_id_witness(successor)
+            self._require_configuration_authority()
+            _AUTHORITY_PREPARE(
+                self._authority_witness,
+                tx_id=tx_id,
+                observed_state_sha256=observed,
+                intended_state_sha256=intended,
+                semantic_binding_sha256=binding,
+            )
+            self._atomic_write_json_witness(self._state_path_witness, successor)
+            successor_raw = self._read_regular_bytes_witness(
+                self._state_path_witness,
+                limit=_MAX_STATE_BYTES,
+                label="economic-session state",
+            )
+            successor_observed = self._sha256_witness(successor_raw).hexdigest()
+            if successor_observed != intended:
+                raise EconomicSessionIntegrityError(
+                    "published successor session does not match prepared digest"
+                )
+            self._require_configuration_authority()
+            committed = _AUTHORITY_COMMIT(
+                self._authority_witness,
+                tx_id=tx_id,
+                observed_state_sha256=successor_observed,
+                semantic_binding_sha256=binding,
+            )
+            return self._evidence(
+                successor,
+                successor_observed,
+                committed.generation,
+            )
+
     def require_current(self, candidate: ProductEconomicSession) -> ProductEconomicSession:
         if type(candidate) is not ProductEconomicSession:
             raise EconomicSessionMismatchError(
@@ -733,6 +937,21 @@ class ProductEconomicSessionStore:
             state_sha256=state_sha256,
             authority_generation=generation,
             product_clock_authoritative=bool(payload["product_clock_authoritative"]),
+            predecessor_session_id=(
+                None
+                if payload["predecessor_session_id"] is None
+                else str(payload["predecessor_session_id"])
+            ),
+            predecessor_state_sha256=(
+                None
+                if payload["predecessor_state_sha256"] is None
+                else str(payload["predecessor_state_sha256"])
+            ),
+            predecessor_ended_at=(
+                None
+                if payload["predecessor_ended_at"] is None
+                else str(payload["predecessor_ended_at"])
+            ),
         )
 
 

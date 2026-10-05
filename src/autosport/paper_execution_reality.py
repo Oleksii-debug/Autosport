@@ -325,83 +325,6 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             payload=payload,
         )
 
-    def record_attempt(self, attempt: PaperLegAttempt) -> None:
-        if type(self) is not PaperExecutionLedger:
-            raise TypeError("ledger must be exact PaperExecutionLedger")
-        _impl._require_canonical_attempt_surface(attempt)
-        try:
-            canonical_attempt = PaperLegAttempt.from_dict(attempt.to_dict())
-        except (TypeError, ValueError) as exc:
-            raise PaperExecutionIntegrityError(
-                "attempt no longer satisfies canonical value invariants"
-            ) from exc
-        if canonical_attempt != attempt:
-            raise PaperExecutionIntegrityError(
-                "attempt changed outside canonical construction authority"
-            )
-
-        events = self.events(attempt.run_id)
-        reservations = [
-            event for event in events if event["event_type"] == "RUN_RESERVED"
-        ]
-        if len(reservations) != 1:
-            raise PaperExecutionStateError(
-                "attempt requires exactly one durable run reservation"
-            )
-        if any(event["event_type"] == "RUN_COMPLETED" for event in events):
-            raise PaperExecutionStateError(
-                "attempt cannot be recorded after durable run completion"
-            )
-        reservation = reservations[0]["payload"]
-        action_ids = reservation.get("action_ids")
-        if (
-            type(action_ids) is not list
-            or any(type(item) is not str or not item for item in action_ids)
-        ):
-            raise PaperExecutionIntegrityError(
-                "durable reservation action_ids are invalid"
-            )
-        if (
-            attempt.sequence < 0
-            or attempt.sequence >= len(action_ids)
-            or action_ids[attempt.sequence] != attempt.action_id
-            or reservation.get("plan_id") != attempt.plan_id
-            or reservation.get("model_fingerprint") != attempt.model_fingerprint
-        ):
-            raise PaperExecutionStateError(
-                "attempt identity is not authorized by durable run reservation"
-            )
-
-        existing_attempts = tuple(
-            PaperLegAttempt.from_dict(event["payload"])
-            for event in events
-            if event["event_type"] == "ATTEMPT_RECORDED"
-        )
-        by_sequence = {item.sequence: item for item in existing_attempts}
-        if len(by_sequence) != len(existing_attempts):
-            raise PaperExecutionIntegrityError(
-                "durable run contains duplicate attempt sequence"
-            )
-        same = by_sequence.get(attempt.sequence)
-        if same is None:
-            if set(by_sequence) != set(range(attempt.sequence)):
-                raise PaperExecutionStateError(
-                    "attempt would create a non-prefix durable execution history"
-                )
-            if any(
-                item.outcome is not PaperAttemptOutcome.ACCEPTED
-                for item in existing_attempts
-            ):
-                raise PaperExecutionStateError(
-                    "attempt cannot follow a terminal durable outcome"
-                )
-        elif same != attempt:
-            raise PaperExecutionIntegrityError(
-                "attempt sequence already has different durable truth"
-            )
-
-        super().record_attempt(attempt)
-
     def _append_attempt_unlocked(
         self,
         *,
@@ -457,6 +380,16 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         if type(self) is not PaperExecutionLedger:
             raise TypeError("ledger must be exact PaperExecutionLedger")
         _impl._require_canonical_attempt_surface(attempt)
+        try:
+            canonical_attempt = PaperLegAttempt.from_dict(attempt.to_dict())
+        except (PaperExecutionIntegrityError, TypeError, ValueError) as exc:
+            raise PaperExecutionIntegrityError(
+                "attempt no longer satisfies canonical value invariants"
+            ) from exc
+        if canonical_attempt != attempt:
+            raise PaperExecutionIntegrityError(
+                "attempt changed outside canonical construction authority"
+            )
 
         def mutate() -> None:
             self._ensure_existing_path_durable()
@@ -473,7 +406,8 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 raise PaperExecutionStateError(
                     "cannot record attempt after durable run completion"
                 )
-            action_ids_raw = reservations[0]["payload"].get("action_ids")
+            reservation_payload = reservations[0]["payload"]
+            action_ids_raw = reservation_payload.get("action_ids")
             if (
                 type(action_ids_raw) is not list
                 or any(type(item) is not str or not item for item in action_ids_raw)
@@ -492,6 +426,14 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 )
             )
             _derive_run_economics(tuple(action_ids_raw), existing_attempts)
+            if (
+                reservation_payload.get("plan_id") != attempt.plan_id
+                or reservation_payload.get("model_fingerprint")
+                != attempt.model_fingerprint
+            ):
+                raise PaperExecutionStateError(
+                    "attempt plan/model identity is not authorized by durable reservation"
+                )
             if attempt.sequence < len(existing_attempts):
                 if existing_attempts[attempt.sequence] != attempt:
                     raise PaperExecutionStateError(

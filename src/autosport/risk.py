@@ -40,7 +40,6 @@ _CANONICAL_PAPERBOOK_VALIDATE_LOADED_STATE = PaperBook._validate_loaded_state
 _CANONICAL_PAPERBOOK_VALIDATE_LIFECYCLE_ENTRY = PaperBook._validate_lifecycle_entry
 _CANONICAL_PAPERBOOK_DEBIT_BALANCE = PaperBook._debit_balance
 _CANONICAL_PAPERBOOK_SETTLEMENT_RESULT = PaperBook._settlement_result
-_CANONICAL_PAPERBOOK_OPEN_TICKET = PaperBook.open_ticket
 
 
 def _verify_product_risk_of_ruin_authority(
@@ -2057,10 +2056,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 continue
 
             try:
-                _CANONICAL_PAPERBOOK_OPEN_TICKET(
-
-                    shadow,
-
+                shadow.open_ticket(
                     context.legs,
                     amount,
                     reason=f"risk-vector-reservation:{index}",

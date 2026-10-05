@@ -482,7 +482,7 @@ def test_product_verifier_rejects_copied_runtime_profile(
             )
 
 
-def test_product_verifier_rechecks_runtime_profile_before_positive_return(
+def test_product_verifier_rejects_reopen_constructor_mutation_before_execution(
     monkeypatch, tmp_path: Path
 ) -> None:
     bound, approval, store, _issued = _issue(monkeypatch, tmp_path)
@@ -500,24 +500,22 @@ def test_product_verifier_rechecks_runtime_profile_before_positive_return(
         bound=bound,
         action_id=action.action_id,
     )
+    attacker_called = False
+
+    def hostile_reopen(self, path):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated ledger constructor must never execute")
 
     with _active_runtime_profile(store.workspace) as runtime_profile:
-        original_init = RealExecutionLedger.__init__
-
-        def revoke_during_reopen(self, path):
-            original_init(self, path)
-            trusted_runtime_profile.revoke_trusted_runtime_code_profile(
-                runtime_profile
-            )
-
         monkeypatch.setattr(
             RealExecutionLedger,
             "__init__",
-            revoke_during_reopen,
+            hostile_reopen,
         )
         with pytest.raises(
             BetfairStandardLimitPriceBoundError,
-            match="canonical product runtime authority is missing or changed",
+            match="reopen authority changed",
         ):
             verify_product_betfair_standard_limit_price_bound(
                 evidence=evidence,
@@ -527,6 +525,8 @@ def test_product_verifier_rechecks_runtime_profile_before_positive_return(
                 execution_plan_id=bound.execution_plan.plan_id,
                 action_id=action.action_id,
             )
+
+    assert attacker_called is False
 
 
 def test_product_verifier_does_not_inherit_caller_selected_issuance_authority_root(

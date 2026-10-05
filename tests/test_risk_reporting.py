@@ -1992,5 +1992,41 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(actual, expected)
 
 
+    def test_paper_risk_report_bypasses_rebound_policy_replay_methods(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(95),),
+            Decimal("20"),
+            placed_at="2026-09-21T18:30:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T18:35:00+00:00",
+        )
+        goal = self._goal()
+        expected = build_paper_risk_report(book, goal)
+
+        with (
+            patch.object(
+                PaperRiskPolicy,
+                "_historical_risk_metrics",
+                side_effect=AssertionError("rebound historical metrics executed"),
+            ),
+            patch.object(
+                PaperRiskPolicy,
+                "_goal_history_rooms",
+                side_effect=AssertionError("rebound goal rooms executed"),
+            ),
+        ):
+            actual = build_paper_risk_report(book, goal)
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual.current_equity, Decimal("80"))
+        self.assertEqual(actual.historical_max_drawdown_amount, Decimal("20"))
+
+
 if __name__ == "__main__":
     unittest.main()

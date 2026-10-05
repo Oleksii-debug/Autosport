@@ -612,7 +612,17 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 or evidence.provider_conflate_ms
                 != self._subscription.requested_conflate_ms
             ):
-                return False
+                return BetfairAuthenticatedFreshnessDecision(
+                    verdict=BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED,
+                    reason=(
+                        "provider publication evidence no longer matches the "
+                        "authenticated subscription timing authority"
+                    ),
+                    evidence_id=structural.evidence_id,
+                    subscription_id=self._subscription.subscription_id,
+                    transport_frame_sha256=frame_sha,
+                    evaluated_at_ms=evaluated_at_ms,
+                )
             market_id = identity.market_id
             if "EX_MARKET_DEF" not in self._subscription.market_data_fields:
                 return BetfairAuthenticatedFreshnessDecision(

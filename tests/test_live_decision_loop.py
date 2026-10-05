@@ -7561,6 +7561,156 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 stopped_restart.resume()
 
+    def test_durable_stop_deletion_is_rejected_by_monotonic_control_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            loop.stop()
+            loop.close()
+            (workspace / PersistentLiveDecisionLoop.CONTROL_FILE_NAME).unlink()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "monotonic rollback/recovery verification",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START),
+                )
+
+    def test_durable_stop_rollback_to_prior_running_bytes_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            loop.resume()
+            control_path = workspace / PersistentLiveDecisionLoop.CONTROL_FILE_NAME
+            running_bytes = control_path.read_bytes()
+            loop.stop()
+            self.assertNotEqual(control_path.read_bytes(), running_bytes)
+            loop.close()
+            control_path.write_bytes(running_bytes)
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "monotonic rollback/recovery verification",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START),
+                )
+
+    def test_stop_publish_before_authority_commit_recovers_exact_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            with patch.object(
+                loop._control_authority,
+                "commit",
+                side_effect=RuntimeError("simulated loss before control authority commit"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "before control authority commit",
+                ):
+                    loop.stop()
+            loop.close()
+
+            stopped_observer = _DurableObserver(workspace, [()])
+            recovered = self._loop(
+                workspace,
+                observer=stopped_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            self.assertTrue(recovered.stopped)
+            self.assertEqual(recovered.run_cycle().status, LiveCycleStatus.STOPPED)
+            self.assertEqual(stopped_observer.calls, 0)
+            recovered.close()
+
+    def test_stop_prepare_before_publication_aborts_to_previous_control_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            observer = _DurableObserver(workspace, [()])
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            with patch(
+                "autosport.live_decision_loop.atomic_write_json",
+                side_effect=RuntimeError("simulated loss before control publication"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "before control publication",
+                ):
+                    loop.stop()
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.CONTROL_FILE_NAME).exists()
+            )
+            loop.close()
+
+            recovered_observer = _DurableObserver(workspace, [()])
+            recovered = self._loop(
+                workspace,
+                observer=recovered_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            self.assertFalse(recovered.stopped)
+            self.assertEqual(recovered.run_cycle().status, LiveCycleStatus.NO_CHANGE)
+            self.assertEqual(recovered_observer.calls, 1)
+            recovered.close()
+
+    def test_valid_legacy_stop_bootstraps_monotonic_control_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            control_path = workspace / PersistentLiveDecisionLoop.CONTROL_FILE_NAME
+            control_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "autosport.live_decision_control",
+                        "schema_version": 1,
+                        "loop_id": "live-test-loop",
+                        "state": "stopped",
+                    },
+                    sort_keys=True,
+                ) + "\n",
+                encoding="utf-8",
+            )
+            stopped_observer = _DurableObserver(workspace, [()])
+            recovered = self._loop(
+                workspace,
+                observer=stopped_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            self.assertTrue(recovered.stopped)
+            self.assertEqual(recovered.run_cycle().status, LiveCycleStatus.STOPPED)
+            self.assertEqual(stopped_observer.calls, 0)
+            self.assertTrue(recovered._control_authority.read_history())
+            recovered.close()
+
     def test_durable_dependency_registry_restores_exact_selectors_without_manual_registration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

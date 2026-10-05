@@ -80,6 +80,10 @@ def _require_runtime_authority(self: PaperExecutionAdoptionRuntime) -> None:
         raise PaperExecutionAdoptionError(
             "PAPER adoption runtime authority object changed after construction"
         )
+    if type(self.book) is not _adoption.PaperBook:
+        raise PaperExecutionAdoptionError(
+            "PAPER adoption runtime book must retain exact PaperBook authority"
+        )
     if (
         self.paper_book_path is not paper_book_path
         or self.max_quote_age is not max_quote_age
@@ -681,6 +685,7 @@ def _materialize_attempt(
     binding: PaperExposureBinding,
     decision_id: str,
 ):
+    _require_runtime_authority(self)
     side = _require_action_side(action)
     _require_materialization_authority(action, binding)
     self._require_attempt_action_identity(attempt, action)

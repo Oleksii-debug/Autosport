@@ -54,12 +54,18 @@ class PaperRiskReportingTests(unittest.TestCase):
         return EconomicGoalContract(**values)  # type: ignore[arg-type]
 
     @staticmethod
-    def _leg(index: int, odds: str = "2") -> TicketLeg:
+    def _leg(
+        index: int,
+        odds: str = "2",
+        *,
+        sport: str | None = None,
+    ) -> TicketLeg:
         return TicketLeg(
             event_id=f"event-{index}",
             market_id=f"market-{index}",
             selection_id=f"selection-{index}",
             locked_odds=Decimal(odds),
+            sport=sport,
         )
 
     def test_pristine_report_uses_canonical_risk_replay_and_keeps_ruin_unknown(self) -> None:

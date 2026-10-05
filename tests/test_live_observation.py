@@ -99,6 +99,68 @@ class LiveObservationTests(unittest.TestCase):
 
             store_type.return_value.close.assert_called_once_with()
 
+    def test_live_observation_rejects_substituted_authority_types_before_provider_read(self):
+        class Store(SQLiteMarketStore):
+            pass
+
+        class HealthStore(SourceHealthStore):
+            pass
+
+        class Updates(BoundedMirrorInvalidationBuffer):
+            pass
+
+        class ExplosiveProvider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider read executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            health_store = SourceHealthStore(root / "source_health.json")
+            updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+            hostile_store = Store(root / "other-market.db")
+            hostile_health = HealthStore(root / "other-health.json")
+            hostile_updates = Updates(MarketMirror())
+            try:
+                with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+                    poll_open_market_store_once(
+                        hostile_store,
+                        health_store,
+                        ExplosiveProvider(),
+                        mirror_updates=updates,
+                    )
+                with self.assertRaisesRegex(TypeError, "exact SourceHealthStore"):
+                    poll_open_market_store_once(
+                        store,
+                        hostile_health,
+                        ExplosiveProvider(),
+                        mirror_updates=updates,
+                    )
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "exact BoundedMirrorInvalidationBuffer",
+                ):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        ExplosiveProvider(),
+                        mirror_updates=hostile_updates,
+                    )
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "exact BoundedMirrorInvalidationBuffer",
+                ):
+                    observe_workspace_once(
+                        root / "workspace-observer",
+                        ExplosiveProvider(),
+                        mirror_updates=hostile_updates,
+                    )
+            finally:
+                hostile_store.close()
+                store.close()
+
     def test_open_store_poll_rejects_batch_source_identity_mismatch_before_persistence(self):
         class MismatchedBatchProvider:
             source_id = "live-fixture"

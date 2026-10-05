@@ -811,6 +811,7 @@ class PersistentLiveDecisionLoop:
         self.intent_factory = intent_factory
         self.intent_provenance = intent_provenance
         self._intent_provenance_authority = intent_provenance
+        self._intent_provenance_sha256_authority = intent_provenance.provenance_sha256
         self.provider = provider
         self.decision_ledger = decision_ledger or JsonlDecisionLedger(
             self._workspace_authority / "decisions.jsonl"
@@ -854,10 +855,25 @@ class PersistentLiveDecisionLoop:
         )
         self.ingestion_policy = ingestion_policy
         self._ingestion_policy_authority = ingestion_policy
+        self._ingestion_policy_semantics_authority = (
+            None
+            if ingestion_policy is None
+            else (
+                ingestion_policy.max_batch_size,
+                ingestion_policy.stale_after_seconds,
+                ingestion_policy.max_future_skew_seconds,
+            )
+        )
         self.max_quote_age = max_quote_age
         self._max_quote_age_authority = max_quote_age
         self.bounds = bounds or LiveLoopBounds()
         self._bounds_authority = self.bounds
+        self._bounds_semantics_authority = (
+            self.bounds.observation_max_items,
+            self.bounds.max_dirty_keys,
+            self.bounds.max_dirty_per_cycle,
+            self.bounds.max_registered_inputs,
+        )
         self.clock = resolved_clock
         self._clock_authority = self.clock
         self._last_clock_time = provenance_as_of
@@ -2625,9 +2641,29 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "live intent provenance authority changed after construction"
             )
+        if (
+            self.intent_provenance.provenance_sha256
+            != self._intent_provenance_sha256_authority
+        ):
+            raise LiveDecisionProgressError(
+                "live intent provenance semantics changed after construction"
+            )
         if self.ingestion_policy is not self._ingestion_policy_authority:
             raise LiveDecisionProgressError(
                 "live ingestion policy authority changed after construction"
+            )
+        ingestion_policy_semantics = (
+            None
+            if self.ingestion_policy is None
+            else (
+                self.ingestion_policy.max_batch_size,
+                self.ingestion_policy.stale_after_seconds,
+                self.ingestion_policy.max_future_skew_seconds,
+            )
+        )
+        if ingestion_policy_semantics != self._ingestion_policy_semantics_authority:
+            raise LiveDecisionProgressError(
+                "live ingestion policy semantics changed after construction"
             )
         if self._observe is not self._observe_authority:
             raise LiveDecisionProgressError(
@@ -2640,6 +2676,16 @@ class PersistentLiveDecisionLoop:
         if self.bounds is not self._bounds_authority:
             raise LiveDecisionProgressError(
                 "live loop bounds authority changed after construction"
+            )
+        bounds_semantics = (
+            self.bounds.observation_max_items,
+            self.bounds.max_dirty_keys,
+            self.bounds.max_dirty_per_cycle,
+            self.bounds.max_registered_inputs,
+        )
+        if bounds_semantics != self._bounds_semantics_authority:
+            raise LiveDecisionProgressError(
+                "live loop bounds semantics changed after construction"
             )
         if self.clock is not self._clock_authority:
             raise LiveDecisionProgressError(

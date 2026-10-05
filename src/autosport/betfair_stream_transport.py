@@ -245,15 +245,26 @@ class BetfairStreamAuthenticatedFrame:
         return False
 
     def assert_transport_issued(self) -> None:
-        expected = _ISSUED_AUTHENTICATED_FRAMES.get(self)
-        if expected is None or expected != _authenticated_frame_fingerprint(self):
+        authority = _ISSUED_AUTHENTICATED_FRAMES.get(self)
+        if (
+            authority is None
+            or authority[0] != _authenticated_frame_fingerprint(self)
+        ):
             raise BetfairStreamAuthenticationError(
                 "Betfair authenticated frame was not issued by this product transport"
             )
 
+    def assert_receive_clock_authority(self, clock: object) -> None:
+        self.assert_transport_issued()
+        authority = _ISSUED_AUTHENTICATED_FRAMES.get(self)
+        if authority is None or authority[1] is not clock:
+            raise BetfairStreamAuthenticationError(
+                "Betfair authenticated frame receive clock authority mismatch"
+            )
+
 
 _ISSUED_AUTHENTICATED_FRAMES: WeakKeyDictionary[
-    BetfairStreamAuthenticatedFrame, str
+    BetfairStreamAuthenticatedFrame, tuple[str, object]
 ] = WeakKeyDictionary()
 
 
@@ -745,8 +756,9 @@ class BetfairStreamTlsTransport:
             payload_sha256=sha256(payload).hexdigest(),
             received_monotonic_ns=received_monotonic_ns,
         )
-        _ISSUED_AUTHENTICATED_FRAMES[issued] = _authenticated_frame_fingerprint(
-            issued
+        _ISSUED_AUTHENTICATED_FRAMES[issued] = (
+            _authenticated_frame_fingerprint(issued),
+            _MONOTONIC_NS,
         )
         return issued
 

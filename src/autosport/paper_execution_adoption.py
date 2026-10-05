@@ -163,6 +163,20 @@ def _timestamp_text(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
+_EXECUTION_LOCK_REGISTRY_GUARD = RLock()
+_EXECUTION_LOCKS_BY_PATH: dict[str, RLock] = {}
+
+
+def _execution_lock_for_path(path: str | Path) -> RLock:
+    key = str(Path(path).resolve(strict=False))
+    with _EXECUTION_LOCK_REGISTRY_GUARD:
+        lock = _EXECUTION_LOCKS_BY_PATH.get(key)
+        if lock is None:
+            lock = RLock()
+            _EXECUTION_LOCKS_BY_PATH[key] = lock
+        return lock
+
+
 class PaperExecutionAdoptionRuntime:
     """Bridge canonical PortfolioPlan decisions through #623 PAPER attempt truth.
 
@@ -208,16 +222,17 @@ class PaperExecutionAdoptionRuntime:
         self.book = book
         self.ledger = ledger
         self.config = config
-        # Serialize every canonical execution on this runtime. The PaperValue
-        # authority holds this same re-entrant lock across risk admission and
-        # execution so a second canonical allocation cannot change PaperBook
-        # between the bound risk witness and materialization.
-        self._execution_lock = RLock()
+        self.paper_book_path = Path(paper_book_path)
+        # Serialize every canonical execution targeting the same PaperBook path,
+        # not merely calls made through one runtime instance. PaperValue risk
+        # admission and the persistent live loop use this same re-entrant authority,
+        # so two independently constructed runtimes cannot both spend one stale
+        # residual-capacity witness in-process.
+        self._execution_lock = _execution_lock_for_path(self.paper_book_path)
         # In-process capability registry. Object identity is intentional: serialized,
         # copied, reconstructed, or caller-authored PreparedPaperExecution values do
         # not carry execution authority. Restart re-mints from canonical inputs.
         self._prepared_authorities: dict[int, PreparedPaperExecution] = {}
-        self.paper_book_path = Path(paper_book_path)
         if self.paper_book_path.exists():
             durable_book = PaperBook.load(self.paper_book_path)
             self._assert_same_book_state(

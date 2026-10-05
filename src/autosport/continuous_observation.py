@@ -371,6 +371,8 @@ def run_continuous_observation(
         return os.path.normcase(os.path.realpath(os.path.abspath(os.fspath(path))))
 
     status_key = canonical_path_key(status_path)
+    status_canonical = Path(status_key)
+    root_canonical = Path(canonical_path_key(root))
     market_path = root / "market.db"
     health_path = root / "source_health.json"
     protected_paths = (
@@ -382,8 +384,15 @@ def run_continuous_observation(
         health_path.with_name(health_path.name + ".lock"),
         health_path.with_suffix(health_path.suffix + ".tmp"),
     )
-    if any(status_key == canonical_path_key(path) for path in protected_paths):
-        raise ValueError("status_path must not collide with authoritative storage")
+
+    def paths_overlap(left: Path, right: Path) -> bool:
+        return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
+    if status_canonical == root_canonical or any(
+        paths_overlap(status_canonical, Path(canonical_path_key(path)))
+        for path in protected_paths
+    ):
+        raise ValueError("status_path must not overlap authoritative storage")
 
     try:
         authority_root = resolve_monotonic_authority_root(

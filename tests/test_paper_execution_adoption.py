@@ -222,7 +222,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 PaperExecutionAdoptionRuntime(
                     book=PaperBook("1000"),
                     ledger=PaperExecutionLedger(workspace / "paper-execution.jsonl"),
-                    config=self._config(),
+                    config=config(),
                     max_quote_age=HostileTimedelta(seconds=5),
                     paper_book_path=workspace / "paper_book.json",
                 )
@@ -230,7 +230,8 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
     def test_execute_with_clock_rejects_datetime_subclass_before_hooks(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
-            runtime, prepared = self._runtime_and_prepared(workspace)
+            _book, _ledger, runtime = self.runtime(directory)
+            prepared_value = prepared(runtime, action("a1"))
 
             class HostileDateTime(datetime):
                 def utcoffset(self):
@@ -253,7 +254,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 "PAPER execution clock must return exact datetime",
             ):
                 runtime.execute_with_clock(
-                    prepared=prepared,
+                    prepared=prepared_value,
                     trigger_id="trigger-1",
                     clock=lambda: hostile,
                     materialize_exposure=False,

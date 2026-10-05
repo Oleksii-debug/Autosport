@@ -2108,6 +2108,61 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(durable.tickets, book.tickets)
 
 
+    def test_class_save_override_cannot_replace_persistence_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("class-save-override", stake="10.00"))
+            book_path = Path(tmp) / "paper-book.json"
+            hostile_calls = 0
+
+            def hostile_save(_book, _path):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("hostile class save executed")
+
+            with patch.object(PaperBook, "save", new=hostile_save):
+                result = runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="class-save-override",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+            durable = PaperBook.load(book_path)
+            self.assertEqual(durable.balance, Decimal("90.00"))
+            self.assertEqual(durable.tickets, book.tickets)
+
+    def test_class_load_override_cannot_replace_reload_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("class-load-override", stake="10.00"))
+            book_path = Path(tmp) / "paper-book.json"
+            hostile_calls = 0
+
+            def hostile_load(_path):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("hostile class load executed")
+
+            with patch.object(PaperBook, "load", new=hostile_load):
+                result = runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="class-load-override",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(result.ticket_ids), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+            durable = PaperBook.load(book_path)
+            self.assertEqual(durable.balance, Decimal("90.00"))
+            self.assertEqual(durable.tickets, book.tickets)
+
+
     def test_instance_open_ticket_override_cannot_replace_money_moving_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, _ledger, runtime = self.runtime(tmp)

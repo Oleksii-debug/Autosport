@@ -99,6 +99,24 @@ def _decimal(value: object, name: str, *, allow_zero: bool = False) -> Decimal:
     return parsed
 
 
+def _serialized_decimal(
+    value: object,
+    name: str,
+    *,
+    allow_zero: bool = False,
+) -> Decimal:
+    if type(value) is not str:
+        raise PaperExecutionIntegrityError(
+            f"{name} must be a canonical serialized decimal string"
+        )
+    try:
+        return _decimal(value, name, allow_zero=allow_zero)
+    except ValueError as exc:
+        raise PaperExecutionIntegrityError(
+            f"{name} is not a valid canonical serialized decimal"
+        ) from exc
+
+
 def _decimal_text(value: Decimal) -> str:
     if not value.is_finite():
         raise ValueError("Decimal must be finite")
@@ -381,8 +399,22 @@ class PaperExecutionEvidenceRecord:
                 observed_at=raw["observed_at"],
                 evidence_grade=EvidenceGrade(raw["evidence_grade"]),
                 evidence_source=raw["evidence_source"],
-                accepted_odds=raw["accepted_odds"],
-                accepted_stake=raw["accepted_stake"],
+                accepted_odds=(
+                    None
+                    if raw["accepted_odds"] is None
+                    else _serialized_decimal(
+                        raw["accepted_odds"],
+                        "evidence accepted_odds",
+                    )
+                ),
+                accepted_stake=(
+                    None
+                    if raw["accepted_stake"] is None
+                    else _serialized_decimal(
+                        raw["accepted_stake"],
+                        "evidence accepted_stake",
+                    )
+                ),
                 suspended=raw["suspended"],
                 reason=raw["reason"],
             )
@@ -597,15 +629,35 @@ class PaperLegAttempt:
                 selection_id=raw["selection_id"],
                 side=raw["side"],
                 decision_quote_id=raw["decision_quote_id"],
-                decision_odds=Decimal(raw["decision_odds"]),
-                requested_stake=Decimal(raw["requested_stake"]),
+                decision_odds=_serialized_decimal(
+                    raw["decision_odds"],
+                    "attempt decision_odds",
+                ),
+                requested_stake=_serialized_decimal(
+                    raw["requested_stake"],
+                    "attempt requested_stake",
+                ),
                 decision_observed_at=raw["decision_observed_at"],
                 execution_observed_at=raw["execution_observed_at"],
                 delay_ms=raw["delay_ms"],
                 quote_age_ms=raw["quote_age_ms"],
                 outcome=PaperAttemptOutcome(raw["outcome"]),
-                execution_odds=None if raw["execution_odds"] is None else Decimal(raw["execution_odds"]),
-                execution_stake=None if raw["execution_stake"] is None else Decimal(raw["execution_stake"]),
+                execution_odds=(
+                    None
+                    if raw["execution_odds"] is None
+                    else _serialized_decimal(
+                        raw["execution_odds"],
+                        "attempt execution_odds",
+                    )
+                ),
+                execution_stake=(
+                    None
+                    if raw["execution_stake"] is None
+                    else _serialized_decimal(
+                        raw["execution_stake"],
+                        "attempt execution_stake",
+                    )
+                ),
                 suspended=raw["suspended"],
                 evidence_grade=EvidenceGrade(raw["evidence_grade"]),
                 evidence_source=raw["evidence_source"],

@@ -12,6 +12,7 @@ from autosport.paper_execution_reality import (
     PaperAttemptOutcome,
     PaperExecutionEvidenceRecord,
     PaperExecutionEvidenceRegistry,
+    PaperExecutionIntegrityError,
     PaperExecutionLedger,
     PaperExecutionModelConfig,
     PaperExecutionStateError,

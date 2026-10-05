@@ -828,6 +828,8 @@ class PersistentLiveDecisionLoop:
             raise TypeError("book must be PaperBook")
         if not isinstance(authority, EconomicDecisionAuthority):
             raise TypeError("authority must be EconomicDecisionAuthority")
+        if ingestion_policy is not None and type(ingestion_policy) is not IngestionPolicy:
+            raise TypeError("ingestion_policy must be an exact IngestionPolicy or None")
         if not callable(intent_factory):
             raise TypeError("intent_factory must be callable")
         factory_strategy_version_id = getattr(

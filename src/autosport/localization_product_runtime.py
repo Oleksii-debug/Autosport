@@ -10,6 +10,9 @@ PRODUCT_RUNTIME_UK_UA: Mapping[str, str] = MappingProxyType(
         "ui.product_runtime.button.stop": "PAPER: стоп",
         "ui.product_runtime.source.label": "Джерело:",
         "ui.product_runtime.source.save": "Зберегти джерело",
+        "ui.product_runtime.source.option.parlayapi-table-tennis": (
+            "Parlay API — настільний теніс"
+        ),
         "ui.product_runtime.status.idle": "Тривала PAPER-робота не запущена.",
         "ui.product_runtime.status.starting": (
             "Запускається канонічна тривала PAPER-робота…"

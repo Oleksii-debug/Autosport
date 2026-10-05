@@ -574,6 +574,15 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                     evaluated_at_ms=evaluated_at_ms,
                 )
             frame_sha, received_monotonic_ns = frame_binding
+            if self._transport.identity.app_key_class != "LIVE":
+                return BetfairAuthenticatedFreshnessDecision(
+                    verdict=BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED,
+                    reason="configured Betfair app key class is not LIVE",
+                    evidence_id=structural.evidence_id,
+                    subscription_id=self._subscription.subscription_id,
+                    transport_frame_sha256=frame_sha,
+                    evaluated_at_ms=evaluated_at_ms,
+                )
             lag_reason = _consumer_lag_rejection_reason(
                 received_monotonic_ns,
                 policy_snapshot,
@@ -643,6 +652,8 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             except BetfairAuthenticatedStreamError:
                 return False
             if decision.subscription_id != self._subscription.subscription_id:
+                return False
+            if self._transport.identity.app_key_class != "LIVE":
                 return False
             structural = self._freshness.evaluate(
                 identity,

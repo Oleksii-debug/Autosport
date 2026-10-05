@@ -794,7 +794,10 @@ def _execute_unlocked(
         book = self.book
         paper_book_path = self.paper_book_path
         try:
-            book.save(paper_book_path)
+            # Persistence is economic authority. Dispatch through the exact
+            # validated PaperBook class so caller-owned instance attributes cannot
+            # replace save() and turn a successful live debit into an undurable one.
+            type(book).save(book, paper_book_path)
         except Exception:
             # Canonical PaperBook.save publishes only via an atomic os.replace.
             # Any exception means that replacement did not complete, so restore

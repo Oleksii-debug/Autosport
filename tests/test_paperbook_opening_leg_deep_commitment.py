@@ -1971,3 +1971,121 @@ def test_constructor_rejects_in_place_canonical_type_authority_code_mutation() -
             PaperBook("100")
     finally:
         authority.__code__ = original_code
+
+
+def test_load_bytes_rejects_rebound_raw_snapshot_decoder_before_execution(
+    monkeypatch,
+) -> None:
+    payload = (
+        b'{"schema_version":7,"initial_bankroll":"100","balance":"100",'
+        b'"tickets":[],"lifecycle":[]}'
+    )
+    attacker_calls = 0
+
+    def hostile(cls, raw):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound raw snapshot decoder executed")
+
+    monkeypatch.setattr(PaperBook, "_from_raw_snapshot", classmethod(hostile))
+
+    with pytest.raises(ValueError, match="raw snapshot decoder dispatch changed"):
+        PaperBook.load_bytes(payload)
+
+    assert attacker_calls == 0
+
+
+def test_load_rejects_rebound_byte_loader_before_execution(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "canonical-byte-loader.json"
+    PaperBook("100").save(path)
+    attacker_calls = 0
+
+    def hostile(cls, payload):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound byte loader executed")
+
+    monkeypatch.setattr(PaperBook, "load_bytes", classmethod(hostile))
+
+    with pytest.raises(ValueError, match="byte loader dispatch changed"):
+        PaperBook.load(path)
+
+    assert attacker_calls == 0
+
+
+def test_load_rejects_rebound_snapshot_path_helper_before_execution(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "canonical-path-helper.json"
+    PaperBook("100").save(path)
+    attacker_calls = 0
+
+    def hostile(path_value):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound snapshot path helper executed")
+
+    monkeypatch.setattr(
+        PaperBook,
+        "_canonical_snapshot_path",
+        staticmethod(hostile),
+    )
+
+    with pytest.raises(ValueError, match="snapshot path dispatch changed"):
+        PaperBook.load(path)
+
+    assert attacker_calls == 0
+
+
+def test_load_bytes_rejects_in_place_raw_snapshot_decoder_code_mutation() -> None:
+    payload = (
+        b'{"schema_version":7,"initial_bankroll":"100","balance":"100",'
+        b'"tickets":[],"lifecycle":[]}'
+    )
+    descriptor = PaperBook.__dict__["_from_raw_snapshot"]
+    authority = descriptor.__func__
+    original_code = authority.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        authority.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="raw snapshot decoder authority changed"):
+            PaperBook.load_bytes(payload)
+    finally:
+        authority.__code__ = original_code
+
+
+def test_load_rejects_in_place_byte_loader_code_mutation(tmp_path) -> None:
+    path = tmp_path / "mutated-byte-loader.json"
+    PaperBook("100").save(path)
+    descriptor = PaperBook.__dict__["load_bytes"]
+    authority = descriptor.__func__
+    original_code = authority.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        authority.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="byte loader authority changed"):
+            PaperBook.load(path)
+    finally:
+        authority.__code__ = original_code
+
+
+def test_load_rejects_in_place_snapshot_path_helper_code_mutation(tmp_path) -> None:
+    path = tmp_path / "mutated-path-helper.json"
+    PaperBook("100").save(path)
+    descriptor = PaperBook.__dict__["_canonical_snapshot_path"]
+    authority = descriptor.__func__
+    original_code = authority.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        authority.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="snapshot path authority changed"):
+            PaperBook.load(path)
+    finally:
+        authority.__code__ = original_code

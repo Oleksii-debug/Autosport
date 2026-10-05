@@ -1202,6 +1202,61 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertFalse(report.money_scope_complete)
         self.assertFalse(report.opening_capital_authority_complete)
 
+    def test_paper_equity_path_never_claims_net_cost_completeness(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(85),),
+            Decimal("10"),
+            placed_at="2026-09-21T16:30:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T16:35:00+00:00",
+        )
+        goal = self._goal()
+
+        path = build_product_issued_paper_equity_path(book, goal)
+        drawdown = build_product_issued_paper_drawdown_evidence(book, goal)
+        report = build_paper_risk_report(book, goal)
+
+        self.assertFalse(path.applicable_costs_complete)
+        self.assertFalse(path.net_equity_authoritative)
+        self.assertFalse(drawdown.applicable_costs_complete)
+        self.assertFalse(drawdown.net_equity_authoritative)
+        self.assertFalse(report.applicable_costs_complete)
+        self.assertFalse(report.net_equity_authoritative)
+
+    def test_cost_completeness_flags_are_bound_into_path_identity(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(86),),
+            Decimal("10"),
+            placed_at="2026-09-21T16:40:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T16:45:00+00:00",
+        )
+        goal = self._goal()
+        path = build_product_issued_paper_equity_path(book, goal)
+
+        forged = replace(
+            path,
+            applicable_costs_complete=True,
+            net_equity_authoritative=True,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "equity-path evidence does not match canonical product state",
+        ):
+            verify_product_issued_paper_equity_path(book, goal, forged)
+
     def test_verified_minimum_equity_rejects_wrong_bankroll_or_currency_scope(self) -> None:
         book = PaperBook("100")
         ticket = book.open_ticket(

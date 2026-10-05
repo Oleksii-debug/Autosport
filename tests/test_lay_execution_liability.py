@@ -178,6 +178,87 @@ class ExchangeLockedCapitalTests(unittest.TestCase):
             )
 
 
+class DurableEvidenceBindingTests(unittest.TestCase):
+    @staticmethod
+    def _reserved_empirical_attempt(tmp: str):
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        source_action = _action(
+            "evidence-binding",
+            side="BACK",
+            odds="2.00",
+            stake="10.00",
+        )
+        plan = _plan(source_action)
+        config = _config()
+        trigger_id = "durable-evidence-binding"
+        run_id = paper_reality._impl._run_id(plan, trigger_id, config)
+        record = PaperExecutionEvidenceRecord(
+            action_id=source_action.action_id,
+            bookmaker_id=source_action.bookmaker_id,
+            account_id=source_action.account_id,
+            event_id=source_action.event_id,
+            market_id=source_action.market_id,
+            selection_id=source_action.selection_id,
+            side=source_action.side,
+            quote_id=source_action.quote_id,
+            outcome=PaperAttemptOutcome.ACCEPTED,
+            observed_at=STARTED_AT,
+            evidence_grade=EvidenceGrade.EMPIRICAL,
+            evidence_source="captured-paper-observation-v1",
+            accepted_odds="2.00",
+            accepted_stake="10.00",
+            reason="observed accepted",
+        )
+        registry = PaperExecutionEvidenceRegistry(ledger)
+        registry.register(record)
+        ledger.reserve_run(
+            run_id=run_id,
+            trigger_id=trigger_id,
+            plan=plan,
+            config=config,
+            started_at=STARTED_AT,
+            observation_evidence_ids={source_action.action_id: record.evidence_id},
+        )
+        attempt = paper_reality._impl._observed_attempt(
+            run_id=run_id,
+            plan=plan,
+            action=source_action,
+            sequence=0,
+            config=config,
+            observation=record.as_observation(),
+            started_at=STARTED_AT,
+        )
+        return ledger, attempt
+
+    def test_durable_attempt_cannot_substitute_unreserved_evidence_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, attempt = self._reserved_empirical_attempt(tmp)
+            before = len(ledger.events())
+            object.__setattr__(attempt, "evidence_id", "forged-evidence-id")
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "evidence identity is not authorized",
+            ):
+                ledger.record_attempt(attempt)
+
+            self.assertEqual(len(ledger.events()), before)
+
+    def test_durable_attempt_cannot_change_execution_odds_from_registered_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, attempt = self._reserved_empirical_attempt(tmp)
+            before = len(ledger.events())
+            object.__setattr__(attempt, "execution_odds", Decimal("3.00"))
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "execution truth does not match durable observation evidence",
+            ):
+                ledger.record_attempt(attempt)
+
+            self.assertEqual(len(ledger.events()), before)
+
+
 class DurableSideIntegrityTests(unittest.TestCase):
     @staticmethod
     def _attempt(*, outcome: PaperAttemptOutcome, side: str) -> PaperLegAttempt:

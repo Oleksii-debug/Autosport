@@ -588,6 +588,7 @@ def _seal_paperbook_open_transition_authority(method):
 
 def _seal_paperbook_json_decode_authority(method):
     """Inject closure-captured JSON parser and rejection hooks into load_bytes."""
+    method_code = method.__code__
     loads = json.loads
     loads_code = loads.__code__
     duplicate_hook = _reject_duplicate_json_keys
@@ -617,13 +618,18 @@ def _seal_paperbook_json_decode_authority(method):
 
     @wraps(method)
     def sealed(cls, *args, **kwargs):
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook JSON decode callable authority changed")
         if loads.__code__ is not loads_code:
             raise ValueError("PaperBook JSON parser authority changed")
         if duplicate_hook.__code__ is not duplicate_hook_code:
             raise ValueError("PaperBook duplicate-key authority changed")
         if constant_hook.__code__ is not constant_hook_code:
             raise ValueError("PaperBook non-finite constant authority changed")
-        return method(cls, *args, _json_decode=decode, **kwargs)
+        result = method(cls, *args, _json_decode=decode, **kwargs)
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook JSON decode callable authority changed")
+        return result
 
     del sealed.__wrapped__
     return sealed
@@ -631,6 +637,7 @@ def _seal_paperbook_json_decode_authority(method):
 
 def _seal_paperbook_snapshot_decode_authority(method):
     """Inject closure-captured authority revocation into raw snapshot decoding."""
+    method_code = method.__code__
     revoke_opening = _revoke_ticket_opening_authority
     revoke_opening_code = revoke_opening.__code__
     revoke_causal = _revoke_paperbook_causal_history_authority
@@ -650,11 +657,16 @@ def _seal_paperbook_snapshot_decode_authority(method):
 
     @wraps(method)
     def sealed(cls, *args, **kwargs):
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook snapshot decode callable authority changed")
         if revoke_opening.__code__ is not revoke_opening_code:
             raise ValueError("PaperBook opening revoke authority changed")
         if revoke_causal.__code__ is not revoke_causal_code:
             raise ValueError("PaperBook causal-history revoke authority changed")
-        return method(cls, *args, _snapshot_authority_revoke=revoke, **kwargs)
+        result = method(cls, *args, _snapshot_authority_revoke=revoke, **kwargs)
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook snapshot decode callable authority changed")
+        return result
 
     del sealed.__wrapped__
     return sealed
@@ -662,6 +674,7 @@ def _seal_paperbook_snapshot_decode_authority(method):
 
 def _seal_paperbook_snapshot_install_authority(method):
     """Inject closure-captured authority installation into trusted file load."""
+    method_code = method.__code__
     install_opening = _install_validated_ticket_opening_authority
     install_opening_code = install_opening.__code__
     install_causal = _install_validated_paperbook_causal_history_authority
@@ -681,11 +694,16 @@ def _seal_paperbook_snapshot_install_authority(method):
 
     @wraps(method)
     def sealed(cls, *args, **kwargs):
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook snapshot install callable authority changed")
         if install_opening.__code__ is not install_opening_code:
             raise ValueError("PaperBook opening install authority changed")
         if install_causal.__code__ is not install_causal_code:
             raise ValueError("PaperBook causal-history install authority changed")
-        return method(cls, *args, _snapshot_authority_install=install, **kwargs)
+        result = method(cls, *args, _snapshot_authority_install=install, **kwargs)
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook snapshot install callable authority changed")
+        return result
 
     del sealed.__wrapped__
     return sealed
@@ -693,6 +711,7 @@ def _seal_paperbook_snapshot_install_authority(method):
 
 def _seal_paperbook_save_candidate_authority(method):
     """Inject closure-captured snapshot candidate authorities into save."""
+    method_code = method.__code__
     opening_candidate = _require_snapshot_candidate_opening_authority
     opening_candidate_code = opening_candidate.__code__
     causal_candidate = _require_snapshot_candidate_causal_history_authority
@@ -714,17 +733,22 @@ def _seal_paperbook_save_candidate_authority(method):
 
     @wraps(method)
     def sealed(self, *args, **kwargs):
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook save candidate callable authority changed")
         if opening_candidate.__code__ is not opening_candidate_code:
             raise ValueError("PaperBook snapshot opening candidate authority changed")
         if causal_candidate.__code__ is not causal_candidate_code:
             raise ValueError("PaperBook snapshot causal candidate authority changed")
-        return method(
+        result = method(
             self,
             *args,
             _opening_candidate_authority=require_opening,
             _causal_candidate_authority=require_causal,
             **kwargs,
         )
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook save candidate callable authority changed")
+        return result
 
     del sealed.__wrapped__
     return sealed

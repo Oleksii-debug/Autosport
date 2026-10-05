@@ -386,6 +386,109 @@ def test_settlement_resolution_keys_reject_str_subclass_before_internal_hashing(
 
 
 
+
+@pytest.mark.parametrize(
+    "operation",
+    ("committed_stake", "open_ticket", "settle", "save"),
+)
+def test_public_operations_ignore_rebound_opening_authority_dispatch(
+    monkeypatch,
+    operation: str,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    leg = _leg()
+    ticket = book.open_ticket([leg], "10", placed_at=_TS)
+    object.__setattr__(leg, "locked_odds", Decimal("3.00"))
+
+    monkeypatch.setattr(
+        paper_module,
+        "_require_ticket_opening_authority",
+        lambda _book: None,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="opening economic identity changed after admission",
+    ):
+        if operation == "committed_stake":
+            _ = book.committed_stake
+        elif operation == "open_ticket":
+            book.open_ticket([_leg(odds="2.50")], "1", placed_at=_TS)
+        elif operation == "settle":
+            book.settle(ticket.ticket_id, {leg.quote_key}, settled_at=_TS)
+        else:
+            book.save(tmp_path / "rebound-opening-authority.json")
+
+
+def test_public_operation_rejects_in_place_opening_authority_code_mutation_before_execution() -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    authority = paper_module._require_ticket_opening_authority
+    original_code = authority.__code__
+    attacker_calls = 0
+
+    def hostile_authority(_book):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        return None
+
+    try:
+        authority.__code__ = hostile_authority.__code__
+        with pytest.raises(
+            ValueError,
+            match="opening authority dispatch changed",
+        ):
+            _ = book.committed_stake
+    finally:
+        authority.__code__ = original_code
+
+    assert attacker_calls == 0
+    assert book.balance == Decimal("90")
+
+
+def test_public_operation_ignores_rebound_causal_history_authority_dispatch(
+    monkeypatch,
+) -> None:
+    book = PaperBook("100")
+    first = book.open_ticket([_leg()], "10", placed_at=_TS)
+    second_leg = TicketLeg(
+        "event-2",
+        "market-2",
+        "selection-2",
+        Decimal("2.50"),
+        sport="tennis",
+        exchange_side="back",
+    )
+    second = book.open_ticket([second_leg], "10", placed_at=_TS)
+
+    book.tickets = {
+        second.ticket_id: second,
+        first.ticket_id: first,
+    }
+    book._lifecycle = [
+        ("open", second.ticket_id, (), ()),
+        ("open", first.ticket_id, (), ()),
+    ]
+
+    # The visible state remains internally replayable; only the hidden
+    # product-issued chronology witness distinguishes the coherent rewrite.
+    PaperBook._validate_loaded_state(book)
+
+    monkeypatch.setattr(
+        paper_module,
+        "_require_paperbook_causal_history_authority",
+        lambda _book: None,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="causal history changed outside product-issued transitions",
+    ):
+        _ = book.committed_stake
+
+
+
 def test_causal_registry_ignores_rebound_snapshot_module_dispatch(monkeypatch) -> None:
     book = PaperBook("100")
     book.open_ticket([_leg()], "10", placed_at=_TS)

@@ -173,6 +173,34 @@ class ObservationResult:
         if type(self.health) is not SourceHealthState:
             raise TypeError("observation health must be an exact SourceHealthState")
         self.health.validate()
+        if (
+            type(self.stats.source_id) is not str
+            or not self.stats.source_id
+            or self.stats.source_id.strip() != self.stats.source_id
+            or "|" in self.stats.source_id
+        ):
+            raise ValueError("observation stats source_id must be canonical")
+        for field_name in ("received", "accepted", "rejected"):
+            value = getattr(self.stats, field_name)
+            if type(value) is not int or value < 0:
+                raise ValueError(
+                    f"observation stats {field_name} must be a non-negative integer"
+                )
+        if self.stats.accepted + self.stats.rejected > self.stats.received:
+            raise ValueError(
+                "observation accepted and rejected counts cannot exceed received"
+            )
+        if self.stats.cursor is not None and type(self.stats.cursor) is not str:
+            raise TypeError("observation stats cursor must be an exact string or None")
+        if type(self.stats.quality_flags) is not tuple or any(
+            type(flag) is not str or not flag or flag.strip() != flag
+            for flag in self.stats.quality_flags
+        ):
+            raise ValueError(
+                "observation stats quality_flags must be exact non-empty trimmed strings"
+            )
+        if type(self.stats.health_status) is not str:
+            raise TypeError("observation stats health_status must be an exact string")
         if type(self.current_quotes) is not tuple:
             raise TypeError("observation current_quotes must be an exact tuple")
         if any(type(event) is not MarketEvent for event in self.current_quotes):

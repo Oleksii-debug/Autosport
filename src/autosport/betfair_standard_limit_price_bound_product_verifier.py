@@ -51,9 +51,19 @@ def _build_product_entrypoint():
     profile_evidence_getter = canonical_profile_type.evidence_sha256.fget
     profile_evidence_getter_code = profile_evidence_getter.__code__
     canonical_store_type = SupervisedPlanIssuanceStore
+    missing_class_field = object()
+    canonical_store_workspace_class_attr = canonical_store_type.__dict__.get(
+        "workspace", missing_class_field
+    )
+    canonical_store_authority_root_class_attr = canonical_store_type.__dict__.get(
+        "authority_root", missing_class_field
+    )
     canonical_store_init = canonical_store_type.__init__
     canonical_store_init_code = canonical_store_init.__code__
     canonical_ledger_type = RealExecutionLedger
+    canonical_ledger_path_class_attr = canonical_ledger_type.__dict__.get(
+        "path", missing_class_field
+    )
     canonical_ledger_init = canonical_ledger_type.__init__
     canonical_ledger_init_code = canonical_ledger_init.__code__
     path_factory = Path
@@ -81,7 +91,13 @@ def _build_product_entrypoint():
 
     def reopen_graph_unchanged() -> bool:
         return (
-            canonical_store_type.__init__ is canonical_store_init
+            canonical_store_type.__dict__.get("workspace", missing_class_field)
+            is canonical_store_workspace_class_attr
+            and canonical_store_type.__dict__.get("authority_root", missing_class_field)
+            is canonical_store_authority_root_class_attr
+            and canonical_ledger_type.__dict__.get("path", missing_class_field)
+            is canonical_ledger_path_class_attr
+            and canonical_store_type.__init__ is canonical_store_init
             and canonical_store_init.__code__ is canonical_store_init_code
             and canonical_ledger_type.__init__ is canonical_ledger_init
             and canonical_ledger_init.__code__ is canonical_ledger_init_code
@@ -167,6 +183,10 @@ def _build_product_entrypoint():
                 "canonical product runtime workspace is invalid"
             )
 
+        if not reopen_graph_unchanged():
+            raise BetfairStandardLimitPriceBoundError(
+                "canonical Betfair product verifier reopen authority changed"
+            )
         if type(issuance_store) is not canonical_store_type:
             raise BetfairStandardLimitPriceBoundError(
                 "product issuance store is not canonical"

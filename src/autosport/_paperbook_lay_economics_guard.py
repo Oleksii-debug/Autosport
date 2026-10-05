@@ -143,9 +143,9 @@ def _open_ticket_unlocked(
             "PaperBook LAY economics require exactly one canonical single-leg LAY ticket"
         )
 
+    type(self)._validate_loaded_state(self)
     _paper._require_ticket_opening_authority(self)
     _paper._require_paperbook_causal_history_authority(self)
-    type(self)._validate_loaded_state(self)
 
     leg = ticket_legs[0]
     type(self)._validate_ticket_leg(leg)
@@ -491,9 +491,9 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
 
 
 def _committed_capital_unlocked(self: _paper.PaperBook) -> Decimal:
+    type(self)._validate_loaded_state(self)
     _paper._require_ticket_opening_authority(self)
     _paper._require_paperbook_causal_history_authority(self)
-    type(self)._validate_loaded_state(self)
     try:
         with localcontext(_paper._paper_decimal_context()) as context:
             total = Decimal("0")

@@ -39,10 +39,10 @@ class MalformedBatchProvider:
 class ProviderBatchOperationalMetadataTests(unittest.TestCase):
     def test_malformed_operational_metadata_fails_before_event_persistence(self) -> None:
         cases: tuple[tuple[str, object, object, type[BaseException], str], ...] = (
-            ("wrong cursor type", 7, (), TypeError, "cursor must be str or None"),
+            ("wrong cursor type", 7, (), TypeError, "cursor must be an exact str or None"),
             ("quality flags not tuple", None, ["GAP"], TypeError, "must be a tuple"),
             ("quality flag not string", None, (7,), TypeError, "quality flag must be str"),
-            ("blank quality flag", None, ("",), ValueError, "non-empty and trimmed"),
+            ("blank quality flag", None, ("",), ValueError, "canonical text"),
             ("untrimmed quality flag", None, (" GAP",), ValueError, "canonical text"),
             ("cursor control character", "page\nforged", (), ValueError, "control characters"),
             ("quality flag control character", None, ("GAP\rFORGED",), ValueError, "canonical text"),

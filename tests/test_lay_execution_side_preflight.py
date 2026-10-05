@@ -276,6 +276,85 @@ def test_direct_complete_rejects_decimal_subclass_before_ledger_read() -> None:
         assert ledger.events() == []
 
 
+def test_direct_attempt_requires_durable_reservation_before_write() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        current_action = _action("direct-attempt-no-reserve", side="BACK")
+        current_plan = _plan(current_action)
+        current_config = _config()
+        trigger_id = "direct-attempt-no-reserve"
+        run_id = _legacy_reality._run_id(
+            current_plan,
+            trigger_id,
+            current_config,
+        )
+        attempt = _legacy_reality._synthetic_attempt(
+            run_id=run_id,
+            plan=current_plan,
+            action=current_action,
+            sequence=0,
+            config=current_config,
+            started_at=STARTED_AT,
+            suspended=False,
+        )
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="requires exactly one durable run reservation",
+        ):
+            ledger.record_attempt(attempt)
+
+        assert ledger.events() == []
+
+
+def test_direct_attempt_must_match_reserved_action_identity() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        reserved_action = _action("reserved-action", side="BACK")
+        current_plan = _plan(reserved_action)
+        current_config = _config()
+        trigger_id = "direct-attempt-identity"
+        run_id = _legacy_reality._run_id(
+            current_plan,
+            trigger_id,
+            current_config,
+        )
+        ledger.reserve_run(
+            run_id=run_id,
+            trigger_id=trigger_id,
+            plan=current_plan,
+            config=current_config,
+            started_at=STARTED_AT,
+            observation_evidence_ids={},
+        )
+        forged_action = _action("forged-action", side="BACK")
+        forged_attempt = _legacy_reality._synthetic_attempt(
+            run_id=run_id,
+            plan=ExecutionPlan(
+                plan_id=current_plan.plan_id,
+                bookmaker_profile_version=current_plan.bookmaker_profile_version,
+                decision_id=current_plan.decision_id,
+                approval_id=current_plan.approval_id,
+                created_at=current_plan.created_at,
+                actions=(forged_action,),
+            ),
+            action=forged_action,
+            sequence=0,
+            config=current_config,
+            started_at=STARTED_AT,
+            suspended=False,
+        )
+        events_before = list(ledger.events())
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="not authorized by durable run reservation",
+        ):
+            ledger.record_attempt(forged_attempt)
+
+        assert ledger.events() == events_before
+
+
 def test_mutated_config_identity_fails_before_fingerprint_or_reservation() -> None:
     class HostileModelId(str):
         calls = 0

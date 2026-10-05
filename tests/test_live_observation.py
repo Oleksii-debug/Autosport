@@ -410,6 +410,75 @@ class LiveObservationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_rejected_mismatched_batch_resets_same_authority_provider_snapshot(self):
+        class Provider:
+            source_id = "live-fixture"
+
+            def __init__(self) -> None:
+                self.reset_calls = 0
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return ProviderBatch(
+                    source_id="foreign-source",
+                    quotes=(),
+                    cursor="bad-source",
+                )
+
+            def reset_pending_snapshot(self) -> None:
+                self.reset_calls += 1
+
+        provider = Provider()
+        wrapped = live_observation_module._ReplayableBatchProvider(provider)
+        with self.assertRaisesRegex(RuntimeError, "batch source identity conflicts"):
+            wrapped.read_batch(max_items=1)
+
+        self.assertEqual(provider.reset_calls, 1)
+        self.assertFalse(wrapped.has_inflight)
+
+    def test_rejected_noncanonical_batch_type_resets_provider_snapshot(self):
+        class Provider:
+            source_id = "live-fixture"
+
+            def __init__(self) -> None:
+                self.reset_calls = 0
+
+            def read_batch(self, max_items: int = 1000):
+                return object()
+
+            def reset_pending_snapshot(self) -> None:
+                self.reset_calls += 1
+
+        provider = Provider()
+        wrapped = live_observation_module._ReplayableBatchProvider(provider)
+        with self.assertRaisesRegex(TypeError, "exact ProviderBatch"):
+            wrapped.read_batch(max_items=1)
+
+        self.assertEqual(provider.reset_calls, 1)
+        self.assertFalse(wrapped.has_inflight)
+
+    def test_rejected_read_reset_failure_preserves_primary_validation_error(self):
+        class Provider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000):
+                return object()
+
+            def reset_pending_snapshot(self) -> None:
+                raise RuntimeError("reset failed")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(Provider())
+        with self.assertRaisesRegex(TypeError, "exact ProviderBatch") as raised:
+            wrapped.read_batch(max_items=1)
+
+        self.assertTrue(
+            any(
+                "provider rejected-read snapshot reset also failed: RuntimeError: reset failed"
+                in note
+                for note in getattr(raised.exception, "__notes__", ())
+            )
+        )
+        self.assertFalse(wrapped.has_inflight)
+
     def test_replayable_provider_rejects_equal_string_subclass_before_read(self):
         class SourceId(str):
             pass

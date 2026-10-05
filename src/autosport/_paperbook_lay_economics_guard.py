@@ -10,6 +10,12 @@ from .exchange_exposure import locked_capital_for_exchange_side
 from .real_execution_ledger import _validate_decimal_text_resource_bound
 
 
+_DECIMAL_TYPE = Decimal
+_PAPER_TICKET_TYPE = PaperTicket
+_TICKET_LEG_TYPE = TicketLeg
+_TICKET_STATUS_TYPE = TicketStatus
+_LOCALCONTEXT = localcontext
+
 _ORIGINAL_LOCKED_CAPITAL = locked_capital_for_exchange_side
 _ORIGINAL_DECIMAL_RESOURCE_BOUND = _validate_decimal_text_resource_bound
 
@@ -40,7 +46,7 @@ _ORIGINAL_ADVANCE_CAUSAL_HISTORY_SETTLE = _paper._advance_paperbook_causal_histo
 
 
 def _require_exact_decimal(value: object, label: str) -> Decimal:
-    if type(value) is not Decimal:
+    if type(value) is not _DECIMAL_TYPE:
         raise ValueError(f"PaperBook {label} must be an exact Decimal")
     if not value.is_finite():
         raise ValueError(f"PaperBook snapshot contains non-finite {label}")
@@ -210,15 +216,15 @@ def _canonical_open_stake(book: _paper.PaperBook, stake) -> Decimal:
     parser = getattr(_paper.PaperBook, "_canonical_decimal_input", None)
     if parser is not None:
         amount = parser(stake, "stake")
-        if type(amount) is not Decimal:
+        if type(amount) is not _DECIMAL_TYPE:
             raise ValueError("canonical stake parser must return exact Decimal")
         return amount
     if type(stake) not in {Decimal, str, int, float}:
         raise TypeError(
             "stake must be an exact Decimal, str, int, or float"
         )
-    amount = Decimal(str(stake))
-    if type(amount) is not Decimal:
+    amount = _DECIMAL_TYPE(str(stake))
+    if type(amount) is not _DECIMAL_TYPE:
         raise ValueError("stake normalization must produce exact Decimal")
     _require_exact_decimal(amount, "stake")
     return amount
@@ -229,7 +235,7 @@ def _is_lay_leg(leg: object) -> bool:
     # dispatch paths. Never invoke caller-controlled equality on a mutated frozen
     # TicketLeg while deciding which economic authority owns validation.
     return (
-        type(leg) is TicketLeg
+        type(leg) is _TICKET_LEG_TYPE
         and type(leg.exchange_side) is str
         and leg.exchange_side == "lay"
     )
@@ -240,7 +246,7 @@ def _book_has_canonical_lay_ticket(book: object) -> bool:
     if type(tickets) is not dict:
         return False
     for ticket in tickets.values():
-        if type(ticket) is not PaperTicket or type(ticket.legs) is not tuple:
+        if type(ticket) is not _PAPER_TICKET_TYPE or type(ticket.legs) is not tuple:
             continue
         if any(_is_lay_leg(leg) for leg in ticket.legs):
             return True
@@ -302,7 +308,7 @@ def _validate_ticket_leg(
                 raise ValueError(
                     "PaperBook ticket sport must be a lowercase canonical sport identity"
                 )
-        if type(leg.locked_odds) is not Decimal:
+        if type(leg.locked_odds) is not _DECIMAL_TYPE:
             raise ValueError(
                 f"PaperBook locked_odds{suffix} must be an exact Decimal"
             )
@@ -339,7 +345,7 @@ def _open_ticket_unlocked(
             currency=currency,
         )
 
-    if any(type(leg) is not TicketLeg for leg in ticket_legs):
+    if any(type(leg) is not _TICKET_LEG_TYPE for leg in ticket_legs):
         return _ORIGINAL_OPEN_TICKET(
             self,
             ticket_legs,
@@ -396,7 +402,7 @@ def _open_ticket_unlocked(
         currency,
     )
 
-    ticket = PaperTicket(
+    ticket = _PAPER_TICKET_TYPE(
         ticket_id=str(_paper.uuid.uuid4()),
         stake=amount,
         legs=ticket_legs,
@@ -472,7 +478,7 @@ def _settle_unlocked(
             void_quote_keys,
             settled_at=settled_at,
         )
-    if ticket.status is not TicketStatus.OPEN:
+    if ticket.status is not _TICKET_STATUS_TYPE.OPEN:
         raise ValueError("ticket already settled")
 
     winners = _normalize_exact_resolution_keys(
@@ -574,15 +580,15 @@ def _settlement_result(
 
     locked_capital = _locked_capital_for_ticket(ticket)
     if leg.quote_key in void_quote_keys:
-        status = TicketStatus.VOID
+        status = _TICKET_STATUS_TYPE.VOID
         payout = locked_capital
     elif leg.quote_key in winning_quote_keys:
-        status = TicketStatus.LOST
-        payout = Decimal("0")
+        status = _TICKET_STATUS_TYPE.LOST
+        payout = _DECIMAL_TYPE("0")
     else:
-        status = TicketStatus.WON
+        status = _TICKET_STATUS_TYPE.WON
         try:
-            with localcontext(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
+            with _LOCALCONTEXT(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
                 payout = locked_capital + ticket.stake
                 if context.flags[Inexact]:
                     raise ValueError("PaperBook LAY payout loses Decimal precision")
@@ -593,7 +599,7 @@ def _settlement_result(
 
     _require_exact_decimal(payout, f"settlement payout for ticket {ticket.ticket_id}")
     try:
-        with localcontext(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
+        with _LOCALCONTEXT(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
             new_balance = balance + payout
             if context.flags[Inexact]:
                 raise ValueError("PaperBook LAY balance credit loses Decimal precision")
@@ -696,11 +702,11 @@ def _validate_lifecycle_reachability(cls, book: _paper.PaperBook) -> None:
     for ticket_id, ticket in book.tickets.items():
         if ticket_id not in opened:
             raise ValueError("PaperBook lifecycle is missing ticket open action")
-        if ticket_id not in settled and ticket.status is not TicketStatus.OPEN:
+        if ticket_id not in settled and ticket.status is not _TICKET_STATUS_TYPE.OPEN:
             raise ValueError(
                 f"PaperBook ticket {ticket_id} settled state is missing lifecycle provenance"
             )
-        if ticket_id in settled and ticket.status is TicketStatus.OPEN:
+        if ticket_id in settled and ticket.status is _TICKET_STATUS_TYPE.OPEN:
             raise ValueError(
                 f"PaperBook ticket {ticket_id} open state conflicts with lifecycle settlement witness"
             )
@@ -729,7 +735,7 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
 
     for ticket_key, ticket in book.tickets.items():
         _require_exact_text(ticket_key, "ticket mapping key")
-        if type(ticket) is not PaperTicket:
+        if type(ticket) is not _PAPER_TICKET_TYPE:
             raise ValueError("PaperBook tickets must contain canonical PaperTicket values")
         _require_exact_text(ticket.ticket_id, "ticket_id")
         if ticket_key != ticket.ticket_id:
@@ -744,7 +750,7 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
                 ticket.placed_at
             ):
                 raise ValueError("PaperBook settled_at must not precede placed_at")
-        if ticket.status is TicketStatus.OPEN and ticket.settled_at is not None:
+        if ticket.status is _TICKET_STATUS_TYPE.OPEN and ticket.settled_at is not None:
             raise ValueError("PaperBook snapshot open ticket cannot have settled_at")
         _require_exact_text(
             ticket.strategy_reason,
@@ -782,28 +788,28 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
 
         is_lay = len(ticket.legs) == 1 and _is_lay_leg(ticket.legs[0])
         if not is_lay:
-            if ticket.status in {TicketStatus.OPEN, TicketStatus.LOST} and ticket.payout != 0:
+            if ticket.status in {_TICKET_STATUS_TYPE.OPEN, _TICKET_STATUS_TYPE.LOST} and ticket.payout != 0:
                 raise ValueError(
                     "PaperBook snapshot open/lost ticket payout must be zero"
                 )
-            if ticket.status is TicketStatus.VOID and ticket.payout != ticket.stake:
+            if ticket.status is _TICKET_STATUS_TYPE.VOID and ticket.payout != ticket.stake:
                 raise ValueError(
                     "PaperBook snapshot void ticket payout must equal stake"
                 )
-            if ticket.status is TicketStatus.WON and ticket.payout <= ticket.stake:
+            if ticket.status is _TICKET_STATUS_TYPE.WON and ticket.payout <= ticket.stake:
                 raise ValueError(
                     "PaperBook snapshot won ticket payout must exceed stake"
                 )
             continue
 
         locked_capital = _locked_capital_for_ticket(ticket)
-        if ticket.status in {TicketStatus.OPEN, TicketStatus.LOST}:
-            expected_payout = Decimal("0")
-        elif ticket.status is TicketStatus.VOID:
+        if ticket.status in {_TICKET_STATUS_TYPE.OPEN, _TICKET_STATUS_TYPE.LOST}:
+            expected_payout = _DECIMAL_TYPE("0")
+        elif ticket.status is _TICKET_STATUS_TYPE.VOID:
             expected_payout = locked_capital
-        elif ticket.status is TicketStatus.WON:
+        elif ticket.status is _TICKET_STATUS_TYPE.WON:
             try:
-                with localcontext(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
+                with _LOCALCONTEXT(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
                     expected_payout = locked_capital + ticket.stake
                     if context.flags[Inexact]:
                         raise ValueError(
@@ -828,10 +834,10 @@ def _committed_capital_unlocked(self: _paper.PaperBook) -> Decimal:
     _ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY(self)
     _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY(self)
     try:
-        with localcontext(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
-            total = Decimal("0")
+        with _LOCALCONTEXT(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
+            total = _DECIMAL_TYPE("0")
             for ticket in self.tickets.values():
-                if ticket.status is TicketStatus.OPEN:
+                if ticket.status is _TICKET_STATUS_TYPE.OPEN:
                     total += _locked_capital_for_ticket(ticket)
             if context.flags[Inexact]:
                 raise ValueError("PaperBook committed capital loses Decimal precision")

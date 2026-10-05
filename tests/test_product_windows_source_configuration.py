@@ -649,3 +649,97 @@ def test_stopped_status_localizes_reason_without_machine_id(
     assert localized in surface.product_status.value
     assert reason not in surface.product_status.value
     assert surface._product_last_stop is not None
+
+
+class _Control:
+    def __init__(self) -> None:
+        self.states: list[tuple[str, ...]] = []
+        self.configured: list[dict[str, object]] = []
+
+    def state(self, values: list[str]) -> None:
+        self.states.append(tuple(values))
+
+    def configure(self, **kwargs: object) -> None:
+        self.configured.append(kwargs)
+
+
+def test_product_running_state_locks_source_mutation_controls() -> None:
+    start = _Control()
+    stop = _Control()
+    source = _Control()
+    save = _Control()
+    replay_busy: list[bool] = []
+    surface = SimpleNamespace(
+        product_start_button=start,
+        product_stop_button=stop,
+        product_source_choice=source,
+        product_source_save_button=save,
+        _set_replay_controls_busy=replay_busy.append,
+    )
+
+    ProductWindowsAutosportApp._set_product_controls_running(surface, True)
+
+    assert start.states[-1] == ("disabled",)
+    assert stop.states[-1] == ("!disabled",)
+    assert source.configured[-1] == {"state": "disabled"}
+    assert save.states[-1] == ("disabled",)
+    assert replay_busy == [True]
+
+
+def test_product_terminal_state_restores_source_configuration_controls() -> None:
+    start = _Control()
+    stop = _Control()
+    source = _Control()
+    save = _Control()
+    replay_busy: list[bool] = []
+    surface = SimpleNamespace(
+        product_start_button=start,
+        product_stop_button=stop,
+        product_source_choice=source,
+        product_source_save_button=save,
+        _set_replay_controls_busy=replay_busy.append,
+    )
+
+    ProductWindowsAutosportApp._set_product_controls_running(surface, False)
+
+    assert stop.states[-1] == ("disabled",)
+    assert start.states[-1] == ("!disabled",)
+    assert source.configured[-1] == {"state": "readonly"}
+    assert save.states[-1] == ("!disabled",)
+    assert replay_busy == [False]
+
+
+def test_app_close_requests_canonical_stop_and_freezes_runtime_controls() -> None:
+    reasons: list[str] = []
+    scheduled: list[tuple[int, object]] = []
+    start = _Control()
+    stop = _Control()
+    source = _Control()
+    save = _Control()
+    worker = SimpleNamespace(
+        request_stop=lambda reason: (reasons.append(reason) or True),
+    )
+    surface = SimpleNamespace(
+        _product_close_pending=False,
+        _product_busy=True,
+        product_worker=worker,
+        product_start_button=start,
+        product_stop_button=stop,
+        product_source_choice=source,
+        product_source_save_button=save,
+        product_status=_Value(),
+        status=_Value(),
+        _append_log=lambda _message: None,
+        after=lambda delay, callback: scheduled.append((delay, callback)),
+        _poll_product_worker=lambda: None,
+    )
+
+    ProductWindowsAutosportApp.close_app(surface)
+
+    assert surface._product_close_pending is True
+    assert reasons == ["app_close"]
+    assert start.states[-1] == ("disabled",)
+    assert stop.states[-1] == ("disabled",)
+    assert source.configured[-1] == {"state": "disabled"}
+    assert save.states[-1] == ("disabled",)
+    assert scheduled and scheduled[0][0] == 100

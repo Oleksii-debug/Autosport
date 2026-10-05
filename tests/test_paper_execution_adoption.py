@@ -1122,5 +1122,55 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 )
 
 
+
+    def test_execution_guard_rejects_ledger_path_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, runtime = self.runtime(tmp)
+            ledger.path = Path(tmp) / "foreign-paper-execution.jsonl"
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "ledger persistence authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("rebound ledger path must not be entered")
+
+    def test_execution_guard_rejects_ledger_writer_lock_path_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, runtime = self.runtime(tmp)
+            ledger._lock_path = Path(tmp) / "foreign-writer.lock"
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "ledger persistence authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("rebound ledger writer lock must not be entered")
+
+    def test_execution_guard_rejects_ledger_anchor_path_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, runtime = self.runtime(tmp)
+            ledger._anchor_path = Path(tmp) / "foreign-anchor.json"
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "ledger persistence authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("rebound ledger anchor must not be entered")
+
+    def test_execution_guard_rejects_ledger_process_lock_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, runtime = self.runtime(tmp)
+            ledger._lock = RLock()
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "ledger persistence authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("rebound ledger process lock must not be entered")
+
+
 if __name__ == "__main__":
     unittest.main()

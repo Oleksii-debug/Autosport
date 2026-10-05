@@ -39,16 +39,30 @@ class OperatorSourceConfig:
     def __post_init__(self) -> None:
         source_id = _source_id(self.source_id)
         expected = _payload_sha256(source_id)
-        if not isinstance(self.integrity_sha256, str) or self.integrity_sha256 != expected:
-            raise OperatorSourceConfigError("operator source configuration integrity mismatch")
+        if (
+            type(self.integrity_sha256) is not str
+            or self.integrity_sha256 != expected
+        ):
+            raise OperatorSourceConfigError(
+                "operator source configuration integrity mismatch"
+            )
 
     def to_json_bytes(self) -> bytes:
+        source_id = _source_id(self.source_id)
+        expected = _payload_sha256(source_id)
+        if (
+            type(self.integrity_sha256) is not str
+            or self.integrity_sha256 != expected
+        ):
+            raise OperatorSourceConfigError(
+                "operator source configuration integrity mismatch"
+            )
         return _canonical_json(
             {
                 "schema": _SCHEMA,
                 "schema_version": _SCHEMA_VERSION,
-                "source_id": self.source_id,
-                "integrity_sha256": self.integrity_sha256,
+                "source_id": source_id,
+                "integrity_sha256": expected,
             }
         )
 
@@ -60,12 +74,16 @@ class OperatorSourceSelection:
     reason_code: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.state, OperatorSourceSelectionState):
-            raise TypeError("state must be OperatorSourceSelectionState")
+        if type(self.state) is not OperatorSourceSelectionState:
+            raise TypeError("state must be exact OperatorSourceSelectionState")
         if self.source_id is not None:
             _source_id(self.source_id)
-        if not isinstance(self.reason_code, str) or not self.reason_code:
-            raise TypeError("reason_code must be non-empty text")
+        if (
+            type(self.reason_code) is not str
+            or not self.reason_code
+            or len(self.reason_code) > 128
+        ):
+            raise TypeError("reason_code must be bounded non-empty exact text")
         if self.state in {
             OperatorSourceSelectionState.CONFIGURED,
             OperatorSourceSelectionState.ADMIN_OVERRIDE,

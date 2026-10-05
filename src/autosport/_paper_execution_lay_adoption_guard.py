@@ -920,6 +920,18 @@ def _assert_recoverable_book_state(
             currency=binding.currency,
         )
 
+    # Reconstruction itself invokes PaperBook domain code. Re-prove both the
+    # live and reconstructed economic states immediately before the final
+    # equality decision so a callback/concurrent mutation cannot be laundered
+    # into a successful restart reconciliation.
+    self._require_minted(prepared)
+    try:
+        type(self.book)._validate_loaded_state(self.book)
+        type(expected)._validate_loaded_state(expected)
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionAdoptionError(
+            "PAPER recovery state changed or became invalid during reconstruction"
+        ) from exc
     if not self._same_book_state(self.book, expected):
         raise PaperExecutionAdoptionError(
             "PaperBook restart state is not the exact pre-action or "

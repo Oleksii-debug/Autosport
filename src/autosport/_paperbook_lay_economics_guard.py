@@ -28,6 +28,25 @@ def _paperbook_operation_context(book: _paper.PaperBook):
     return require_lock(book)
 
 
+def _canonical_open_legs(legs):
+    """Preserve the canonical exact-container ingress once PaperBook provides it."""
+    if hasattr(_paper.PaperBook, "_canonical_decimal_input") and type(legs) not in {
+        list,
+        tuple,
+    }:
+        raise ValueError("ticket legs must be an exact list or tuple")
+    return tuple(legs)
+
+
+def _canonical_open_stake(book: _paper.PaperBook, stake) -> Decimal:
+    parser = getattr(_paper.PaperBook, "_canonical_decimal_input", None)
+    if parser is not None:
+        return parser(stake, "stake")
+    amount = Decimal(str(stake))
+    type(book)._require_finite(amount, "stake")
+    return amount
+
+
 def _is_lay_leg(leg: object) -> bool:
     return type(leg) is TicketLeg and leg.exchange_side == "lay"
 
@@ -93,7 +112,7 @@ def _open_ticket_unlocked(
     bankroll_id: str | None = None,
     currency: str | None = None,
 ) -> PaperTicket:
-    ticket_legs = tuple(legs)
+    ticket_legs = _canonical_open_legs(legs)
     if not any(_is_lay_leg(leg) for leg in ticket_legs):
         return _ORIGINAL_OPEN_TICKET(
             self,
@@ -130,8 +149,7 @@ def _open_ticket_unlocked(
 
     leg = ticket_legs[0]
     type(self)._validate_ticket_leg(leg)
-    amount = Decimal(str(stake))
-    type(self)._require_finite(amount, "stake")
+    amount = _canonical_open_stake(self, stake)
     if amount <= 0:
         raise ValueError("stake must be positive")
     locked_capital = locked_capital_for_exchange_side(

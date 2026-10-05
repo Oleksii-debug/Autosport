@@ -111,6 +111,46 @@ def _empirical_acceptance(
     return record.as_observation(), registry
 
 
+def test_mutated_plan_identity_fails_before_fingerprint_or_reservation() -> None:
+    class HostilePlanId(str):
+        calls = 0
+
+        def __hash__(self) -> int:
+            type(self).calls += 1
+            return super().__hash__()
+
+        def __eq__(self, other: object) -> bool:
+            type(self).calls += 1
+            return super().__eq__(other)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        lay = _action("plan-hostile", side="LAY")
+        plan = _plan(lay)
+        HostilePlanId.calls = 0
+        object.__setattr__(
+            plan,
+            "plan_id",
+            HostilePlanId(plan.plan_id),
+        )
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="plan_id must retain exact canonical text authority",
+        ):
+            execute_paper_plan(
+                plan=plan,
+                trigger_id="plan-hostile",
+                config=_config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                suspended_action_ids=frozenset({lay.action_id}),
+            )
+
+        assert HostilePlanId.calls == 0
+        assert ledger.events() == []
+
+
 def test_mutated_side_subclass_fails_before_dispatch_hooks_or_reservation() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")

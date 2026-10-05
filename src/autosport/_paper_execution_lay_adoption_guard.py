@@ -633,6 +633,34 @@ def _restore_paperbook_from_snapshot(
         ) from exc
 
 
+
+def _execute(
+    self: PaperExecutionAdoptionRuntime,
+    *,
+    prepared: PreparedPaperExecution,
+    trigger_id: str,
+    started_at: str,
+    materialize_exposure: bool,
+    observations: Mapping[str, _reality.ObservedPaperExecution] | None = None,
+    evidence_registry: _reality.PaperExecutionEvidenceRegistry | None = None,
+    suspended_action_ids: frozenset[str] = frozenset(),
+):
+    """Canonical entrypoint that cannot be redirected through instance _execute_unlocked."""
+    _require_runtime_authority(self)
+    execution_lock = self._execution_lock
+    with execution_lock:
+        _require_runtime_authority(self)
+        return _execute_unlocked(
+            self,
+            prepared=prepared,
+            trigger_id=trigger_id,
+            started_at=started_at,
+            materialize_exposure=materialize_exposure,
+            observations=observations,
+            evidence_registry=evidence_registry,
+            suspended_action_ids=suspended_action_ids,
+        )
+
 def _execute_unlocked(
     self: PaperExecutionAdoptionRuntime,
     *,
@@ -1341,6 +1369,7 @@ def _install() -> None:
     PaperExecutionAdoptionRuntime._mint_prepared = _mint_prepared
     PaperExecutionAdoptionRuntime._require_minted = _require_minted
     PaperExecutionAdoptionRuntime.expected_run_id = _expected_run_id
+    PaperExecutionAdoptionRuntime.execute = _execute
     PaperExecutionAdoptionRuntime._execute_unlocked = _execute_unlocked
     PaperExecutionAdoptionRuntime._require_back_compatible_exchange_side = staticmethod(
         _require_supported_exchange_side

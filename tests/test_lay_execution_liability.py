@@ -2120,6 +2120,124 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("100"))
         self.assertEqual(book.tickets, {})
 
+    def test_lay_snapshot_rejects_strategy_reason_str_subclass_before_contains_hook(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        class HostileText(str):
+            def __contains__(self, _item):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("strategy reason contains hook executed")
+
+        object.__setattr__(ticket, "strategy_reason", HostileText("reason"))
+
+        with self.assertRaisesRegex(ValueError, "exact string"):
+            _ = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+
+    def test_lay_snapshot_rejects_provenance_str_subclass_before_sort_hash_hooks(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket(
+            [self._lay_leg()],
+            Decimal("10"),
+            placed_at=QUOTE_AT,
+            provider_source_ids=("paper-exchange",),
+            provider_accounts=(("paper-exchange", "paper-account"),),
+        )
+        hostile_calls = 0
+
+        class HostileText(str):
+            def __lt__(self, _other):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("provenance ordering hook executed")
+
+            def __hash__(self):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("provenance hash hook executed")
+
+        object.__setattr__(
+            ticket,
+            "provider_source_ids",
+            (HostileText("paper-exchange"),),
+        )
+
+        with self.assertRaisesRegex(ValueError, "exact string"):
+            _ = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+
+    def test_lay_snapshot_rejects_timestamp_str_subclass_before_text_hooks(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        class HostileText(str):
+            def strip(self, *_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("timestamp strip hook executed")
+
+            def encode(self, *_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("timestamp encode hook executed")
+
+        object.__setattr__(ticket, "placed_at", HostileText(QUOTE_AT))
+
+        with self.assertRaisesRegex(ValueError, "exact string"):
+            _ = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+
+    def test_lay_replay_rejects_lifecycle_str_subclass_before_membership_hooks(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        action, ticket_id, winners, voids = book._lifecycle[0]
+        hostile_calls = 0
+
+        class HostileText(str):
+            def __eq__(self, _other):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("lifecycle equality hook executed")
+
+            def __hash__(self):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("lifecycle hash hook executed")
+
+        book._lifecycle[0] = (
+            HostileText(action),
+            ticket_id,
+            winners,
+            voids,
+        )
+
+        with self.assertRaisesRegex(ValueError, "lifecycle action"):
+            _ = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(book.balance, Decimal("60.00"))
+        self.assertIn(ticket.ticket_id, book.tickets)
+
+    def test_lay_leg_rejects_decimal_subclass_before_decimal_hooks(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+
+        class HostileDecimal(Decimal):
+            pass
+
+        hostile = HostileDecimal("5.00")
+        object.__setattr__(ticket.legs[0], "locked_odds", hostile)
+
+        with self.assertRaisesRegex(ValueError, "exact Decimal"):
+            _ = book.committed_capital
+
     def test_open_lay_snapshot_round_trip_preserves_liability_and_side(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-book.json"

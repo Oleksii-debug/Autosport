@@ -628,3 +628,25 @@ def test_load_bytes_rejects_bytes_subclass_before_decode() -> None:
         PaperBook.load_bytes(hostile)
 
     assert _HostileSnapshotBytes.decode_calls == 0
+
+
+
+def test_settle_rejects_ticket_id_str_subclass_before_mapping_hash() -> None:
+    class HostileTicketId(str):
+        hash_calls = 0
+
+        def __hash__(self):
+            type(self).hash_calls += 1
+            raise AssertionError("hostile ticket_id hash must never execute")
+
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+    hostile = HostileTicketId(ticket.ticket_id)
+    HostileTicketId.hash_calls = 0
+
+    with pytest.raises(ValueError, match="settlement ticket_id must be a string"):
+        book.settle(hostile, {ticket.legs[0].quote_key}, settled_at=_TS)
+
+    assert HostileTicketId.hash_calls == 0
+    assert ticket.status.value == "open"
+    assert book.balance == Decimal("90")

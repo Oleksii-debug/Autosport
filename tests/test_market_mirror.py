@@ -238,6 +238,20 @@ class MarketMirrorTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "entries must be exact strings"):
             mirror.view(source_ids=Text("provider-a"))
 
+    def test_selector_rejects_string_subclasses_instead_of_iterating_characters(self) -> None:
+        class SourceId(str):
+            pass
+
+        mirror = MarketMirror()
+        mirror.apply(self.event())
+
+        with self.assertRaisesRegex(TypeError, "exact string"):
+            mirror.active_view(
+                as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+                source_ids=SourceId("provider-a"),
+            )
+
     def test_new_and_forward_updates_are_applied(self) -> None:
         mirror = MarketMirror()
 

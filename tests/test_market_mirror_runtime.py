@@ -3,6 +3,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from threading import Event, Thread
 from unittest.mock import patch
 
 from autosport.domain import MarketEvent
@@ -986,6 +987,29 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
 
         self.assertEqual(mirror.snapshot(), ())
         self.assertEqual(runtime.pending_count, 0)
+
+    def test_registry_mutation_guard_blocks_direct_mutation_but_not_reads(self) -> None:
+        mirror = MarketMirror()
+        index = FocusedMirrorDependencyIndex(mirror)
+        started = Event()
+        finished = Event()
+
+        def register_in_peer() -> None:
+            started.set()
+            index.register("input-a", selection_ids="selection-1")
+            finished.set()
+
+        with index.registry_mutation_guard():
+            peer = Thread(target=register_in_peer)
+            peer.start()
+            self.assertTrue(started.wait(1))
+            self.assertEqual(index.registry_snapshot(), ())
+            self.assertFalse(finished.wait(0.05))
+
+        self.assertTrue(finished.wait(1))
+        peer.join(timeout=1)
+        self.assertFalse(peer.is_alive())
+        self.assertEqual(index.input_ids, ("input-a",))
 
     def test_dependency_revision_changes_across_same_selector_reregistration(self) -> None:
         mirror = MarketMirror()

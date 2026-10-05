@@ -853,7 +853,9 @@ class PersistentLiveDecisionLoop:
         self.max_quote_age = max_quote_age
         self._max_quote_age_authority = max_quote_age
         self.bounds = bounds or LiveLoopBounds()
+        self._bounds_authority = self.bounds
         self.clock = resolved_clock
+        self._clock_authority = self.clock
         self._last_clock_time = provenance_as_of
         self.post_append_hook = post_append_hook
         if catalog_lifecycle is not None and not isinstance(
@@ -878,6 +880,10 @@ class PersistentLiveDecisionLoop:
         self.catalog_fetch_page = catalog_fetch_page
         self.catalog_source_id = catalog_source_id
         self.catalog_required_history = catalog_required_history
+        self._catalog_lifecycle_authority = catalog_lifecycle
+        self._catalog_fetch_page_authority = catalog_fetch_page
+        self._catalog_source_id_authority = catalog_source_id
+        self._catalog_required_history_authority = catalog_required_history
         self._default_market_store: SQLiteMarketStore | None = None
         self._default_health_store: SourceHealthStore | None = None
         self._default_market_change_token: int | None = None
@@ -2612,6 +2618,30 @@ class PersistentLiveDecisionLoop:
         if self.max_quote_age != self._max_quote_age_authority:
             raise LiveDecisionProgressError(
                 "live quote-age authority changed after construction"
+            )
+        if self.bounds is not self._bounds_authority:
+            raise LiveDecisionProgressError(
+                "live loop bounds authority changed after construction"
+            )
+        if self.clock is not self._clock_authority:
+            raise LiveDecisionProgressError(
+                "live clock authority changed after construction"
+            )
+        if self.catalog_lifecycle is not self._catalog_lifecycle_authority:
+            raise LiveDecisionProgressError(
+                "catalog lifecycle authority changed after construction"
+            )
+        if self.catalog_fetch_page is not self._catalog_fetch_page_authority:
+            raise LiveDecisionProgressError(
+                "catalog fetch authority changed after construction"
+            )
+        if self.catalog_source_id != self._catalog_source_id_authority:
+            raise LiveDecisionProgressError(
+                "catalog source authority changed after construction"
+            )
+        if self.catalog_required_history != self._catalog_required_history_authority:
+            raise LiveDecisionProgressError(
+                "catalog history authority changed after construction"
             )
         if self.decision_ledger is not self._decision_ledger_authority:
             raise LiveDecisionProgressError(

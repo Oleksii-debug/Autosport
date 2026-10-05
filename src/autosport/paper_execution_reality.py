@@ -230,8 +230,8 @@ def _canonical_run_reservation_inputs(
     started_at: str,
     observation_evidence_ids: Mapping[str, str],
 ) -> tuple[str, str, tuple[str, ...], dict[str, str], str, str, str]:
-    _require_canonical_execution_plan_surface(plan)
-    _require_canonical_execution_config_surface(config)
+    plan = _snapshot_execution_plan(plan)
+    config = _snapshot_execution_config(config)
     run_id = _impl._text(run_id, "run_id")
     trigger_id = _impl._text(trigger_id, "trigger_id")
     _impl._timestamp(started_at, "started_at")

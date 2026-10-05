@@ -1214,6 +1214,55 @@ class LiveObservationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_long_lived_mirror_rejects_foreign_workspace_state_before_provider_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source_workspace = base / "source"
+            foreign = observe_workspace_once(
+                source_workspace,
+                self._provider(),
+                max_items=10,
+                clock=lambda: _RECEIVE_TIME,
+            ).current_quotes[0]
+
+            mirror = MarketMirror()
+            mirror._apply_with_causal_authority(
+                foreign,
+                decision_causal=True,
+            )
+            updates = BoundedMirrorInvalidationBuffer(mirror)
+
+            class Provider:
+                source_id = "live-fixture"
+
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                    self.calls += 1
+                    raise AssertionError("provider I/O must not run")
+
+            provider = Provider()
+            target_workspace = base / "target"
+            with self.assertRaisesRegex(
+                ValueError,
+                "outside current workspace history",
+            ):
+                observe_workspace_once(
+                    target_workspace,
+                    provider,
+                    max_items=10,
+                    clock=lambda: _RECEIVE_TIME,
+                    mirror_updates=updates,
+                )
+
+            self.assertEqual(provider.calls, 0)
+            target_store = SQLiteMarketStore(target_workspace / "market.db")
+            try:
+                self.assertEqual(target_store.events(), ())
+            finally:
+                target_store.close()
+
     def test_long_lived_reconciliation_invalidates_preexisting_positive_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             first = self._observe(tmp)

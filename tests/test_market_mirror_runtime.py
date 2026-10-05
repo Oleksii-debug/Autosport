@@ -1080,6 +1080,29 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             ("selection-a", "selection-b", "unrelated"),
         )
 
+    def test_full_refresh_routing_returns_live_dependency_registry(self) -> None:
+        mirror = MarketMirror()
+        mirror.apply(self.event(sequence=1))
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("old", source_ids="provider-a")
+        batch = MirrorInvalidationBatch(
+            changed_keys=(),
+            full_refresh_required=True,
+            has_more=False,
+        )
+        original_snapshot = mirror.snapshot
+
+        def race_registry():
+            snapshot = original_snapshot()
+            self.assertTrue(dependencies.unregister("old"))
+            dependencies.register("new", source_ids="provider-a")
+            return snapshot
+
+        with patch.object(mirror, "snapshot", side_effect=race_registry):
+            affected = dependencies.affected_inputs(batch)
+
+        self.assertEqual(affected, ("new",))
+        self.assertEqual(dependencies.input_ids, ("new",))
     def test_history_transition_deadline_ignores_future_expired_state_without_predecessor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

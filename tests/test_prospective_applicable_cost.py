@@ -126,7 +126,7 @@ def test_sealed_validator_rejects_semantic_table_reauthoring():
 
     with pytest.raises(
         subject.ProspectiveApplicableCostError,
-        match="sealed canonical schema-v2 semantic tuple",
+        match="sealed canonical schema-v3 semantic tuple",
     ):
         subject._SEALED_RESOLUTION_VALIDATOR(resolution)
 
@@ -205,6 +205,88 @@ def test_public_resolver_name_rebinding_does_not_mutate_preinstalled_sealed_capa
 
     assert attacker_called is False
     subject._SEALED_RESOLUTION_VALIDATOR(result)
+
+
+def _known_zero_slippage_assertion(result, *, with_source=True):
+    components = list(result.components)
+    index = next(
+        i for i, item in enumerate(components)
+        if item.cost_class is CostClass.EXECUTION_SLIPPAGE
+    )
+    source = "a" * 64 if with_source else None
+    candidate = _copy_component(components[index])
+    object.__setattr__(
+        candidate,
+        "status",
+        subject.ProspectiveCostResolutionStatus.KNOWN_ZERO,
+    )
+    object.__setattr__(
+        candidate,
+        "reason",
+        subject.ProspectiveApplicableCostReason.BETFAIR_STANDARD_LIMIT_ZERO_ADVERSE_PRICE,
+    )
+    object.__setattr__(candidate, "dependency_axes", ())
+    object.__setattr__(
+        candidate,
+        "source_family",
+        (
+            "autosport.betfair_standard_limit_price_bound"
+            if with_source
+            else None
+        ),
+    )
+    object.__setattr__(candidate, "source_evidence_id", source)
+    object.__setattr__(candidate, "source_sha256", source)
+    components[index] = candidate
+    return _copy_resolution(result, components=tuple(components))
+
+
+def test_schema_v3_can_represent_source_backed_known_zero_slippage_without_complete_money():
+    result = _resolve_real()
+    source_backed = _known_zero_slippage_assertion(result)
+
+    subject._SEALED_RESOLUTION_VALIDATOR(source_backed)
+
+    by_class = {item.cost_class: item for item in source_backed.components}
+    slippage = by_class[CostClass.EXECUTION_SLIPPAGE]
+    assert slippage.status is subject.ProspectiveCostResolutionStatus.KNOWN_ZERO
+    assert slippage.dependency_axes == ()
+    assert slippage.source_evidence_id == "a" * 64
+    assert source_backed.completeness is (
+        subject.ProspectiveApplicableCostCompleteness.INCOMPLETE
+    )
+    assert source_backed.total_subtractable_amount is None
+    assert source_backed.currency is None
+
+
+def test_schema_v3_known_zero_slippage_requires_product_source_identity():
+    result = _resolve_real()
+    source_less = _known_zero_slippage_assertion(result, with_source=False)
+
+    with pytest.raises(
+        subject.ProspectiveApplicableCostError,
+        match="source family|source authority|requires evidence",
+    ):
+        subject._SEALED_RESOLUTION_VALIDATOR(source_less)
+
+
+def test_product_slippage_resolver_does_not_accept_caller_money_or_known_zero_flags():
+    parameters = set(
+        inspect.signature(
+            subject.resolve_prospective_applicable_costs_with_betfair_standard_limit
+        ).parameters
+    )
+    assert {
+        "slippage_evidence",
+        "ledger",
+        "issuance_store",
+        "runtime_profile",
+        "execution_plan_id",
+        "action_id",
+    } <= parameters
+    assert not parameters.intersection(
+        {"amount", "currency", "known_zero", "slippage_amount", "commission_rate"}
+    )
 
 
 def test_schema_v2_dependency_axes_cannot_be_flattened_to_scalar_money():

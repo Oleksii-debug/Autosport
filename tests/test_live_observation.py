@@ -870,6 +870,45 @@ class LiveObservationTests(unittest.TestCase):
 
         self.assertFalse(wrapped.has_inflight)
 
+    def test_live_acknowledges_durable_batch_after_subscriber_interrupt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source_health.json")
+                bus = live_observation_module.MarketEventBus(store)
+
+                def interrupt(_event):
+                    raise SystemExit("subscriber-stop")
+
+                bus.subscribe(interrupt)
+                engine = live_observation_module.IngestionEngine(
+                    bus,
+                    health_store=health,
+                    clock=lambda: _RECEIVE_TIME,
+                )
+                wrapped = live_observation_module._ReplayableBatchProvider(
+                    self._provider()
+                )
+
+                with self.assertRaises(
+                    live_observation_module.MarketEventDeliveryError
+                ):
+                    live_observation_module._poll_acknowledged(
+                        engine,
+                        wrapped,
+                        max_items=10,
+                    )
+
+                self.assertFalse(wrapped.has_inflight)
+                self.assertEqual(len(store.events()), 2)
+                state = health.get("live-fixture")
+                self.assertEqual(state.total_received, 2)
+                self.assertEqual(state.total_accepted, 2)
+                self.assertEqual(state.total_failures, 0)
+            finally:
+                store.close()
+
     def test_open_store_poll_does_not_rescan_append_only_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

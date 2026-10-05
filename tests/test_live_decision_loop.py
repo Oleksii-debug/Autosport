@@ -553,6 +553,40 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     clock=_ManualClock(self.START + timedelta(seconds=1)),
                 )
 
+    def test_live_loop_rejects_catalog_lifecycle_subclass(self) -> None:
+        class Lifecycle(ContinuousEventLifecycle):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            lifecycle_path = workspace / "catalog_lifecycle.json"
+            lifecycle = Lifecycle(lifecycle_path)
+            with self.assertRaisesRegex(TypeError, "exact ContinuousEventLifecycle"):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=1)),
+                    catalog_lifecycle=lifecycle,
+                    catalog_fetch_page=lambda _checkpoint: CatalogPage(events=()),
+                    catalog_source_id="catalog-fixture",
+                )
+
+    def test_live_loop_rejects_catalog_history_timedelta_subclass(self) -> None:
+        class Age(timedelta):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with self.assertRaisesRegex(TypeError, "catalog_required_history must be an exact timedelta"):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=1)),
+                    catalog_required_history=Age(seconds=1),
+                )
+
     def test_long_lived_default_observer_reconciles_cross_process_market_append(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -296,6 +296,61 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertEqual(provider.calls, 1)
             self.assertEqual(calls, [1.0])
 
+    def test_nonboolean_stop_state_fails_closed_before_provider_io(self):
+        class InvalidStopEvent:
+            def is_set(self):
+                return object()
+
+            def wait(self, _seconds):
+                return False
+
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            with self.assertRaisesRegex(TypeError, "is_set must return bool"):
+                run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    stop_event=InvalidStopEvent(),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    reporter=None,
+                )
+
+            self.assertEqual(provider.calls, 0)
+            status = json.loads(
+                (workspace / "continuous_observation_status.json").read_text("utf-8")
+            )
+            self.assertEqual(status["state"], "failed")
+
+    def test_nonboolean_waiter_result_fails_closed_after_committed_cycle(self):
+        provider = SequenceProvider(
+            [
+                _batch(_quote(), cursor="first"),
+                _batch(_quote(sequence=2), cursor="must-not-run"),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            with self.assertRaisesRegex(TypeError, "waiter must return bool"):
+                run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=2),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    waiter=lambda _seconds: object(),
+                    reporter=None,
+                )
+
+            self.assertEqual(provider.calls, 1)
+            store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
+
     def test_provider_identity_substitution_fails_before_workspace_creation(self):
         class SourceId(str):
             pass

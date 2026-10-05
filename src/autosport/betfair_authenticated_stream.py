@@ -668,9 +668,6 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                     self._market_open_sequence[market_id] = frame_sequence
                 continue
             self._market_open_sequence.pop(market_id, None)
-            for identity in tuple(self._transport_by_identity):
-                if identity.market_id == market_id:
-                    self._transport_by_identity.pop(identity, None)
 
     def _bound_frame_binding(
         self,

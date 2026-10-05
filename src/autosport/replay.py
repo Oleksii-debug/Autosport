@@ -214,10 +214,16 @@ class ReplayEngine:
             # reuse fails closed after the raw durable boundary has observed it.
             update = replay_mirror.apply(event)
             count += 1
-            if update.status == MirrorUpdate.APPLIED:
-                # A strategy callback receives a value snapshot, never the engine's
-                # hash-bound internal event. Callback mutation therefore cannot
-                # rewrite later audit inspection or the durable replay identity.
+            if update.status in {
+                MirrorUpdate.APPLIED,
+                MirrorUpdate.SEMANTIC_REFRESH,
+            }:
+                # A higher-sequence semantic refresh is strategy-visible even when
+                # price/state identity is unchanged: it advances the same causal
+                # liveness/freshness clocks used by live MarketMirror decisions.
+                # Suppressing it here would make replay expire a quote that live
+                # observation has just refreshed. The callback receives a detached
+                # value so it cannot mutate the engine's hash-bound internal event.
                 on_event(_snapshot_replay_event(event))
         self.firewall._complete_replay(completion_capability)
         return ReplayRun(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal, localcontext
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +11,8 @@ from autosport.paper_execution_reality import (
     EvidenceGrade,
     PaperAttemptOutcome,
     PaperExecutionEvidenceRecord,
+    PaperExecutionEvidenceRegistry,
+    PaperExecutionLedger,
 )
 
 
@@ -62,6 +65,20 @@ def test_bounded_empirical_evidence_is_context_independent() -> None:
         assert record.to_dict()["accepted_odds"] == "9.87654321987654321"
         assert record.to_dict()["accepted_stake"] == "123456789.123456789"
         assert record.evidence_sha256 == expected
+
+
+def test_mutated_oversized_evidence_cannot_partially_append(
+    tmp_path: Path,
+) -> None:
+    ledger_path = tmp_path / "paper-execution.jsonl"
+    registry = PaperExecutionEvidenceRegistry(PaperExecutionLedger(ledger_path))
+    record = _record(odds=Decimal("5"), stake=Decimal("10"))
+    object.__setattr__(record, "accepted_odds", Decimal("1E+100000000"))
+
+    with pytest.raises(ValueError, match="fixed-point representation exceeds resource limit"):
+        registry.register(record)
+
+    assert not ledger_path.exists() or ledger_path.read_bytes() == b""
 
 
 def test_decimal_resource_validator_code_drift_fails_closed(

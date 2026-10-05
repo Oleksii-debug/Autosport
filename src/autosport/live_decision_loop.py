@@ -2888,6 +2888,20 @@ class PersistentLiveDecisionLoop:
                 self._progress = durable_progress
                 existing = self._verified_ledger_record_at_offset(ledger_offset)
 
+            if (
+                existing is None
+                and prepared_execution is not None
+            ):
+                assert expected_execution_payload is not None
+                orphan_execution_events = self.paper_execution.ledger.events(
+                    expected_execution_payload["run_id"]
+                )
+                if orphan_execution_events:
+                    raise LiveDecisionProgressError(
+                        "append-pending live decision without durable Decision Ledger "
+                        "has orphan #623 execution history"
+                    )
+
             if existing is not None:
                 verify_economic_goal_binding(
                     existing,

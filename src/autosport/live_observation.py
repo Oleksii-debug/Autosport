@@ -616,11 +616,29 @@ def observe_workspace_once(
             mirror_updates = BoundedMirrorInvalidationBuffer(mirror)
         else:
             mirror = mirror_updates.mirror
+            # A caller may retain a long-lived non-durable mirror only for this
+            # canonical workspace history. Never merge foreign workspace state into
+            # current decision truth merely because quote/source identities happen to
+            # be compatible.
+            persisted_history = tuple(store.events_with_append_generation())
+            canonical_events = {
+                (event.source_id, event.dedupe_key): event
+                for event, _append_generation in persisted_history
+            }
+            for existing_event in mirror.snapshot():
+                canonical_event = canonical_events.get(
+                    (existing_event.source_id, existing_event.dedupe_key)
+                )
+                if canonical_event != existing_event:
+                    raise ValueError(
+                        "mirror_updates contains state outside current workspace history"
+                    )
+
             # Reconcile the non-durable mirror from independently proven canonical
             # append history at each observation boundary. Preserve generation-zero
             # migration rows only as audit/sequence fences; only positive product-issued
             # appends may become decision-causal live state.
-            for persisted_event, append_generation in store.events_with_append_generation():
+            for persisted_event, append_generation in persisted_history:
                 mirror_updates.reconcile_persisted(
                     persisted_event,
                     append_generation=append_generation,

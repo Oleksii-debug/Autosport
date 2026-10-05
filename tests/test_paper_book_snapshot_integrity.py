@@ -723,6 +723,45 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate quote_key"):
             PaperBook.load_bytes(path.read_bytes())
 
+    def test_schema7_load_rejects_unexpected_root_field(self):
+        book = PaperBook("100")
+        leg = TicketLeg("e-root-extra", "m-root-extra", "s-root-extra", locked_odds=Decimal("2"))
+        book.open_ticket([leg], "10")
+        path = Path(self._tmp.name) / "paper_book.json"
+        book.save(path)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["future_root_semantics"] = {"authority": "smuggled"}
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "schema 7 root contains unexpected fields"):
+            PaperBook.load_bytes(path.read_bytes())
+
+    def test_schema7_load_rejects_unexpected_ticket_field(self):
+        book = PaperBook("100")
+        leg = TicketLeg("e-ticket-extra", "m-ticket-extra", "s-ticket-extra", locked_odds=Decimal("2"))
+        book.open_ticket([leg], "10")
+        path = Path(self._tmp.name) / "paper_book.json"
+        book.save(path)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["tickets"][0]["future_ticket_semantics"] = "smuggled"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "schema 7 ticket contains unexpected fields"):
+            PaperBook.load_bytes(path.read_bytes())
+
+    def test_schema7_load_rejects_unexpected_leg_field(self):
+        book = PaperBook("100")
+        leg = TicketLeg("e-leg-extra", "m-leg-extra", "s-leg-extra", locked_odds=Decimal("2"))
+        book.open_ticket([leg], "10")
+        path = Path(self._tmp.name) / "paper_book.json"
+        book.save(path)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["tickets"][0]["legs"][0]["future_leg_semantics"] = "smuggled"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "schema 7 ticket leg contains unexpected fields"):
+            PaperBook.load_bytes(path.read_bytes())
+
     def test_settlement_rejects_inexact_decimal_payout_before_mutation(self):
         book = PaperBook("100")
         leg = TicketLeg(

@@ -1290,14 +1290,22 @@ def execute_paper_plan(
             )
 
     observation_evidence_ids: dict[str, str] = {}
+    canonical_observations: dict[str, ObservedPaperExecution] = {}
     for action_id, observation in observations.items():
         assert evidence_registry is not None
-        _impl._verify_observation_authority(
+        record = _impl._verify_observation_authority(
             action=action_by_id[action_id],
             observation=observation,
             registry=evidence_registry,
         )
-        observation_evidence_ids[action_id] = observation.evidence_id
+        # From this point onward execution uses only an observation reconstructed
+        # from the durable registry record. The caller-owned frozen observation
+        # may be mutated after verification and must never regain execution
+        # authority.
+        canonical_observation = record.as_observation()
+        canonical_observations[action_id] = canonical_observation
+        observation_evidence_ids[action_id] = record.evidence_id
+    observations = canonical_observations
 
     _validate_lay_execution_surface(
         plan=plan,

@@ -33,6 +33,8 @@ _CANONICAL_MARKET_SETTLEMENT_KEY = _domain._CANONICAL_MARKET_SETTLEMENT_KEY
 _CANONICAL_SEMANTIC_IDENTITY = _domain._CANONICAL_SEMANTIC_IDENTITY
 _CANONICAL_QUOTE_TO_DICT = _risk._CANONICAL_MARKET_EVENT_TO_DICT
 _CANONICAL_QUOTE_FROM_DICT = _risk._CANONICAL_MARKET_EVENT_FROM_DICT
+_CANONICAL_BOOK_VALIDATE_STATE = _BOOK_TYPE._validate_loaded_state
+_CANONICAL_BOOK_VALIDATE_LIFECYCLE_ENTRY = _BOOK_TYPE._validate_lifecycle_entry
 
 _policy_namespace = vars(_POLICY_TYPE)
 _original_quote_descriptor = _policy_namespace.get("_quote_risk_decision")
@@ -73,8 +75,9 @@ def _quote_settlement_key(
     # Re-run the canonical serializer/parser contract so object.__setattr__ changes
     # after context construction cannot smuggle noncanonical quote fields into a
     # money-moving decision.
-    rebuilt = _from_dict(_to_dict(quote))
-    if rebuilt != quote:
+    serialized = _to_dict(quote)
+    rebuilt = _from_dict(serialized)
+    if _to_dict(rebuilt) != serialized:
         raise ValueError("proposal quote is non-canonical")
     semantics = quote.market_semantics_id
     if semantics is not None:
@@ -121,10 +124,12 @@ def _portfolio_payload(
     book: object,
     _book_type=_BOOK_TYPE,
     _ticket_status_type=_TICKET_STATUS_TYPE,
+    _validate_state=_CANONICAL_BOOK_VALIDATE_STATE,
+    _validate_lifecycle_entry=_CANONICAL_BOOK_VALIDATE_LIFECYCLE_ENTRY,
 ) -> dict[str, object]:
     if type(book) is not _book_type:
         raise ValueError("risk portfolio requires exact PaperBook")
-    _book_type._validate_loaded_state(book)
+    _validate_state(book)
 
     tickets: list[dict[str, object]] = []
     for ticket_id in sorted(book.tickets):
@@ -162,9 +167,7 @@ def _portfolio_payload(
 
     lifecycle: list[dict[str, object]] = []
     for raw_entry in book._lifecycle:
-        action, ticket_id, winners, voids = _book_type._validate_lifecycle_entry(
-            raw_entry
-        )
+        action, ticket_id, winners, voids = _validate_lifecycle_entry(raw_entry)
         lifecycle.append(
             {
                 "action": action,

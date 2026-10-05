@@ -218,19 +218,8 @@ class _WrongTickSourceRuntime(_FakeRuntime):
         )
 
 
-def test_profiled_worker_rejects_started_status_source_identity_drift(
-    tmp_path: Path,
-) -> None:
+def test_runtime_status_identity_guard_rejects_started_source_drift() -> None:
     runtime = _WrongStartedSourceRuntime()
-
-    def build(_workspace: Path, _source_factory: str, _bankroll: str):
-        return runtime
-
-    worker = ProductGuiWorker(runtime_builder=build)
-    with pytest.raises(ProductEntrypointError):
-        # Caller-injected builders are intentionally forbidden on the profiled
-        # path; exercise the lifecycle helper directly below instead.
-        raise ProductEntrypointError("profiled test seam")
 
     from autosport.product_gui_worker import _require_runtime_status_identity
 
@@ -241,7 +230,7 @@ def test_profiled_worker_rejects_started_status_source_identity_drift(
         )
 
 
-def test_profiled_worker_rejects_tick_source_identity_drift() -> None:
+def test_runtime_tick_identity_guard_rejects_source_drift() -> None:
     runtime = _WrongTickSourceRuntime()
 
     from autosport.product_gui_worker import _require_runtime_tick_identity

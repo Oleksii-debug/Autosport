@@ -8965,5 +8965,72 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             loop.close()
 
 
+
+
+    def test_pending_recovery_revalidates_paperbook_after_replay_before_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(input_id, snapshot):
+                del input_id, snapshot
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                loop.run_cycle()
+
+            pending_before = loop.progress_path.read_bytes()
+            replay = loop._refresh_intents_from_replay
+            loop.intent_factory = _EmptyIntentFactory()
+
+            def replay_then_change_portfolio(*args, **kwargs):
+                result = replay(*args, **kwargs)
+                loop.book.open_ticket(
+                    (
+                        TicketLeg(
+                            "event-concurrent",
+                            "market-concurrent",
+                            "selection-concurrent",
+                            Decimal("2.00"),
+                        ),
+                    ),
+                    Decimal("1"),
+                    reason="concurrent canonical PAPER exposure",
+                    placed_at=(self.START + timedelta(seconds=1)).isoformat(),
+                )
+                return result
+
+            with patch.object(
+                loop,
+                "_refresh_intents_from_replay",
+                side_effect=replay_then_change_portfolio,
+            ):
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "PaperBook/runtime context changed before promotion lock",
+                ):
+                    loop.run_cycle()
+
+            self.assertEqual(loop.progress_path.read_bytes(), pending_before)
+            self.assertEqual(
+                JsonlDecisionLedger(
+                    workspace / "decisions.jsonl"
+                ).verified_records(),
+                (),
+            )
+            self.assertEqual(len(loop.book.tickets), 1)
+            loop.close()
+
+
 if __name__ == "__main__":
     unittest.main()

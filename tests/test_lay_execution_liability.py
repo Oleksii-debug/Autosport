@@ -389,6 +389,14 @@ class _HostileLegIterable:
         raise AssertionError("hostile leg iterable must not execute")
 
 
+class _HostileSettlementKey:
+    calls = 0
+
+    def __hash__(self) -> int:
+        type(self).calls += 1
+        return object.__hash__(self)
+
+
 class PaperBookLayEconomicsTests(unittest.TestCase):
     @staticmethod
     def _lay_leg() -> TicketLeg:
@@ -400,6 +408,25 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
             sport="football",
             exchange_side="lay",
         )
+
+    def test_lay_lifecycle_rejects_noncanonical_settlement_key_before_rehash(self):
+        book = PaperBook(Decimal("100"))
+        book.open_ticket(
+            [self._lay_leg()],
+            Decimal("10"),
+            placed_at=QUOTE_AT,
+        )
+        hostile = _HostileSettlementKey()
+        book._settlement_times[hostile] = None
+        _HostileSettlementKey.calls = 0
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settlement-time witness keys must be canonical strings",
+        ):
+            _ = book.committed_capital
+
+        self.assertEqual(_HostileSettlementKey.calls, 0)
 
     def test_lay_open_reuses_canonical_stake_ingress_when_available(self):
         book = PaperBook(Decimal("100"))

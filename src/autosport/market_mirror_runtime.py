@@ -354,8 +354,8 @@ class FocusedMirrorDependencyIndex:
 
     def affected_inputs(self, batch: MirrorInvalidationBatch) -> tuple[str, ...]:
         """Return registered decision inputs affected by one drained invalidation batch."""
-        if not isinstance(batch, MirrorInvalidationBatch):
-            raise TypeError("batch must be a MirrorInvalidationBatch")
+        if type(batch) is not MirrorInvalidationBatch:
+            raise TypeError("batch must be an exact MirrorInvalidationBatch")
 
         with self._lock:
             dependency_state = tuple(
@@ -467,8 +467,8 @@ class FocusedMirrorDependencyIndex:
         until the consumer independently rebinds every evidence authority.
         """
 
-        if not isinstance(batch, MirrorInvalidationBatch):
-            raise TypeError("batch must be a MirrorInvalidationBatch")
+        if type(batch) is not MirrorInvalidationBatch:
+            raise TypeError("batch must be an exact MirrorInvalidationBatch")
         if batch.full_refresh_required or not batch.semantic_refresh_keys:
             return ()
 

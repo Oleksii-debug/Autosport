@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import gc
 import json
-from types import FunctionType, MappingProxyType
-from weakref import ref
+from types import FunctionType
 
 import pytest
 
@@ -96,7 +94,7 @@ def _balance_capabilities() -> frozenset[BookmakerCapability]:
     return frozenset({BookmakerCapability.BALANCE_READ})
 
 
-def test_live_retry_cannot_cross_authenticated_credential_origin(
+def test_durable_retry_never_reissues_provider_origin(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -114,41 +112,23 @@ def test_live_retry_cannot_cross_authenticated_credential_origin(
         acquisition_id="shared-live-request",
     )
     assert len(first_calls) == 3
-    assert first.source_authority_proven is True
+    assert first.source_authority_proven is False
 
-    # The original live object remains strongly referenced above. A second canonical
-    # acquirer with different credentials but the same caller-local account label must
-    # not inherit that remote-provider capability from the idempotency fast path.
-    different_origin_calls = _install_transport(monkeypatch, [])
-    second = BetfairAccountSnapshotAcquirer(
-        database,
-        _credentials("B"),
-        account_id="default-account",
-    )
-    with pytest.raises(
-        AccountSnapshotAcquisitionError,
-        match="bound to a different authenticated credential origin",
-    ):
-        second.acquire(
-            _balance_capabilities(),
-            acquisition_id="shared-live-request",
-        )
-    assert different_origin_calls == []
-
-    # A reconstructed canonical acquirer carrying the exact same in-memory credential
-    # values remains an idempotent retry of the same authenticated origin and performs
-    # no provider I/O while the exact issued object is still live.
-    same_origin_calls = _install_transport(monkeypatch, [])
-    retry = BetfairAccountSnapshotAcquirer(
-        database,
-        _credentials("A"),
-        account_id="default-account",
-    ).acquire(
-        _balance_capabilities(),
-        acquisition_id="shared-live-request",
-    )
-    assert retry is first
-    assert same_origin_calls == []
+    for label in ("A", "B"):
+        retry_calls = _install_transport(monkeypatch, [])
+        with pytest.raises(
+            AccountSnapshotAcquisitionError,
+            match="durable acquisition cannot reissue provider-origin authority",
+        ):
+            BetfairAccountSnapshotAcquirer(
+                database,
+                _credentials(label),
+                account_id="default-account",
+            ).acquire(
+                _balance_capabilities(),
+                acquisition_id="shared-live-request",
+            )
+        assert retry_calls == []
 
 
 def _extract_outer_guard_raw_acquire():
@@ -166,7 +146,7 @@ def _extract_outer_guard_raw_acquire():
     return candidates[0]
 
 
-def test_inner_live_retry_origin_survives_outer_guard_bypass(
+def test_inner_owner_bypass_still_cannot_reissue_durable_origin(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -185,44 +165,26 @@ def test_inner_live_retry_origin_survives_outer_guard_bypass(
         acquisition_id="inner-origin-request",
     )
     assert len(first_calls) == 3
-    assert first.source_authority_proven is True
+    assert first.source_authority_proven is False
 
-    # The outer origin guard is ordinary Python and its closure exposes the owning
-    # acquisition callable. The owning live-authority model must therefore enforce
-    # the credential origin itself rather than relying on the wrapper as the only
-    # cross-credential fence.
     raw_acquire = _extract_outer_guard_raw_acquire()
-
-    different_origin_calls = _install_transport(monkeypatch, [])
-    second = BetfairAccountSnapshotAcquirer(
-        database,
-        _credentials("B"),
-        account_id="default-account",
-    )
-    with pytest.raises(
-        AccountSnapshotAcquisitionError,
-        match="bound to a different authenticated credential origin",
-    ):
-        raw_acquire(
-            second,
-            _balance_capabilities(),
-            acquisition_id="inner-origin-request",
+    for label in ("A", "B"):
+        retry_calls = _install_transport(monkeypatch, [])
+        acquirer = BetfairAccountSnapshotAcquirer(
+            database,
+            _credentials(label),
+            account_id="default-account",
         )
-    assert different_origin_calls == []
-
-    same_origin_calls = _install_transport(monkeypatch, [])
-    same_origin = BetfairAccountSnapshotAcquirer(
-        database,
-        _credentials("A"),
-        account_id="default-account",
-    )
-    retry = raw_acquire(
-        same_origin,
-        _balance_capabilities(),
-        acquisition_id="inner-origin-request",
-    )
-    assert retry is first
-    assert same_origin_calls == []
+        with pytest.raises(
+            AccountSnapshotAcquisitionError,
+            match="durable acquisition cannot reissue provider-origin authority",
+        ):
+            raw_acquire(
+                acquirer,
+                _balance_capabilities(),
+                acquisition_id="inner-origin-request",
+            )
+        assert retry_calls == []
 
 
 def _extract_inner_authority_boundary(raw_acquire):

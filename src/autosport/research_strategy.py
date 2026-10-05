@@ -218,12 +218,15 @@ class ResearchStrategyPlan:
     def __post_init__(self) -> None:
         if not self.instructions:
             raise ValueError("research strategy plan must contain at least one decision")
-        if len(self.source_sha256) != 64:
-            raise ValueError("research strategy plan source_sha256 must be SHA-256")
-        try:
-            int(self.source_sha256, 16)
-        except ValueError as exc:
-            raise ValueError("research strategy plan source_sha256 must be hexadecimal") from exc
+        if (
+            type(self.source_sha256) is not str
+            or len(self.source_sha256) != 64
+            or self.source_sha256 != self.source_sha256.lower()
+            or any(ch not in "0123456789abcdef" for ch in self.source_sha256)
+        ):
+            raise ValueError(
+                "research strategy plan source_sha256 must be a lowercase SHA-256 hex digest"
+            )
         ids = [item.decision_id for item in self.instructions]
         if len(ids) != len(set(ids)):
             raise ValueError("duplicate research decision_id")

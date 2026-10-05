@@ -12,6 +12,10 @@ _S2 = "soccer:h2h:v2"
 _TS = "2026-09-22T12:00:00+00:00"
 
 
+class _SemanticStringSubclass(str):
+    pass
+
+
 def _leg(semantics: str | None) -> TicketLeg:
     return TicketLeg(
         "event-1",
@@ -63,6 +67,11 @@ def test_ticket_leg_rejects_noncanonical_market_semantics(identity: str) -> None
     with pytest.raises(ValueError, match="market_semantics_id"):
         _leg(identity)
 
+
+
+def test_ticket_leg_rejects_semantic_string_subclass() -> None:
+    with pytest.raises(ValueError, match="market_semantics_id"):
+        _leg(_SemanticStringSubclass(_S1))
 
 
 def test_paperbook_schema8_round_trip_preserves_market_semantics(tmp_path) -> None:

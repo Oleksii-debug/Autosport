@@ -713,8 +713,14 @@ class SourceHealthStore:
 
     def assert_persistence_authority(self) -> None:
         self._assert_persistence_authority()
-        if self._path_authority.exists() or self._path_authority.is_symlink():
-            self._assert_target_shape()
+        if not self._path_authority.exists() and not self._path_authority.is_symlink():
+            raise MonotonicAuthorityRollbackError(
+                "source health persistence target is missing after authority construction"
+            )
+        self._assert_target_shape()
+        observed = self._current_state_sha256()
+        assert observed is not None
+        self._verify_authority_current(observed)
 
     @staticmethod
     def _state_from_payload(payload: dict, *, normalize_failed_flags: bool = True) -> SourceHealthState:

@@ -10938,6 +10938,69 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             loop.close()
 
 
+    def test_cycle_entry_rejects_source_health_valid_old_rollback_before_provider_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            provider = _EmptyProvider()
+            strategy = self._strategy_version()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=self._scientific_registry(workspace, strategy),
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            loop.run_cycle()
+            health = loop._default_health_store
+            self.assertIsNotNone(health)
+            assert health is not None
+            valid_old = health.path.read_bytes()
+            health.record_failure(
+                provider.source_id,
+                now=(self.START + timedelta(seconds=2)).isoformat(),
+                error=RuntimeError("provider unavailable"),
+                failure_kind="provider_unavailable",
+            )
+            self.assertNotEqual(health.path.read_bytes(), valid_old)
+            health.path.write_bytes(valid_old)
+            provider_calls = provider.calls
+            progress_before = (
+                loop.progress_path.read_bytes()
+                if loop.progress_path.exists()
+                else None
+            )
+            ledger_before = (
+                (workspace / "decisions.jsonl").read_bytes()
+                if (workspace / "decisions.jsonl").exists()
+                else None
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "source-health persistence authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(provider.calls, provider_calls)
+            self.assertEqual(
+                loop.progress_path.read_bytes() if loop.progress_path.exists() else None,
+                progress_before,
+            )
+            self.assertEqual(
+                (workspace / "decisions.jsonl").read_bytes()
+                if (workspace / "decisions.jsonl").exists()
+                else None,
+                ledger_before,
+            )
+            loop.close()
+
+
     def test_cycle_entry_rejects_retained_source_health_hardlink_alias_before_provider_poll(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

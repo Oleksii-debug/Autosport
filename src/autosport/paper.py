@@ -556,6 +556,49 @@ def _seal_paperbook_open_transition_authority(method):
     return sealed
 
 
+def _seal_paperbook_json_decode_authority(method):
+    """Inject closure-captured JSON parser and rejection hooks into load_bytes."""
+    loads = json.loads
+    loads_code = loads.__code__
+    duplicate_hook = _reject_duplicate_json_keys
+    duplicate_hook_code = duplicate_hook.__code__
+    constant_hook = _reject_nonfinite_json_constant
+    constant_hook_code = constant_hook.__code__
+
+    def decode(text: str) -> object:
+        if loads.__code__ is not loads_code:
+            raise ValueError("PaperBook JSON parser authority changed")
+        if duplicate_hook.__code__ is not duplicate_hook_code:
+            raise ValueError("PaperBook duplicate-key authority changed")
+        if constant_hook.__code__ is not constant_hook_code:
+            raise ValueError("PaperBook non-finite constant authority changed")
+        raw = loads(
+            text,
+            object_pairs_hook=duplicate_hook,
+            parse_constant=constant_hook,
+        )
+        if loads.__code__ is not loads_code:
+            raise ValueError("PaperBook JSON parser authority changed")
+        if duplicate_hook.__code__ is not duplicate_hook_code:
+            raise ValueError("PaperBook duplicate-key authority changed")
+        if constant_hook.__code__ is not constant_hook_code:
+            raise ValueError("PaperBook non-finite constant authority changed")
+        return raw
+
+    @wraps(method)
+    def sealed(cls, *args, **kwargs):
+        if loads.__code__ is not loads_code:
+            raise ValueError("PaperBook JSON parser authority changed")
+        if duplicate_hook.__code__ is not duplicate_hook_code:
+            raise ValueError("PaperBook duplicate-key authority changed")
+        if constant_hook.__code__ is not constant_hook_code:
+            raise ValueError("PaperBook non-finite constant authority changed")
+        return method(cls, *args, _json_decode=decode, **kwargs)
+
+    del sealed.__wrapped__
+    return sealed
+
+
 def _seal_paperbook_snapshot_decode_authority(method):
     """Inject closure-captured authority revocation into raw snapshot decoding."""
     revoke_opening = _revoke_ticket_opening_authority
@@ -1820,7 +1863,13 @@ class PaperBook:
         return book
 
     @classmethod
-    def load_bytes(cls, payload: bytes) -> "PaperBook":
+    @_seal_paperbook_json_decode_authority
+    def load_bytes(
+        cls,
+        payload: bytes,
+        *,
+        _json_decode=None,
+    ) -> "PaperBook":
         if type(payload) is not bytes:
             raise TypeError("PaperBook.load_bytes payload must be canonical bytes")
         try:
@@ -1828,11 +1877,7 @@ class PaperBook:
         except UnicodeDecodeError as exc:
             raise ValueError("PaperBook snapshot must be valid UTF-8") from exc
         try:
-            raw = json.loads(
-                text,
-                object_pairs_hook=_reject_duplicate_json_keys,
-                parse_constant=_reject_nonfinite_json_constant,
-            )
+            raw = _json_decode(text)
         except RecursionError as exc:
             raise ValueError("PaperBook snapshot JSON nesting is too deep") from exc
         return cls._from_raw_snapshot(raw)

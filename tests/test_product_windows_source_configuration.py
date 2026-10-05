@@ -379,3 +379,21 @@ def test_product_stop_restores_prior_active_strategy_session(tmp_path: Path) -> 
     assert calls == [("research-plan-v1", research_plan)]
     assert surface.session is restored_session
     assert surface._recovery_view is None
+
+
+def test_worker_start_failure_does_not_mask_session_reopen_failure(
+    tmp_path: Path,
+) -> None:
+    surface = _start_surface(tmp_path)
+    surface.product_worker.start = lambda **_kwargs: False
+    surface._restore_base_session_after_product = lambda: (
+        surface.product_status.set("recovery-required") or False
+    )
+
+    with patch(
+        "autosport.product_windows_gui.load_operator_source_configuration",
+        return_value=_configured(),
+    ):
+        ProductWindowsAutosportApp.start_product_runtime(surface)
+
+    assert surface.product_status.value == "recovery-required"

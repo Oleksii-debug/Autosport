@@ -58,6 +58,9 @@ _CANONICAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY = _require_paperbook_causal_history_
 _CANONICAL_GOAL_PROVENANCE = provenance_for
 _CANONICAL_GOAL_FROM_PAYLOAD = economic_goal_from_payload
 _CANONICAL_GOAL_TO_PAYLOAD = economic_goal_to_payload
+_CANONICAL_PAPERBOOK_LOAD = PaperBook.load
+_CANONICAL_ECONOMIC_GOAL_STORE = EconomicGoalStore
+_CANONICAL_ECONOMIC_GOAL_STORE_LOAD = EconomicGoalStore.load
 
 
 @dataclass(frozen=True, slots=True)
@@ -863,18 +866,18 @@ def _durable_source_pair(
             "paper_book_path must be the canonical workspace/paper_book.json"
         )
 
-    store = EconomicGoalStore(workspace_path)
-    goal_before = store.load()
+    store = _CANONICAL_ECONOMIC_GOAL_STORE(workspace_path)
+    goal_before = _CANONICAL_ECONOMIC_GOAL_STORE_LOAD(store)
     goal_before_provenance = _CANONICAL_GOAL_PROVENANCE(goal_before)
-    book = PaperBook.load(paper_path)
-    goal_after = store.load()
+    book = _CANONICAL_PAPERBOOK_LOAD(paper_path)
+    goal_after = _CANONICAL_ECONOMIC_GOAL_STORE_LOAD(store)
     if _CANONICAL_GOAL_PROVENANCE(goal_after) != goal_before_provenance:
         raise ValueError("durable economic goal changed during equity-path resolution")
 
     before_state = _CANONICAL_RISK_PORTFOLIO_SHA256(book)
     if before_state is None:
         raise ValueError("durable PaperBook cannot issue canonical equity-path evidence")
-    book_after = PaperBook.load(paper_path)
+    book_after = _CANONICAL_PAPERBOOK_LOAD(paper_path)
     after_state = _CANONICAL_RISK_PORTFOLIO_SHA256(book_after)
     if (
         after_state is None
@@ -886,7 +889,7 @@ def _durable_source_pair(
     # Close the cross-file read interval after the final PaperBook read. Without
     # this last owner-goal read, a durable goal replacement occurring after
     # goal_after but before book_after could publish a mixed source pair.
-    goal_final = store.load()
+    goal_final = _CANONICAL_ECONOMIC_GOAL_STORE_LOAD(store)
     if _CANONICAL_GOAL_PROVENANCE(goal_final) != goal_before_provenance:
         raise ValueError("durable economic goal changed during equity-path resolution")
     return book_after, goal_final

@@ -10390,5 +10390,74 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             loop.close()
 
 
+
+    def test_post_execution_authority_mutation_cannot_publish_committed_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+            model = PaperExecutionModelConfig(
+                model_id="post-execution-authority-fence-test",
+                model_version="1",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="post-execution-authority-fence-test",
+                seed="post-execution-authority-fence",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            book = PaperBook("1000")
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=PaperExecutionLedger(workspace / "paper-execution.jsonl"),
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            goal = EconomicGoalContract(
+                goal_id="goal-post-execution-authority-fence",
+                revision=1,
+                bankroll_id="bankroll-live-test",
+                currency="EUR",
+                max_risk_of_ruin=Decimal("1"),
+            )
+            authority = EconomicDecisionAuthority(
+                goal,
+                PaperRiskPolicy(economic_goal=goal),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(event,)]),
+                factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                book=book,
+                authority=authority,
+                paper_execution=execution,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            real_execute = execution.execute
+
+            def mutate_after_execute(**kwargs):
+                result = real_execute(**kwargs)
+                object.__setattr__(goal, "max_risk_of_ruin", Decimal("0.5"))
+                return result
+
+            with patch.object(execution, "execute", side_effect=mutate_after_execute):
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "economic goal contract semantics changed",
+                ):
+                    loop.run_cycle()
+
+            durable_progress = json.loads(loop.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(durable_progress["phase"], "append_pending")
+            loop.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -631,9 +631,7 @@ class DeterministicResearchCritic:
                 if forecast.uncertainty > self.policy.max_forecast_uncertainty:
                     reasons.append("forecast uncertainty exceeds policy")
 
-                forecast_evidence_hashes = {
-                    str(value).lower() for value in forecast.evidence_hashes
-                }
+                forecast_evidence_hashes = set(forecast.evidence_hashes)
                 included = [
                     item
                     for item in available
@@ -645,6 +643,15 @@ class DeterministicResearchCritic:
                 selected_hashes = tuple(item.content_sha256 for item in included)
                 if len(included) < self.policy.minimum_evidence_per_leg:
                     reasons.append("insufficient causal evidence linked by forecast hash")
+                included_hashes = {item.content_sha256 for item in included}
+                missing_declared_hashes = sorted(
+                    forecast_evidence_hashes.difference(included_hashes)
+                )
+                if missing_declared_hashes:
+                    reasons.append(
+                        "ForecastRecord declares evidence without typed causal coverage: "
+                        + ",".join(missing_declared_hashes)
+                    )
                 blocked_included = sorted(
                     {
                         flag
@@ -676,10 +683,7 @@ class DeterministicResearchCritic:
                             reasons.append("ForecastRecord lacks market snapshot hash")
                         elif latest.market_snapshot_hash is None:
                             reasons.append("latest evidence lacks market snapshot hash")
-                        elif (
-                            forecast.market_snapshot_hash.lower()
-                            != latest.market_snapshot_hash.lower()
-                        ):
+                        elif forecast.market_snapshot_hash != latest.market_snapshot_hash:
                             reasons.append("market snapshot hash mismatch")
 
             review = ResearchLegReview(

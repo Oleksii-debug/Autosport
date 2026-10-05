@@ -45,10 +45,10 @@ A future generic opportunity path must not synthesize a `ForecastRecord` merely 
 - a minimum number of evidence hashes used by the forecast were already available by its input cutoff;
 - the forecast covers the latest evidence available at decision time;
 - candidate odds match the latest evidence;
-- blocked data-quality flags are absent;
+- blocked data-quality flags are absent from every causal evidence record whose hash the forecast actually includes;
 - optional market snapshot hash matches forecast and latest evidence.
 
-The default blocked flags include stale source, future clock skew, source-time regression, truncated batch and explicit gap detection.
+The default blocked flags include stale source, future provider clock skew, impossible future local observation, invalid source timestamp, invalid quote, source-time regression, truncated batch and explicit gap detection. A later clean evidence record does not launder an earlier blocked record that remains part of the forecast's declared evidence set.
 
 ### Portfolio / Risk
 

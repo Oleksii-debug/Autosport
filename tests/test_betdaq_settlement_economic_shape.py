@@ -14,11 +14,39 @@ from autosport.betdaq_settlement_readback import (
 def _evidence() -> BetdaqEconomicEvidence:
     return BetdaqEconomicEvidence(
         method="GetOrderDetails",
-        request_identity_sha256="a" * 64,
+        # Canonical GetOrderDetails request identity for OrderId=123.
+        request_identity_sha256="0e48478b4b2cc067a15dea78acc1f4e549b94f51249935f8ad8e098c698ea824",
         source_payload_sha256="b" * 64,
         observed_at="2026-09-25T00:00:00Z",
-        account_context_id="betdaq-auth-context:test",
+        account_context_id="betdaq-auth-context:" + ("a" * 64),
     )
+
+
+@pytest.mark.parametrize(
+    "account_context_id",
+    [
+        "betdaq-auth-context:test",
+        "betdaq-auth-context:" + ("a" * 63),
+        "betdaq-auth-context:" + ("A" * 64),
+        "wrong-prefix:" + ("a" * 64),
+    ],
+)
+def test_economic_evidence_rejects_noncanonical_account_context_id(
+    account_context_id: str,
+) -> None:
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="account_context_id",
+    ):
+        BetdaqEconomicEvidence(
+            method="GetOrderDetails",
+            request_identity_sha256=(
+                "0e48478b4b2cc067a15dea78acc1f4e549b94f51249935f8ad8e098c698ea824"
+            ),
+            source_payload_sha256="b" * 64,
+            observed_at="2026-09-25T00:00:00Z",
+            account_context_id=account_context_id,
+        )
 
 
 def _observation(**overrides: object) -> BetdaqOrderSettlementObservation:
@@ -71,6 +99,20 @@ def test_order_readback_rejects_impossible_provider_money_shape(
 ) -> None:
     with pytest.raises(BetdaqEconomicReadbackError, match=message):
         _observation(**{field: value})
+
+
+@pytest.mark.parametrize(
+    "sequence_number",
+    [-1, 9_223_372_036_854_775_808],
+)
+def test_order_readback_rejects_sequence_outside_provider_xsd_long(
+    sequence_number: int,
+) -> None:
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="sequence_number must fit non-negative provider xsd:long",
+    ):
+        _observation(sequence_number=sequence_number)
 
 
 def test_unmatched_order_can_preserve_zero_matched_stake_and_average_price() -> None:

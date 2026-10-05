@@ -13,6 +13,7 @@ from autosport.betdaq_account_readonly import (
     BetdaqCredentials,
 )
 from autosport.betdaq_settlement_readback import (
+    BetdaqEconomicEvidence,
     BetdaqEconomicReadbackClient,
     BetdaqEconomicReadbackError,
     coalesce_posting_replays,
@@ -37,6 +38,10 @@ class _FakeHttpResponse:
         if limit is None:
             return self.payload
         return self.payload[:limit]
+
+    def info(self):
+        # urllib's HTTPErrorProcessor consults response headers even for 2xx.
+        return {}
 
 
 class QueueUrlopen:
@@ -687,6 +692,36 @@ def test_economic_read_rejects_transient_protocol_rebind_from_call_lock(
     assert entered == [True]
     assert opener.calls == []
     assert settlement_module._CANONICAL_SECURE_ENDPOINT == canonical_endpoint
+
+def test_economic_read_rejects_protocol_rebind_on_call_lock_exit(monkeypatch):
+    foreign_ns = "urn:foreign:betdaq:credential-laundering"
+    payload = postings_by_id(posting(9001)).replace(
+        NS.encode(),
+        foreign_ns.encode(),
+    )
+    client, opener = economic_client(monkeypatch, payload)
+    canonical_ns = settlement_module._CANONICAL_EXTERNAL_NS
+
+    class ExitRebindingProtocolLock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            settlement_module._CANONICAL_EXTERNAL_NS = foreign_ns
+            return False
+
+    client._account_client._call_lock = ExitRebindingProtocolLock()
+
+    try:
+        with pytest.raises(
+            BetdaqEconomicReadbackError,
+            match="canonical BETDAQ economic protocol authority was replaced",
+        ):
+            client.read_account_postings_by_id(9000)
+    finally:
+        settlement_module._CANONICAL_EXTERNAL_NS = canonical_ns
+
+    assert len(opener.calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -1365,6 +1400,14 @@ def test_order_result_accepts_all_documented_unprojected_attributes(monkeypatch)
 
 
 
+class _AdversarialMethod(str):
+    def __eq__(self, _other):
+        raise AssertionError("method subclass equality must not execute")
+
+    def __hash__(self):
+        raise AssertionError("method subclass hash must not execute")
+
+
 class _AdversarialDecimal(Decimal):
     def is_finite(self):
         raise AssertionError("Decimal subclass hook must not execute")
@@ -1380,6 +1423,33 @@ class _AdversarialDatetime(datetime):
 
 class _ForgedEconomicEvidence:
     evidence_id = "betdaq-economic:" + ("0" * 64)
+
+
+def test_postings_readback_rejects_method_subclass_before_hash_or_equality(
+    monkeypatch,
+):
+    client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    value = client.read_account_postings_by_id(9000)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="postings readback method must be exact text",
+    ):
+        replace(value, method=_AdversarialMethod("ListAccountPostingsById"))
+
+
+def test_economic_evidence_rejects_method_subclass_before_equality():
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="economic evidence method must be exact text",
+    ):
+        BetdaqEconomicEvidence(
+            method=_AdversarialMethod("GetOrderDetails"),
+            request_identity_sha256="1" * 64,
+            source_payload_sha256="2" * 64,
+            observed_at="2026-10-01T00:00:00Z",
+            account_context_id="betdaq-auth-context:" + ("3" * 64),
+        )
 
 
 def test_order_observation_rejects_forged_evidence_object(monkeypatch):
@@ -1554,6 +1624,21 @@ def test_cross_response_currency_drift_is_economic_conflict(monkeypatch):
         match="different provider currencies",
     ):
         coalesce_posting_replays(euro, usd)
+
+
+@pytest.mark.parametrize("description", [" leading", "trailing ", " both "])
+def test_reconstructed_posting_rejects_untrimmed_provider_description(
+    monkeypatch,
+    description,
+):
+    client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    readback = client.read_account_postings_by_id(9000)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="description must be trimmed provider text",
+    ):
+        replace(readback.postings[0], description=description)
 
 
 def test_posting_replay_coalescence_rejects_account_context_mixing(monkeypatch):

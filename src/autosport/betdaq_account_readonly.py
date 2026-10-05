@@ -1015,12 +1015,13 @@ class BetdaqAccountReadOnlyClient:
                 "BETDAQ SOAP method is outside the strict read-only allowlist"
             )
         protocol_authority = _protocol_authority()
+        secure_endpoint, external_ns, _, _ = protocol_authority
         with self._call_lock:
             body = self._request_xml(method, request_fields)
             headers = {
                 "Accept": "text/xml",
                 "Content-Type": "text/xml; charset=utf-8",
-                "SOAPAction": f'"{_CANONICAL_EXTERNAL_NS}{method}"',
+                "SOAPAction": f'"{external_ns}{method}"',
             }
             transport = self._transport
             canonical_dispatch = _expected_transport is not None
@@ -1044,14 +1045,14 @@ class BetdaqAccountReadOnlyClient:
                 if canonical_dispatch:
                     payload = _expected_https_post(
                         _expected_transport,
-                        _CANONICAL_SECURE_ENDPOINT,
+                        secure_endpoint,
                         headers=headers,
                         body=body,
                         timeout_seconds=self._timeout_seconds,
                     )
                 else:
                     payload = transport.post(
-                        _CANONICAL_SECURE_ENDPOINT,
+                        secure_endpoint,
                         headers=headers,
                         body=body,
                         timeout_seconds=self._timeout_seconds,
@@ -1087,13 +1088,13 @@ class BetdaqAccountReadOnlyClient:
         *,
         _protocol_authority=_canonical_betdaq_protocol_authority,
     ) -> bytes:
-        _protocol_authority()
-        ET.register_namespace("soap", _CANONICAL_SOAP11_NS)
-        envelope = ET.Element(f"{{{_CANONICAL_SOAP11_NS}}}Envelope")
-        header = ET.SubElement(envelope, f"{{{_CANONICAL_SOAP11_NS}}}Header")
+        _, external_ns, soap11_ns, _ = _protocol_authority()
+        ET.register_namespace("soap", soap11_ns)
+        envelope = ET.Element(f"{{{soap11_ns}}}Envelope")
+        header = ET.SubElement(envelope, f"{{{soap11_ns}}}Header")
         ET.SubElement(
             header,
-            f"{{{_CANONICAL_EXTERNAL_NS}}}ExternalApiHeader",
+            f"{{{external_ns}}}ExternalApiHeader",
             {
                 "version": self._credentials.version,
                 "languageCode": self._credentials.language_code,
@@ -1102,8 +1103,8 @@ class BetdaqAccountReadOnlyClient:
                 "applicationIdentifier": self._credentials.application_identifier,
             },
         )
-        soap_body = ET.SubElement(envelope, f"{{{_CANONICAL_SOAP11_NS}}}Body")
-        method_element = ET.SubElement(soap_body, f"{{{_CANONICAL_EXTERNAL_NS}}}{method}")
+        soap_body = ET.SubElement(envelope, f"{{{soap11_ns}}}Body")
+        method_element = ET.SubElement(soap_body, f"{{{external_ns}}}{method}")
         if method == "GetAccountBalances":
             request_name = "getAccountBalancesRequest"
         elif method == "ListBootstrapOrders":
@@ -1115,10 +1116,10 @@ class BetdaqAccountReadOnlyClient:
                 "BETDAQ SOAP method is outside request-element allowlist"
             )
         request_element = ET.SubElement(
-            method_element, f"{{{_CANONICAL_EXTERNAL_NS}}}{request_name}"
+            method_element, f"{{{external_ns}}}{request_name}"
         )
         for key, value in fields.items():
-            element = ET.SubElement(request_element, f"{{{_CANONICAL_EXTERNAL_NS}}}{key}")
+            element = ET.SubElement(request_element, f"{{{external_ns}}}{key}")
             element.text = value
         return ET.tostring(envelope, encoding="utf-8", xml_declaration=True)
 
@@ -1141,7 +1142,7 @@ def _parse_soap_result(
     *,
     _protocol_authority=_canonical_betdaq_protocol_authority,
 ) -> ET.Element:
-    _protocol_authority()
+    _, external_ns, soap11_ns, soap12_ns = _protocol_authority()
     upper = payload.upper()
     if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
         raise BetdaqAccountReadOnlyError("BETDAQ SOAP payload contains forbidden DTD/entity")
@@ -1150,7 +1151,7 @@ def _parse_soap_result(
     except (ET.ParseError, UnicodeError):
         raise BetdaqAccountReadOnlyError("BETDAQ response is not valid SOAP XML") from None
     namespace, local = _split_tag(root.tag)
-    if local != "Envelope" or namespace not in {_CANONICAL_SOAP11_NS, _CANONICAL_SOAP12_NS}:
+    if local != "Envelope" or namespace not in {soap11_ns, soap12_ns}:
         raise BetdaqAccountReadOnlyError("BETDAQ response has invalid SOAP Envelope")
     bodies = [child for child in root if child.tag == f"{{{namespace}}}Body"]
     if len(bodies) != 1:
@@ -1163,7 +1164,7 @@ def _parse_soap_result(
     responses = [
         child
         for child in body
-        if child.tag == f"{{{_CANONICAL_EXTERNAL_NS}}}{method}Response"
+        if child.tag == f"{{{external_ns}}}{method}Response"
     ]
     if len(responses) != 1:
         raise BetdaqAccountReadOnlyError(
@@ -1172,23 +1173,27 @@ def _parse_soap_result(
     results = [
         child
         for child in responses[0]
-        if child.tag == f"{{{_CANONICAL_EXTERNAL_NS}}}{method}Result"
+        if child.tag == f"{{{external_ns}}}{method}Result"
     ]
     if len(results) != 1:
         raise BetdaqAccountReadOnlyError(
             f"BETDAQ response is missing exact {method}Result"
         )
-    _require_success_return_status(results[0])
+    _require_success_return_status(results[0], external_ns=external_ns)
     return results[0]
 
 
-def _require_success_return_status(result: ET.Element) -> None:
-    """Require provider-level success before any method payload can become evidence."""
+def _require_success_return_status(
+    result: ET.Element,
+    *,
+    external_ns: str,
+) -> None:
+    """Require provider-level success under the caller's validated protocol snapshot."""
 
     statuses = [
         child
         for child in result
-        if child.tag == f"{{{_CANONICAL_EXTERNAL_NS}}}ReturnStatus"
+        if child.tag == f"{{{external_ns}}}ReturnStatus"
     ]
     if len(statuses) != 1:
         raise BetdaqAccountReadOnlyError(
@@ -1211,14 +1216,15 @@ def _require_success_return_status(result: ET.Element) -> None:
 def _parse_orders(
     result: ET.Element, evidence: BetdaqSoapEvidence
 ) -> tuple[BetdaqOrderObservation, ...]:
+    _, external_ns, _, _ = _canonical_betdaq_protocol_authority()
     containers = [
-        child for child in result if child.tag == f"{{{_CANONICAL_EXTERNAL_NS}}}Orders"
+        child for child in result if child.tag == f"{{{external_ns}}}Orders"
     ]
     if len(containers) != 1:
         raise BetdaqAccountReadOnlyError("BETDAQ order result must contain one Orders element")
     orders: list[BetdaqOrderObservation] = []
     for child in containers[0]:
-        if child.tag != f"{{{_CANONICAL_EXTERNAL_NS}}}Order":
+        if child.tag != f"{{{external_ns}}}Order":
             raise BetdaqAccountReadOnlyError("BETDAQ Orders contains an unexpected element")
         status_code = _integer_attr(child, "Status")
         status_name = _STATUS_NAMES.get(status_code)

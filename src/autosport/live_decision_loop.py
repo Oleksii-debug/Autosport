@@ -3005,6 +3005,8 @@ class PersistentLiveDecisionLoop:
                             "before pending publication"
                         )
                     atomic_write_json(self.progress_path, pending.to_dict())
+                    self._progress = pending
+                    self._pending_dependency_revisions = pending_dependency_revisions
                 return pending, pending_dependency_revisions
 
         try:
@@ -3049,9 +3051,6 @@ class PersistentLiveDecisionLoop:
             if owns_store:
                 assert store is not None
                 store.close()
-        self._progress = pending
-        self._pending_dependency_revisions = pending_dependency_revisions
-
     def _load_input_registry(self) -> tuple[_InputSpec, ...] | None:
         if not self.inputs_path.exists():
             return None

@@ -1452,5 +1452,109 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(len(book.tickets), 1)
 
 
+    def test_post_execution_callback_mutation_fails_before_hostile_action_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("post-exec-action")
+            current_prepared = prepared(runtime, current)
+            original_execute = adoption_module.execute_paper_plan
+
+            def mutate_after_execution(**kwargs):
+                run = original_execute(**kwargs)
+                object.__setattr__(
+                    current_prepared.execution_plan.actions[0],
+                    "action_id",
+                    _HostileExchangeSide("post-exec-action"),
+                )
+                _HostileExchangeSide.comparisons = 0
+                return run
+
+            with patch.object(
+                adoption_module,
+                "execute_paper_plan",
+                side_effect=mutate_after_execution,
+            ), self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "prepared execution authority changed after mint",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-post-exec-action",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(_HostileExchangeSide.comparisons, 0)
+            self.assertEqual(book.tickets, {})
+
+    def test_post_execution_callback_binding_mutation_fails_before_hostile_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("post-exec-binding")
+            current_prepared = prepared(runtime, current)
+            original_execute = adoption_module.execute_paper_plan
+
+            def mutate_after_execution(**kwargs):
+                run = original_execute(**kwargs)
+                object.__setattr__(
+                    current_prepared.exposure_bindings[0],
+                    "action_id",
+                    _HostileExchangeSide("post-exec-binding"),
+                )
+                _HostileExchangeSide.comparisons = 0
+                return run
+
+            with patch.object(
+                adoption_module,
+                "execute_paper_plan",
+                side_effect=mutate_after_execution,
+            ), self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "prepared execution authority changed after mint",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-post-exec-binding",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(_HostileExchangeSide.comparisons, 0)
+            self.assertEqual(book.tickets, {})
+
+    def test_post_execution_runtime_redirect_fails_before_materialization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("post-exec-ledger"))
+            original_execute = adoption_module.execute_paper_plan
+
+            def redirect_after_execution(**kwargs):
+                run = original_execute(**kwargs)
+                object.__setattr__(
+                    runtime,
+                    "ledger",
+                    PaperExecutionLedger(Path(tmp) / "redirected-ledger.jsonl"),
+                )
+                return run
+
+            with patch.object(
+                adoption_module,
+                "execute_paper_plan",
+                side_effect=redirect_after_execution,
+            ), self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "runtime authority object changed after construction",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-post-exec-ledger",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(book.tickets, {})
+            self.assertIsNot(runtime.ledger, ledger)
+
+
 if __name__ == "__main__":
     unittest.main()

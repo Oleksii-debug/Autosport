@@ -14,6 +14,7 @@ from .storage import SQLiteMarketStore
 MirrorQuoteKey = tuple[str, str]
 MirrorRefreshIdentity = tuple[MirrorQuoteKey, int]
 _StableReadT = TypeVar("_StableReadT")
+_DEPENDENCY_READ_RETRY_LIMIT = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,7 +480,7 @@ class FocusedMirrorDependencyIndex:
     ) -> _StableReadT:
         """Run one selector-based read against a stable registry incarnation."""
         normalized_id = self._input_id(input_id)
-        while True:
+        for _attempt in range(_DEPENDENCY_READ_RETRY_LIMIT):
             with self._lock:
                 try:
                     dependency = self._dependencies[normalized_id]
@@ -507,6 +508,9 @@ class FocusedMirrorDependencyIndex:
             # in flight. Retry against its now-authoritative selectors rather than
             # returning a result from an incarnation that no longer exists. Churn
             # in unrelated registrations does not invalidate this selector read.
+        raise RuntimeError(
+            "focused mirror dependency changed continuously during stable read"
+        )
 
     def _stable_live_decision_view(
         self,

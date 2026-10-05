@@ -13,7 +13,7 @@ from autosport.ingestion import (
     IngestionStats,
 )
 from autosport.ingestion_health import IngestionPolicy, SourceHealthStore
-from autosport.market_bus import MarketEventBus
+from autosport.market_bus import MarketEventBus, MarketEventDeliveryError
 from autosport.providers import (
     CanonicalNormalizer,
     InMemoryProvider,
@@ -719,6 +719,38 @@ class IngestionHealthTests(unittest.TestCase):
             self.assertEqual(len(store.events()), 2)
             self.assertEqual(health.get("source").status, "degraded")
             store.close()
+
+    def test_subscriber_interrupt_records_committed_health_before_delivery_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, health = self._engine(tmp)
+            provider = StaticProvider(
+                "source",
+                [
+                    ProviderBatch(
+                        "source",
+                        (self._quote("2026-09-12T11:59:59+00:00"),),
+                        cursor="cursor-1",
+                    )
+                ],
+            )
+
+            def interrupt(_event):
+                raise SystemExit("subscriber-stop")
+
+            engine.bus.subscribe(interrupt)
+            try:
+                with self.assertRaises(MarketEventDeliveryError) as raised:
+                    engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(raised.exception.accepted_count, 1)
+                self.assertEqual(len(store.events()), 1)
+                state = health.get("source")
+                self.assertEqual(state.poll_count, 1)
+                self.assertEqual(state.total_received, 1)
+                self.assertEqual(state.total_accepted, 1)
+                self.assertEqual(state.total_failures, 0)
+            finally:
+                store.close()
 
     def test_committed_delivery_outcome_survives_health_base_exception(self):
         with tempfile.TemporaryDirectory() as tmp:

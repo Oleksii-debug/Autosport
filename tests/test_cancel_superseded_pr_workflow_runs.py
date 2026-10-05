@@ -1138,7 +1138,7 @@ def test_base_active_run_reader_rejects_oversized_provider_page(monkeypatch) -> 
         }
 
     def fake_request(path: str, **_kwargs):
-        assert "per_page=100&page=1" in path
+        assert path.endswith("per_page=100&page=1")
         return {
             "total_count": 101,
             "workflow_runs": [run_payload(run_id) for run_id in range(1, 102)],
@@ -1168,7 +1168,7 @@ def test_base_active_run_reader_rejects_total_count_smaller_than_page(
         }
 
     def fake_request(path: str, **_kwargs):
-        assert "per_page=100&page=1" in path
+        assert path.endswith("per_page=100&page=1")
         return {
             "total_count": 1,
             "workflow_runs": [run_payload(1), run_payload(2)],

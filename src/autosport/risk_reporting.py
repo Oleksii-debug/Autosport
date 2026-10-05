@@ -18,11 +18,11 @@ from pathlib import Path
 
 from .domain import TicketStatus
 from .economic_goal import EconomicGoalContract
-from .economic_goal_provenance import provenance_for
+from .economic_goal_provenance import _CANONICAL_GOAL_PROVENANCE
 from .economic_goal_store import (
     EconomicGoalStore,
-    economic_goal_from_payload,
-    economic_goal_to_payload,
+    _CANONICAL_GOAL_FROM_PAYLOAD,
+    _CANONICAL_GOAL_TO_PAYLOAD,
 )
 from .paper import (
     PaperBook,
@@ -55,6 +55,9 @@ _CANONICAL_RISK_HISTORICAL_METRICS = PaperRiskPolicy._historical_risk_metrics
 _CANONICAL_RISK_GOAL_HISTORY_ROOMS = PaperRiskPolicy._goal_history_rooms
 _CANONICAL_REQUIRE_TICKET_OPENING_AUTHORITY = _require_ticket_opening_authority
 _CANONICAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY = _require_paperbook_causal_history_authority
+_CANONICAL_GOAL_PROVENANCE = provenance_for
+_CANONICAL_GOAL_FROM_PAYLOAD = economic_goal_from_payload
+_CANONICAL_GOAL_TO_PAYLOAD = economic_goal_to_payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,12 +386,12 @@ def build_product_issued_paper_equity_path(
 
     _require_product_issued_paper_state(book)
 
-    goal_provenance_before = provenance_for(goal)
-    goal_snapshot = economic_goal_from_payload(economic_goal_to_payload(goal))
-    goal_snapshot_provenance = provenance_for(goal_snapshot)
+    goal_provenance_before = _CANONICAL_GOAL_PROVENANCE(goal)
+    goal_snapshot = _CANONICAL_GOAL_FROM_PAYLOAD(_CANONICAL_GOAL_TO_PAYLOAD(goal))
+    goal_snapshot_provenance = _CANONICAL_GOAL_PROVENANCE(goal_snapshot)
     if (
         goal_provenance_before != goal_snapshot_provenance
-        or provenance_for(goal) != goal_snapshot_provenance
+        or _CANONICAL_GOAL_PROVENANCE(goal) != goal_snapshot_provenance
     ):
         raise ValueError("canonical economic goal changed during equity-path issuance")
 
@@ -502,7 +505,7 @@ def build_product_issued_paper_equity_path(
         raise ValueError("canonical PAPER risk state changed during equity-path issuance")
     if after_source_sha256 != before_source_sha256:
         raise ValueError("canonical PAPER source state changed during equity-path issuance")
-    if provenance_for(goal) != goal_snapshot_provenance:
+    if _CANONICAL_GOAL_PROVENANCE(goal) != goal_snapshot_provenance:
         raise ValueError("canonical economic goal changed during equity-path issuance")
     # Current PaperBook persistence owns the opening numeric balance but does not
     # durably bind that opening capital to EconomicGoal.bankroll_id/currency.
@@ -862,10 +865,10 @@ def _durable_source_pair(
 
     store = EconomicGoalStore(workspace_path)
     goal_before = store.load()
-    goal_before_provenance = provenance_for(goal_before)
+    goal_before_provenance = _CANONICAL_GOAL_PROVENANCE(goal_before)
     book = PaperBook.load(paper_path)
     goal_after = store.load()
-    if provenance_for(goal_after) != goal_before_provenance:
+    if _CANONICAL_GOAL_PROVENANCE(goal_after) != goal_before_provenance:
         raise ValueError("durable economic goal changed during equity-path resolution")
 
     before_state = _CANONICAL_RISK_PORTFOLIO_SHA256(book)
@@ -884,7 +887,7 @@ def _durable_source_pair(
     # this last owner-goal read, a durable goal replacement occurring after
     # goal_after but before book_after could publish a mixed source pair.
     goal_final = store.load()
-    if provenance_for(goal_final) != goal_before_provenance:
+    if _CANONICAL_GOAL_PROVENANCE(goal_final) != goal_before_provenance:
         raise ValueError("durable economic goal changed during equity-path resolution")
     return book_after, goal_final
 
@@ -1134,10 +1137,10 @@ def build_paper_risk_report(
     # operations such as object.__setattr__. Capture one canonical persisted-value
     # snapshot and fence the source contract before, immediately after capture, and
     # again before return so report fields/headroom cannot mix two goal revisions.
-    goal_provenance_before = provenance_for(goal)
-    goal_snapshot = economic_goal_from_payload(economic_goal_to_payload(goal))
-    goal_snapshot_provenance = provenance_for(goal_snapshot)
-    goal_provenance_after_capture = provenance_for(goal)
+    goal_provenance_before = _CANONICAL_GOAL_PROVENANCE(goal)
+    goal_snapshot = _CANONICAL_GOAL_FROM_PAYLOAD(_CANONICAL_GOAL_TO_PAYLOAD(goal))
+    goal_snapshot_provenance = _CANONICAL_GOAL_PROVENANCE(goal_snapshot)
+    goal_provenance_after_capture = _CANONICAL_GOAL_PROVENANCE(goal)
     if (
         goal_provenance_before != goal_snapshot_provenance
         or goal_provenance_after_capture != goal_snapshot_provenance
@@ -1248,6 +1251,6 @@ def build_paper_risk_report(
         risk_of_ruin_status=RISK_OF_RUIN_STATUS_UNKNOWN,
     )
 
-    if provenance_for(goal) != goal_snapshot_provenance:
+    if _CANONICAL_GOAL_PROVENANCE(goal) != goal_snapshot_provenance:
         raise ValueError("canonical economic goal changed during reporting")
     return report

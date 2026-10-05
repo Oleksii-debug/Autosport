@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .betfair_stream_codec import BETFAIR_STREAM_SOURCE_ID
 from .ingestion import CommittedIngestionHealthError, IngestionEngine, IngestionStats
 from .ingestion_health import IngestionPolicy, SourceHealthStore
 from .market_bus import MarketEventBus, MarketEventDeliveryError
@@ -64,6 +65,11 @@ def _validate_observation_ingress(
         raise TypeError("provider source_id must be an exact string")
     if not source_id or source_id.strip() != source_id or "|" in source_id:
         raise ValueError("provider source_id must be canonical")
+    if source_id == BETFAIR_STREAM_SOURCE_ID:
+        raise TypeError(
+            "Betfair Exchange Stream source requires the canonical authenticated "
+            "stream-to-provider bridge"
+        )
     return effective_policy
 
 

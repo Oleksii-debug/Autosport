@@ -94,12 +94,21 @@ def _decimal(value: object, name: str, *, allow_zero: bool = False) -> Decimal:
     return parsed
 
 
+def _preflight_decimal_text_fields(*values: Decimal | None) -> None:
+    """Validate every sibling Decimal before any fixed-point string is allocated."""
+    for value in values:
+        if value is None:
+            continue
+        if type(value) is not Decimal or not value.is_finite():
+            raise ValueError("Decimal must be finite")
+        _validate_decimal_text_resource_bound(value)
+
+
 def _decimal_text(value: Decimal) -> str:
-    if type(value) is not Decimal or not value.is_finite():
-        raise ValueError("Decimal must be finite")
-    # This is a second defensive preflight for caller-mutated frozen records:
-    # never reach format(..., "f") before the canonical resource policy agrees.
-    _validate_decimal_text_resource_bound(value)
+    # Keep the scalar formatter fail-closed, while aggregate serializers call
+    # _preflight_decimal_text_fields first so no benign sibling is formatted
+    # before an oversized sibling has been rejected.
+    _preflight_decimal_text_fields(value)
     return format(value, "f")
 
 
@@ -289,6 +298,7 @@ class PaperExecutionEvidenceRecord:
             raise ValueError("rejected/unknown evidence cannot claim accepted odds/stake")
 
     def to_dict(self) -> dict[str, Any]:
+        _preflight_decimal_text_fields(self.accepted_odds, self.accepted_stake)
         return {
             "action_id": self.action_id,
             "bookmaker_id": self.bookmaker_id,
@@ -531,6 +541,12 @@ class PaperLegAttempt:
             raise ValueError("rejected/unknown attempt cannot claim execution odds/stake")
 
     def to_dict(self) -> dict[str, Any]:
+        _preflight_decimal_text_fields(
+            self.decision_odds,
+            self.requested_stake,
+            self.execution_odds,
+            self.execution_stake,
+        )
         return {
             "attempt_id": self.attempt_id,
             "run_id": self.run_id,

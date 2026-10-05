@@ -282,7 +282,11 @@ def build_product_issued_paper_equity_path(
                 equity=book.initial_bankroll,
             )
         ]
-        availability_complete = True
+        # PaperBook does not currently persist a product-issued availability
+        # timestamp for the opening capital point. Therefore the full path cannot
+        # honestly claim complete causal availability even when every settlement
+        # carries settled_at.
+        availability_complete = False
         for index, raw_entry in enumerate(book._lifecycle):
             action, ticket_id, winners_raw, voids_raw = (
                 PaperBook._validate_lifecycle_entry(raw_entry)

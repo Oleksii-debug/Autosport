@@ -87,6 +87,8 @@ class ProductIssuedPaperEquityPath:
     settled_history_complete: bool
     money_scope_complete: bool
     opening_capital_authority_complete: bool
+    applicable_costs_complete: bool
+    net_equity_authoritative: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +116,8 @@ class ProductIssuedPaperDrawdownEvidence:
     settled_history_complete: bool
     money_scope_complete: bool
     opening_capital_authority_complete: bool
+    applicable_costs_complete: bool
+    net_equity_authoritative: bool
     evidence_sha256: str
 
 
@@ -144,6 +148,8 @@ class PaperRiskReport:
     settled_history_complete: bool
     money_scope_complete: bool
     opening_capital_authority_complete: bool
+    applicable_costs_complete: bool
+    net_equity_authoritative: bool
     history_view: str
     historical_as_known_supported: bool
     goal_id: str
@@ -191,6 +197,8 @@ def _equity_path_payload(
     settled_history_complete: bool,
     money_scope_complete: bool,
     opening_capital_authority_complete: bool,
+    applicable_costs_complete: bool,
+    net_equity_authoritative: bool,
 ) -> dict[str, object]:
     return {
         "schema": EQUITY_PATH_SCHEMA,
@@ -208,6 +216,8 @@ def _equity_path_payload(
         "settled_history_complete": settled_history_complete,
         "money_scope_complete": money_scope_complete,
         "opening_capital_authority_complete": opening_capital_authority_complete,
+        "applicable_costs_complete": applicable_costs_complete,
+        "net_equity_authoritative": net_equity_authoritative,
         "points": [
             {
                 "sequence": point.sequence,
@@ -371,6 +381,11 @@ def build_product_issued_paper_equity_path(
     # authority. Keep the fact explicit and fail closed for downstream financial
     # consumers until the canonical PaperBook/opening-capital authority carries it.
     opening_capital_authority_complete = False
+    # PaperBook settlement arithmetic is gross of campaign/provider/execution
+    # monetary costs. Cost authorities exist elsewhere in the product, but this
+    # path does not yet compose and re-resolve them for the exact capital scope.
+    applicable_costs_complete = False
+    net_equity_authoritative = False
     payload = _equity_path_payload(
         goal_snapshot=goal_snapshot,
         goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
@@ -381,6 +396,8 @@ def build_product_issued_paper_equity_path(
         settled_history_complete=settled_history_complete,
         money_scope_complete=money_scope_complete,
         opening_capital_authority_complete=opening_capital_authority_complete,
+        applicable_costs_complete=applicable_costs_complete,
+        net_equity_authoritative=net_equity_authoritative,
     )
     path_sha256 = hashlib.sha256(
         json.dumps(
@@ -413,6 +430,8 @@ def build_product_issued_paper_equity_path(
         settled_history_complete=settled_history_complete,
         money_scope_complete=money_scope_complete,
         opening_capital_authority_complete=opening_capital_authority_complete,
+        applicable_costs_complete=applicable_costs_complete,
+        net_equity_authoritative=net_equity_authoritative,
     )
 
 
@@ -499,6 +518,10 @@ def verified_settled_minimum_equity(
         raise ValueError(
             "minimum equity requires product-issued opening-capital authority"
         )
+    if not resolved.applicable_costs_complete or not resolved.net_equity_authoritative:
+        raise ValueError(
+            "minimum equity requires complete authoritative net monetary costs"
+        )
     return resolved.minimum_equity, resolved.minimum_equity_point_id
 
 
@@ -535,6 +558,8 @@ def _drawdown_evidence_payload(
         "settled_history_complete": path.settled_history_complete,
         "money_scope_complete": path.money_scope_complete,
         "opening_capital_authority_complete": path.opening_capital_authority_complete,
+        "applicable_costs_complete": path.applicable_costs_complete,
+        "net_equity_authoritative": path.net_equity_authoritative,
     }
 
 
@@ -577,6 +602,8 @@ def build_product_issued_paper_drawdown_evidence(
         settled_history_complete=path.settled_history_complete,
         money_scope_complete=path.money_scope_complete,
         opening_capital_authority_complete=path.opening_capital_authority_complete,
+        applicable_costs_complete=path.applicable_costs_complete,
+        net_equity_authoritative=path.net_equity_authoritative,
         evidence_sha256=evidence_sha256,
     )
 
@@ -777,6 +804,10 @@ def resolve_durable_verified_settled_minimum_equity(
     if not resolved.opening_capital_authority_complete:
         raise ValueError(
             "minimum equity requires product-issued opening-capital authority"
+        )
+    if not resolved.applicable_costs_complete or not resolved.net_equity_authoritative:
+        raise ValueError(
+            "minimum equity requires complete authoritative net monetary costs"
         )
     return (
         resolved.minimum_equity,
@@ -1016,6 +1047,8 @@ def build_paper_risk_report(
         settled_history_complete=equity_path.settled_history_complete,
         money_scope_complete=equity_path.money_scope_complete,
         opening_capital_authority_complete=equity_path.opening_capital_authority_complete,
+        applicable_costs_complete=equity_path.applicable_costs_complete,
+        net_equity_authoritative=equity_path.net_equity_authoritative,
         history_view=equity_path.history_view,
         historical_as_known_supported=equity_path.historical_as_known_supported,
         goal_id=goal_snapshot.goal_id,

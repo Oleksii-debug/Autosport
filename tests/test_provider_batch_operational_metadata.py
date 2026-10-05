@@ -148,5 +148,22 @@ class ProviderBatchOperationalMetadataTests(unittest.TestCase):
         self.assertEqual(event.metadata["limits"][4]["currency"], "EUR")
 
 
+    def test_quote_decimal_odds_requires_exact_decimal(self) -> None:
+        class DecimalSubclass(Decimal):
+            pass
+
+        quote = ProviderQuote(
+            provider_event_id="event-1",
+            provider_market_id="winner",
+            provider_selection_id="player-a",
+            decimal_odds=DecimalSubclass("2.0"),
+            observed_ts="2026-09-14T08:00:00+00:00",
+            sequence=1,
+        )
+
+        with self.assertRaisesRegex(TypeError, "exact Decimal"):
+            CanonicalNormalizer().normalize("fixture", quote)
+
+
 if __name__ == "__main__":
     unittest.main()

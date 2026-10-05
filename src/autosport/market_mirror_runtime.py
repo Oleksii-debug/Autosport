@@ -153,6 +153,7 @@ class FocusedMirrorDependencyIndex:
         self._mirror = mirror
         self._dependencies: dict[str, FocusedMirrorDependency] = {}
         self._matched_keys: dict[str, set[MirrorQuoteKey]] = {}
+        self._registry_revision = 0
         self._lock = RLock()
 
     @staticmethod
@@ -201,6 +202,7 @@ class FocusedMirrorDependencyIndex:
                 raise ValueError(f"input_id {normalized_id!r} is already registered")
             self._dependencies[normalized_id] = dependency
             self._matched_keys[normalized_id] = initial_keys
+            self._registry_revision += 1
         return dependency
 
     def unregister(self, input_id: str) -> bool:
@@ -208,6 +210,8 @@ class FocusedMirrorDependencyIndex:
         with self._lock:
             removed = self._dependencies.pop(normalized_id, None)
             self._matched_keys.pop(normalized_id, None)
+            if removed is not None:
+                self._registry_revision += 1
             return removed is not None
 
     @property
@@ -301,7 +305,7 @@ class FocusedMirrorDependencyIndex:
             )
         material_keys = changed_keys - refresh_keys
 
-        captured = self._mirror.view_for_keys(changed_keys)
+        captured = self._mirror.view_for_keys(changed_keys, _causal_only=True)
         events = {
             (event.source_id, event.quote_key): event
             for event in captured.events
@@ -321,6 +325,7 @@ class FocusedMirrorDependencyIndex:
 
         with self._lock:
             dependencies = tuple(self._dependencies.values())
+            registry_revision = self._registry_revision
 
         refresh_only: list[str] = []
         for dependency in dependencies:
@@ -334,6 +339,18 @@ class FocusedMirrorDependencyIndex:
             )
             if not material_matches:
                 refresh_only.append(dependency.input_id)
+
+        with self._lock:
+            if self._registry_revision != registry_revision:
+                # Positive optimization metadata must never cross a concurrent
+                # dependency-registration mutation. Ordinary invalidation remains
+                # conservative; only the optional refresh-only classification is lost.
+                return ()
+            if any(
+                self._dependencies.get(dependency.input_id) != dependency
+                for dependency in dependencies
+            ):
+                return ()
         return tuple(refresh_only)
 
     @staticmethod

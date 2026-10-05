@@ -431,6 +431,7 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
         self._product_expected_provider_source_id = (
             configured.entry.expected_provider_source_id
         )
+        start_error: BaseException | None = None
         try:
             started = self.product_worker.start(
                 workspace=workspace,
@@ -439,12 +440,16 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
                 initial_bankroll="10000",
                 poll_seconds=_PRODUCT_POLL_SECONDS,
             )
-        except Exception:
+        except BaseException as exc:
+            start_error = exc
             started = False
 
         if not started:
             self._product_expected_provider_source_id = None
-            if not self._restore_base_session_after_product():
+            restored = self._restore_base_session_after_product()
+            if start_error is not None and not isinstance(start_error, Exception):
+                raise start_error
+            if not restored:
                 return
             message = product_text("ui.product_runtime.status.start_failed")
             self.product_status.set(message)

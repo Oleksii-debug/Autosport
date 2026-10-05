@@ -882,7 +882,9 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 )
             lifecycle = []
             for raw_entry in book._lifecycle:
-                action, ticket_id, winners, voids = _CANONICAL_PAPERBOOK_VALIDATE_LIFECYCLE_ENTRY(raw_entry)
+                action, ticket_id, winners, voids = (
+                    _CANONICAL_PAPERBOOK_VALIDATE_LIFECYCLE_ENTRY(raw_entry)
+                )
                 lifecycle.append(
                     {
                         "action": action,
@@ -1275,7 +1277,10 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     return None
 
                 if action == "open":
-                    replay_balance = _CANONICAL_PAPERBOOK_DEBIT_BALANCE(replay_balance, ticket.stake)
+                    replay_balance = _CANONICAL_PAPERBOOK_DEBIT_BALANCE(
+                        replay_balance,
+                        ticket.stake,
+                    )
                     replay_committed = cls._exact_positive_sum(
                         (replay_committed, ticket.stake)
                     )

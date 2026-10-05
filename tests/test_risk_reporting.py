@@ -2699,5 +2699,126 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(attacker_calls, 0)
 
 
+    def test_durable_resolver_rejects_rebound_goal_decimal_parser_before_execution(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+        attacker_calls = 0
+
+        def hostile_decimal(*_args, **_kwargs):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("rebound goal decimal parser executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper_book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with patch.object(
+                risk_reporting._economic_goal_store,
+                "_decimal_text",
+                hostile_decimal,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "economic-goal store authority changed",
+                ):
+                    resolve_durable_product_issued_paper_equity_path(
+                        paper_book_path=str(paper_path),
+                        workspace=str(workspace),
+                    )
+
+        self.assertEqual(attacker_calls, 0)
+
+    def test_durable_resolver_rejects_rebound_json_loads_before_execution(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+        attacker_calls = 0
+
+        def hostile_loads(*_args, **_kwargs):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("rebound json.loads executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper_book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with patch.object(risk_reporting._json_integrity.json, "loads", hostile_loads):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "economic-goal store authority changed",
+                ):
+                    resolve_durable_product_issued_paper_equity_path(
+                        paper_book_path=str(paper_path),
+                        workspace=str(workspace),
+                    )
+
+        self.assertEqual(attacker_calls, 0)
+
+    def test_durable_resolver_rejects_rebound_json_domain_validator_before_execution(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+        attacker_calls = 0
+
+        def hostile_validator(_value):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("rebound JSON domain validator executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper_book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with patch.object(
+                risk_reporting._json_integrity,
+                "_validate_strict_json_value",
+                hostile_validator,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "economic-goal store authority changed",
+                ):
+                    resolve_durable_product_issued_paper_equity_path(
+                        paper_book_path=str(paper_path),
+                        workspace=str(workspace),
+                    )
+
+        self.assertEqual(attacker_calls, 0)
+
+    def test_durable_resolver_rejects_rebound_json_isfinite_before_execution(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+        attacker_calls = 0
+
+        def hostile_isfinite(_value):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("rebound math.isfinite executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper_book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with patch.object(risk_reporting._json_integrity.math, "isfinite", hostile_isfinite):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "economic-goal store authority changed",
+                ):
+                    resolve_durable_product_issued_paper_equity_path(
+                        paper_book_path=str(paper_path),
+                        workspace=str(workspace),
+                    )
+
+        self.assertEqual(attacker_calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

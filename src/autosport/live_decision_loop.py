@@ -747,13 +747,8 @@ class _Progress:
                 None
                 if health_boundaries_raw is None
                 else tuple(
-                    sorted(
-                        (
-                            ProviderHealthReplayBoundary.from_dict(value)
-                            for value in health_boundaries_raw
-                        ),
-                        key=lambda value: value.source_id,
-                    )
+                    ProviderHealthReplayBoundary.from_dict(value)
+                    for value in health_boundaries_raw
                 )
             )
             return cls(

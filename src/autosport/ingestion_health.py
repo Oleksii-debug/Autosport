@@ -520,13 +520,19 @@ class SourceHealthStore:
         state.last_failure_kind = None
         state.consecutive_failure_kind_count = 0
         state.last_cursor = cursor
+        effective_flags = set(quality_flags)
         if latest_source_ts is not None:
+            if state.latest_source_ts is not None and (
+                parse_source_timestamp(latest_source_ts)
+                < parse_source_timestamp(state.latest_source_ts)
+            ):
+                effective_flags.add("SOURCE_TIME_REGRESSION")
             if state.latest_source_ts is None or (
                 parse_source_timestamp(latest_source_ts)
                 >= parse_source_timestamp(state.latest_source_ts)
             ):
                 state.latest_source_ts = latest_source_ts
-        state.quality_flags = tuple(sorted(quality_flags))
+        state.quality_flags = tuple(sorted(effective_flags))
         state.status = "degraded" if state.quality_flags else "healthy"
         self._put(state, recorded_at=now)
         return state

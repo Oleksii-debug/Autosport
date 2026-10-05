@@ -93,6 +93,7 @@ def _registered_observation(
     odds: str | None = None,
     stake: str | None = None,
     grade: EvidenceGrade = EvidenceGrade.EMPIRICAL,
+    suspended: bool = False,
 ):
     record = PaperExecutionEvidenceRecord(
         action_id=source_action.action_id,
@@ -109,6 +110,7 @@ def _registered_observation(
         evidence_source="captured-paper-observation-v1",
         accepted_odds=odds,
         accepted_stake=stake,
+        suspended=suspended,
         reason=f"observed {outcome.value.lower()}",
     )
     registry = PaperExecutionEvidenceRegistry(ledger)
@@ -331,6 +333,65 @@ class LayExecutionLiabilityTests(unittest.TestCase):
                             evidence_registry=registry,
                         )
                     self.assertEqual(len(ledger.events()), before)
+
+    def test_suspended_empirical_fill_fails_before_run_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            source_action = _action()
+            observation, registry = _registered_observation(
+                ledger,
+                source_action,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="5.00",
+                stake="10.00",
+                suspended=True,
+            )
+            before = len(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "suspended observation cannot claim a fill",
+            ):
+                execute_paper_plan(
+                    plan=_plan(source_action),
+                    trigger_id="lay-suspended-fill",
+                    config=_config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                    observations={source_action.action_id: observation},
+                    evidence_registry=registry,
+                )
+
+            self.assertEqual(len(ledger.events()), before)
+
+    def test_empirical_overfill_fails_before_run_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            source_action = _action(stake="10.00")
+            observation, registry = _registered_observation(
+                ledger,
+                source_action,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="5.00",
+                stake="11.00",
+            )
+            before = len(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "accepted stake exceeds requested stake",
+            ):
+                execute_paper_plan(
+                    plan=_plan(source_action),
+                    trigger_id="lay-overfill",
+                    config=_config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                    observations={source_action.action_id: observation},
+                    evidence_registry=registry,
+                )
+
+            self.assertEqual(len(ledger.events()), before)
 
     def test_mixed_or_multileg_lay_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

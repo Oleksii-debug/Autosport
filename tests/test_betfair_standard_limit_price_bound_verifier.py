@@ -7,6 +7,7 @@ import tempfile
 
 import pytest
 
+import autosport.betfair_standard_limit_price_bound_verifier as verifier_module
 from autosport.betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundError,
     BetfairStandardLimitPriceBoundEvidence,
@@ -193,3 +194,108 @@ def test_reserved_plan_without_durable_supervised_approval_is_rejected() -> None
             bound=bound,
             action_id=action.action_id,
         )
+
+
+
+def test_global_snapshot_helper_rebinding_cannot_accept_forged_evidence(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    forged = _forge_clone(evidence)
+    object.__setattr__(forged, "price_floor_odds", Decimal("1.99"))
+
+    monkeypatch.setattr(
+        verifier_module,
+        "_exact_snapshot",
+        lambda _evidence: (("attacker", object, "same"),),
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="does not match fresh canonical re-resolution",
+    ):
+        _verify(
+            evidence=forged,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+
+def test_global_continuity_helper_rebinding_cannot_bypass_approval_gate(monkeypatch) -> None:
+    bound, approval, goal = _bound(_profile())
+    action = bound.execution_plan.actions[0]
+    store = _issuance_store(bound, goal)
+    store.issue(bound=bound, approval=approval)
+    ledger = RealExecutionLedger(store.workspace / "execution-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+    raw_evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    monkeypatch.setattr(
+        verifier_module,
+        "_require_execution_state_continuity",
+        lambda **_kwargs: None,
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="durable supervised approval is missing or revoked",
+    ):
+        _verify(
+            evidence=raw_evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+
+def test_global_issuance_request_helper_rebinding_is_non_authoritative(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+
+    def attacker_helper(**_kwargs):
+        raise AssertionError("module-global issuance helper must never execute")
+
+    monkeypatch.setattr(
+        verifier_module,
+        "_require_issuance_time_provider_request",
+        attacker_helper,
+    )
+
+    verified = _verify(
+        evidence=evidence,
+        ledger=ledger,
+        store=store,
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    assert verified is not evidence
+    assert verified.action_id == action.action_id
+
+
+def test_in_place_approval_method_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    method = RealExecutionLedger.supervised_approval_is_active
+    original_code = method.__code__
+
+    def attacker_method(*_args, **_kwargs):
+        return True
+
+    try:
+        method.__code__ = attacker_method.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        method.__code__ = original_code

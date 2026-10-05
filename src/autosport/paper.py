@@ -1267,6 +1267,13 @@ class PaperBook:
                 raise ValueError(
                     f"PaperBook snapshot leg {index} for ticket {ticket_id} must be an object"
                 )
+            if (
+                (schema_version is None or schema_version < 8)
+                and "market_semantics_id" in raw_leg
+            ):
+                raise ValueError(
+                    "ticket leg market_semantics_id is unsupported before schema 8"
+                )
             expected_leg_fields = {
                 "event_id",
                 "market_id",

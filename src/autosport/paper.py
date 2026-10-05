@@ -713,6 +713,23 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
     fsync_directory_descriptor = None
     fsync_directory_function = None
     fsync_directory_code = None
+    snapshot_helper_authorities = None
+    snapshot_helper_names = (
+        "_require_finite",
+        "_require_canonical_text",
+        "_validate_timestamp",
+        "_validate_ticket_leg",
+        "_validate_lifecycle_entry",
+        "_validate_lifecycle_reachability",
+        "_validate_loaded_state",
+        "_parse_lifecycle_key_list",
+        "_parse_lifecycle",
+        "_parse_snapshot_decimal",
+        "_required_snapshot_field",
+        "_parse_snapshot_legs",
+        "_parse_snapshot_provider_accounts",
+        "_parse_snapshot_status",
+    )
 
     def install(canonical_type: type) -> None:
         nonlocal raw_snapshot_descriptor, raw_snapshot_function, raw_snapshot_code
@@ -721,6 +738,7 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
         nonlocal lifecycle_json_descriptor, lifecycle_json_function, lifecycle_json_code
         nonlocal ensure_parent_descriptor, ensure_parent_function, ensure_parent_code
         nonlocal fsync_directory_descriptor, fsync_directory_function, fsync_directory_code
+        nonlocal snapshot_helper_authorities
         if raw_snapshot_descriptor is not None:
             raise RuntimeError("PaperBook snapshot entry dispatch authority already installed")
         raw_snapshot_descriptor = canonical_type.__dict__["_from_raw_snapshot"]
@@ -753,6 +771,45 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
         lifecycle_json_code = lifecycle_json_function.__code__
         ensure_parent_code = ensure_parent_function.__code__
         fsync_directory_code = fsync_directory_function.__code__
+        helper_authorities = {}
+        for helper_name in snapshot_helper_names:
+            helper_descriptor = canonical_type.__dict__.get(helper_name)
+            if helper_descriptor is None:
+                raise RuntimeError(
+                    f"PaperBook snapshot helper {helper_name} is unavailable"
+                )
+            if type(helper_descriptor) in {classmethod, staticmethod}:
+                helper_function = helper_descriptor.__func__
+            else:
+                helper_function = helper_descriptor
+            helper_code = getattr(helper_function, "__code__", None)
+            if helper_code is None:
+                raise TypeError(
+                    f"PaperBook snapshot helper {helper_name} must be a Python callable"
+                )
+            helper_authorities[helper_name] = (
+                helper_descriptor,
+                helper_function,
+                helper_code,
+            )
+        snapshot_helper_authorities = helper_authorities
+
+    def require_snapshot_helpers(canonical_type: type) -> None:
+        if snapshot_helper_authorities is None:
+            raise RuntimeError("PaperBook snapshot helper authority is unavailable")
+        for helper_name, (
+            expected_descriptor,
+            helper_function,
+            expected_code,
+        ) in snapshot_helper_authorities.items():
+            if canonical_type.__dict__.get(helper_name) is not expected_descriptor:
+                raise ValueError(
+                    f"PaperBook snapshot helper dispatch changed: {helper_name}"
+                )
+            if helper_function.__code__ is not expected_code:
+                raise ValueError(
+                    f"PaperBook snapshot helper authority changed: {helper_name}"
+                )
 
     def decode_raw(canonical_type: type, raw: object):
         if raw_snapshot_descriptor is None or raw_snapshot_function is None or raw_snapshot_code is None:
@@ -761,7 +818,9 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
             raise ValueError("PaperBook raw snapshot decoder dispatch changed")
         if raw_snapshot_function.__code__ is not raw_snapshot_code:
             raise ValueError("PaperBook raw snapshot decoder authority changed")
+        require_snapshot_helpers(canonical_type)
         result = raw_snapshot_function(canonical_type, raw)
+        require_snapshot_helpers(canonical_type)
         if raw_snapshot_function.__code__ is not raw_snapshot_code:
             raise ValueError("PaperBook raw snapshot decoder authority changed")
         return result

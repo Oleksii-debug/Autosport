@@ -176,3 +176,8 @@ from . import _paperbook_preload_wrapper_helper_guard as _paperbook_preload_wrap
 # load/save callables to remain reachable from the owning guard module. Retire those
 # obsolete capability handles only after every canonical wrapper has captured them.
 from . import _paperbook_preload_generation_handle_cleanup as _paperbook_preload_generation_handle_cleanup  # noqa: E402,F401
+
+# PAPER execution uses the same fixed-point Decimal materialization resource law as
+# the real execution ledger. Install the guard after the legacy/public execution
+# modules exist but before package import returns any public execution capability.
+from . import _paper_execution_decimal_resource_guard as _paper_execution_decimal_resource_guard  # noqa: E402,F401

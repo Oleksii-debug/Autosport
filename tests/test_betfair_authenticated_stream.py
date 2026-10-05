@@ -1693,3 +1693,57 @@ def test_mutating_live_identity_after_positive_decision_revokes_authority(
 
     assert transport.authenticated_app_key_class is None
     assert not decision.decision_eligible
+
+
+def test_suspended_market_drops_active_authority_state_for_endurance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(pt=publish_time_ms)
+        + _market_status_mcm(
+            "SUSPENDED",
+            pt=publish_time_ms + 1,
+            clk="c2",
+        ),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+    assert runtime._market_status_by_id == {"1.A": "OPEN"}
+    assert runtime._runner_status_by_key
+
+    runtime.read_and_ingest()
+
+    assert "1.A" not in runtime._market_status_by_id
+    assert "1.A" not in runtime._market_open_sequence
+    assert all(key[0] != "1.A" for key in runtime._runner_status_by_key)
+    assert all(key[0] != "1.A" for key in runtime._runner_active_sequence)
+
+
+def test_removed_runner_drops_active_runner_authority_state_for_endurance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(pt=publish_time_ms)
+        + _runner_status_mcm(
+            "REMOVED",
+            pt=publish_time_ms + 1,
+            clk="c2",
+        ),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+    runner_key = ("1.A", 1, Decimal("0"))
+    assert runtime._runner_status_by_key[runner_key] == "ACTIVE"
+
+    runtime.read_and_ingest()
+
+    assert runner_key not in runtime._runner_status_by_key
+    assert runner_key not in runtime._runner_active_sequence

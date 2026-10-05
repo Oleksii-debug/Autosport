@@ -15,10 +15,56 @@ from autosport.risk import (
     ProposedTicketRiskContext,
     RiskOfRuinEvidence,
     RiskOfRuinVectorEvidence,
+    StakeVectorDecision,
 )
 
 
+class _HostileSignalInput:
+    calls = 0
+
+    def __str__(self) -> str:
+        type(self).calls += 1
+        return "1"
+
+
 class EconomicGoalEndogenousStakeTests(unittest.TestCase):
+
+    def test_stake_vector_decision_rejects_action_subclass_before_comparison(self) -> None:
+        class HostileAction(str):
+            comparisons = 0
+
+            def __hash__(self) -> int:
+                type(self).comparisons += 1
+                return super().__hash__()
+
+            def __eq__(self, other: object) -> bool:
+                type(self).comparisons += 1
+                return super().__eq__(other)
+
+        hostile = HostileAction("WAIT")
+        with self.assertRaisesRegex(ValueError, "stake vector action"):
+            StakeVectorDecision(hostile, (Decimal("0"),), "reason")
+
+        self.assertEqual(HostileAction.comparisons, 0)
+
+    def test_stake_vector_decision_rejects_decimal_subclass_before_comparison(self) -> None:
+        class HostileStake(Decimal):
+            comparisons = 0
+
+            def __lt__(self, other: object) -> bool:
+                type(self).comparisons += 1
+                return super().__lt__(other)
+
+            def __gt__(self, other: object) -> bool:
+                type(self).comparisons += 1
+                return super().__gt__(other)
+
+        hostile = HostileStake("0")
+        with self.assertRaisesRegex(ValueError, "exact non-negative finite Decimal"):
+            StakeVectorDecision("WAIT", (hostile,), "reason")
+
+        self.assertEqual(HostileStake.comparisons, 0)
+
     @staticmethod
     def _event(
         *,
@@ -280,6 +326,96 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             self.assertEqual(book.committed_stake, Decimal("20"))
             self.assertFalse((Path(tmp) / "decisions.jsonl").exists())
 
+
+
+
+
+    def test_single_goal_stake_rejects_context_subclass(self) -> None:
+        class DerivedContext(ProposedTicketRiskContext):
+            pass
+
+        event = self._event(
+            event_id="event-derived-single",
+            market_id="market-derived-single",
+            selection_id="selection-derived-single",
+            sequence=92,
+        )
+        goal = self._goal()
+        base = self._risk_context(event, goal)
+        derived = DerivedContext(
+            legs=base.legs,
+            quotes=base.quotes,
+            provider_accounts=base.provider_accounts,
+            bankroll_id=base.bankroll_id,
+            currency=base.currency,
+            measurement_window_start=base.measurement_window_start,
+            measurement_window_end=base.measurement_window_end,
+            proposal_ts=base.proposal_ts,
+        )
+
+        amount = self._policy(goal).derive_goal_stake(
+            PaperBook("100"),
+            Decimal("1"),
+            context=derived,
+        )
+
+        self.assertIsNone(amount)
+
+
+    def test_multi_candidate_vector_rejects_hostile_signal_before_str(self) -> None:
+        _HostileSignalInput.calls = 0
+        goal = self._goal()
+        policy = self._policy(goal)
+        event = self._event(
+            event_id="event-hostile-vector",
+            market_id="market-hostile-vector",
+            selection_id="selection-hostile-vector",
+            sequence=95,
+        )
+        context = self._risk_context(event, goal)
+
+        decision = policy.derive_goal_stake_vector(
+            PaperBook("100"),
+            (_HostileSignalInput(),),
+            contexts=(context,),
+        )
+
+        self.assertEqual(decision.action, "WAIT")
+        self.assertEqual(decision.reason, "candidate signal evidence is invalid")
+        self.assertEqual(_HostileSignalInput.calls, 0)
+
+    def test_multi_candidate_vector_rejects_context_subclass(self) -> None:
+        class DerivedContext(ProposedTicketRiskContext):
+            pass
+
+        event = self._event(
+            event_id="event-derived-context",
+            market_id="market-derived-context",
+            selection_id="selection-derived-context",
+            sequence=91,
+        )
+        goal = self._goal()
+        base = self._risk_context(event, goal)
+        derived = DerivedContext(
+            legs=base.legs,
+            quotes=base.quotes,
+            provider_accounts=base.provider_accounts,
+            bankroll_id=base.bankroll_id,
+            currency=base.currency,
+            measurement_window_start=base.measurement_window_start,
+            measurement_window_end=base.measurement_window_end,
+            proposal_ts=base.proposal_ts,
+        )
+        decision = self._policy(goal).derive_goal_stake_vector(
+            PaperBook("100"),
+            (Decimal("1"),),
+            contexts=(derived,),
+        )
+
+        self.assertEqual(decision.action, "WAIT")
+        self.assertEqual(decision.stakes, (Decimal("0"),))
+        self.assertEqual(decision.reason, "candidate risk context is invalid")
+
     def test_multi_candidate_vector_prioritizes_signal_and_reserves_aggregate_cap(self) -> None:
         weak = self._event(event_id="event-weak", market_id="market-weak", sequence=11)
         strong = self._event(
@@ -444,7 +580,7 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
         self.assertEqual(book.tickets, {})
         self.assertEqual(book.committed_stake, Decimal("0"))
 
-    def test_multi_candidate_vector_accepts_exact_vector_bound_ruin_evidence(self) -> None:
+    def test_multi_candidate_vector_rejects_caller_constructed_exact_ruin_evidence(self) -> None:
         first = self._event(
             event_id="event-vector-ror-1",
             market_id="market-vector-ror-1",
@@ -483,11 +619,131 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             risk_of_ruin_vector_evidence=witness,
         )
 
-        self.assertEqual(decision.action, "STAKE_VECTOR")
-        self.assertEqual(decision.stakes, expected_stakes)
+        self.assertEqual(decision.action, "WAIT")
+        self.assertEqual(decision.stakes, (Decimal("0"), Decimal("0")))
         self.assertEqual(book.balance, Decimal("100"))
         self.assertEqual(book.tickets, {})
         self.assertEqual(book.committed_stake, Decimal("0"))
+
+
+
+
+    def test_vector_ruin_evidence_revalidated_after_mutation_before_comparison(self) -> None:
+        class HostileBound(Decimal):
+            comparisons = 0
+
+            def __gt__(self, other: object) -> bool:
+                type(self).comparisons += 1
+                return super().__gt__(other)
+
+        first = self._event(
+            event_id="event-mutated-vector-1",
+            market_id="market-mutated-vector-1",
+            selection_id="selection-mutated-vector-1",
+            sequence=96,
+        )
+        second = self._event(
+            event_id="event-mutated-vector-2",
+            market_id="market-mutated-vector-2",
+            selection_id="selection-mutated-vector-2",
+            sequence=97,
+        )
+        goal = self._goal(
+            max_risk_of_ruin=Decimal("0.10"),
+            max_concurrent_positions=3,
+        )
+        policy = self._policy(goal)
+        book = PaperBook("100")
+        contexts = (
+            self._risk_context(first, goal),
+            self._risk_context(second, goal),
+        )
+        evidence = self._bound_ruin_vector_evidence(
+            policy,
+            book,
+            contexts,
+            (Decimal("2.00"), Decimal("2.00")),
+            upper_bound=Decimal("0.05"),
+        )
+        hostile = HostileBound("0.05")
+        HostileBound.comparisons = 0
+        object.__setattr__(evidence, "upper_bound", hostile)
+
+        decision = policy.derive_goal_stake_vector(
+            book,
+            (Decimal("1"), Decimal("1")),
+            contexts=contexts,
+            risk_of_ruin_vector_evidence=evidence,
+        )
+
+        self.assertEqual(decision.action, "WAIT")
+        self.assertEqual(
+            decision.reason,
+            "multi-candidate portfolio risk-of-ruin vector evidence is invalid",
+        )
+        self.assertEqual(HostileBound.comparisons, 0)
+
+    def test_multi_candidate_vector_rejects_vector_evidence_subclass(self) -> None:
+        class DerivedVectorEvidence(RiskOfRuinVectorEvidence):
+            pass
+
+        first = self._event(
+            event_id="event-vector-subclass-1",
+            market_id="market-vector-subclass-1",
+            selection_id="selection-vector-subclass-1",
+            sequence=93,
+        )
+        second = self._event(
+            event_id="event-vector-subclass-2",
+            market_id="market-vector-subclass-2",
+            selection_id="selection-vector-subclass-2",
+            sequence=94,
+        )
+        goal = self._goal(
+            max_risk_of_ruin=Decimal("0.10"),
+            max_concurrent_positions=3,
+        )
+        policy = self._policy(goal)
+        book = PaperBook("100")
+        contexts = (
+            self._risk_context(first, goal),
+            self._risk_context(second, goal),
+        )
+        canonical = self._bound_ruin_vector_evidence(
+            policy,
+            book,
+            contexts,
+            (Decimal("2.00"), Decimal("2.00")),
+            upper_bound=Decimal("0.05"),
+        )
+        derived = DerivedVectorEvidence(
+            evidence_id=canonical.evidence_id,
+            research_protocol_sha256=canonical.research_protocol_sha256,
+            reproducibility_bundle_sha256=canonical.reproducibility_bundle_sha256,
+            producer_identity=canonical.producer_identity,
+            causal_cutoff=canonical.causal_cutoff,
+            evaluated_at=canonical.evaluated_at,
+            bankroll_id=canonical.bankroll_id,
+            currency=canonical.currency,
+            base_portfolio_sha256=canonical.base_portfolio_sha256,
+            candidate_vector_sha256=canonical.candidate_vector_sha256,
+            evaluated_stakes=canonical.evaluated_stakes,
+            upper_bound=canonical.upper_bound,
+        )
+
+        decision = policy.derive_goal_stake_vector(
+            book,
+            (Decimal("1"), Decimal("1")),
+            contexts=contexts,
+            risk_of_ruin_vector_evidence=derived,
+        )
+
+        self.assertEqual(decision.action, "WAIT")
+        self.assertEqual(decision.stakes, (Decimal("0"), Decimal("0")))
+        self.assertEqual(
+            decision.reason,
+            "multi-candidate portfolio risk-of-ruin vector evidence is invalid",
+        )
 
     def test_multi_candidate_vector_rejects_mismatched_vector_ruin_evidence(self) -> None:
         first = self._event(
@@ -629,7 +885,7 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
         self.assertEqual(decision.stakes, (Decimal("0"), Decimal("0")))
         self.assertEqual(book.tickets, {})
 
-    def test_multi_candidate_vector_accepts_explicit_ruin_witness(self) -> None:
+    def test_multi_candidate_vector_rejects_caller_constructed_single_ruin_witness(self) -> None:
         event = self._event(event_id="event-ruin", market_id="market-ruin", sequence=16)
         goal = self._goal(max_risk_of_ruin=Decimal("0.10"))
         policy = self._policy(goal)
@@ -650,8 +906,9 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(decision.action, "STAKE_VECTOR")
-        self.assertEqual(decision.stakes, (Decimal("2.00"),))
+        self.assertEqual(decision.action, "ZERO")
+        self.assertEqual(decision.stakes, (Decimal("0"),))
+        self.assertEqual(book.balance, Decimal("100"))
         self.assertEqual(book.tickets, {})
 
     def test_single_candidate_bare_ruin_scalar_cannot_authorize(self) -> None:

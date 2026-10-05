@@ -67,6 +67,11 @@ def _install() -> None:
 _install()
 del _install
 
+# Market semantics became part of durable PAPER identity in schema 8. Compose that
+# identity into the already-source-defined risk roots before this module captures
+# candidate/evaluate witnesses and before generation/private/root sealing runs.
+from . import _risk_market_semantics_identity as _risk_market_semantics_identity  # noqa: E402,F401
+
 # Raw risk executable specs remain reconstructible compatibility evidence. Complete
 # the existing evaluate witness before any generation/private wrapper snapshots that
 # raw function. Only helpers whose descriptors remain stable across later wrapper
@@ -78,6 +83,7 @@ _decimal_context = _policy_namespace.get("_decimal_context")
 _exact_positive_sum = _policy_namespace.get("_exact_positive_sum")
 _fraction_exceeds = _policy_namespace.get("_fraction_exceeds")
 _ruin_candidate = _policy_namespace.get("risk_of_ruin_candidate_sha256")
+_ruin_candidate_vector = _policy_namespace.get("risk_of_ruin_candidate_vector_sha256")
 if type(_fraction_limits) is not FunctionType:
     raise RuntimeError("canonical PaperRiskPolicy fraction-limit helper is unavailable")
 for _helper_name, _helper_descriptor in (
@@ -93,6 +99,13 @@ for _helper_name, _helper_descriptor in (
         raise RuntimeError(
             f"canonical PaperRiskPolicy static helper is unavailable: {_helper_name}"
         )
+if (
+    type(_ruin_candidate_vector) is not classmethod
+    or type(_ruin_candidate_vector.__func__) is not FunctionType
+):
+    raise RuntimeError(
+        "canonical PaperRiskPolicy candidate-vector digest helper is unavailable"
+    )
 _evaluate_witnesses = _risk._PAPER_RISK_EVALUATE_HELPER_WITNESSES
 if type(_evaluate_witnesses) is not tuple:
     raise RuntimeError("canonical PaperRiskPolicy evaluate witness tuple is unavailable")
@@ -143,16 +156,38 @@ else:
         _evaluate_witnesses + _transitive_witnesses
     )
 
+_vector_witnesses = _risk._PAPER_RISK_DERIVE_GOAL_STAKE_VECTOR_HELPER_WITNESSES
+if type(_vector_witnesses) is not tuple:
+    raise RuntimeError(
+        "canonical PaperRiskPolicy stake-vector helper witness tuple is unavailable"
+    )
+_vector_witness_names = tuple(item[0] for item in _vector_witnesses)
+_vector_digest_witness = (
+    "risk_of_ruin_candidate_vector_sha256",
+    _ruin_candidate_vector,
+    _ruin_candidate_vector.__func__,
+    _ruin_candidate_vector.__func__.__code__,
+    True,
+)
+if "risk_of_ruin_candidate_vector_sha256" not in _vector_witness_names:
+    _risk._PAPER_RISK_DERIVE_GOAL_STAKE_VECTOR_HELPER_WITNESSES = (
+        _vector_witnesses + (_vector_digest_witness,)
+    )
+
 del _policy_namespace
 del _fraction_limits
 del _decimal_context
 del _exact_positive_sum
 del _fraction_exceeds
 del _ruin_candidate
+del _ruin_candidate_vector
 del _evaluate_witnesses
 del _witness_names
 del _transitive_witnesses
 del _transitive_names
+del _vector_witnesses
+del _vector_witness_names
+del _vector_digest_witness
 del _helper_name
 del _helper_descriptor
 del _risk

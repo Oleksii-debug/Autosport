@@ -37,10 +37,15 @@ class MirrorInvalidationBatch:
     has_more: bool
     semantic_refresh_keys: tuple[MirrorQuoteKey, ...] = ()
     semantic_refresh_identities: tuple[MirrorRefreshIdentity, ...] = ()
+    mirror_revision: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.full_refresh_required) is not bool or type(self.has_more) is not bool:
             raise TypeError("invalidation batch flags must be booleans")
+        if self.mirror_revision is not None and (
+            type(self.mirror_revision) is not int or self.mirror_revision < 0
+        ):
+            raise ValueError("mirror_revision must be a non-negative int or None")
         if (
             type(self.changed_keys) is not tuple
             or type(self.semantic_refresh_keys) is not tuple
@@ -317,9 +322,12 @@ class FocusedMirrorDependencyIndex:
                         dependency_affected = True
                 if dependency_affected:
                     affected.append(dependency.input_id)
-            if not batch.has_more:
-                for dependency in dependencies:
-                    if self._dependencies.get(dependency.input_id) == dependency:
+            if (
+                not batch.has_more
+                and batch.mirror_revision is not None
+                and captured.revision == batch.mirror_revision
+            ):
+                for dependency in dependencies:                    if self._dependencies.get(dependency.input_id) == dependency:
                         self._matched_revisions[dependency.input_id] = captured.revision
         return tuple(affected)
 
@@ -805,6 +813,7 @@ class BoundedMirrorInvalidationBuffer:
             raise ValueError("max_items must be a positive non-boolean integer")
 
         with self._lock:
+            mirror_revision = self._mirror.view_for_keys(()).revision
             if self._full_refresh_required:
                 self._full_refresh_required = False
                 self._dirty.clear()
@@ -815,6 +824,7 @@ class BoundedMirrorInvalidationBuffer:
                     has_more=False,
                     semantic_refresh_keys=(),
                     semantic_refresh_identities=(),
+                    mirror_revision=mirror_revision,
                 )
 
             count = min(max_items, len(self._dirty))
@@ -835,4 +845,5 @@ class BoundedMirrorInvalidationBuffer:
                 has_more=bool(self._dirty),
                 semantic_refresh_keys=semantic_refresh_keys,
                 semantic_refresh_identities=semantic_refresh_identities,
+                mirror_revision=mirror_revision,
             )

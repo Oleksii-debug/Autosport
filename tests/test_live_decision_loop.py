@@ -322,6 +322,50 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             catalog_required_history=catalog_required_history,
         )
 
+    def test_constructor_rejects_paper_execution_runtime_subclass(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            book = PaperBook("1000")
+            ledger = PaperExecutionLedger(workspace / "paper-execution.jsonl")
+
+            class HostileRuntime(PaperExecutionAdoptionRuntime):
+                pass
+
+            runtime = HostileRuntime(
+                book=book,
+                ledger=ledger,
+                config=PaperExecutionModelConfig(
+                    model_id="hostile-runtime",
+                    model_version="1",
+                    evidence_grade=EvidenceGrade.SYNTHETIC,
+                    evidence_source="hostile-runtime",
+                    seed="hostile-runtime",
+                    max_quote_age_ms=5_000,
+                    min_delay_ms=0,
+                    max_delay_ms=0,
+                    rejected_bps=0,
+                    partial_bps=0,
+                    unknown_bps=0,
+                    partial_fill_bps=5_000,
+                    max_slippage_bps=0,
+                ),
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "paper_execution must be exact PaperExecutionAdoptionRuntime or None",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START),
+                    book=book,
+                    paper_execution=runtime,
+                )
+
     def test_constructor_requires_durable_registered_intent_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

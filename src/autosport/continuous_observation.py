@@ -355,6 +355,18 @@ def run_continuous_observation(
     stopper = stop_event if stop_event is not None else threading.Event()
     wait = waiter if waiter is not None else stopper.wait
 
+    def stop_is_set() -> bool:
+        value = stopper.is_set()
+        if type(value) is not bool:
+            raise TypeError("stop_event is_set must return bool")
+        return value
+
+    def wait_once(seconds: float) -> bool:
+        value = wait(seconds)
+        if type(value) is not bool:
+            raise TypeError("waiter must return bool")
+        return value
+
     root = config.workspace
     root.mkdir(parents=True, exist_ok=True)
     status_path = config.resolved_status_path
@@ -424,12 +436,12 @@ def run_continuous_observation(
 
         enter_loop = True
         if restart_backoff_remaining > 0:
-            if stopper.is_set():
+            if stop_is_set():
                 terminal_reason = "operator_stop"
                 enter_loop = False
             else:
                 remaining_runtime = config.max_runtime_seconds - (
-                    read_monotonic() - started_monotonic
+                    read_read_monotonic() - started_monotonic
                 )
                 if remaining_runtime <= 0:
                     terminal_reason = "max_runtime"
@@ -439,7 +451,7 @@ def run_continuous_observation(
                         restart_backoff_remaining,
                         remaining_runtime,
                     )
-                    if wait(startup_wait):
+                    if wait_once(startup_wait):
                         terminal_reason = "operator_stop"
                         enter_loop = False
                     elif startup_wait >= remaining_runtime:
@@ -449,8 +461,8 @@ def run_continuous_observation(
                         enter_loop = False
 
         while enter_loop:
-            elapsed = monotonic() - started_monotonic
-            if stopper.is_set():
+            elapsed = read_monotonic() - started_monotonic
+            if stop_is_set():
                 terminal_reason = "operator_stop"
                 break
             if state.attempted_cycles >= config.max_cycles:
@@ -509,7 +521,7 @@ def run_continuous_observation(
                     terminal_reason = "max_cycles_after_provider_unavailable"
                     terminal_exit = 4 if state.successful_cycles == 0 else 0
                     break
-                remaining = config.max_runtime_seconds - (monotonic() - started_monotonic)
+                remaining = config.max_runtime_seconds - (read_monotonic() - started_monotonic)
                 if remaining <= 0:
                     terminal_reason = "max_runtime_after_provider_unavailable"
                     terminal_exit = 4 if state.successful_cycles == 0 else 0
@@ -521,7 +533,7 @@ def run_continuous_observation(
                     ),
                     remaining,
                 )
-                if wait(backoff):
+                if wait_once(backoff):
                     terminal_reason = "operator_stop"
                     break
                 continue
@@ -564,11 +576,11 @@ def run_continuous_observation(
             if state.attempted_cycles >= config.max_cycles:
                 terminal_reason = "max_cycles"
                 break
-            remaining = config.max_runtime_seconds - (monotonic() - started_monotonic)
+            remaining = config.max_runtime_seconds - (read_monotonic() - started_monotonic)
             if remaining <= 0:
                 terminal_reason = "max_runtime"
                 break
-            if wait(min(config.interval_seconds, remaining)):
+            if wait_once(min(config.interval_seconds, remaining)):
                 terminal_reason = "operator_stop"
                 break
     except Exception as exc:

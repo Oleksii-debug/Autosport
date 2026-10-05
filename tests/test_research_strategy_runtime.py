@@ -11,6 +11,7 @@ from autosport.research_strategy import (
     RESEARCH_STRATEGY_ID,
     ResearchStrategyPlan,
     _advance_research_latest,
+    _validate_market_binding,
     market_event_evidence_hash,
     research_market_snapshot_hash,
 )
@@ -257,6 +258,58 @@ class ResearchStrategyRuntimeTests(unittest.TestCase):
             "scenario outcome identity first appears after decision",
         ):
             plan.preflight(events)
+
+
+    def test_market_bound_research_evidence_cannot_predate_local_receipt(self):
+        dataset = load_dataset(Path("examples/tt_demo"))
+        events = list(dataset.load_market_events())
+        trigger = next(event for event in events if event.sequence == 4)
+        observed = datetime.fromisoformat(
+            trigger.observed_ts.replace("Z", "+00:00")
+        )
+        delayed = replace(
+            trigger,
+            ingest_ts=(observed + timedelta(microseconds=1)).isoformat(),
+        )
+        latest = {}
+        for event in events:
+            candidate = delayed if event.sequence == 4 else event
+            _advance_research_latest(latest, candidate)
+            if event.sequence == 4:
+                break
+
+        snapshot_hash = research_market_snapshot_hash(
+            latest,
+            [delayed.quote_key],
+        )
+        evidence_hash = market_event_evidence_hash(delayed)
+        base = ResearchStrategyPlan.from_dict(self._plan_dict()).instructions[0]
+        evidence = replace(
+            base.evidence[0],
+            available_at=trigger.observed_ts,
+            content_sha256=evidence_hash,
+            market_snapshot_hash=snapshot_hash,
+        )
+        decision_ts = (observed + timedelta(microseconds=2)).isoformat()
+        forecast = replace(
+            base.forecasts[0],
+            input_cutoff_ts=decision_ts,
+            generated_at=decision_ts,
+            evidence_hashes=(evidence_hash,),
+            market_snapshot_hash=snapshot_hash,
+        )
+        instruction = replace(
+            base,
+            decision_ts=decision_ts,
+            forecasts=(forecast,),
+            evidence=(evidence,),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "evidence became available before market receipt",
+        ):
+            _validate_market_binding(instruction, latest)
 
     def test_research_strategy_runs_full_typed_pipeline_in_dataset_session(self):
         dataset = load_dataset(Path("examples/tt_demo"))

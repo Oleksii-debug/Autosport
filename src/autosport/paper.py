@@ -5,6 +5,7 @@ import os
 import tempfile
 import threading
 import uuid
+from functools import wraps
 from decimal import (
     Context,
     Decimal,
@@ -26,6 +27,7 @@ from .forecasting import parse_iso_timestamp
 _PAPER_DECIMAL_PRECISION = 28
 _PAPER_DECIMAL_EMIN = -999999
 _PAPER_DECIMAL_EMAX = 999999
+_MAX_PAPER_DECIMAL_TEXT_CHARS = 512
 _PAPER_SNAPSHOT_SCHEMA_VERSION = 7
 _SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7})
 _SCHEMA_MISSING = object()
@@ -270,6 +272,41 @@ def _make_paperbook_causal_history_authority_registry():
 ) = _make_paperbook_causal_history_authority_registry()
 
 
+def _make_paperbook_operation_lock_registry():
+    # Economic transitions must be linearizable per book. Keep synchronization
+    # authority outside caller-visible state so snapshots cannot mint/replace it.
+    locks = WeakKeyDictionary()
+    guard = threading.RLock()
+
+    def register_book(book: object) -> None:
+        with guard:
+            locks[book] = threading.RLock()
+
+    def require_lock(book: object):
+        with guard:
+            lock = locks.get(book)
+        if lock is None:
+            raise RuntimeError("PaperBook operation lock registry is unavailable")
+        return lock
+
+    return register_book, require_lock
+
+
+(
+    _register_paperbook_operation_lock,
+    _require_paperbook_operation_lock,
+) = _make_paperbook_operation_lock_registry()
+
+
+def _serialized_paperbook_operation(method):
+    @wraps(method)
+    def serialized(self, *args, **kwargs):
+        with _require_paperbook_operation_lock(self):
+            return method(self, *args, **kwargs)
+
+    return serialized
+
+
 def _paper_decimal_context() -> Context:
     context = Context(
         prec=_PAPER_DECIMAL_PRECISION,
@@ -301,10 +338,13 @@ class PaperBook:
     """Virtual bankroll and auditable paper tickets. No real-money execution path exists."""
 
     def __init__(self, initial_bankroll: Decimal | str = Decimal("10000")) -> None:
+        _register_paperbook_operation_lock(self)
         _register_ticket_opening_authority_book(self)
         _register_paperbook_causal_history_authority_book(self)
-        initial = Decimal(str(initial_bankroll))
-        self._require_finite(initial, "initial_bankroll")
+        initial = self._canonical_decimal_input(
+            initial_bankroll,
+            "initial_bankroll",
+        )
         if initial <= 0:
             raise ValueError("initial virtual bankroll must be positive")
         self.initial_bankroll = initial
@@ -320,11 +360,32 @@ class PaperBook:
         self._settlement_times: dict[str, str | None] = {}
 
     @property
+    @_serialized_paperbook_operation
     def committed_stake(self) -> Decimal:
+        self._validate_loaded_state(self)
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
-        self._validate_loaded_state(self)
         return sum((t.stake for t in self.tickets.values() if t.status is TicketStatus.OPEN), Decimal("0"))
+
+    @classmethod
+    def _canonical_decimal_input(cls, value: object, label: str) -> Decimal:
+        if type(value) not in {Decimal, str, int, float}:
+            raise ValueError(
+                f"PaperBook {label} must be an exact built-in Decimal, string, integer or float"
+            )
+        if type(value) is Decimal:
+            parsed = value
+        else:
+            if type(value) is str and len(value) > _MAX_PAPER_DECIMAL_TEXT_CHARS:
+                raise ValueError(
+                    f"PaperBook {label} decimal text exceeds the canonical size limit"
+                )
+            try:
+                parsed = Decimal(str(value))
+            except (DecimalException, ValueError) as exc:
+                raise ValueError(f"PaperBook {label} is not a valid Decimal value") from exc
+        cls._require_finite(parsed, label)
+        return parsed
 
     @classmethod
     def _debit_balance(cls, balance: Decimal, amount: Decimal) -> Decimal:
@@ -343,6 +404,7 @@ class PaperBook:
             raise ValueError("PaperBook stake debit arithmetic is not representable") from exc
         return new_balance
 
+    @_serialized_paperbook_operation
     def open_ticket(
         self,
         legs,
@@ -355,10 +417,10 @@ class PaperBook:
         bankroll_id: str | None = None,
         currency: str | None = None,
     ) -> PaperTicket:
+        self._validate_loaded_state(self)
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
-        self._validate_loaded_state(self)
-        amount = Decimal(str(stake))
+        amount = self._canonical_decimal_input(stake, "stake")
         new_balance = self._debit_balance(self.balance, amount)
 
         ticket_placed_at = self._validate_placed_at(
@@ -376,6 +438,8 @@ class PaperBook:
             bankroll_id,
             currency,
         )
+        if type(legs) not in {list, tuple}:
+            raise ValueError("ticket legs must be an exact list or tuple")
         ticket_legs = tuple(legs)
         if not ticket_legs:
             raise ValueError("ticket requires at least one leg")
@@ -404,15 +468,15 @@ class PaperBook:
 
     @staticmethod
     def _normalize_resolution_keys(values: object, label: str) -> set[str]:
-        if isinstance(values, str) or values is None:
-            raise ValueError(f"PaperBook {label} must be a collection of quote keys")
-        try:
-            normalized = set(values)
-        except TypeError as exc:
-            raise ValueError(f"PaperBook {label} must be a collection of quote keys") from exc
-        if any(not isinstance(value, str) or not value for value in normalized):
-            raise ValueError(f"PaperBook {label} must contain non-empty string quote keys")
-        return normalized
+        if type(values) not in {set, frozenset, list, tuple}:
+            raise ValueError(
+                f"PaperBook {label} must be an exact built-in collection of quote keys"
+            )
+        if any(type(value) is not str or not value for value in values):
+            raise ValueError(
+                f"PaperBook {label} must contain non-empty string quote keys"
+            )
+        return set(values)
 
     @classmethod
     def _settlement_result(
@@ -461,6 +525,7 @@ class PaperBook:
             raise ValueError("PaperBook settlement arithmetic is not representable") from exc
         return status, payout, new_balance
 
+    @_serialized_paperbook_operation
     def settle(
         self,
         ticket_id: str,
@@ -469,10 +534,11 @@ class PaperBook:
         *,
         settled_at: str | None = None,
     ) -> PaperTicket:
+        self._validate_loaded_state(self)
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
-        self._validate_loaded_state(self)
-        ticket = self.tickets[ticket_id]
+        canonical_ticket_id = self._require_canonical_text(ticket_id, "ticket_id")
+        ticket = self.tickets[canonical_ticket_id]
         if ticket.status is not TicketStatus.OPEN:
             raise ValueError("ticket already settled")
 
@@ -533,15 +599,24 @@ class PaperBook:
                 )
         return payload
 
+    @staticmethod
+    def _canonical_snapshot_path(path: object) -> Path:
+        if type(path) not in {str, type(Path("."))}:
+            raise TypeError(
+                "PaperBook snapshot path must be exact str or exact Path"
+            )
+        return Path(path)
+
+    @_serialized_paperbook_operation
     def save(self, path: str | Path) -> None:
+        # PaperBook and PaperTicket are intentionally mutable during a paper run.
+        # Validate caller-visible state before consulting hidden authorities so a
+        # hostile subclass cannot execute comparison hooks during fail-closed
+        # authority checks, and do so before any durable replacement.
+        self._validate_loaded_state(self)
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
-        # PaperBook and PaperTicket are intentionally mutable during a paper run.
-        # Revalidate the complete economic/identity state immediately before any
-        # durable replacement so caller/agent mutation cannot persist a snapshot
-        # that a trusted fresh load would reject.
-        self._validate_loaded_state(self)
-        destination = Path(path)
+        destination = self._canonical_snapshot_path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         raw = {
             "schema_version": _PAPER_SNAPSHOT_SCHEMA_VERSION,
@@ -612,12 +687,12 @@ class PaperBook:
 
     @staticmethod
     def _require_finite(value: object, label: str) -> None:
-        if not isinstance(value, Decimal) or not value.is_finite():
+        if type(value) is not Decimal or not value.is_finite():
             raise ValueError(f"PaperBook snapshot contains non-finite {label}")
 
     @staticmethod
     def _require_utf8_string(value: object, label: str) -> str:
-        if not isinstance(value, str):
+        if type(value) is not str:
             raise ValueError(f"PaperBook {label} must be a string")
         try:
             value.encode("utf-8", errors="strict")
@@ -808,8 +883,8 @@ class PaperBook:
         if type(entry) is not tuple or len(entry) != 4:
             raise ValueError("PaperBook lifecycle entries must be canonical tuples")
         action, ticket_id, winners, voids = entry
-        if action not in {"open", "settle"}:
-            raise ValueError("PaperBook lifecycle action must be open or settle")
+        if type(action) is not str or action not in {"open", "settle"}:
+            raise ValueError("PaperBook lifecycle action must be canonical open or settle text")
         cls._require_canonical_text(ticket_id, "lifecycle ticket_id")
         if type(winners) is not tuple or type(voids) is not tuple:
             raise ValueError("PaperBook lifecycle settlement keys must be canonical tuples")
@@ -828,6 +903,10 @@ class PaperBook:
             raise ValueError("PaperBook lifecycle must be a canonical list")
         if type(book._settlement_times) is not dict:
             raise ValueError("PaperBook settlement-time witness must be a canonical mapping")
+        if any(type(ticket_id) is not str for ticket_id in book._settlement_times):
+            raise ValueError(
+                "PaperBook settlement-time witness keys must be canonical strings"
+            )
 
         replay_balance = book.initial_bankroll
         opened: set[str] = set()
@@ -1038,9 +1117,13 @@ class PaperBook:
 
     @classmethod
     def _parse_snapshot_decimal(cls, value: object, label: str) -> Decimal:
-        if not isinstance(value, str) or not value or value.strip() != value:
+        if type(value) is not str or not value or value.strip() != value:
             raise ValueError(
                 f"PaperBook snapshot {label} must be a non-empty trimmed decimal string"
+            )
+        if len(value) > _MAX_PAPER_DECIMAL_TEXT_CHARS:
+            raise ValueError(
+                f"PaperBook snapshot {label} decimal text exceeds the canonical size limit"
             )
         try:
             parsed = Decimal(value)
@@ -1135,7 +1218,7 @@ class PaperBook:
 
     @staticmethod
     def _parse_snapshot_status(value: object, ticket_id: str) -> TicketStatus:
-        if not isinstance(value, str):
+        if type(value) is not str:
             raise ValueError(
                 f"PaperBook snapshot status for ticket {ticket_id} must be a string"
             )
@@ -1278,8 +1361,8 @@ class PaperBook:
 
     @classmethod
     def load_bytes(cls, payload: bytes) -> "PaperBook":
-        if not isinstance(payload, bytes):
-            raise TypeError("PaperBook.load_bytes payload must be bytes")
+        if type(payload) is not bytes:
+            raise TypeError("PaperBook.load_bytes payload must be exact bytes")
         try:
             text = payload.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -1296,7 +1379,8 @@ class PaperBook:
 
     @classmethod
     def load(cls, path: str | Path) -> "PaperBook":
-        book = cls.load_bytes(Path(path).read_bytes())
+        snapshot_path = cls._canonical_snapshot_path(path)
+        book = cls.load_bytes(snapshot_path.read_bytes())
         _install_validated_ticket_opening_authority(book)
         _install_validated_paperbook_causal_history_authority(book)
         return book

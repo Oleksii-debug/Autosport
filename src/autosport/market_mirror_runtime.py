@@ -215,6 +215,7 @@ class FocusedMirrorDependencyIndex:
             self._matched_revisions[normalized_id] = initial_view.revision
             self._registry_revision += 1
             self._dependency_revisions[normalized_id] = self._registry_revision
+            dependency_revision = self._registry_revision
 
         # Close the mirror-view -> registry-publication race without making this
         # index a second market-state authority. If mirror truth advanced after
@@ -229,7 +230,11 @@ class FocusedMirrorDependencyIndex:
                 if dependency.matches(event)
             }
             with self._lock:
-                if self._dependencies.get(normalized_id) == dependency:
+                if (
+                    self._dependencies.get(normalized_id) == dependency
+                    and self._dependency_revisions.get(normalized_id)
+                    == dependency_revision
+                ):
                     self._matched_keys[normalized_id].update(catch_up_keys)
                     self._matched_revisions[normalized_id] = catch_up.revision
         return dependency
@@ -287,7 +292,13 @@ class FocusedMirrorDependencyIndex:
             raise TypeError("batch must be a MirrorInvalidationBatch")
 
         with self._lock:
-            dependencies = tuple(self._dependencies.values())
+            dependency_state = tuple(
+                (dependency, self._dependency_revisions[input_id])
+                for input_id, dependency in self._dependencies.items()
+            )
+            dependencies = tuple(
+                dependency for dependency, _revision in dependency_state
+            )
 
         if batch.full_refresh_required:
             captured = self._mirror.view()
@@ -301,8 +312,12 @@ class FocusedMirrorDependencyIndex:
             }
             with self._lock:
                 active_dependencies = tuple(self._dependencies.values())
-                for dependency in dependencies:
-                    if self._dependencies.get(dependency.input_id) == dependency:
+                for dependency, dependency_revision in dependency_state:
+                    if (
+                        self._dependencies.get(dependency.input_id) == dependency
+                        and self._dependency_revisions.get(dependency.input_id)
+                        == dependency_revision
+                    ):
                         self._matched_keys[dependency.input_id] = rebuilt[
                             dependency.input_id
                         ]
@@ -333,8 +348,12 @@ class FocusedMirrorDependencyIndex:
 
         affected: list[str] = []
         with self._lock:
-            for dependency in dependencies:
-                if self._dependencies.get(dependency.input_id) != dependency:
+            for dependency, dependency_revision in dependency_state:
+                if (
+                    self._dependencies.get(dependency.input_id) != dependency
+                    or self._dependency_revisions.get(dependency.input_id)
+                    != dependency_revision
+                ):
                     continue
                 matched = self._matched_keys.setdefault(dependency.input_id, set())
                 dependency_affected = False
@@ -355,8 +374,12 @@ class FocusedMirrorDependencyIndex:
                 and batch.mirror_revision is not None
                 and captured.revision == batch.mirror_revision
             ):
-                for dependency in dependencies:
-                    if self._dependencies.get(dependency.input_id) == dependency:
+                for dependency, dependency_revision in dependency_state:
+                    if (
+                        self._dependencies.get(dependency.input_id) == dependency
+                        and self._dependency_revisions.get(dependency.input_id)
+                        == dependency_revision
+                    ):
                         self._matched_revisions[dependency.input_id] = captured.revision
         return tuple(affected)
 
@@ -723,6 +746,7 @@ class FocusedMirrorDependencyIndex:
         with self._lock:
             try:
                 dependency = self._dependencies[normalized_id]
+                dependency_revision = self._dependency_revisions[normalized_id]
             except KeyError as exc:
                 raise KeyError(
                     f"unknown focused mirror input {normalized_id!r}"
@@ -738,9 +762,13 @@ class FocusedMirrorDependencyIndex:
 
         with self._lock:
             current_dependency = self._dependencies.get(normalized_id)
+            current_dependency_revision = self._dependency_revisions.get(normalized_id)
         if current_dependency is None:
             raise KeyError(f"unknown focused mirror input {normalized_id!r}")
-        if current_dependency != dependency:
+        if (
+            current_dependency != dependency
+            or current_dependency_revision != dependency_revision
+        ):
             # Never return a bounded snapshot captured against selectors that ceased
             # to be authoritative while the mirror read was in flight. The fallback
             # itself is revision-stamped because the registry can change again while

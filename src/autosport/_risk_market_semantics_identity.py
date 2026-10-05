@@ -31,6 +31,8 @@ _CANONICAL_CONTEXT_VALIDATOR = _CONTEXT_TYPE.__post_init__
 _CANONICAL_PROPOSED_LEG_VALIDATOR = _risk._validate_proposed_ticket_leg
 _CANONICAL_MARKET_SETTLEMENT_KEY = _domain._CANONICAL_MARKET_SETTLEMENT_KEY
 _CANONICAL_SEMANTIC_IDENTITY = _domain._CANONICAL_SEMANTIC_IDENTITY
+_CANONICAL_QUOTE_TO_DICT = _risk._CANONICAL_MARKET_EVENT_TO_DICT
+_CANONICAL_QUOTE_FROM_DICT = _risk._CANONICAL_MARKET_EVENT_FROM_DICT
 
 _policy_namespace = vars(_POLICY_TYPE)
 _original_quote_descriptor = _policy_namespace.get("_quote_risk_decision")
@@ -48,6 +50,8 @@ def _leg_settlement_key(
     _leg_validator=_CANONICAL_PROPOSED_LEG_VALIDATOR,
     _semantic_identity=_CANONICAL_SEMANTIC_IDENTITY,
     _settlement_key=_CANONICAL_MARKET_SETTLEMENT_KEY,
+    _to_dict=_CANONICAL_QUOTE_TO_DICT,
+    _from_dict=_CANONICAL_QUOTE_FROM_DICT,
 ) -> str:
     if type(leg) is not _leg_type:
         raise ValueError("proposal leg must be an exact TicketLeg")
@@ -69,7 +73,7 @@ def _quote_settlement_key(
     # Re-run the canonical serializer/parser contract so object.__setattr__ changes
     # after context construction cannot smuggle noncanonical quote fields into a
     # money-moving decision.
-    rebuilt = _quote_type.from_dict(quote.to_dict())
+    rebuilt = _from_dict(_to_dict(quote))
     if rebuilt != quote:
         raise ValueError("proposal quote is non-canonical")
     semantics = quote.market_semantics_id
@@ -205,6 +209,7 @@ def _candidate_payload(
     _validator=_validate_context_market_semantics,
     _leg_key=_leg_settlement_key,
     _quote_key=_quote_settlement_key,
+    _quote_to_dict=_CANONICAL_QUOTE_TO_DICT,
 ) -> dict[str, object]:
     if type(context) is not _context_type:
         raise ValueError("risk candidate requires canonical ProposedTicketRiskContext")
@@ -233,7 +238,7 @@ def _candidate_payload(
             }
             for _, leg in leg_pairs
         ],
-        "quotes": [quote.to_dict() for _, quote in quote_pairs],
+        "quotes": [_quote_to_dict(quote) for _, quote in quote_pairs],
         "provider_accounts": [
             {"source_id": source_id, "account_id": account_id}
             for source_id, account_id in context.provider_accounts

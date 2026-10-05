@@ -11,6 +11,7 @@ from typing import Callable
 from .continuous_session import (
     ContinuousSessionStatus,
     ContinuousTickResult,
+    SessionState,
     SessionStoppedError,
 )
 from .operator_source_registry import (
@@ -246,10 +247,18 @@ def _require_runtime_status_identity(
     status: object,
     *,
     expected_source_id: str | None,
+    expected_session_id: str | None = None,
+    expected_state: SessionState | None = None,
 ) -> ContinuousSessionStatus:
     if type(status) is not ContinuousSessionStatus:
         raise ProductEntrypointError(
             "product runtime returned a non-canonical session status"
+        )
+    if type(status.session_id) is not str or not status.session_id or (
+        status.session_id.strip() != status.session_id
+    ):
+        raise ProductEntrypointError(
+            "product runtime session status has invalid session identity"
         )
     if (
         expected_source_id is not None
@@ -258,6 +267,17 @@ def _require_runtime_status_identity(
         raise ProductEntrypointError(
             "product runtime session status changed configured source identity"
         )
+    if (
+        expected_session_id is not None
+        and status.session_id != expected_session_id
+    ):
+        raise ProductEntrypointError(
+            "product runtime session status changed lifecycle session identity"
+        )
+    if expected_state is not None and status.state is not expected_state:
+        raise ProductEntrypointError(
+            "product runtime session status has unexpected lifecycle state"
+        )
     return status
 
 
@@ -265,14 +285,28 @@ def _require_runtime_tick_identity(
     tick: object,
     *,
     expected_source_id: str | None,
+    expected_session_id: str | None = None,
 ) -> ContinuousTickResult:
     if type(tick) is not ContinuousTickResult:
         raise ProductEntrypointError(
             "product runtime returned a non-canonical tick result"
         )
+    if type(tick.session_id) is not str or not tick.session_id or (
+        tick.session_id.strip() != tick.session_id
+    ):
+        raise ProductEntrypointError(
+            "product runtime tick has invalid session identity"
+        )
     if expected_source_id is not None and tick.source_id != expected_source_id:
         raise ProductEntrypointError(
             "product runtime tick changed configured source identity"
+        )
+    if (
+        expected_session_id is not None
+        and tick.session_id != expected_session_id
+    ):
+        raise ProductEntrypointError(
+            "product runtime tick changed lifecycle session identity"
         )
     return tick
 
@@ -564,12 +598,15 @@ class ProductGuiWorker:
                 stopped_status = _require_runtime_status_identity(
                     runtime.stop(stop_reason),
                     expected_source_id=expected_source_id,
+                    expected_state=SessionState.STOPPED,
                 )
             else:
                 started_status = _require_runtime_status_identity(
                     runtime.start(),
                     expected_source_id=expected_source_id,
+                    expected_state=SessionState.RUNNING,
                 )
+                lifecycle_session_id = started_status.session_id
                 if expected_source_id is not None:
                     # Serialize STOP acceptance and trusted-profile issuance through the
                     # worker lifecycle lock. This gives the two operations one ordering:
@@ -593,6 +630,7 @@ class ProductGuiWorker:
                         tick = _require_runtime_tick_identity(
                             runtime.tick(),
                             expected_source_id=expected_source_id,
+                            expected_session_id=lifecycle_session_id,
                         )
                     except SessionStoppedError:
                         if not self._stop_event.is_set():
@@ -608,6 +646,8 @@ class ProductGuiWorker:
                 stopped_status = _require_runtime_status_identity(
                     runtime.stop(stop_reason),
                     expected_source_id=expected_source_id,
+                    expected_session_id=lifecycle_session_id,
+                    expected_state=SessionState.STOPPED,
                 )
         except BaseException as exc:
             terminal_error = exc

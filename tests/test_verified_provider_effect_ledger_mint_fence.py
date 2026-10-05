@@ -10,6 +10,7 @@ from autosport.real_execution_ledger import (
     ExecutionAction,
     ExecutionLedgerIntegrityError,
     ExecutionPlan,
+    ExecutionStateError,
     RealExecutionLedger,
     VerifiedProviderEffectBindingView,
 )
@@ -97,7 +98,7 @@ def test_caller_constructed_verified_effect_cannot_open_writer_grant(tmp_path) -
     before = ledger.verified_snapshot()
 
     with pytest.raises(
-        ExecutionLedgerIntegrityError,
+        ExecutionStateError,
         match="verified provider effect evidence is not authoritative",
     ):
         ledger._bind_verified_provider_effect_evidence(
@@ -113,7 +114,7 @@ def test_caller_constructed_verified_effect_cannot_open_writer_grant(tmp_path) -
 def test_failed_writer_verification_does_not_leak_raw_append_grant(tmp_path) -> None:
     ledger = _submitted_ledger(tmp_path)
 
-    with pytest.raises(ExecutionLedgerIntegrityError):
+    with pytest.raises(ExecutionStateError):
         ledger._bind_verified_provider_effect_evidence(
             attempt_id="attempt-1",
             evidence=_caller_constructed_effect(),

@@ -233,14 +233,24 @@ class IngestionEngine:
         health_store: SourceHealthStore | None = None,
         clock: Clock | None = None,
     ) -> None:
+        if type(bus) is not MarketEventBus:
+            raise TypeError("bus must be an exact MarketEventBus")
+        if normalizer is not None and type(normalizer) is not CanonicalNormalizer:
+            raise TypeError("normalizer must be an exact CanonicalNormalizer or null")
+        if policy is not None and type(policy) is not IngestionPolicy:
+            raise TypeError("policy must be an exact IngestionPolicy or null")
+        if health_store is not None and type(health_store) is not SourceHealthStore:
+            raise TypeError("health_store must be an exact SourceHealthStore or null")
+        if clock is not None and not callable(clock):
+            raise TypeError("clock must be callable or null")
         self.bus = bus
-        self.normalizer = normalizer or CanonicalNormalizer()
-        self.policy = policy or IngestionPolicy()
+        self.normalizer = normalizer if normalizer is not None else CanonicalNormalizer()
+        self.policy = policy if policy is not None else IngestionPolicy()
         self.health_store = health_store
-        self.clock = clock or _utc_now_iso
+        self.clock = clock if clock is not None else _utc_now_iso
 
     def poll_once(self, provider: MarketProvider, max_items: int = 1000) -> IngestionStats:
-        if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0:
+        if type(max_items) is not int or max_items <= 0:
             raise ValueError("max_items must be a positive integer")
         if max_items > self.policy.max_batch_size:
             raise ValueError(

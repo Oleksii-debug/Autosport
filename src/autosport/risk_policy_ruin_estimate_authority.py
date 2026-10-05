@@ -121,8 +121,49 @@ def _canonical_json(value: object) -> bytes:
         ) from exc
 
 
+_ESTIMATE_AUTHORITY_PROPERTY_NAMES = (
+    "product_preoutcome_policy_proven",
+    "frozen_policy_execution_proven",
+    "iid_qualified",
+    "proposal_target_execution_proven",
+    "risk_upper_bound_computed",
+    "grants_ticket_authority",
+    "grants_real_money_authority",
+)
+
+
+def _build_estimate_meta():
+    sealed: set[type] = set()
+    protected = frozenset(_ESTIMATE_AUTHORITY_PROPERTY_NAMES)
+
+    class _EstimateMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            if cls in sealed and name in protected:
+                raise TypeError(
+                    "risk policy estimate authority surface is sealed: " + name
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name: str) -> None:
+            if cls in sealed and name in protected:
+                raise TypeError(
+                    "risk policy estimate authority surface is sealed: " + name
+                )
+            super().__delattr__(name)
+
+        @classmethod
+        def seal(mcls, cls: type) -> None:
+            sealed.add(cls)
+
+    return _EstimateMeta
+
+
+_EstimateMeta = _build_estimate_meta()
+del _build_estimate_meta
+
+
 @dataclass(frozen=True, slots=True, init=False)
-class ProductFixedNRiskPolicyEstimate:
+class ProductFixedNRiskPolicyEstimate(metaclass=_EstimateMeta):
     """Product-derived ruin bound for the frozen simulator stake policy.
 
     This result is scientific/PAPER evidence for the exact precommitted policy
@@ -194,15 +235,8 @@ class ProductFixedNRiskPolicyEstimate:
 
 
 _ESTIMATE_TYPE = ProductFixedNRiskPolicyEstimate
-_ESTIMATE_AUTHORITY_PROPERTY_NAMES = (
-    "product_preoutcome_policy_proven",
-    "frozen_policy_execution_proven",
-    "iid_qualified",
-    "proposal_target_execution_proven",
-    "risk_upper_bound_computed",
-    "grants_ticket_authority",
-    "grants_real_money_authority",
-)
+_EstimateMeta.seal(_ESTIMATE_TYPE)
+del _EstimateMeta
 _ESTIMATE_AUTHORITY_PROPERTY_SURFACE = tuple(
     (
         name,

@@ -1368,9 +1368,9 @@ def _install_account_snapshot_acquisition_authority() -> None:
                             "canonical Betfair account snapshot reader has instance-level "
                             f"dispatch shadow: {method_name}"
                         )
-                    # Positive acquisition owns the closure-captured top-level
-                    # snapshot reader. Later class rebinding must neither replace
-                    # nor revoke that already-captured canonical read authority.
+                    # The acquisition implementation owns the closure-captured
+                    # top-level snapshot reader. Later class rebinding must neither
+                    # replace nor revoke that canonical provider-read implementation.
                     candidate = (
                         canonical_snapshot_read
                         if method_name == "read_account_snapshot"
@@ -1476,7 +1476,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
             )
             if type(acquired) is not AuthoritativeAccountSnapshot:
                 raise AccountSnapshotAcquisitionError(
-                    "live account snapshot authority requires exact acquired evidence"
+                    "canonical account snapshot acquisition requires exact durable evidence"
                 )
             return acquired
 

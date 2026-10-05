@@ -5,7 +5,11 @@ freshness projection. It adds only the missing product-owned composition: issue 
 bounded read-only marketSubscription on the authenticated socket, require provider
 SUCCESS on that same connection, consume only transport-issued frames, and promote
 otherwise-fresh structural evidence only while the exact acknowledged subscription and
-connection remain authoritative in this process.
+connection remain authoritative in this process. Decision eligibility also requires
+that the exact transport-issued socket-ingress monotonic timestamp remains within the
+same freshness budget: a frame that waited too long in the product receive/processing
+queue is non-actionable even when provider wall timestamps still look fresh. Transport
+and authenticated composition must prove one exact monotonic clock domain for that age.
 
 It does not add betting writes, order-stream actions, durable-persistence authority,
 account attestation, settlement, execution, or real-money authority.

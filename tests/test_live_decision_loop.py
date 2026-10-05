@@ -10459,5 +10459,58 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             loop.close()
 
 
+
+    def test_cycle_entry_rejects_paper_execution_quote_age_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            model = PaperExecutionModelConfig(
+                model_id="execution-quote-age-authority-test",
+                model_version="1",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="execution-quote-age-authority-test",
+                seed="execution-quote-age-authority",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            book = PaperBook("1000")
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=PaperExecutionLedger(workspace / "paper-execution.jsonl"),
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),)],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                book=book,
+                paper_execution=execution,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            execution.max_quote_age = timedelta(seconds=500)
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "PAPER execution quote-age authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(observer.calls, 0)
+            self.assertFalse(loop.progress_path.exists())
+            loop.close()
+
+
 if __name__ == "__main__":
     unittest.main()

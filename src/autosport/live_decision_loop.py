@@ -2141,7 +2141,7 @@ class PersistentLiveDecisionLoop:
         owns_history_store = False
         try:
             for input_id in input_ids:
-                while True:
+                for _attempt in range(_MARKET_FRONTIER_RETRY_LIMIT):
                     dependency_revision = self.dependencies.dependency_revision(
                         input_id
                     )
@@ -2201,6 +2201,10 @@ class PersistentLiveDecisionLoop:
                     # and snapshot/deadline materialization. Retry the complete
                     # decision read so a replacement that requires durable-history
                     # fallback cannot be evaluated through latest-only mirror truth.
+                else:
+                    raise LiveDecisionProgressError(
+                        "focused dependency changed continuously during snapshot capture"
+                    )
 
                 snapshots[input_id] = snapshot
                 self._input_market_sha256[input_id] = _canonical_json_sha256(

@@ -905,6 +905,22 @@ def test_operation_lock_registration_ignores_rebound_threading_module(
 
 
 @pytest.mark.parametrize(
+    "guarded_callable",
+    (
+        PaperBook.__init__,
+        PaperBook.open_ticket,
+        PaperBook.settle,
+        PaperBook.save,
+        PaperBook.committed_stake.fget,
+    ),
+)
+def test_public_authority_wrappers_do_not_expose_unwrapped_bypass(
+    guarded_callable,
+) -> None:
+    assert not hasattr(guarded_callable, "__wrapped__")
+
+
+@pytest.mark.parametrize(
     "operation",
     ("committed_stake", "open_ticket", "settle", "save"),
 )

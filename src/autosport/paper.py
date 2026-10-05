@@ -409,6 +409,9 @@ def _serialized_paperbook_operation(method):
         with lock:
             return method(self, *args, **kwargs)
 
+    # functools.wraps publishes the guarded callable through __wrapped__, which
+    # would let callers bypass serialization and authority checks directly.
+    del serialized.__wrapped__
     return serialized
 
 
@@ -438,6 +441,8 @@ def _guard_paperbook_runtime_authority(method):
             raise ValueError("PaperBook causal-history authority dispatch changed")
         return method(self, *args, **kwargs)
 
+    # Do not publish an unguarded entry point via functools.wraps.__wrapped__.
+    del guarded.__wrapped__
     return guarded
 
 
@@ -479,6 +484,9 @@ def _guard_paperbook_constructor_authority(method):
         )
         return method(self, *args, **kwargs)
 
+    # Constructor registration is part of the authority boundary; exposing the
+    # original __init__ through __wrapped__ would permit registry-free objects.
+    del guarded.__wrapped__
     return guarded
 
 

@@ -235,6 +235,51 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
                     "REJECT_PAPER_RESEARCH_CANDIDATE",
                 )
 
+
+    def test_forecast_is_rejected_when_any_included_evidence_is_quality_blocked(self):
+        bad_hash = "c" * 64
+        old_bad = self._evidence(
+            content_hash=bad_hash,
+            available_at="2026-09-13T10:00:00+00:00",
+            quality_flags=("STALE_SOURCE",),
+            evidence_id="evidence-b-old-bad",
+        )
+        latest_clean = self._evidence(
+            content_hash=EVIDENCE_HASH,
+            available_at="2026-09-13T10:00:01+00:00",
+            quality_flags=(),
+            evidence_id="evidence-b-latest-clean",
+        )
+        forecast = self._forecast(
+            evidence_hashes=(bad_hash, EVIDENCE_HASH),
+            input_cutoff="2026-09-13T10:00:01+00:00",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            book = self._book()
+            before = set(book.tickets)
+            book, ledger, decision = self._decide(
+                tmp,
+                book=book,
+                forecast=forecast,
+                evidence=[old_bad, latest_clean],
+            )
+
+            self.assertFalse(decision.approved)
+            self.assertEqual(set(book.tickets), before)
+            self.assertTrue(
+                any(
+                    "blocked data-quality flags in forecast evidence: STALE_SOURCE"
+                    in reason
+                    for reason in decision.reasons
+                )
+            )
+            envelope = json.loads(ledger.path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                envelope["record"]["action"],
+                "REJECT_PAPER_RESEARCH_CANDIDATE",
+            )
+
     def test_future_forecast_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             _book, _ledger, decision = self._decide(

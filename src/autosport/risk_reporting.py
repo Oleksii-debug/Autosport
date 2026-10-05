@@ -20,6 +20,7 @@ from .domain import TicketStatus
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
 from . import economic_goal_store as _economic_goal_store
+from . import json_integrity as _json_integrity
 from .economic_goal_store import (
     EconomicGoalStore,
     economic_goal_from_payload,
@@ -91,6 +92,26 @@ _CANONICAL_ECONOMIC_GOAL_STORE_MODULE_PATH = _economic_goal_store.Path
 _CANONICAL_ECONOMIC_GOAL_FROM_JSON = _economic_goal_store.economic_goal_from_json
 _CANONICAL_GOAL_STRICT_JSON_LOADS = _economic_goal_store.strict_json_loads
 _CANONICAL_GOAL_FROM_PAYLOAD_TRANSITIVE = _economic_goal_store.economic_goal_from_payload
+_CANONICAL_GOAL_REQUIRE_EXACT_KEYS = _economic_goal_store._require_exact_keys
+_CANONICAL_GOAL_DECIMAL_TEXT = _economic_goal_store._decimal_text
+_CANONICAL_GOAL_RESTRICTION_SET = _economic_goal_store._restriction_set
+_CANONICAL_GOAL_DECIMAL_TYPE = _economic_goal_store.Decimal
+_CANONICAL_GOAL_OBJECTIVE_TYPE = _economic_goal_store.EconomicObjective
+_CANONICAL_GOAL_AUTOMATION_TYPE = _economic_goal_store.AutomationLevel
+_CANONICAL_GOAL_CONTRACT_TYPE = _economic_goal_store.EconomicGoalContract
+_CANONICAL_GOAL_SCHEMA = _economic_goal_store.ECONOMIC_GOAL_SCHEMA
+_CANONICAL_GOAL_SCHEMA_VERSION = _economic_goal_store.ECONOMIC_GOAL_SCHEMA_VERSION
+_CANONICAL_GOAL_CONTRACT_KEYS = _economic_goal_store._CONTRACT_KEYS
+_CANONICAL_GOAL_ROOT_KEYS = _economic_goal_store._ROOT_KEYS
+_CANONICAL_GOAL_DECIMAL_FIELDS = _economic_goal_store._DECIMAL_FIELDS
+_CANONICAL_GOAL_RESTRICTION_FIELDS = _economic_goal_store._RESTRICTION_FIELDS
+_CANONICAL_JSON_LOADS = _json_integrity.json.loads
+_CANONICAL_JSON_UNIQUE_OBJECT = _json_integrity._unique_json_object
+_CANONICAL_JSON_REJECT_CONSTANT = _json_integrity._reject_nonstandard_json_constant
+_CANONICAL_JSON_PARSE_INTEGER = _json_integrity._parse_bounded_json_integer
+_CANONICAL_JSON_VALIDATE_VALUE = _json_integrity._validate_strict_json_value
+_CANONICAL_JSON_ISFINITE = _json_integrity.math.isfinite
+_CANONICAL_JSON_INTEGER_MAX_DIGITS = _json_integrity._JSON_INTEGER_MAX_DIGITS
 _CANONICAL_GOAL_STORE_PATH_TYPE = type(_CANONICAL_ECONOMIC_GOAL_STORE_MODULE_PATH("."))
 _CANONICAL_GOAL_STORE_PATH_READ_TEXT = _CANONICAL_GOAL_STORE_PATH_TYPE.read_text
 _CANONICAL_PATH = Path
@@ -148,6 +169,14 @@ _CANONICAL_DURABLE_RESOLVER_CODE_WITNESSES = tuple(
         _CANONICAL_ECONOMIC_GOAL_FROM_JSON,
         _CANONICAL_GOAL_STRICT_JSON_LOADS,
         _CANONICAL_GOAL_FROM_PAYLOAD_TRANSITIVE,
+        _CANONICAL_GOAL_REQUIRE_EXACT_KEYS,
+        _CANONICAL_GOAL_DECIMAL_TEXT,
+        _CANONICAL_GOAL_RESTRICTION_SET,
+        _CANONICAL_JSON_LOADS,
+        _CANONICAL_JSON_UNIQUE_OBJECT,
+        _CANONICAL_JSON_REJECT_CONSTANT,
+        _CANONICAL_JSON_PARSE_INTEGER,
+        _CANONICAL_JSON_VALIDATE_VALUE,
         _CANONICAL_GOAL_STORE_PATH_READ_TEXT,
         _CANONICAL_PATH_NEW,
         _CANONICAL_PATH_IS_ABSOLUTE,
@@ -185,6 +214,35 @@ def _require_canonical_durable_resolver_code_authority() -> None:
         is not _CANONICAL_GOAL_STRICT_JSON_LOADS
         or _economic_goal_store.economic_goal_from_payload
         is not _CANONICAL_GOAL_FROM_PAYLOAD_TRANSITIVE
+        or _economic_goal_store._require_exact_keys
+        is not _CANONICAL_GOAL_REQUIRE_EXACT_KEYS
+        or _economic_goal_store._decimal_text
+        is not _CANONICAL_GOAL_DECIMAL_TEXT
+        or _economic_goal_store._restriction_set
+        is not _CANONICAL_GOAL_RESTRICTION_SET
+        or _economic_goal_store.Decimal is not _CANONICAL_GOAL_DECIMAL_TYPE
+        or _economic_goal_store.EconomicObjective is not _CANONICAL_GOAL_OBJECTIVE_TYPE
+        or _economic_goal_store.AutomationLevel is not _CANONICAL_GOAL_AUTOMATION_TYPE
+        or _economic_goal_store.EconomicGoalContract is not _CANONICAL_GOAL_CONTRACT_TYPE
+        or _economic_goal_store.ECONOMIC_GOAL_SCHEMA is not _CANONICAL_GOAL_SCHEMA
+        or _economic_goal_store.ECONOMIC_GOAL_SCHEMA_VERSION
+        is not _CANONICAL_GOAL_SCHEMA_VERSION
+        or _economic_goal_store._CONTRACT_KEYS is not _CANONICAL_GOAL_CONTRACT_KEYS
+        or _economic_goal_store._ROOT_KEYS is not _CANONICAL_GOAL_ROOT_KEYS
+        or _economic_goal_store._DECIMAL_FIELDS is not _CANONICAL_GOAL_DECIMAL_FIELDS
+        or _economic_goal_store._RESTRICTION_FIELDS
+        is not _CANONICAL_GOAL_RESTRICTION_FIELDS
+        or _json_integrity.json.loads is not _CANONICAL_JSON_LOADS
+        or _json_integrity._unique_json_object is not _CANONICAL_JSON_UNIQUE_OBJECT
+        or _json_integrity._reject_nonstandard_json_constant
+        is not _CANONICAL_JSON_REJECT_CONSTANT
+        or _json_integrity._parse_bounded_json_integer
+        is not _CANONICAL_JSON_PARSE_INTEGER
+        or _json_integrity._validate_strict_json_value
+        is not _CANONICAL_JSON_VALIDATE_VALUE
+        or _json_integrity.math.isfinite is not _CANONICAL_JSON_ISFINITE
+        or _json_integrity._JSON_INTEGER_MAX_DIGITS
+        != _CANONICAL_JSON_INTEGER_MAX_DIGITS
         or _CANONICAL_GOAL_STORE_PATH_TYPE.read_text
         is not _CANONICAL_GOAL_STORE_PATH_READ_TEXT
     ):

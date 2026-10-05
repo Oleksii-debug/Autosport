@@ -559,6 +559,8 @@ def build_product_issued_paper_equity_path(
         net_equity_authoritative=net_equity_authoritative,
         correction_lineage_complete=correction_lineage_complete,
         restated_history_authoritative=restated_history_authoritative,
+        frozen_scope_complete=frozen_scope_complete,
+        historical_reresolution_complete=historical_reresolution_complete,
     )
 
 

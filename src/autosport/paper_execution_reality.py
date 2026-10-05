@@ -977,17 +977,28 @@ class PaperExecutionEvidenceRegistry(_LegacyPaperExecutionEvidenceRegistry):
 
     @property
     def authority_ledger(self) -> PaperExecutionLedger:
-        return self._require_authority()
+        return _CANONICAL_EVIDENCE_REGISTRY_REQUIRE_AUTHORITY(self)
 
     def register(self, record: PaperExecutionEvidenceRecord) -> str:
-        ledger = self._require_authority()
+        ledger = _CANONICAL_EVIDENCE_REGISTRY_REQUIRE_AUTHORITY(self)
         _impl._require_canonical_evidence_record_surface(record)
-        ledger.register_observation_evidence(record)
+        _CANONICAL_LEDGER_REGISTER_OBSERVATION_EVIDENCE(ledger, record)
         return record.evidence_id
 
     def resolve(self, evidence_id: str) -> PaperExecutionEvidenceRecord:
-        ledger = self._require_authority()
-        return ledger.resolve_observation_evidence(evidence_id)
+        ledger = _CANONICAL_EVIDENCE_REGISTRY_REQUIRE_AUTHORITY(self)
+        return _CANONICAL_LEDGER_RESOLVE_OBSERVATION_EVIDENCE(ledger, evidence_id)
+
+
+_CANONICAL_EVIDENCE_REGISTRY_REQUIRE_AUTHORITY = (
+    PaperExecutionEvidenceRegistry._require_authority
+)
+_CANONICAL_LEDGER_REGISTER_OBSERVATION_EVIDENCE = (
+    PaperExecutionLedger.register_observation_evidence
+)
+_CANONICAL_LEDGER_RESOLVE_OBSERVATION_EVIDENCE = (
+    PaperExecutionLedger.resolve_observation_evidence
+)
 
 
 def _synthetic_attempt(

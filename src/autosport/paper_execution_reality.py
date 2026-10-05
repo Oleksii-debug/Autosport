@@ -699,6 +699,10 @@ def execute_paper_plan(
         observations = {}
     if not isinstance(observations, Mapping):
         raise TypeError("observations must be a mapping")
+    if type(suspended_action_ids) is not frozenset or any(
+        type(item) is not str for item in suspended_action_ids
+    ):
+        raise TypeError("suspended_action_ids must be a frozenset[str]")
     action_by_id = {action.action_id: action for action in plan.actions}
     if set(observations) - set(action_by_id):
         raise PaperExecutionStateError("observations contain action outside execution plan")

@@ -237,6 +237,95 @@ def test_risk_state_graph_ignores_rebound_paperbook_economic_roots(monkeypatch) 
     }
 
 
+
+def test_single_evidence_ingress_ignores_rebound_validator(monkeypatch) -> None:
+    policy = _policy()
+    book = PaperBook("100")
+    context = _context(1)
+    evidence = _single_evidence(policy, book, context)
+    calls = {"validator": 0}
+
+    def hostile_validator(self):
+        calls["validator"] += 1
+        raise AssertionError("live RiskOfRuinEvidence validator executed")
+
+    monkeypatch.setattr(RiskOfRuinEvidence, "__post_init__", hostile_validator)
+
+    rebound_context = replace(context, risk_of_ruin_evidence=evidence)
+    decision = policy.evaluate(book, Decimal("1"), context=rebound_context)
+
+    assert not decision.allowed
+    assert calls == {"validator": 0}
+
+
+def test_policy_state_ignores_rebound_economic_goal_validator(monkeypatch) -> None:
+    policy = _policy(max_risk_of_ruin=Decimal("1"))
+    book = PaperBook("100")
+    context = _context(1)
+    calls = {"validator": 0}
+
+    def hostile_validator(self):
+        calls["validator"] += 1
+        raise AssertionError("live EconomicGoalContract validator executed")
+
+    monkeypatch.setattr(EconomicGoalContract, "__post_init__", hostile_validator)
+
+    decision = policy.evaluate(book, Decimal("1"), context=context)
+
+    assert decision.allowed
+    assert calls == {"validator": 0}
+
+
+def test_vector_evidence_ingress_ignores_rebound_validator(monkeypatch) -> None:
+    policy = _policy()
+    relaxed = _policy(max_risk_of_ruin=Decimal("1"))
+    book = PaperBook("100")
+    contexts = (_context(1), _context(2))
+    signals = (Decimal("0.01"), Decimal("0.01"))
+    baseline = relaxed.derive_goal_stake_vector(book, signals, contexts=contexts)
+    assert baseline.action == "STAKE_VECTOR"
+
+    portfolio = policy.risk_of_ruin_portfolio_sha256(book)
+    candidate_vector = policy.risk_of_ruin_candidate_vector_sha256(contexts)
+    assert portfolio is not None
+    assert candidate_vector is not None
+    evidence = RiskOfRuinVectorEvidence(
+        evidence_id="validator-rebind-vector",
+        research_protocol_sha256="c" * 64,
+        reproducibility_bundle_sha256="d" * 64,
+        producer_identity="canonical-vector-risk-evaluator",
+        causal_cutoff=CAUSAL_CUTOFF,
+        evaluated_at=EVALUATED_AT,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        base_portfolio_sha256=portfolio,
+        candidate_vector_sha256=candidate_vector,
+        evaluated_stakes=baseline.stakes,
+        upper_bound=Decimal("0.005"),
+    )
+    calls = {"validator": 0}
+
+    def hostile_validator(self):
+        calls["validator"] += 1
+        raise AssertionError("live RiskOfRuinVectorEvidence validator executed")
+
+    monkeypatch.setattr(
+        RiskOfRuinVectorEvidence,
+        "__post_init__",
+        hostile_validator,
+    )
+
+    decision = policy.derive_goal_stake_vector(
+        book,
+        signals,
+        contexts=contexts,
+        risk_of_ruin_vector_evidence=evidence,
+    )
+
+    assert decision.action != "STAKE_VECTOR"
+    assert calls == {"validator": 0}
+
+
 def test_caller_cannot_mint_single_candidate_risk_of_ruin_authority() -> None:
     """Freeze #955: public hashes plus a caller bound must not grant authority."""
 

@@ -63,6 +63,14 @@ class ReplayFirewallReuseTests(unittest.TestCase):
         self.assertEqual(run.event_count, 2)
         self.assertEqual(seen, [1, 2])
 
+    def test_replay_engine_rejects_market_event_subclasses(self) -> None:
+        class Event(MarketEvent):
+            pass
+
+        hostile = Event.from_dict(self._event().to_dict())
+        with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+            ReplayEngine([hostile])
+
     def test_replay_engine_rejects_firewall_subclasses_before_event_iteration(self) -> None:
         class Firewall(ReplayLeakageFirewall):
             pass

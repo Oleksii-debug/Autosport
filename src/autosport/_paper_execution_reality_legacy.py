@@ -11,7 +11,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
-from .real_execution_ledger import ExecutionAction, ExecutionPlan
+from .real_execution_ledger import (
+    ExecutionAction,
+    ExecutionPlan,
+    _validate_decimal_text_resource_bound,
+)
 
 
 _SCHEMA_VERSION = 2
@@ -78,12 +82,22 @@ def _timestamp_text(value: datetime) -> str:
 
 def _decimal(value: object, name: str, *, allow_zero: bool = False) -> Decimal:
     try:
-        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
+        if type(value) is Decimal:
+            parsed = value
+        elif type(value) is str:
+            parsed = Decimal(value)
+        elif type(value) is int:
+            parsed = Decimal(value)
+        else:
+            raise ValueError(f"{name} must be an exact Decimal, string or integer")
     except (InvalidOperation, ValueError, TypeError) as exc:
+        if isinstance(exc, ValueError) and "exact Decimal" in str(exc):
+            raise
         raise ValueError(f"{name} must be a finite Decimal") from exc
     if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):
         comparator = ">= 0" if allow_zero else "> 0"
         raise ValueError(f"{name} must be finite and {comparator}")
+    _validate_decimal_text_resource_bound(parsed)
     return parsed
 
 

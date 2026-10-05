@@ -68,6 +68,40 @@ class PaperRiskReportingTests(unittest.TestCase):
             sport=sport,
         )
 
+    def test_risk_report_crosscheck_ignores_rebound_locked_capital_helper(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(112),),
+            Decimal("10"),
+            placed_at="2026-09-21T19:10:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T19:15:00+00:00",
+        )
+        goal = self._goal()
+        expected = build_paper_risk_report(book, goal)
+        attacker_called = False
+
+        def attacker_helper(_ticket):
+            nonlocal attacker_called
+            attacker_called = True
+            return Decimal("0")
+
+        with patch.object(
+            risk_reporting,
+            "_paper_ticket_equity_locked_capital",
+            side_effect=attacker_helper,
+        ):
+            actual = build_paper_risk_report(book, goal)
+
+        self.assertFalse(attacker_called)
+        self.assertEqual(actual, expected)
+
+
     def test_equity_builder_ignores_rebound_locked_capital_helper(self) -> None:
         book = PaperBook("100")
         ticket = book.open_ticket(

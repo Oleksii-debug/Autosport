@@ -48,6 +48,7 @@ _WORKSPACE_LOCK_TYPE = WorkspaceEconomicLock
 _PAPERBOOK_LOAD = PaperBook.load
 _PAPERBOOK_VALIDATE_LOADED_STATE = PaperBook._validate_loaded_state
 _ECONOMIC_GOAL_LOAD = EconomicGoalStore.load
+_OPENING_PAPERBOOK_SHA256 = None
 _AUTHORITY_RECOVER = MonotonicWorkspaceAuthority.recover
 _AUTHORITY_PREPARE = MonotonicWorkspaceAuthority.prepare
 _AUTHORITY_COMMIT = MonotonicWorkspaceAuthority.commit
@@ -431,6 +432,7 @@ class ProductEconomicSessionStore:
         self._clock_witness = self._clock
         self._product_clock_witness = self._product_clock
         self._uuid4_witness = _UUID4
+        self._opening_paperbook_sha256_witness = _opening_paperbook_sha256
         self._workspace_lock_type_witness = _WORKSPACE_LOCK_TYPE
         self._paperbook_load_witness = _PAPERBOOK_LOAD
         self._paperbook_validate_witness = _PAPERBOOK_VALIDATE_LOADED_STATE
@@ -482,6 +484,7 @@ class ProductEconomicSessionStore:
             or _PAPERBOOK_VALIDATE_LOADED_STATE is not self._paperbook_validate_witness
             or _WORKSPACE_LOCK_TYPE is not self._workspace_lock_type_witness
             or _UUID4 is not self._uuid4_witness
+            or _opening_paperbook_sha256 is not self._opening_paperbook_sha256_witness
             or EconomicGoalStore.load is not self._economic_goal_load_witness
             or MonotonicWorkspaceAuthority.recover is not self._authority_recover_witness
             or MonotonicWorkspaceAuthority.prepare is not self._authority_prepare_witness
@@ -582,7 +585,7 @@ class ProductEconomicSessionStore:
 
     def _publish_new(self, goal, goal_contract_sha256: str) -> ProductEconomicSession:
         self._require_configuration_authority()
-        opening_sha256 = _opening_paperbook_sha256(self._paperbook_path_witness)
+        opening_sha256 = self._opening_paperbook_sha256_witness(self._paperbook_path_witness)
         self._require_configuration_authority()
         payload = _state_payload(
             workspace_instance_id=self._authority_witness.workspace_instance_id,

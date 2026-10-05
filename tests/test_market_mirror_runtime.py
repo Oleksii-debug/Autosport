@@ -1950,5 +1950,42 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
                     runtime.drain(max_items=value)
 
 
+    def test_proven_history_decision_state_retries_same_selector_reincarnation(self) -> None:
+        mirror = MarketMirror()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        provider_a = self.event(
+            source_id="provider-a",
+            selection="selection-a",
+            sequence=1,
+        )
+        history = ((provider_a, 1),)
+        original_resolve = dependencies._decision_state_for_dependency
+        reads = [0]
+
+        def reincarnate_same_dependency(*args, **kwargs):
+            result = original_resolve(*args, **kwargs)
+            reads[0] += 1
+            if reads[0] == 1:
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-a")
+            return result
+
+        with patch.object(
+            dependencies,
+            "_decision_state_for_dependency",
+            side_effect=reincarnate_same_dependency,
+        ):
+            snapshot, _deadline = dependencies.decision_state_from_proven_history(
+                "decision",
+                history,
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(reads[0], 2)
+        self.assertEqual(snapshot.events, (provider_a,))
+
+
 if __name__ == "__main__":
     unittest.main()

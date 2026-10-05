@@ -7,6 +7,28 @@ from .domain import MarketEvent
 from .storage import SQLiteMarketStore
 
 
+def _subscriber_failure(exc: BaseException) -> Exception:
+    """Normalize subscriber interrupts without losing post-commit disposition."""
+
+    if isinstance(exc, Exception):
+        return exc
+    try:
+        detail = str(exc)
+    except BaseException:
+        detail = "<unprintable exception>"
+    wrapped = RuntimeError(
+        f"subscriber raised {type(exc).__name__}: {detail}"
+    )
+    try:
+        wrapped.add_note(
+            "original subscriber failure was a BaseException and was normalized "
+            "after market persistence committed"
+        )
+    except BaseException:
+        pass
+    return wrapped
+
+
 class MarketEventDeliveryError(ExceptionGroup):
     """Subscriber failures raised only after persistence, with the exact durable outcome."""
 
@@ -82,8 +104,8 @@ class MarketEventBus:
             for callback in subscribers:
                 try:
                     callback(deepcopy(event))
-                except Exception as exc:
-                    failures.append(exc)
+                except BaseException as exc:
+                    failures.append(_subscriber_failure(exc))
         if failures:
             raise MarketEventDeliveryError(
                 "one or more market event subscribers failed after persistence",

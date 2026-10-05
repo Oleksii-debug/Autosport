@@ -7,9 +7,11 @@ from decimal import Decimal, DecimalException, Inexact, localcontext
 from . import paper as _paper
 from .domain import PaperTicket, TicketLeg, TicketStatus
 from .exchange_exposure import locked_capital_for_exchange_side
+from .real_execution_ledger import _validate_decimal_text_resource_bound
 
 
 _ORIGINAL_LOCKED_CAPITAL = locked_capital_for_exchange_side
+_ORIGINAL_DECIMAL_RESOURCE_BOUND = _validate_decimal_text_resource_bound
 
 _ORIGINAL_OPEN_TICKET = _paper.PaperBook.open_ticket
 _ORIGINAL_SETTLE = _paper.PaperBook.settle
@@ -35,6 +37,20 @@ _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY = _paper._require_paperbook_causal_hi
 _ORIGINAL_RECORD_TICKET_OPENING_AUTHORITY = _paper._record_ticket_opening_authority
 _ORIGINAL_ADVANCE_CAUSAL_HISTORY_OPEN = _paper._advance_paperbook_causal_history_open
 _ORIGINAL_ADVANCE_CAUSAL_HISTORY_SETTLE = _paper._advance_paperbook_causal_history_settle
+
+
+def _require_exact_decimal(value: object, label: str) -> Decimal:
+    if type(value) is not Decimal:
+        raise ValueError(f"PaperBook {label} must be an exact Decimal")
+    if not value.is_finite():
+        raise ValueError(f"PaperBook snapshot contains non-finite {label}")
+    try:
+        _ORIGINAL_DECIMAL_RESOURCE_BOUND(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"PaperBook {label} exceeds canonical Decimal resource bounds"
+        ) from exc
+    return value
 
 
 def _require_exact_text(
@@ -204,7 +220,7 @@ def _canonical_open_stake(book: _paper.PaperBook, stake) -> Decimal:
     amount = Decimal(str(stake))
     if type(amount) is not Decimal:
         raise ValueError("stake normalization must produce exact Decimal")
-    _ORIGINAL_REQUIRE_FINITE(amount, "stake")
+    _require_exact_decimal(amount, "stake")
     return amount
 
 
@@ -290,7 +306,7 @@ def _validate_ticket_leg(
             raise ValueError(
                 f"PaperBook locked_odds{suffix} must be an exact Decimal"
             )
-        _ORIGINAL_REQUIRE_FINITE(leg.locked_odds, f"locked_odds{suffix}")
+        _require_exact_decimal(leg.locked_odds, f"locked_odds{suffix}")
         if leg.locked_odds <= 1:
             raise ValueError("PaperBook snapshot decimal odds must be greater than 1")
         return leg
@@ -545,7 +561,7 @@ def _settlement_result(
         )
 
     _require_supported_ticket_shape(ticket)
-    _ORIGINAL_REQUIRE_FINITE(balance, "balance")
+    _require_exact_decimal(balance, "balance")
     leg = ticket.legs[0]
     _validate_ticket_leg(_paper.PaperBook, leg, ticket_id=ticket.ticket_id)
     known = {leg.quote_key}
@@ -575,7 +591,7 @@ def _settlement_result(
                 "PaperBook LAY settlement arithmetic is not representable"
             ) from exc
 
-    _ORIGINAL_REQUIRE_FINITE(payout, f"settlement payout for ticket {ticket.ticket_id}")
+    _require_exact_decimal(payout, f"settlement payout for ticket {ticket.ticket_id}")
     try:
         with localcontext(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
             new_balance = balance + payout
@@ -585,7 +601,7 @@ def _settlement_result(
         raise ValueError(
             "PaperBook LAY settlement arithmetic is not representable"
         ) from exc
-    _ORIGINAL_REQUIRE_FINITE(
+    _require_exact_decimal(
         new_balance,
         f"balance after settling ticket {ticket.ticket_id}",
     )
@@ -702,8 +718,8 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
     if not _book_has_canonical_lay_ticket(book):
         return _ORIGINAL_VALIDATE_LOADED_STATE(cls, book)
 
-    _ORIGINAL_REQUIRE_FINITE(book.initial_bankroll, "initial_bankroll")
-    _ORIGINAL_REQUIRE_FINITE(book.balance, "balance")
+    _require_exact_decimal(book.initial_bankroll, "initial_bankroll")
+    _require_exact_decimal(book.balance, "balance")
     if book.initial_bankroll <= 0:
         raise ValueError("PaperBook snapshot initial_bankroll must be positive")
     if book.balance < 0:
@@ -745,8 +761,8 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
             raise ValueError(
                 "PaperBook snapshot ticket status must be canonical TicketStatus"
             )
-        _ORIGINAL_REQUIRE_FINITE(ticket.stake, f"stake for ticket {ticket.ticket_id}")
-        _ORIGINAL_REQUIRE_FINITE(ticket.payout, f"payout for ticket {ticket.ticket_id}")
+        _require_exact_decimal(ticket.stake, f"stake for ticket {ticket.ticket_id}")
+        _require_exact_decimal(ticket.payout, f"payout for ticket {ticket.ticket_id}")
         if ticket.stake <= 0:
             raise ValueError("PaperBook snapshot ticket stake must be positive")
         if ticket.payout < 0:
@@ -823,7 +839,7 @@ def _committed_capital_unlocked(self: _paper.PaperBook) -> Decimal:
         raise ValueError(
             "PaperBook committed capital arithmetic is not representable"
         ) from exc
-    _ORIGINAL_REQUIRE_FINITE(total, "committed_capital")
+    _require_exact_decimal(total, "committed_capital")
     return total
 
 

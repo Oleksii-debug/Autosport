@@ -384,7 +384,7 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         # advancing the same quote to a later generation-zero semantic refresh.
         noncausal = self.prophetx_refresh_event(sequence=3)
         result = runtime.reconcile_persisted(noncausal, append_generation=0)
-        self.assertEqual(result.status, MirrorUpdate.SEMANTIC_REFRESH)
+        self.assertEqual(result.status, MirrorUpdate.APPLIED)
         self.assertEqual(
             dependencies.semantic_refresh_only_inputs(batch),
             (),
@@ -450,7 +450,7 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             noncausal_refresh,
             append_generation=0,
         )
-        self.assertEqual(result.status, MirrorUpdate.SEMANTIC_REFRESH)
+        self.assertEqual(result.status, MirrorUpdate.APPLIED)
 
         batch = runtime.drain()
         self.assertEqual(
@@ -493,14 +493,14 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
                 noncausal_refresh,
                 append_generation=0,
             ).status,
-            MirrorUpdate.SEMANTIC_REFRESH,
+            MirrorUpdate.APPLIED,
         )
         self.assertEqual(
             runtime.reconcile_persisted(
                 later_causal_refresh,
                 append_generation=3,
             ).status,
-            MirrorUpdate.SEMANTIC_REFRESH,
+            MirrorUpdate.APPLIED,
         )
 
         batch = runtime.drain()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -262,3 +263,57 @@ def test_bridge_refuses_unowned_historical_betfair_state() -> None:
     )
     with pytest.raises(ValueError, match="canonical bridge metadata"):
         provider.bind_durable_current({(event.source_id, event.quote_key): event})
+
+
+def test_durable_binding_rejects_closed_row_with_open_disposition() -> None:
+    _, event = _durable_open(sequence=7)
+    forged = replace(event, status="closed")
+    provider = BetfairAuthenticatedMarketProvider(
+        _runtime(),
+        freshness_policy=BetfairStreamFreshnessPolicy(max_age_ms=5_000),
+    )
+
+    with pytest.raises(ValueError, match="closed disposition metadata mismatch"):
+        provider.bind_durable_current({(forged.source_id, forged.quote_key): forged})
+
+
+def test_durable_binding_rejects_selection_identity_drift() -> None:
+    _, event = _durable_open(sequence=7)
+    forged = replace(event, selection_id="forged-selection")
+    provider = BetfairAuthenticatedMarketProvider(
+        _runtime(),
+        freshness_policy=BetfairStreamFreshnessPolicy(max_age_ms=5_000),
+    )
+
+    with pytest.raises(ValueError, match="selection identity mismatch"):
+        provider.bind_durable_current({(forged.source_id, forged.quote_key): forged})
+
+
+def test_durable_assertion_rejects_same_sequence_open_odds_rewrite() -> None:
+    _, event = _durable_open(sequence=7)
+    provider = BetfairAuthenticatedMarketProvider(
+        _runtime(),
+        freshness_policy=BetfairStreamFreshnessPolicy(max_age_ms=5_000),
+    )
+    current = {(event.source_id, event.quote_key): event}
+    provider.bind_durable_current(current)
+
+    forged = replace(event, decimal_odds=Decimal("3.0"))
+    with pytest.raises(ValueError, match="odds do not match quote identity"):
+        provider.assert_durable_current(
+            {(forged.source_id, forged.quote_key): forged}
+        )
+
+
+def test_durable_assertion_rejects_noncanonical_current_mapping_key() -> None:
+    _, event = _durable_open(sequence=7)
+    provider = BetfairAuthenticatedMarketProvider(
+        _runtime(),
+        freshness_policy=BetfairStreamFreshnessPolicy(max_age_ms=5_000),
+    )
+    provider.bind_durable_current({(event.source_id, event.quote_key): event})
+
+    with pytest.raises(ValueError, match="key does not match canonical MarketEvent key"):
+        provider.assert_durable_current(
+            {(event.source_id, "wrong-quote-key"): event}
+        )

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 """Fail-closed decision-time aggregate for economically applicable costs.
 
-Schema v2 deliberately cannot represent COMPLETE or positive monetary truth.  The
-public resolver is installed from a closure seal that captures the exact canonical
+Schema v3 still cannot represent COMPLETE or a positive monetary total. It can
+represent one product-verified KNOWN_ZERO execution-slippage source while every
+unresolved cost class remains fail-closed. The public resolver is installed from a closure seal that captures the exact canonical
 input types, model-money resolver, output types, and immutable semantic tables at
 module initialization.  Authority-bearing resolution therefore does not consult
 caller-writable module globals after installation.
@@ -18,6 +19,7 @@ import re
 from typing import Any
 
 from .betfair_standard_limit_price_bound import (
+    BetfairStandardLimitPriceBoundError,
     BetfairStandardLimitPriceBoundEvidence,
     BetfairStandardLimitPriceBoundStatus,
 )
@@ -62,7 +64,7 @@ class ProspectiveCostDependencyAxis(StrEnum):
 
 
 class ProspectiveApplicableCostCompleteness(StrEnum):
-    """Schema v2 deliberately has no COMPLETE state."""
+    """Schema v3 deliberately has no COMPLETE state."""
 
     INCOMPLETE = "INCOMPLETE"
 
@@ -410,6 +412,7 @@ def _build_canonical_authority():
     model_status_cls = ProspectiveModelComputeMoneyStatus
     model_reason_cls = ProspectiveModelComputeMoneyReason
     model_resolver = resolve_prospective_model_compute_money
+    slippage_error_cls = BetfairStandardLimitPriceBoundError
     slippage_evidence_cls = BetfairStandardLimitPriceBoundEvidence
     slippage_status_cls = BetfairStandardLimitPriceBoundStatus
     slippage_product_verifier = verify_product_betfair_standard_limit_price_bound
@@ -883,18 +886,33 @@ def _build_canonical_authority():
         if slippage_product_verifier.__code__ is not slippage_product_verifier_code:
             raise error_cls("canonical Betfair slippage verifier authority changed")
 
-        verified = slippage_product_verifier(
-            evidence=slippage_evidence,
-            ledger=ledger,
-            issuance_store=issuance_store,
-            runtime_profile=runtime_profile,
-            execution_plan_id=execution_plan_id,
-            action_id=action_id,
-        )
+        try:
+            verified = slippage_product_verifier(
+                evidence=slippage_evidence,
+                ledger=ledger,
+                issuance_store=issuance_store,
+                runtime_profile=runtime_profile,
+                execution_plan_id=execution_plan_id,
+                action_id=action_id,
+            )
+        except slippage_error_cls as exc:
+            raise error_cls(
+                "canonical Betfair slippage verification failed"
+            ) from exc
         if slippage_product_verifier.__code__ is not slippage_product_verifier_code:
             raise error_cls("canonical Betfair slippage verifier authority changed")
         if type(verified) is not slippage_evidence_cls:
             raise error_cls("canonical Betfair slippage verifier returned non-canonical evidence")
+        if text(
+            object.__getattribute__(verified, "execution_plan_id"),
+            "slippage execution_plan_id",
+        ) != execution_plan_id:
+            raise error_cls("Betfair slippage evidence execution plan mismatch")
+        if text(
+            object.__getattribute__(verified, "action_id"),
+            "slippage action_id",
+        ) != action_id:
+            raise error_cls("Betfair slippage evidence action mismatch")
         if (
             object.__getattribute__(verified, "status")
             is not slippage_status_cls.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION

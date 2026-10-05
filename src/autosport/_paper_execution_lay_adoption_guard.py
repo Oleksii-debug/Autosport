@@ -43,6 +43,9 @@ _ORIGINAL_LEDGER_EVENTS = _reality.PaperExecutionLedger.events
 _ORIGINAL_LEDGER_LOAD_RUN = _reality.PaperExecutionLedger.load_run
 _ORIGINAL_LEDGER_APPEND_EVENT = _reality.PaperExecutionLedger._append_event
 _ORIGINAL_EXPOSURE_SCOPE_PAYLOAD = PaperExecutionAdoptionRuntime._exposure_scope_payload
+_ORIGINAL_REQUIRE_ATTEMPT_ACTION_IDENTITY = PaperExecutionAdoptionRuntime._require_attempt_action_identity
+_ORIGINAL_SAME_BOOK_STATE = PaperExecutionAdoptionRuntime._same_book_state
+_ORIGINAL_ASSERT_SAME_BOOK_STATE = PaperExecutionAdoptionRuntime._assert_same_book_state
 _PREPARED_WITNESSES: dict[int, tuple[PreparedPaperExecution, str]] = {}
 _ACTION_WITNESSES: dict[int, tuple[ExecutionAction, str, str]] = {}
 _BINDING_WITNESSES: dict[int, tuple[PaperExposureBinding, tuple[str, str | None, str | None, str | None]]] = {}
@@ -545,7 +548,7 @@ def _preflight_materialization_batch(
     for attempt, action, binding in candidates:
         _require_materialization_authority(action, binding)
         side = _require_action_side(action)
-        _adoption.PaperExecutionAdoptionRuntime._require_attempt_action_identity(self, attempt, action)
+        _ORIGINAL_REQUIRE_ATTEMPT_ACTION_IDENTITY(self, attempt, action)
         if attempt.execution_odds is None or attempt.execution_stake is None:
             raise PaperExecutionAdoptionError(
                 "accepted-equivalent attempt lacks execution odds/stake"
@@ -902,7 +905,7 @@ def _execute_unlocked(
             raise PaperExecutionAdoptionError(
                 "PaperBook changed or became invalid across durable publication"
             ) from exc
-        _adoption.PaperExecutionAdoptionRuntime._assert_same_book_state(
+        _ORIGINAL_ASSERT_SAME_BOOK_STATE(
             durable_book,
             book,
             "PaperBook changed across atomic durable publication",
@@ -1134,7 +1137,7 @@ def _materialize_attempt(
         raise PaperExecutionAdoptionError(
             "materialization decision_id changed after prepared authority mint"
         )
-    _adoption.PaperExecutionAdoptionRuntime._require_attempt_action_identity(self, attempt, action)
+    _ORIGINAL_REQUIRE_ATTEMPT_ACTION_IDENTITY(self, attempt, action)
     # Existing PaperBook state is durable economic authority. Revalidate the
     # complete canonical snapshot before searching marker strings or comparing
     # ticket fields so a mutated/faulty in-memory ticket cannot execute custom
@@ -1285,7 +1288,7 @@ def _assert_recoverable_book_state(
             "PAPER recovery requires canonical validated PaperBook state"
         ) from exc
 
-    if _adoption.PaperExecutionAdoptionRuntime._same_book_state(self.book, pre_action_book):
+    if _ORIGINAL_SAME_BOOK_STATE(self.book, pre_action_book):
         return
     if not materialize_exposure:
         raise PaperExecutionAdoptionError(
@@ -1341,7 +1344,7 @@ def _assert_recoverable_book_state(
             )
         _require_materialization_authority(action, binding)
         side = _require_action_side(action)
-        _adoption.PaperExecutionAdoptionRuntime._require_attempt_action_identity(self, attempt, action)
+        _ORIGINAL_REQUIRE_ATTEMPT_ACTION_IDENTITY(self, attempt, action)
         if attempt.execution_odds is None or attempt.execution_stake is None:
             raise PaperExecutionAdoptionError(
                 "accepted-equivalent durable attempt lacks execution truth"
@@ -1383,7 +1386,7 @@ def _assert_recoverable_book_state(
         raise PaperExecutionAdoptionError(
             "PAPER recovery state changed or became invalid during reconstruction"
         ) from exc
-    if not _adoption.PaperExecutionAdoptionRuntime._same_book_state(self.book, expected):
+    if not _ORIGINAL_SAME_BOOK_STATE(self.book, expected):
         raise PaperExecutionAdoptionError(
             "PaperBook restart state is not the exact pre-action or "
             "#623-authorized post-action state"

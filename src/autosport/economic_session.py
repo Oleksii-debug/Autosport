@@ -180,13 +180,18 @@ def _parse_instant(
     return parsed.astimezone(_utc)
 
 
-def _clock_instant(clock: Callable[[], int], *, _fromtimestamp=_DATETIME_FROMTIMESTAMP) -> str:
+def _clock_instant(
+    clock: Callable[[], int],
+    *,
+    _fromtimestamp=_DATETIME_FROMTIMESTAMP,
+    _utc=timezone.utc,
+) -> str:
     epoch_ns = clock()
     if type(epoch_ns) is not int or epoch_ns < 0:
         raise EconomicSessionIntegrityError("economic-session clock is invalid")
     seconds, nanoseconds = divmod(epoch_ns, 1_000_000_000)
     try:
-        instant = _fromtimestamp(seconds, timezone.utc).replace(
+        instant = _fromtimestamp(seconds, _utc).replace(
             microsecond=nanoseconds // 1000
         )
     except (OverflowError, OSError, ValueError) as exc:

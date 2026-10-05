@@ -9032,5 +9032,176 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             loop.close()
 
 
+
+
+    def test_live_decision_context_binds_paper_execution_model_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            book = PaperBook("1000")
+            ledger = PaperExecutionLedger(workspace / "paper-execution.jsonl")
+            first_model = PaperExecutionModelConfig(
+                model_id="context-model",
+                model_version="1",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="context-model",
+                seed="context-seed-1",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            first_execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=ledger,
+                config=first_model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+                book=book,
+                paper_execution=first_execution,
+            )
+            first_context = first._decision_context_sha256()
+            first.close()
+
+            second_model = PaperExecutionModelConfig(
+                model_id="context-model",
+                model_version="2",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="context-model",
+                seed="context-seed-2",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            second_execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=ledger,
+                config=second_model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            second = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+                book=book,
+                paper_execution=second_execution,
+            )
+            self.assertNotEqual(first_context, second._decision_context_sha256())
+            second.close()
+
+    def test_pending_restart_rejects_changed_paper_execution_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            ledger = PaperExecutionLedger(workspace / "paper-execution.jsonl")
+            first_model = PaperExecutionModelConfig(
+                model_id="pending-model",
+                model_version="1",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="pending-model",
+                seed="pending-seed-1",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            book = PaperBook("1000")
+            first_execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=ledger,
+                config=first_model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+
+            def fail_after_pending(input_id, snapshot):
+                del input_id, snapshot
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                book=book,
+                paper_execution=first_execution,
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+            first.close()
+
+            resumed_book = PaperBook.load(workspace / "paper_book.json")
+            second_model = PaperExecutionModelConfig(
+                model_id="pending-model",
+                model_version="2",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="pending-model",
+                seed="pending-seed-2",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            second_execution = PaperExecutionAdoptionRuntime(
+                book=resumed_book,
+                ledger=ledger,
+                config=second_model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+                book=resumed_book,
+                paper_execution=second_execution,
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "runtime context changed across restart",
+            ):
+                resumed.run_cycle()
+
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertEqual(
+                JsonlDecisionLedger(
+                    workspace / "decisions.jsonl"
+                ).verified_records(),
+                (),
+            )
+            resumed.close()
+
+
 if __name__ == "__main__":
     unittest.main()

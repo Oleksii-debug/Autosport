@@ -1851,3 +1851,93 @@ def test_public_operation_rejects_in_place_visible_state_validator_code_mutation
 
     assert book.balance == Decimal("90")
 
+
+
+def test_subclass_constructor_is_rejected_before_overridden_helper_executes() -> None:
+    attacker_calls = 0
+
+    class HostilePaperBook(PaperBook):
+        @classmethod
+        def _canonical_decimal_input(cls, value, label):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("subclass decimal helper executed")
+
+    with pytest.raises(ValueError, match="canonical PaperBook type"):
+        HostilePaperBook("100")
+
+    assert attacker_calls == 0
+
+
+def test_subclass_load_bytes_is_rejected_before_overridden_parser_executes() -> None:
+    attacker_calls = 0
+
+    class HostilePaperBook(PaperBook):
+        @classmethod
+        def _parse_snapshot_decimal(cls, value, label):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("subclass snapshot parser executed")
+
+    payload = (
+        b'{"schema_version":7,"initial_bankroll":"100","balance":"100",'
+        b'"tickets":[],"lifecycle":[]}'
+    )
+
+    with pytest.raises(ValueError, match="canonical PaperBook type"):
+        HostilePaperBook.load_bytes(payload)
+
+    assert attacker_calls == 0
+
+
+def test_subclass_load_is_rejected_before_overridden_path_helper_executes(
+    tmp_path,
+) -> None:
+    attacker_calls = 0
+
+    class HostilePaperBook(PaperBook):
+        @staticmethod
+        def _canonical_snapshot_path(path):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("subclass path helper executed")
+
+    with pytest.raises(ValueError, match="canonical PaperBook type"):
+        HostilePaperBook.load(tmp_path / "never-read.json")
+
+    assert attacker_calls == 0
+
+
+def test_private_registries_reject_forged_subclass_before_key_hooks_execute() -> None:
+    hash_calls = 0
+
+    class HostilePaperBook(PaperBook):
+        def __hash__(self):
+            nonlocal hash_calls
+            hash_calls += 1
+            raise AssertionError("subclass hash executed")
+
+    forged = object.__new__(HostilePaperBook)
+
+    with pytest.raises(ValueError, match="canonical PaperBook type"):
+        paper_module._register_ticket_opening_authority_book(forged)
+    with pytest.raises(ValueError, match="canonical PaperBook type"):
+        paper_module._register_paperbook_causal_history_authority_book(forged)
+    with pytest.raises(ValueError, match="canonical PaperBook type"):
+        paper_module._register_paperbook_operation_lock(forged)
+
+    assert hash_calls == 0
+
+
+def test_exact_paperbook_type_remains_operational_after_type_authority_seal(
+    tmp_path,
+) -> None:
+    path = tmp_path / "canonical-paper-book.json"
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+    book.save(path)
+    restored = PaperBook.load(path)
+
+    assert type(restored) is PaperBook
+    assert restored.committed_stake == Decimal("10")
+    assert restored.tickets[ticket.ticket_id].legs[0].locked_odds == Decimal("2.00")

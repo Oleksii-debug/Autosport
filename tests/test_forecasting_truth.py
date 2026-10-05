@@ -77,6 +77,33 @@ class ForecastTruthTests(unittest.TestCase):
                 generated_at="2026-02-10T12:00:00+00:00",
             )
 
+
+    def test_forecast_rejects_nonzero_submicrosecond_causal_timestamps(self):
+        for field, value in (
+            ("training_cutoff", "2026-01-31T23:59:59.0000001+00:00"),
+            ("input_cutoff", "2026-02-10T11:59:00.0000001+00:00"),
+            ("generated_at", "2026-02-10T12:00:00.0000001+00:00"),
+        ):
+            with self.subTest(field=field):
+                kwargs = {field: value}
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "precision finer than microseconds is unsupported",
+                ):
+                    self._record(**kwargs)
+
+    def test_forecast_accepts_zero_only_excess_fractional_precision(self):
+        record = self._record(
+            training_cutoff="2026-01-31T23:59:59.123456000+00:00",
+            input_cutoff="2026-02-10T11:59:00.123456000+00:00",
+            generated_at="2026-02-10T12:00:00.123456000+00:00",
+        )
+
+        self.assertEqual(
+            record.generated_at,
+            "2026-02-10T12:00:00.123456000+00:00",
+        )
+
     def test_forecast_ledger_is_pre_outcome_and_hashes_record(self):
         record = self._record()
         with tempfile.TemporaryDirectory() as tmp:

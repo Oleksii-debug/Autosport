@@ -478,6 +478,21 @@ class JsonlDecisionLedger:
             sort_keys=True,
             allow_nan=False,
         )
+        try:
+            existing = self.path.read_bytes()
+        except FileNotFoundError:
+            existing = b""
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger file is unreadable before append"
+            ) from exc
+        self._verify_bytes(
+            existing,
+            reserved_decision_id=payload["decision_id"],
+            reserved_material_action_id=payload["payload"].get(
+                MATERIAL_ACTION_ID_PAYLOAD_KEY
+            ),
+        )
         with self.path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(envelope + "\n")
             handle.flush()
@@ -523,7 +538,13 @@ class JsonlDecisionLedger:
         )
 
     @classmethod
-    def _verify_bytes(cls, raw: bytes) -> int:
+    def _verify_bytes(
+        cls,
+        raw: bytes,
+        *,
+        reserved_decision_id: str | None = None,
+        reserved_material_action_id: str | None = None,
+    ) -> int:
         if not raw:
             return 0
         if not raw.endswith(b"\n"):
@@ -616,6 +637,21 @@ class JsonlDecisionLedger:
                 seen_material_action_ids.add(material_action_id)
             line_count += 1
 
+        if (
+            reserved_decision_id is not None
+            and reserved_decision_id in seen_decision_ids
+        ):
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger already contains decision_id"
+            )
+        if reserved_material_action_id is not None:
+            reserved_material_action_id = cls._require_material_action_id(
+                reserved_material_action_id
+            )
+            if reserved_material_action_id in seen_material_action_ids:
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger already contains material_action_id"
+                )
         return line_count
 
     def verified_snapshot(self) -> VerifiedDecisionLedgerSnapshot:

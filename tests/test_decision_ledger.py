@@ -196,19 +196,20 @@ class DecisionLedgerTests(unittest.TestCase):
             ):
                 ledger.verify_integrity()
 
-    def test_verify_integrity_rejects_duplicate_decision_identity(self):
+    def test_append_rejects_duplicate_decision_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"
             ledger = JsonlDecisionLedger(path)
             record = self._record(decision_id="duplicate-id")
             ledger.append(record)
-            ledger.append(record)
 
             with self.assertRaisesRegex(
                 DecisionLedgerIntegrityError,
-                "duplicate decision_id at line 2",
+                "already contains decision_id",
             ):
-                ledger.verify_integrity()
+                ledger.append(record)
+
+            self.assertEqual(ledger.verify_integrity(), 1)
 
     def test_verify_integrity_rejects_unterminated_tail(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -432,6 +433,67 @@ class DecisionLedgerTests(unittest.TestCase):
                 restored.payload["material_action_id"],
                 "paper-action-valid",
             )
+
+
+    def test_append_economic_rejects_sequential_duplicate_material_action_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            goal = self._economic_goal()
+            first = DecisionRecord(
+                "run-1",
+                "agent",
+                "2026-01-01T00:00:00+00:00",
+                "PROPOSE_STAKE",
+                {"x": 1, "material_action_id": "paper-action-retry"},
+                "ctx",
+                decision_id="paper-action-retry-first",
+                decision_kind=ECONOMIC_DECISION_KIND,
+            )
+            second = replace(
+                first,
+                decision_id="paper-action-retry-second",
+            )
+            ledger.append_economic(first, goal)
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "already contains material_action_id",
+            ):
+                ledger.append_economic(second, goal)
+
+            self.assertEqual(ledger.verify_integrity(), 1)
+            restored = ledger.verified_economic_decision_for_material_action(
+                "paper-action-retry",
+                goal,
+            )
+            self.assertIsNotNone(restored)
+            assert restored is not None
+            self.assertEqual(
+                restored.decision_id,
+                "paper-action-retry-first",
+            )
+
+    def test_append_refuses_to_extend_corrupt_existing_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            ledger.append(self._record(decision_id="first"))
+            envelope = json.loads(path.read_text(encoding="utf-8"))
+            envelope["record"]["payload"]["x"] = 99
+            path.write_text(
+                json.dumps(envelope, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            corrupt_bytes = path.read_bytes()
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "SHA-256 mismatch at line 1",
+            ):
+                ledger.append(self._record(decision_id="second"))
+
+            self.assertEqual(path.read_bytes(), corrupt_bytes)
 
 
 if __name__ == "__main__":

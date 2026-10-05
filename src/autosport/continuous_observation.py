@@ -308,6 +308,14 @@ def run_continuous_observation(
         type(run_id) is not str or not run_id or run_id != run_id.strip()
     ):
         raise ValueError("run_id must be a non-empty trimmed exact string")
+    if isinstance(redact_values, (str, bytes, bytearray)):
+        raise TypeError("redact_values must be a sequence of exact strings")
+    try:
+        redaction_secrets = tuple(redact_values)
+    except (TypeError, RuntimeError) as exc:
+        raise TypeError("redact_values must be a finite sequence of exact strings") from exc
+    if any(type(secret) is not str for secret in redaction_secrets):
+        raise TypeError("redact_values must contain exact strings")
     if not callable(monotonic):
         raise TypeError("monotonic must be callable")
     if not callable(wall_clock):
@@ -524,7 +532,7 @@ def run_continuous_observation(
                 if _has_health_persistence_failure_note(exc):
                     state.health_status = "unknown"
                     state.last_error_kind = "local_health_failure_while_recording_provider_error"
-                    state.last_error = _redacted_error(exc, redact_values)
+                    state.last_error = _redacted_error(exc, redaction_secrets)
                     terminal_reason = state.last_error_kind
                     terminal_exit = 5
                     publish("failed", stop_reason=terminal_reason)
@@ -539,7 +547,7 @@ def run_continuous_observation(
                     state.last_error_kind = (
                         "local_health_failure_while_recording_provider_error"
                     )
-                    state.last_error = _redacted_error(exc, redact_values)
+                    state.last_error = _redacted_error(exc, redaction_secrets)
                     terminal_reason = state.last_error_kind
                     terminal_exit = 5
                     publish("failed", stop_reason=terminal_reason)
@@ -549,7 +557,7 @@ def run_continuous_observation(
                 )
                 state.health_status = durable_health.status
                 state.last_error_kind = "provider_unavailable"
-                state.last_error = _redacted_error(exc, redact_values)
+                state.last_error = _redacted_error(exc, redaction_secrets)
                 publish("provider_unavailable")
                 if state.attempted_cycles >= config.max_cycles:
                     terminal_reason = "max_cycles_after_provider_unavailable"
@@ -574,7 +582,7 @@ def run_continuous_observation(
             except CommittedIngestionHealthError as exc:
                 state.health_status = "unknown"
                 state.last_error_kind = "local_health_publication_failure_after_market_commit"
-                state.last_error = _redacted_error(exc, redact_values)
+                state.last_error = _redacted_error(exc, redaction_secrets)
                 terminal_reason = state.last_error_kind
                 terminal_exit = 5
                 publish("failed", stop_reason=terminal_reason)
@@ -582,7 +590,7 @@ def run_continuous_observation(
             except (sqlite3.Error, OSError) as exc:
                 state.health_status = _safe_health_status(health_store, state.source_id, "unknown")
                 state.last_error_kind = "local_durable_failure"
-                state.last_error = _redacted_error(exc, redact_values)
+                state.last_error = _redacted_error(exc, redaction_secrets)
                 terminal_reason = state.last_error_kind
                 terminal_exit = 5
                 publish("failed", stop_reason=terminal_reason)
@@ -590,7 +598,7 @@ def run_continuous_observation(
             except Exception as exc:
                 state.health_status = _safe_health_status(health_store, state.source_id, "failed")
                 state.last_error_kind = "fail_closed_provider_or_validation_error"
-                state.last_error = _redacted_error(exc, redact_values)
+                state.last_error = _redacted_error(exc, redaction_secrets)
                 terminal_reason = state.last_error_kind
                 terminal_exit = 3
                 publish("failed", stop_reason=terminal_reason)
@@ -620,7 +628,7 @@ def run_continuous_observation(
     except Exception as exc:
         if state.last_error_kind is None:
             state.last_error_kind = "local_startup_or_status_failure"
-            state.last_error = _redacted_error(exc, redact_values)
+            state.last_error = _redacted_error(exc, redaction_secrets)
         # If status publication itself is broken, a second write may fail too. Preserve
         # the original exception and never proceed to provider I/O after that failure.
         try:

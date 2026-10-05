@@ -441,7 +441,7 @@ def run_continuous_observation(
                 enter_loop = False
             else:
                 remaining_runtime = config.max_runtime_seconds - (
-                    read_read_monotonic() - started_monotonic
+                    read_monotonic() - started_monotonic
                 )
                 if remaining_runtime <= 0:
                     terminal_reason = "max_runtime"

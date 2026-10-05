@@ -15,6 +15,7 @@ from .paper_execution_adoption import (
 from .real_execution_ledger import ExecutionAction, ExecutionPlan
 
 
+_ORIGINAL_INIT = PaperExecutionAdoptionRuntime.__init__
 _ORIGINAL_PREPARE = PaperExecutionAdoptionRuntime.prepare
 _ORIGINAL_PREPARE_PAPER_VALUE_ACTION = (
     PaperExecutionAdoptionRuntime.prepare_paper_value_action
@@ -28,9 +29,56 @@ _ORIGINAL_MINT_PREPARED = PaperExecutionAdoptionRuntime._mint_prepared
 _ORIGINAL_REQUIRE_MINTED = PaperExecutionAdoptionRuntime._require_minted
 _ORIGINAL_EXPECTED_RUN_ID = PaperExecutionAdoptionRuntime.expected_run_id
 _PREPARED_WITNESS_ATTR = "_autosport_lay_prepared_authority_witnesses"
+_RUNTIME_WITNESS_ATTR = "_autosport_lay_runtime_authority_witness"
 
 
 
+
+
+
+def _init(self: PaperExecutionAdoptionRuntime, *args, **kwargs) -> None:
+    _ORIGINAL_INIT(self, *args, **kwargs)
+    _reality._require_canonical_execution_config_surface(self.config)
+    setattr(
+        self,
+        _RUNTIME_WITNESS_ATTR,
+        {
+            "book": self.book,
+            "ledger": self.ledger,
+            "config": self.config,
+            "config_fingerprint": self.config.fingerprint,
+            "paper_book_path": self.paper_book_path,
+            "max_quote_age": self.max_quote_age,
+        },
+    )
+
+
+def _require_runtime_authority(self: PaperExecutionAdoptionRuntime) -> None:
+    witness = getattr(self, _RUNTIME_WITNESS_ATTR, None)
+    if type(witness) is not dict:
+        raise PaperExecutionAdoptionError(
+            "PAPER adoption runtime authority witness is unavailable"
+        )
+    if (
+        self.book is not witness.get("book")
+        or self.ledger is not witness.get("ledger")
+        or self.config is not witness.get("config")
+    ):
+        raise PaperExecutionAdoptionError(
+            "PAPER adoption runtime authority object changed after construction"
+        )
+    if (
+        self.paper_book_path != witness.get("paper_book_path")
+        or self.max_quote_age != witness.get("max_quote_age")
+    ):
+        raise PaperExecutionAdoptionError(
+            "PAPER adoption runtime configuration changed after construction"
+        )
+    _reality._require_canonical_execution_config_surface(self.config)
+    if self.config.fingerprint != witness.get("config_fingerprint"):
+        raise PaperExecutionAdoptionError(
+            "PAPER adoption execution config changed after construction"
+        )
 
 def _exact_text(value: object, name: str, *, optional: bool = False) -> str | None:
     if value is None and optional:
@@ -178,6 +226,7 @@ def _mint_prepared(
     self: PaperExecutionAdoptionRuntime,
     prepared: PreparedPaperExecution,
 ) -> PreparedPaperExecution:
+    _require_runtime_authority(self)
     witness = _prepared_authority_witness(prepared)
     minted = _ORIGINAL_MINT_PREPARED(self, prepared)
     witnesses = getattr(self, _PREPARED_WITNESS_ATTR, None)
@@ -192,6 +241,7 @@ def _require_minted(
     self: PaperExecutionAdoptionRuntime,
     prepared: PreparedPaperExecution,
 ) -> None:
+    _require_runtime_authority(self)
     _ORIGINAL_REQUIRE_MINTED(self, prepared)
     witnesses = getattr(self, _PREPARED_WITNESS_ATTR, None)
     if type(witnesses) is not dict:
@@ -581,6 +631,7 @@ def _install() -> None:
     marker = "_autosport_lay_adoption_guard"
     if getattr(PaperExecutionAdoptionRuntime, marker, False):
         return
+    PaperExecutionAdoptionRuntime.__init__ = _init
     PaperExecutionAdoptionRuntime._mint_prepared = _mint_prepared
     PaperExecutionAdoptionRuntime._require_minted = _require_minted
     PaperExecutionAdoptionRuntime.expected_run_id = _expected_run_id

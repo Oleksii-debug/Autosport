@@ -37,6 +37,7 @@ _ORIGINAL_EXPECTED_RUN_ID = PaperExecutionAdoptionRuntime.expected_run_id
 _ORIGINAL_EXECUTE_UNLOCKED = PaperExecutionAdoptionRuntime._execute_unlocked
 _ORIGINAL_PAPERBOOK_SAVE = _adoption.PaperBook.save
 _ORIGINAL_PAPERBOOK_LOAD = _adoption.PaperBook.load
+_ORIGINAL_PAPERBOOK_OPEN_TICKET = _adoption.PaperBook.open_ticket
 _ORIGINAL_LEDGER_EVENTS = _reality.PaperExecutionLedger.events
 _ORIGINAL_LEDGER_LOAD_RUN = _reality.PaperExecutionLedger.load_run
 _PREPARED_WITNESSES: dict[int, tuple[PreparedPaperExecution, str]] = {}
@@ -1143,7 +1144,7 @@ def _materialize_attempt(
             )
         return ticket
 
-    return type(self.book).open_ticket(self.book,
+    return _ORIGINAL_PAPERBOOK_OPEN_TICKET(self.book,
         [
             TicketLeg(
                 event_id=attempt.event_id,

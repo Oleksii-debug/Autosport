@@ -10130,5 +10130,48 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(observer.calls, 0)
             loop.close()
 
+
+    def test_cycle_entry_rejects_in_place_economic_contract_semantic_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),)],
+            )
+            goal = EconomicGoalContract(
+                goal_id="goal-in-place-semantic-mutation",
+                revision=1,
+                bankroll_id="bankroll-live-test",
+                currency="EUR",
+                max_risk_of_ruin=Decimal("1"),
+            )
+            authority = EconomicDecisionAuthority(
+                goal,
+                PaperRiskPolicy(economic_goal=goal),
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                authority=authority,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            object.__setattr__(
+                goal,
+                "max_risk_of_ruin",
+                Decimal("0.5"),
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "economic goal contract semantics changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(observer.calls, 0)
+            self.assertFalse(loop.progress_path.exists())
+            loop.close()
+
 if __name__ == "__main__":
     unittest.main()

@@ -2523,6 +2523,39 @@ class PersistentLiveDecisionLoop:
         context_hash = _canonical_json_sha256(context_payload)
         return context_hash, f"live-{context_hash}"
 
+    def _assert_canonical_persistence_authority(
+        self,
+        *,
+        expected_execution_model_fingerprint: str | None = None,
+    ) -> None:
+        canonical_decision_ledger = self.workspace / "decisions.jsonl"
+        if self.decision_ledger.path != canonical_decision_ledger:
+            raise LiveDecisionProgressError(
+                "live Decision Ledger persistence authority changed after construction"
+            )
+        if self.paper_execution is None:
+            return
+        if self.paper_execution.book is not self.book:
+            raise LiveDecisionProgressError(
+                "PAPER execution PaperBook authority changed after construction"
+            )
+        if self.paper_execution.paper_book_path != self.workspace / "paper_book.json":
+            raise LiveDecisionProgressError(
+                "PAPER execution PaperBook path authority changed after construction"
+            )
+        if self.paper_execution.ledger.path != self.workspace / "paper-execution.jsonl":
+            raise LiveDecisionProgressError(
+                "PAPER execution ledger authority changed after construction"
+            )
+        if (
+            expected_execution_model_fingerprint is not None
+            and self.paper_execution.config.fingerprint
+            != expected_execution_model_fingerprint
+        ):
+            raise LiveDecisionProgressError(
+                "PAPER execution model authority changed after decision preparation"
+            )
+
     def _persist_plan(
         self,
         *,
@@ -2575,6 +2608,14 @@ class PersistentLiveDecisionLoop:
                     "intent_evidence_json": prepared_execution.intent_evidence_json,
                 }
 
+        self._assert_canonical_persistence_authority(
+            expected_execution_model_fingerprint=(
+                None
+                if expected_execution_payload is None
+                else expected_execution_payload["model_fingerprint"]
+            )
+        )
+
         progress_market_append_generation = (
             None
             if self._progress is None
@@ -2625,6 +2666,13 @@ class PersistentLiveDecisionLoop:
             execution_guard,
             self.dependencies.registry_mutation_guard(),
         ):
+            self._assert_canonical_persistence_authority(
+                expected_execution_model_fingerprint=(
+                    None
+                    if expected_execution_payload is None
+                    else expected_execution_payload["model_fingerprint"]
+                )
+            )
             focused_dependency_state = self.dependencies.registry_state_snapshot()
             durable_progress = self._load_progress()
             if (
@@ -2801,6 +2849,13 @@ class PersistentLiveDecisionLoop:
                 self.decision_ledger.append_economic(record, self.authority)
                 if self.post_append_hook is not None:
                     self.post_append_hook()
+                self._assert_canonical_persistence_authority(
+                    expected_execution_model_fingerprint=(
+                        None
+                        if expected_execution_payload is None
+                        else expected_execution_payload["model_fingerprint"]
+                    )
+                )
                 if self.dependencies.registry_state_snapshot() != focused_dependency_state:
                     raise LiveDecisionProgressError(
                         "focused dependency registry changed during durable ledger publication"
@@ -2811,6 +2866,11 @@ class PersistentLiveDecisionLoop:
             # therefore re-enters this same append-pending identity and resumes
             # the exact run instead of fabricating a fresh fill.
             if prepared_execution is not None:
+                self._assert_canonical_persistence_authority(
+                    expected_execution_model_fingerprint=expected_execution_payload[
+                        "model_fingerprint"
+                    ]
+                )
                 execution_result = self.paper_execution.execute(
                     prepared=prepared_execution,
                     trigger_id=decision_id,

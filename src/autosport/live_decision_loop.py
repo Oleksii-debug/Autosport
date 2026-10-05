@@ -455,20 +455,24 @@ class _Control:
         if raw["schema"] != _CONTROL_SCHEMA or raw["schema_version"] != _CONTROL_VERSION:
             raise LiveDecisionProgressError("unsupported live decision control schema")
         health_boundaries_raw = (
-            [] if schema_version in {1, 2} else raw["health_boundaries"]
+            None if schema_version in {1, 2} else raw["health_boundaries"]
         )
-        if type(health_boundaries_raw) is not list:
+        if health_boundaries_raw is not None and type(health_boundaries_raw) is not list:
             raise LiveDecisionProgressError(
-                "health_boundaries must be a JSON array"
+                "health_boundaries must be a JSON array or null"
             )
         try:
-            health_boundaries = tuple(
-                sorted(
-                    (
-                        ProviderHealthReplayBoundary.from_dict(value)
-                        for value in health_boundaries_raw
-                    ),
-                    key=lambda value: value.source_id,
+            health_boundaries = (
+                None
+                if health_boundaries_raw is None
+                else tuple(
+                    sorted(
+                        (
+                            ProviderHealthReplayBoundary.from_dict(value)
+                            for value in health_boundaries_raw
+                        ),
+                        key=lambda value: value.source_id,
+                    )
                 )
             )
             return cls(
@@ -594,7 +598,7 @@ class _Progress:
     decision_ts: str
     market_state_sha256: str
     market_append_generation: int | None
-    health_boundaries: tuple[ProviderHealthReplayBoundary, ...]
+    health_boundaries: tuple[ProviderHealthReplayBoundary, ...] | None
     decision_context_sha256: str
     affected_input_ids: tuple[str, ...]
     registered_input_ids: tuple[str, ...]
@@ -614,15 +618,25 @@ class _Progress:
             raise LiveDecisionProgressError(
                 "market_append_generation must be a non-negative int or null"
             )
-        if type(self.health_boundaries) is not tuple:
-            raise LiveDecisionProgressError("health_boundaries must be a tuple")
-        health_source_ids = tuple(
-            boundary.source_id for boundary in self.health_boundaries
-        )
-        if health_source_ids != tuple(sorted(set(health_source_ids))):
-            raise LiveDecisionProgressError(
-                "health_boundaries must be sorted and unique by source_id"
+        if self.health_boundaries is not None:
+            if type(self.health_boundaries) is not tuple:
+                raise LiveDecisionProgressError(
+                    "health_boundaries must be a tuple or null"
+                )
+            if any(
+                not isinstance(boundary, ProviderHealthReplayBoundary)
+                for boundary in self.health_boundaries
+            ):
+                raise LiveDecisionProgressError(
+                    "health_boundaries must contain provider health replay boundaries"
+                )
+            health_source_ids = tuple(
+                boundary.source_id for boundary in self.health_boundaries
             )
+            if health_source_ids != tuple(sorted(set(health_source_ids))):
+                raise LiveDecisionProgressError(
+                    "health_boundaries must be sorted and unique by source_id"
+                )
         _canonical_sha256("decision_context_sha256", self.decision_context_sha256)
         if self.phase not in {
             _PHASE_PENDING,
@@ -688,9 +702,13 @@ class _Progress:
             "decision_ts": self.decision_ts,
             "market_state_sha256": self.market_state_sha256,
             "market_append_generation": self.market_append_generation,
-            "health_boundaries": [
-                boundary.to_dict() for boundary in self.health_boundaries
-            ],
+            "health_boundaries": (
+                None
+                if self.health_boundaries is None
+                else [
+                    boundary.to_dict() for boundary in self.health_boundaries
+                ]
+            ),
             "decision_context_sha256": self.decision_context_sha256,
             "affected_input_ids": list(self.affected_input_ids),
             "registered_input_ids": list(self.registered_input_ids),
@@ -2235,7 +2253,7 @@ class PersistentLiveDecisionLoop:
         *,
         expected_market_state_sha256: str,
         max_append_generation: int | None,
-        health_boundaries: tuple[ProviderHealthReplayBoundary, ...] = (),
+        health_boundaries: tuple[ProviderHealthReplayBoundary, ...] | None = None,
         refresh_intents: bool = True,
     ) -> None:
         _canonical_sha256(
@@ -2315,7 +2333,7 @@ class PersistentLiveDecisionLoop:
                     )
                 ),
             )
-            if self._health_gate is not None:
+            if self._health_gate is not None and health_boundaries is not None:
                 boundary_map = {
                     boundary.source_id: boundary
                     for boundary in health_boundaries
@@ -2760,7 +2778,7 @@ class PersistentLiveDecisionLoop:
         market_state_sha256: str,
         gate: str,
         decision_context_sha256: str,
-        health_boundaries: tuple[ProviderHealthReplayBoundary, ...],
+        health_boundaries: tuple[ProviderHealthReplayBoundary, ...] | None,
     ) -> tuple[str, str]:
         provenance = self.intent_provenance
         context_payload = {
@@ -2774,9 +2792,13 @@ class PersistentLiveDecisionLoop:
             "intent_strategy_version_id": provenance.strategy_version_id,
             "intent_model_version_id": provenance.model_version_id,
             "intent_provenance_sha256": provenance.provenance_sha256,
-            "health_boundaries": [
-                boundary.to_dict() for boundary in health_boundaries
-            ],
+            "health_boundaries": (
+                None
+                if health_boundaries is None
+                else [
+                    boundary.to_dict() for boundary in health_boundaries
+                ]
+            ),
             "plan_sha256": plan.plan_sha256,
         }
         context_hash = _canonical_json_sha256(context_payload)
@@ -3113,10 +3135,14 @@ class PersistentLiveDecisionLoop:
             "intent_strategy_version_id": provenance.strategy_version_id,
             "intent_model_version_id": provenance.model_version_id,
             "intent_provenance_sha256": provenance.provenance_sha256,
-            "health_boundaries": [
-                boundary.to_dict()
-                for boundary in decision_health_boundaries
-            ],
+            "health_boundaries": (
+                None
+                if decision_health_boundaries is None
+                else [
+                    boundary.to_dict()
+                    for boundary in decision_health_boundaries
+                ]
+            ),
             "affected_input_ids": list(affected_input_ids),
             "plan_sha256": plan.plan_sha256,
             "plan": plan.to_dict(),
@@ -3329,10 +3355,14 @@ class PersistentLiveDecisionLoop:
                     != provenance.provenance_sha256
                     or existing.payload.get("gate") != gate
                     or existing.payload.get("health_boundaries")
-                    != [
-                        boundary.to_dict()
-                        for boundary in decision_health_boundaries
-                    ]
+                    != (
+                        None
+                        if decision_health_boundaries is None
+                        else [
+                            boundary.to_dict()
+                            for boundary in decision_health_boundaries
+                        ]
+                    )
                     or existing.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
                     != decision_id
                 ):
@@ -5082,10 +5112,14 @@ class PersistentLiveDecisionLoop:
                 }
             )
             if payload_version == 3:
-                expected_health_boundaries = [
-                    boundary.to_dict()
-                    for boundary in progress.health_boundaries
-                ]
+                expected_health_boundaries = (
+                    None
+                    if progress.health_boundaries is None
+                    else [
+                        boundary.to_dict()
+                        for boundary in progress.health_boundaries
+                    ]
+                )
                 if (
                     existing.payload.get("health_boundaries")
                     != expected_health_boundaries
@@ -5358,9 +5392,13 @@ class PersistentLiveDecisionLoop:
         health_boundaries: tuple[ProviderHealthReplayBoundary, ...] = (),
     ) -> str:
         event_tuple = tuple(events)
-        boundary_map = {
-            boundary.source_id: boundary for boundary in health_boundaries
-        }
+        boundary_map = (
+            {}
+            if health_boundaries is None
+            else {
+                boundary.source_id: boundary for boundary in health_boundaries
+            }
+        )
         input_hashes: dict[str, str] = {}
         for input_id, spec in self._input_specs.items():
             selected = tuple(
@@ -5381,7 +5419,7 @@ class PersistentLiveDecisionLoop:
                 revision=0,
                 events=selected,
             )
-            if self._health_gate is not None:
+            if self._health_gate is not None and health_boundaries is not None:
                 if as_of is None:
                     raise LiveDecisionProgressError(
                         "health-gated market reconstruction requires decision time"

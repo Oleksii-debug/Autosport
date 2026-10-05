@@ -182,7 +182,10 @@ class OneShotObservationWorker:
 
     def _run(self, task: ObservationTask) -> None:
         try:
-            message = ObservationWorkerMessage(result=task())
+            result = task()
+            if type(result) is not ObservationResult:
+                raise TypeError("observation task must return an exact ObservationResult")
+            message = ObservationWorkerMessage(result=result)
         except BaseException as exc:
             # SystemExit/KeyboardInterrupt raised inside this background thread do
             # not terminate the GUI process. Publish a terminal failure so poll()

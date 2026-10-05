@@ -219,6 +219,10 @@ def _build_product_entrypoint():
                 "canonical Betfair product verifier reopen authority changed"
             )
         profile = require_runtime(runtime_profile)
+        if not reopen_graph_unchanged():
+            raise BetfairStandardLimitPriceBoundError(
+                "canonical Betfair product verifier reopen authority changed"
+            )
         if not authority_graph_unchanged():
             raise BetfairStandardLimitPriceBoundError(
                 "canonical Betfair product verifier authority changed"
@@ -229,14 +233,23 @@ def _build_product_entrypoint():
                 "canonical product runtime workspace is invalid"
             )
         try:
+            workspace_input = path_factory(profile_workspace)
+            if not reopen_graph_unchanged():
+                raise BetfairStandardLimitPriceBoundError(
+                    "canonical Betfair product verifier reopen authority changed"
+                )
             workspace = canonical_path_resolve(
-                path_factory(profile_workspace),
+                workspace_input,
                 strict=False,
             )
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             raise BetfairStandardLimitPriceBoundError(
                 "canonical product runtime workspace is invalid"
             ) from exc
+        if not reopen_graph_unchanged():
+            raise BetfairStandardLimitPriceBoundError(
+                "canonical Betfair product verifier reopen authority changed"
+            )
         if canonical_path_str(workspace) != profile_workspace:
             raise BetfairStandardLimitPriceBoundError(
                 "canonical product runtime workspace is invalid"
@@ -339,12 +352,15 @@ def _build_product_entrypoint():
                 )
             )
             is not canonical_path_type
-            or exact_instance_field(
-                canonical_store,
-                "workspace",
-                "canonical product issuance store",
+            or canonical_path_eq(
+                exact_instance_field(
+                    canonical_store,
+                    "workspace",
+                    "canonical product issuance store",
+                ),
+                workspace,
             )
-            is not workspace
+            is not True
             or exact_instance_field(
                 canonical_store,
                 "authority_root",
@@ -359,12 +375,15 @@ def _build_product_entrypoint():
                 )
             )
             is not canonical_path_type
-            or exact_instance_field(
-                canonical_store,
-                "directory",
-                "canonical product issuance store",
+            or canonical_path_eq(
+                exact_instance_field(
+                    canonical_store,
+                    "directory",
+                    "canonical product issuance store",
+                ),
+                expected_issuance_directory,
             )
-            != expected_issuance_directory
+            is not True
             or type(
                 exact_instance_field(
                     canonical_ledger,
@@ -373,12 +392,15 @@ def _build_product_entrypoint():
                 )
             )
             is not canonical_path_type
-            or exact_instance_field(
-                canonical_ledger,
-                "path",
-                "canonical execution ledger",
+            or canonical_path_eq(
+                exact_instance_field(
+                    canonical_ledger,
+                    "path",
+                    "canonical execution ledger",
+                ),
+                ledger_path,
             )
-            != ledger_path
+            is not True
         ):
             raise BetfairStandardLimitPriceBoundError(
                 "canonical Betfair product verifier reopen state changed"

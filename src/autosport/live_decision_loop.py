@@ -175,6 +175,7 @@ _CONTROL_AUTHORITY_DOMAIN = "autosport.live-decision-control.v1"
 _INPUTS_SCHEMA = "autosport.live_decision_inputs"
 _INPUTS_VERSION = 2
 _INPUTS_KEYS = frozenset({"schema", "schema_version", "loop_id", "inputs"})
+_INPUTS_AUTHORITY_DOMAIN = "autosport.live-decision-inputs.v1"
 _INPUT_SPEC_KEYS_V1 = frozenset(
     {"input_id", "source_ids", "event_ids", "market_ids", "selection_ids"}
 )
@@ -985,7 +986,15 @@ class PersistentLiveDecisionLoop:
         self._dependency_mutation_lock = RLock()
         self.inputs_path = self._workspace_authority / self.INPUTS_FILE_NAME
         self._inputs_path_authority = self.inputs_path
-        durable_input_specs = self._load_input_registry() or ()
+        self._inputs_authority = MonotonicWorkspaceAuthority(
+            workspace=self._workspace_authority.resolve(strict=False),
+            domain=_INPUTS_AUTHORITY_DOMAIN,
+            key=self.loop_id,
+        )
+        self._inputs_authority_object = self._inputs_authority
+        self._inputs_authority_namespace = self._inputs_authority.namespace_sha256
+        with WorkspaceEconomicLock(self.workspace):
+            durable_input_specs = self._load_input_registry() or ()
         if len(durable_input_specs) > self.bounds.max_registered_inputs:
             raise LiveDecisionProgressError(
                 "durable live dependency registry exceeds max_registered_inputs"
@@ -2642,6 +2651,16 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "live input-registry path authority changed after construction"
             )
+        if (
+            self._inputs_authority is not self._inputs_authority_object
+            or self._inputs_authority.namespace_sha256
+            != self._inputs_authority_namespace
+            or self._inputs_authority.domain != _INPUTS_AUTHORITY_DOMAIN
+            or self._inputs_authority.key != self._loop_id_authority
+        ):
+            raise LiveDecisionProgressError(
+                "live input-registry monotonic authority changed after construction"
+            )
         if self.book is not self._book_authority:
             raise LiveDecisionProgressError(
                 "live PaperBook authority changed after construction"
@@ -3425,7 +3444,49 @@ class PersistentLiveDecisionLoop:
                 assert store is not None
                 store.close()
 
-    def _load_input_registry(self) -> tuple[_InputSpec, ...] | None:
+    def _input_registry_payload(
+        self,
+        specs: tuple[_InputSpec, ...],
+    ) -> dict[str, object]:
+        return {
+            "schema": _INPUTS_SCHEMA,
+            "schema_version": _INPUTS_VERSION,
+            "loop_id": self.loop_id,
+            "inputs": [spec.to_dict() for spec in specs],
+        }
+
+    def _input_registry_state_sha256(
+        self,
+        specs: tuple[_InputSpec, ...] | None,
+    ) -> str | None:
+        if specs is None:
+            return None
+        return _canonical_json_sha256(self._input_registry_payload(specs))
+
+    def _input_registry_transition_binding(
+        self,
+        *,
+        previous_state_sha256: str | None,
+        candidate: tuple[_InputSpec, ...],
+        kind: str,
+    ) -> str:
+        return _canonical_json_sha256(
+            {
+                "schema": "autosport.live_decision_inputs_transition",
+                "schema_version": 1,
+                "kind": kind,
+                "loop_id": self.loop_id,
+                "previous_state_sha256": previous_state_sha256,
+                "intended_state_sha256": self._input_registry_state_sha256(candidate),
+                "input_ids": [spec.input_id for spec in candidate],
+            }
+        )
+
+    @staticmethod
+    def _input_registry_tx_id(binding_sha256: str) -> str:
+        return f"live-inputs-{binding_sha256}"
+
+    def _read_input_registry_file(self) -> tuple[_InputSpec, ...] | None:
         if not self.inputs_path.exists():
             return None
         try:
@@ -3454,18 +3515,81 @@ class PersistentLiveDecisionLoop:
             )
         return specs
 
+    def _load_input_registry(self) -> tuple[_InputSpec, ...] | None:
+        specs = self._read_input_registry_file()
+        observed = self._input_registry_state_sha256(specs)
+        try:
+            history = self._inputs_authority.read_history()
+            if not history:
+                if specs is None:
+                    return None
+                binding = self._input_registry_transition_binding(
+                    previous_state_sha256=None,
+                    candidate=specs,
+                    kind="BOOTSTRAP",
+                )
+                tx_id = self._input_registry_tx_id(binding)
+                assert observed is not None
+                self._inputs_authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=observed,
+                    semantic_binding_sha256=binding,
+                )
+                self._inputs_authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed,
+                    semantic_binding_sha256=binding,
+                )
+                return specs
+
+            pending = history[-1] if history[-1].phase is AuthorityPhase.PREPARE else None
+            if pending is not None and observed == pending.intended_state_sha256:
+                if specs is None:
+                    raise LiveDecisionProgressError(
+                        "prepared live input-registry authority has no durable registry bytes"
+                    )
+                matched: tuple[str, str] | None = None
+                for kind in ("TRANSITION", "BOOTSTRAP"):
+                    candidate_binding = self._input_registry_transition_binding(
+                        previous_state_sha256=pending.previous_committed_state_sha256,
+                        candidate=specs,
+                        kind=kind,
+                    )
+                    candidate_tx_id = self._input_registry_tx_id(candidate_binding)
+                    if (
+                        candidate_tx_id == pending.tx_id
+                        and candidate_binding == pending.semantic_binding_sha256
+                    ):
+                        matched = (candidate_tx_id, candidate_binding)
+                        break
+                if matched is None:
+                    raise LiveDecisionProgressError(
+                        "prepared live input-registry authority conflicts with durable registry semantics"
+                    )
+                tx_id, binding = matched
+                self._inputs_authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=tx_id,
+                    semantic_binding_sha256=binding,
+                )
+            else:
+                self._inputs_authority.recover(
+                    observed_state_sha256=observed,
+                )
+            return specs
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise LiveDecisionProgressError(
+                "live dependency registry failed monotonic rollback/recovery verification"
+            ) from exc
+
     def _persist_input_registry(
         self,
         *,
         expected_previous: tuple[_InputSpec, ...],
     ) -> None:
         candidate = tuple(self._input_specs.values())
-        payload = {
-            "schema": _INPUTS_SCHEMA,
-            "schema_version": _INPUTS_VERSION,
-            "loop_id": self.loop_id,
-            "inputs": [spec.to_dict() for spec in candidate],
-        }
+        payload = self._input_registry_payload(candidate)
         with WorkspaceEconomicLock(self.workspace):
             durable_progress = self._load_progress()
             if durable_progress != self._progress:
@@ -3495,7 +3619,39 @@ class PersistentLiveDecisionLoop:
                     raise LiveDecisionProgressError(
                         "focused dependency registry changed before dependency publication"
                     )
-                atomic_write_json(self.inputs_path, payload)
+                observed = self._input_registry_state_sha256(
+                    None if not self.inputs_path.exists() else durable
+                )
+                intended = self._input_registry_state_sha256(candidate)
+                assert intended is not None
+                binding = self._input_registry_transition_binding(
+                    previous_state_sha256=observed,
+                    candidate=candidate,
+                    kind="TRANSITION",
+                )
+                tx_id = self._input_registry_tx_id(binding)
+                try:
+                    self._inputs_authority.prepare(
+                        tx_id=tx_id,
+                        observed_state_sha256=observed,
+                        intended_state_sha256=intended,
+                        semantic_binding_sha256=binding,
+                    )
+                    atomic_write_json(self.inputs_path, payload)
+                    published = self._read_input_registry_file()
+                    if published != candidate:
+                        raise LiveDecisionProgressError(
+                            "live dependency registry publication changed before monotonic commit"
+                        )
+                    self._inputs_authority.commit(
+                        tx_id=tx_id,
+                        observed_state_sha256=intended,
+                        semantic_binding_sha256=binding,
+                    )
+                except MonotonicWorkspaceAuthorityError as exc:
+                    raise LiveDecisionProgressError(
+                        "live dependency registry monotonic publication failed"
+                    ) from exc
 
     def _ledger_end_offset(self) -> int:
         snapshot = self.decision_ledger.verified_snapshot_if_exists()

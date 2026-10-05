@@ -1142,6 +1142,7 @@ def _build_canonical_authority():
         if (
             object.__getattribute__(verified, "status")
             is not slippage_status_cls.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION
+            or object.__getattribute__(verified, "matchme_applicability_proven") is not True
             or object.__getattribute__(verified, "zero_adverse_price_deterioration") is not True
             or object.__getattribute__(verified, "execution_feasibility_proven") is not False
             or object.__getattribute__(verified, "realized_price_exact") is not False

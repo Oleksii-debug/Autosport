@@ -74,6 +74,23 @@ class LiveObservationTests(unittest.TestCase):
             time.sleep(0.01)
         raise AssertionError("worker did not publish terminal message")
 
+    def test_workspace_observer_rejects_noncallable_provider_before_workspace_creation(self):
+        class Provider:
+            source_id = "live-fixture"
+            read_batch = object()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(TypeError, "read_batch must be callable"):
+                observe_workspace_once(
+                    workspace,
+                    Provider(),
+                    max_items=10,
+                    clock=lambda: _RECEIVE_TIME,
+                )
+
+            self.assertFalse(workspace.exists())
+
     def test_workspace_observer_uses_short_lived_market_and_health_stores_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self._observe(tmp)

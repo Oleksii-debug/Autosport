@@ -149,7 +149,7 @@ def _source():
 def _combined_source_digest(entitlement: object, statement: object, observed_at: str) -> str:
     payload = {
         "schema": "autosport.betfair_provider_billing_inputs",
-        "schema_version": 5,
+        "schema_version": 6,
         "venue_id": entitlement.venue_id,
         "observed_at": observed_at,
         "entitlement": {
@@ -193,6 +193,8 @@ def _combined_source_digest(entitlement: object, statement: object, observed_at:
                 "balance": str(item.balance),
                 "item_class": item.item_class,
                 "item_class_data_sha256": item.item_class_data_sha256,
+                "provider_charge_class": item.provider_charge_class,
+                "provider_transaction_id": item.provider_transaction_id,
             }
             for item in statement.items
         ],
@@ -237,6 +239,8 @@ def _caller_built_source(issued: object):
         balance=original_item.balance,
         item_class=original_item.item_class,
         item_class_data_sha256=original_item.item_class_data_sha256,
+        provider_charge_class=original_item.provider_charge_class,
+        provider_transaction_id=original_item.provider_transaction_id,
     )
     statement = statement_cls(
         venue_id=issued.statement.venue_id,

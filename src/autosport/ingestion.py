@@ -110,13 +110,19 @@ class _SourceHealthSnapshot:
         self, outcome: "CommittedIngestionOutcome"
     ) -> "_SourceHealthSnapshot":
         latest_source_ts = self.latest_source_ts
+        effective_flags = set(outcome.quality_flags)
         if outcome.latest_source_ts is not None:
+            if latest_source_ts is not None and (
+                parse_source_timestamp(outcome.latest_source_ts)
+                < parse_source_timestamp(latest_source_ts)
+            ):
+                effective_flags.add("SOURCE_TIME_REGRESSION")
             if latest_source_ts is None or (
                 parse_source_timestamp(outcome.latest_source_ts)
                 >= parse_source_timestamp(latest_source_ts)
             ):
                 latest_source_ts = outcome.latest_source_ts
-        quality_flags = tuple(sorted(outcome.quality_flags))
+        quality_flags = tuple(sorted(effective_flags))
         return _SourceHealthSnapshot(
             source_id=self.source_id,
             status="degraded" if quality_flags else "healthy",
@@ -371,13 +377,24 @@ class IngestionEngine:
             health_before=health_before,
         )
         health_status = "degraded" if ordered_flags else "healthy"
+        final_quality_flags = ordered_flags
         if self.health_store is not None:
             try:
                 state = outcome._record_health_once(self.health_store)
             except Exception as health_error:
                 raise CommittedIngestionHealthError(outcome) from health_error
             health_status = state.status
-        return outcome.stats(health_status=health_status)
+            final_quality_flags = state.quality_flags
+        return IngestionStats(
+            outcome.source_id,
+            outcome.received,
+            outcome.accepted,
+            outcome.rejected,
+            outcome.elapsed_seconds,
+            outcome.cursor,
+            final_quality_flags,
+            health_status,
+        )
 
 
 def _utc_now_iso() -> str:

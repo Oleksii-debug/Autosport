@@ -532,3 +532,34 @@ def test_economic_projection_does_not_open_quarantined_workspace(
     assert controller._active_workspace == tmp_path
     assert "віднов" in controller.status.casefold()
     assert "quarantined" not in controller.status.casefold()
+
+
+def test_runtime_workspace_identity_drift_quarantines_both_workspaces(
+    tmp_path: Path,
+) -> None:
+    original = tmp_path / "original"
+    drifted = tmp_path / "drifted"
+    controller = _controller(tmp_path, None)
+    controller.product_worker = _QueuedProductWorker(None, busy=True)
+    controller._product_runtime_identity = (
+        original,
+        "session-1",
+        "source-1",
+    )
+    controller._active_workspace = drifted
+
+    assert not controller._bind_product_runtime_identity(
+        workspace=drifted,
+        session_id="session-1",
+        source_id="source-1",
+    )
+
+    assert original in controller._recovery_required_workspaces
+    assert drifted in controller._recovery_required_workspaces
+    assert controller._product_runtime_identity == (
+        original,
+        "session-1",
+        "source-1",
+    )
+    assert controller.product_worker.stop_reasons == ["runtime_error"]
+    assert "віднов" in controller.product_runtime_status.casefold()

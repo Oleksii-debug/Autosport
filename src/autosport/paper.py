@@ -507,6 +507,80 @@ def _serialized_paperbook_operation(method):
     return serialized
 
 
+def _make_paperbook_runtime_helper_authority():
+    helper_authorities = None
+    helper_names = (
+        "_require_finite",
+        "_require_utf8_string",
+        "_require_canonical_text",
+        "_validate_ticket_provenance",
+        "_validate_timestamp",
+        "_validate_placed_at",
+        "_validate_settled_at",
+        "_validate_ticket_leg",
+        "_validate_lifecycle_entry",
+        "_validate_lifecycle_reachability",
+        "_validate_loaded_state",
+        "_normalize_resolution_keys",
+        "_parse_lifecycle_key_list",
+        "_parse_lifecycle",
+        "_parse_snapshot_decimal",
+        "_required_snapshot_field",
+        "_parse_snapshot_legs",
+        "_parse_snapshot_provider_accounts",
+        "_parse_snapshot_status",
+    )
+
+    def install(canonical_type: type) -> None:
+        nonlocal helper_authorities
+        if helper_authorities is not None:
+            raise RuntimeError("PaperBook runtime helper authority already installed")
+        captured = {}
+        for helper_name in helper_names:
+            descriptor = canonical_type.__dict__.get(helper_name)
+            if descriptor is None:
+                raise RuntimeError(
+                    f"PaperBook runtime helper {helper_name} is unavailable"
+                )
+            if type(descriptor) in {classmethod, staticmethod}:
+                function = descriptor.__func__
+            else:
+                function = descriptor
+            code = getattr(function, "__code__", None)
+            if code is None:
+                raise TypeError(
+                    f"PaperBook runtime helper {helper_name} must be a Python callable"
+                )
+            captured[helper_name] = (descriptor, function, code)
+        helper_authorities = captured
+
+    def require(book: object) -> None:
+        if helper_authorities is None:
+            raise RuntimeError("PaperBook runtime helper authority is unavailable")
+        canonical_type = type(book)
+        for helper_name, (
+            expected_descriptor,
+            function,
+            expected_code,
+        ) in helper_authorities.items():
+            if canonical_type.__dict__.get(helper_name) is not expected_descriptor:
+                raise ValueError(
+                    f"PaperBook runtime helper dispatch changed: {helper_name}"
+                )
+            if function.__code__ is not expected_code:
+                raise ValueError(
+                    f"PaperBook runtime helper authority changed: {helper_name}"
+                )
+
+    return install, require
+
+
+(
+    _install_paperbook_runtime_helper_authority,
+    _require_paperbook_runtime_helper_authority,
+) = _make_paperbook_runtime_helper_authority()
+
+
 def _guard_paperbook_runtime_authority(method):
     """Seal public PaperBook authority checks against module-level rebinding."""
     method_code = method.__code__
@@ -518,6 +592,8 @@ def _guard_paperbook_runtime_authority(method):
     causal_authority_code = causal_authority.__code__
     type_authority = _require_paperbook_type_authority
     type_authority_code = type_authority.__code__
+    runtime_helper_authority = _require_paperbook_runtime_helper_authority
+    runtime_helper_authority_code = runtime_helper_authority.__code__
 
     @wraps(method)
     def guarded(self, *args, **kwargs):
@@ -528,6 +604,11 @@ def _guard_paperbook_runtime_authority(method):
         type_authority(self)
         if type_authority.__code__ is not type_authority_code:
             raise ValueError("PaperBook canonical type authority changed")
+        if runtime_helper_authority.__code__ is not runtime_helper_authority_code:
+            raise ValueError("PaperBook runtime helper dispatch authority changed")
+        runtime_helper_authority(self)
+        if runtime_helper_authority.__code__ is not runtime_helper_authority_code:
+            raise ValueError("PaperBook runtime helper dispatch authority changed")
         # Preserve the existing safety order: canonical visible state must be
         # validated before hidden registries compare or hash caller-controlled
         # values. Invoke the closure-captured visible-state authority too, so
@@ -550,6 +631,9 @@ def _guard_paperbook_runtime_authority(method):
         if method.__code__ is not method_code:
             raise ValueError("PaperBook runtime callable authority changed")
         result = method(self, *args, **kwargs)
+        if runtime_helper_authority.__code__ is not runtime_helper_authority_code:
+            raise ValueError("PaperBook runtime helper dispatch authority changed")
+        runtime_helper_authority(self)
         if method.__code__ is not method_code:
             raise ValueError("PaperBook runtime callable authority changed")
         return result
@@ -2615,6 +2699,9 @@ class PaperBook:
 # cannot redirect cls/self helper dispatch into attacker-controlled validation.
 _install_paperbook_type_authority(PaperBook)
 del _install_paperbook_type_authority
+
+_install_paperbook_runtime_helper_authority(PaperBook)
+del _install_paperbook_runtime_helper_authority
 
 _install_paperbook_constructor_decimal_authority(PaperBook)
 del _install_paperbook_constructor_decimal_authority

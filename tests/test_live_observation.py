@@ -1390,6 +1390,21 @@ class LiveObservationTests(unittest.TestCase):
         self.assertEqual(message.error, "RuntimeError: network-test")
         self.assertFalse(worker.busy)
 
+    def test_observation_result_snapshots_mutable_health_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        original_health = canonical.health
+        result = ObservationResult(
+            canonical.stats,
+            original_health,
+            canonical.current_quotes,
+        )
+        self.assertIsNot(result.health, original_health)
+        original_health.status = "failed"
+        self.assertEqual(result.health.status, canonical.stats.health_status)
+        result.validate()
+
     def test_worker_revalidates_mutated_observation_health_before_success(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self._observe(tmp)

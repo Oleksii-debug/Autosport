@@ -2171,6 +2171,7 @@ class PersistentLiveDecisionLoop:
                 market_state_sha256=progress.market_state_sha256,
                 gate=progress.gate,
                 decision_context_sha256=progress.decision_context_sha256,
+                health_boundaries=progress.health_boundaries,
             )[1]
             latest_live = self._verified_latest_ledger_record(
                 replay_run_id=f"live:{self.loop_id}",
@@ -2750,11 +2751,12 @@ class PersistentLiveDecisionLoop:
         market_state_sha256: str,
         gate: str,
         decision_context_sha256: str,
+        health_boundaries: tuple[ProviderHealthReplayBoundary, ...],
     ) -> tuple[str, str]:
         provenance = self.intent_provenance
         context_payload = {
             "schema": "autosport.live_decision_context",
-            "schema_version": 2,
+            "schema_version": 3,
             "loop_id": self.loop_id,
             "mode": self.mode.value,
             "gate": gate,
@@ -2763,6 +2765,9 @@ class PersistentLiveDecisionLoop:
             "intent_strategy_version_id": provenance.strategy_version_id,
             "intent_model_version_id": provenance.model_version_id,
             "intent_provenance_sha256": provenance.provenance_sha256,
+            "health_boundaries": [
+                boundary.to_dict() for boundary in health_boundaries
+            ],
             "plan_sha256": plan.plan_sha256,
         }
         context_hash = _canonical_json_sha256(context_payload)
@@ -3042,11 +3047,17 @@ class PersistentLiveDecisionLoop:
                 decision_context_sha256_override,
             )
         provenance = self.intent_provenance
+        decision_health_boundaries = (
+            self._progress.health_boundaries
+            if self._progress is not None
+            else self._health_boundaries_for_progress()
+        )
         context_hash, decision_id = self._decision_identity(
             plan=plan,
             market_state_sha256=market_state_sha256,
             gate=gate,
             decision_context_sha256=decision_context_sha256,
+            health_boundaries=decision_health_boundaries,
         )
         prepared_execution: PreparedPaperExecution | None = None
         expected_execution_payload = None
@@ -3084,7 +3095,7 @@ class PersistentLiveDecisionLoop:
         )
         record_payload = {
             "schema": "autosport.persistent_live_decision",
-            "schema_version": 2,
+            "schema_version": 3,
             "loop_id": self.loop_id,
             "mode": self.mode.value,
             "gate": gate,
@@ -3093,6 +3104,10 @@ class PersistentLiveDecisionLoop:
             "intent_strategy_version_id": provenance.strategy_version_id,
             "intent_model_version_id": provenance.model_version_id,
             "intent_provenance_sha256": provenance.provenance_sha256,
+            "health_boundaries": [
+                boundary.to_dict()
+                for boundary in decision_health_boundaries
+            ],
             "affected_input_ids": list(affected_input_ids),
             "plan_sha256": plan.plan_sha256,
             "plan": plan.to_dict(),
@@ -3305,6 +3320,11 @@ class PersistentLiveDecisionLoop:
                     or existing.payload.get("intent_provenance_sha256")
                     != provenance.provenance_sha256
                     or existing.payload.get("gate") != gate
+                    or existing.payload.get("health_boundaries")
+                    != [
+                        boundary.to_dict()
+                        for boundary in decision_health_boundaries
+                    ]
                     or existing.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
                     != decision_id
                 ):

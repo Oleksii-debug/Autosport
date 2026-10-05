@@ -72,6 +72,14 @@ _STATE_KEYS: Final = frozenset(
 )
 
 
+_CLOCK_INSTANT = _clock_instant
+_STATE_SHA256 = _state_sha256
+_SEMANTIC_BINDING = _semantic_binding
+_TX_ID = _tx_id
+_CANONICAL_JSON_BYTES = _canonical_json_bytes
+_READ_REGULAR_BYTES = _read_regular_bytes
+_DECODE_STATE = _decode_state
+
 class EconomicSessionError(RuntimeError):
     pass
 

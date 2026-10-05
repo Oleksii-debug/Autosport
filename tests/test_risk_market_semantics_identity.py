@@ -142,6 +142,66 @@ def test_context_rejects_quote_market_semantics_mismatch() -> None:
         )
 
 
+
+def test_market_semantics_identity_ignores_rebound_market_event_serializers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline_context = _context("rules:s1")
+    baseline = PaperRiskPolicy.risk_of_ruin_candidate_sha256(baseline_context)
+    assert baseline is not None
+
+    calls = {"to_dict": 0, "from_dict": 0, "eq": 0}
+
+    def hostile_to_dict(self: MarketEvent) -> dict[str, object]:
+        calls["to_dict"] += 1
+        raise AssertionError("live MarketEvent.to_dict dispatch reached risk identity")
+
+    def hostile_from_dict(cls: type[MarketEvent], raw: dict[str, object]) -> MarketEvent:
+        calls["from_dict"] += 1
+        raise AssertionError("live MarketEvent.from_dict dispatch reached risk identity")
+
+    def hostile_eq(self: MarketEvent, other: object) -> bool:
+        calls["eq"] += 1
+        raise AssertionError("live MarketEvent.__eq__ dispatch reached risk identity")
+
+    monkeypatch.setattr(MarketEvent, "to_dict", hostile_to_dict)
+    monkeypatch.setattr(MarketEvent, "from_dict", classmethod(hostile_from_dict))
+    monkeypatch.setattr(MarketEvent, "__eq__", hostile_eq)
+
+    context = _context("rules:s1")
+    assert PaperRiskPolicy.risk_of_ruin_candidate_sha256(context) == baseline
+    assert calls == {"to_dict": 0, "from_dict": 0, "eq": 0}
+
+
+def test_portfolio_digest_ignores_rebound_paperbook_validators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg("rules:s1")], Decimal("1"), placed_at=_PROPOSAL)
+    baseline = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    assert baseline is not None
+
+    calls = {"state": 0, "lifecycle": 0}
+
+    def hostile_state(cls: type[PaperBook], candidate: PaperBook) -> None:
+        calls["state"] += 1
+        raise AssertionError("live PaperBook state validator dispatch reached risk identity")
+
+    def hostile_lifecycle(cls: type[PaperBook], entry: object):
+        calls["lifecycle"] += 1
+        raise AssertionError("live PaperBook lifecycle validator dispatch reached risk identity")
+
+    monkeypatch.setattr(PaperBook, "_validate_loaded_state", classmethod(hostile_state))
+    monkeypatch.setattr(
+        PaperBook,
+        "_validate_lifecycle_entry",
+        classmethod(hostile_lifecycle),
+    )
+
+    assert PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book) == baseline
+    assert calls == {"state": 0, "lifecycle": 0}
+
+
 def test_candidate_digest_fails_closed_after_quote_semantics_mutation() -> None:
     context = _context("rules:s1")
     object.__setattr__(context.quotes[0], "market_semantics_id", "rules:s2")

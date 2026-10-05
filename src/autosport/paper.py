@@ -46,11 +46,12 @@ def _make_paperbook_type_authority():
             raise TypeError("PaperBook canonical type authority must be an exact class")
         canonical_type = candidate
 
-    def require(book: object) -> None:
+    def require(target: object) -> None:
         if canonical_type is None:
             raise RuntimeError("PaperBook canonical type authority is unavailable")
-        if type(book) is not canonical_type:
-            raise ValueError("PaperBook runtime object must be the canonical PaperBook type")
+        target_type = target if type(target) is type else type(target)
+        if target_type is not canonical_type:
+            raise ValueError("PaperBook authority target must be the canonical PaperBook type")
 
     return install, require
 
@@ -740,6 +741,15 @@ def _seal_paperbook_json_decode_authority(method):
     duplicate_hook_code = duplicate_hook.__code__
     constant_hook = _reject_nonfinite_json_constant
     constant_hook_code = constant_hook.__code__
+    type_authority = _require_paperbook_type_authority
+    type_authority_code = type_authority.__code__
+
+    def require_type(target: object) -> None:
+        if type_authority.__code__ is not type_authority_code:
+            raise ValueError("PaperBook canonical type authority changed")
+        type_authority(target)
+        if type_authority.__code__ is not type_authority_code:
+            raise ValueError("PaperBook canonical type authority changed")
 
     def decode(text: str) -> object:
         if loads.__code__ is not loads_code:
@@ -763,6 +773,7 @@ def _seal_paperbook_json_decode_authority(method):
 
     @wraps(method)
     def sealed(cls, *args, **kwargs):
+        require_type(cls)
         if method.__code__ is not method_code:
             raise ValueError("PaperBook JSON decode callable authority changed")
         if loads.__code__ is not loads_code:
@@ -787,6 +798,15 @@ def _seal_paperbook_snapshot_decode_authority(method):
     revoke_opening_code = revoke_opening.__code__
     revoke_causal = _revoke_paperbook_causal_history_authority
     revoke_causal_code = revoke_causal.__code__
+    type_authority = _require_paperbook_type_authority
+    type_authority_code = type_authority.__code__
+
+    def require_type(target: object) -> None:
+        if type_authority.__code__ is not type_authority_code:
+            raise ValueError("PaperBook canonical type authority changed")
+        type_authority(target)
+        if type_authority.__code__ is not type_authority_code:
+            raise ValueError("PaperBook canonical type authority changed")
 
     def revoke(book: object) -> None:
         if revoke_opening.__code__ is not revoke_opening_code:
@@ -802,6 +822,7 @@ def _seal_paperbook_snapshot_decode_authority(method):
 
     @wraps(method)
     def sealed(cls, *args, **kwargs):
+        require_type(cls)
         if method.__code__ is not method_code:
             raise ValueError("PaperBook snapshot decode callable authority changed")
         if revoke_opening.__code__ is not revoke_opening_code:
@@ -824,6 +845,15 @@ def _seal_paperbook_snapshot_install_authority(method):
     install_opening_code = install_opening.__code__
     install_causal = _install_validated_paperbook_causal_history_authority
     install_causal_code = install_causal.__code__
+    type_authority = _require_paperbook_type_authority
+    type_authority_code = type_authority.__code__
+
+    def require_type(target: object) -> None:
+        if type_authority.__code__ is not type_authority_code:
+            raise ValueError("PaperBook canonical type authority changed")
+        type_authority(target)
+        if type_authority.__code__ is not type_authority_code:
+            raise ValueError("PaperBook canonical type authority changed")
 
     def install(book: object) -> None:
         if install_opening.__code__ is not install_opening_code:
@@ -839,6 +869,7 @@ def _seal_paperbook_snapshot_install_authority(method):
 
     @wraps(method)
     def sealed(cls, *args, **kwargs):
+        require_type(cls)
         if method.__code__ is not method_code:
             raise ValueError("PaperBook snapshot install callable authority changed")
         if install_opening.__code__ is not install_opening_code:

@@ -183,6 +183,66 @@ def _derive_run_economics(
 class PaperExecutionLedger(_impl.PaperExecutionLedger):
     """PAPER ledger with mechanically derived completion economics."""
 
+    def reserve_run(
+        self,
+        *,
+        run_id: str,
+        trigger_id: str,
+        plan: ExecutionPlan,
+        config: PaperExecutionModelConfig,
+        started_at: str,
+        observation_evidence_ids: Mapping[str, str],
+        suspended_action_ids: frozenset[str] = frozenset(),
+    ) -> None:
+        if type(suspended_action_ids) is not frozenset or any(
+            type(item) is not str for item in suspended_action_ids
+        ):
+            raise TypeError("suspended_action_ids must be a frozenset[str]")
+        action_ids = tuple(action.action_id for action in plan.actions)
+        if suspended_action_ids - set(action_ids):
+            raise PaperExecutionStateError(
+                "suspended_action_ids contain action outside execution plan"
+            )
+        base_payload = {
+            "trigger_id": trigger_id,
+            "plan_id": plan.plan_id,
+            "plan_fingerprint": plan.fingerprint,
+            "model_fingerprint": config.fingerprint,
+            "started_at": started_at,
+            "action_ids": list(action_ids),
+            "observation_evidence_ids": dict(sorted(observation_evidence_ids.items())),
+        }
+        payload = {
+            **base_payload,
+            "suspended_action_ids": sorted(suspended_action_ids),
+        }
+
+        existing = [
+            event
+            for event in self.events(run_id)
+            if event["event_type"] == "RUN_RESERVED"
+        ]
+        if existing:
+            if len(existing) != 1:
+                raise PaperExecutionIntegrityError(
+                    "run needs exactly one reservation"
+                )
+            prior_payload = existing[0]["payload"]
+            if prior_payload == payload:
+                return
+            if not suspended_action_ids and prior_payload == base_payload:
+                return
+            raise PaperExecutionStateError(
+                "run execution-control state conflicts with durable reservation"
+            )
+
+        self._append_event(
+            event_type="RUN_RESERVED",
+            run_id=run_id,
+            key=f"{run_id}:reserve",
+            payload=payload,
+        )
+
     def _append_completion_unlocked(
         self,
         *,
@@ -322,6 +382,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         config: PaperExecutionModelConfig,
         started_at: str,
         observation_evidence_ids: Mapping[str, str],
+        suspended_action_ids: frozenset[str] | None = None,
     ) -> PaperExecutionRun | None:
         events = self.events(run_id)
         if not events:
@@ -338,7 +399,39 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             "action_ids": [action.action_id for action in plan.actions],
             "observation_evidence_ids": dict(sorted(observation_evidence_ids.items())),
         }
-        if reserve[0]["payload"] != expected_reserve:
+        durable_reserve = reserve[0]["payload"]
+        if "suspended_action_ids" in durable_reserve:
+            raw_suspended = durable_reserve.get("suspended_action_ids")
+            if (
+                type(raw_suspended) is not list
+                or any(type(item) is not str for item in raw_suspended)
+                or raw_suspended != sorted(set(raw_suspended))
+                or set(raw_suspended)
+                - {action.action_id for action in plan.actions}
+            ):
+                raise PaperExecutionIntegrityError(
+                    "durable suspended_action_ids are invalid"
+                )
+            expected_reserve = {
+                **expected_reserve,
+                "suspended_action_ids": raw_suspended,
+            }
+            if suspended_action_ids is not None:
+                if type(suspended_action_ids) is not frozenset or any(
+                    type(item) is not str for item in suspended_action_ids
+                ):
+                    raise TypeError(
+                        "suspended_action_ids must be a frozenset[str] or None"
+                    )
+                if sorted(suspended_action_ids) != raw_suspended:
+                    raise PaperExecutionStateError(
+                        "run execution-control state conflicts with durable reservation"
+                    )
+        elif suspended_action_ids:
+            raise PaperExecutionStateError(
+                "legacy reservation cannot prove requested suspended_action_ids"
+            )
+        if durable_reserve != expected_reserve:
             raise PaperExecutionStateError("run identity conflicts with durable reservation")
 
         attempt_events = [
@@ -645,6 +738,7 @@ def execute_paper_plan(
         config=config,
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspended_action_ids,
     )
     existing = ledger.load_run(
         run_id=run_id,
@@ -653,6 +747,7 @@ def execute_paper_plan(
         config=config,
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspended_action_ids,
     )
     assert existing is not None
     if existing.completed:
@@ -677,6 +772,7 @@ def execute_paper_plan(
             config=config,
             started_at=started_at,
             observation_evidence_ids=observation_evidence_ids,
+            suspended_action_ids=suspended_action_ids,
         )
         assert result is not None
         return result
@@ -757,6 +853,7 @@ def execute_paper_plan(
                 config=config,
                 started_at=started_at,
                 observation_evidence_ids=observation_evidence_ids,
+                suspended_action_ids=suspended_action_ids,
             )
             assert result is not None
             return result
@@ -774,6 +871,7 @@ def execute_paper_plan(
         config=config,
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspended_action_ids,
     )
     assert result is not None
     return result

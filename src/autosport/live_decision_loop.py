@@ -1801,8 +1801,12 @@ class PersistentLiveDecisionLoop:
             for input_id in registered_input_ids:
                 self._pending_affected[input_id] = None
 
-        refresh_input_ids = tuple(self._pending_affected)
-        affected = refresh_input_ids
+        affected = tuple(self._pending_affected)
+        refresh_input_ids = (
+            self.dependencies.input_ids
+            if self._health_gate is not None and affected
+            else affected
+        )
         if not affected:
             return LiveCycleResult(
                 LiveCycleStatus.NO_CHANGE,
@@ -2533,11 +2537,7 @@ class PersistentLiveDecisionLoop:
             return ()
         source_inputs: dict[str, set[str]] = {}
         for input_id in self.dependencies.input_ids:
-            captured = self.dependencies.decision_view(
-                input_id,
-                as_of=as_of,
-                max_age=self.max_quote_age,
-            )
+            captured = self.dependencies.causal_view(input_id)
             for event in captured.events:
                 source_inputs.setdefault(event.source_id, set()).add(input_id)
 

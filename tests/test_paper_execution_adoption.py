@@ -1475,7 +1475,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 side_effect=mutate_after_execution,
             ), self.assertRaisesRegex(
                 PaperExecutionAdoptionError,
-                "prepared execution authority changed after mint",
+                "prepared action action_id must retain exact canonical text authority",
             ):
                 runtime.execute(
                     prepared=current_prepared,
@@ -1510,7 +1510,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 side_effect=mutate_after_execution,
             ), self.assertRaisesRegex(
                 PaperExecutionAdoptionError,
-                "prepared execution authority changed after mint",
+                "prepared binding action_id must retain exact canonical text authority",
             ):
                 runtime.execute(
                     prepared=current_prepared,

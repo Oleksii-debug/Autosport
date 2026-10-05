@@ -183,7 +183,12 @@ class _ReplayableBatchProvider:
 
     def __init__(self, provider: MarketProvider) -> None:
         self._provider = provider
-        self.source_id = provider.source_id
+        source_id = provider.source_id
+        if type(source_id) is not str:
+            raise TypeError("provider source_id must be an exact string")
+        if not source_id or source_id.strip() != source_id or "|" in source_id:
+            raise ValueError("provider source_id must be canonical")
+        self.source_id = source_id
         self._inflight: ProviderBatch | None = None
         self._inflight_max_items: int | None = None
         self._carried_quality_flags: tuple[str, ...] = ()
@@ -203,6 +208,8 @@ class _ReplayableBatchProvider:
                 raise RuntimeError(
                     "provider source identity changed during live batch read"
                 )
+            if type(batch) is not ProviderBatch:
+                raise TypeError("provider must return an exact ProviderBatch")
             if batch.source_id != self.source_id:
                 raise RuntimeError(
                     "provider batch source identity conflicts with live provider authority"

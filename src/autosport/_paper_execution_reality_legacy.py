@@ -659,7 +659,24 @@ class PaperExecutionLedger:
         self._lock_path = self.path.with_name(self.path.name + ".writer.lock")
         self._anchor_path = self.path.with_name(self.path.name + ".anchor.json")
         self._lock = threading.RLock()
+        self._path_authority = self.path
+        self._absolute_path_authority = self.path.absolute()
+        self._lock_path_authority = self._lock_path
+        self._anchor_path_authority = self._anchor_path
+        self._lock_authority = self._lock
         self._path_durable = False
+
+    def _assert_persistence_authority(self) -> None:
+        if (
+            self.path != self._path_authority
+            or self.path.absolute() != self._absolute_path_authority
+            or self._lock_path != self._lock_path_authority
+            or self._anchor_path != self._anchor_path_authority
+            or self._lock is not self._lock_authority
+        ):
+            raise PaperExecutionIntegrityError(
+                "PAPER execution ledger persistence authority changed after construction"
+            )
 
     def _sync_parent_directory(self) -> None:
         if os.name == "nt":
@@ -687,7 +704,10 @@ class PaperExecutionLedger:
         self._path_durable = True
 
     def _with_writer_lock(self, operation):
-        with self._lock:
+        self._assert_persistence_authority()
+        lock = self._lock_authority
+        with lock:
+            self._assert_persistence_authority()
             try:
                 fd = os.open(
                     self._lock_path,
@@ -700,7 +720,9 @@ class PaperExecutionLedger:
                     "writer/crash ownership is resolved"
                 ) from exc
             try:
-                return operation()
+                result = operation()
+                self._assert_persistence_authority()
+                return result
             finally:
                 os.close(fd)
                 try:
@@ -777,6 +799,7 @@ class PaperExecutionLedger:
             ) from exc
 
     def _load_unlocked(self) -> list[dict[str, Any]]:
+        self._assert_persistence_authority()
         if not self.path.exists():
             if self._anchor_path.exists():
                 anchor = self._read_anchor_unlocked()
@@ -833,7 +856,10 @@ class PaperExecutionLedger:
         return events
 
     def events(self, run_id: str | None = None) -> tuple[dict[str, Any], ...]:
-        with self._lock:
+        self._assert_persistence_authority()
+        lock = self._lock_authority
+        with lock:
+            self._assert_persistence_authority()
             events = self._load_unlocked()
             if run_id is None:
                 return tuple(events)

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from decimal import Decimal
 from pathlib import Path
 from threading import Event, Thread
 
-from autosport.domain import MarketEvent
+from autosport.domain import MarketEvent, TicketLeg
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
     PaperExecutionAdoptionError,
@@ -867,6 +868,98 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 paper_book_path=Path(tmp) / "second-paper-book.json",
             )
             self.assertIsNot(first._execution_lock, second._execution_lock)
+
+
+
+
+    def test_fresh_execution_rejects_paperbook_change_after_prepare(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            trigger_id = "trigger-stale-prepared"
+            run_id = runtime.expected_run_id(current_prepared, trigger_id)
+
+            book.open_ticket(
+                (
+                    TicketLeg(
+                        "event-concurrent",
+                        "market-concurrent",
+                        "selection-concurrent",
+                        Decimal("2.00"),
+                    ),
+                ),
+                Decimal("1.00"),
+                reason="concurrent paper mutation",
+                placed_at=QUOTE_AT,
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "PaperBook changed after execution preparation",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id=trigger_id,
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(ledger.events(run_id), ())
+            self.assertEqual(len(book.tickets), 1)
+
+    def test_fresh_execution_rechecks_paperbook_before_materialization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            trigger_id = "trigger-mid-run-paperbook-race"
+            run_id = runtime.expected_run_id(current_prepared, trigger_id)
+
+            import autosport.paper_execution_adoption as adoption_module
+
+            real_execute = adoption_module.execute_paper_plan
+            mutated = {"value": False}
+
+            def execute_then_mutate(**kwargs):
+                run = real_execute(**kwargs)
+                if not mutated["value"]:
+                    mutated["value"] = True
+                    book.open_ticket(
+                        (
+                            TicketLeg(
+                                "event-concurrent",
+                                "market-concurrent",
+                                "selection-concurrent",
+                                Decimal("2.00"),
+                            ),
+                        ),
+                        Decimal("1.00"),
+                        reason="concurrent paper mutation during execution",
+                        placed_at=QUOTE_AT,
+                    )
+                return run
+
+            with patch(
+                "autosport.paper_execution_adoption.execute_paper_plan",
+                side_effect=execute_then_mutate,
+            ):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "PaperBook changed after execution preparation",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id=trigger_id,
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertTrue(mutated["value"])
+            self.assertTrue(ledger.events(run_id))
+            self.assertEqual(len(book.tickets), 1)
+            self.assertNotIn(
+                "paper_execution_attempt_id=",
+                next(iter(book.tickets.values())).strategy_reason,
+            )
 
 
 if __name__ == "__main__":

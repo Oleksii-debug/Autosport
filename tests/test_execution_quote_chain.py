@@ -11,7 +11,6 @@ import autosport.real_execution_ledger as real_execution_ledger
 from autosport.execution_quote_chain import (
     ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED,
     ACCEPTED_PRICE_NOT_APPLICABLE,
-    ACCEPTED_PRICE_PROVIDER_VERIFIED,
     ACCEPTED_PRICE_UNKNOWN,
     CHAIN_NOT_SUBMITTED,
     CHAIN_SUBMISSION_UNKNOWN,
@@ -24,6 +23,7 @@ from autosport.execution_quote_chain import (
 from autosport.real_execution_ledger import (
     AcknowledgementStatus,
     ExecutionAction,
+    ExecutionLedgerIntegrityError,
     ExecutionPlan,
     ExternalAcknowledgement,
     RealExecutionLedger,
@@ -141,16 +141,13 @@ def _ack(
     ledger.acknowledge(acknowledgement)
 
 
-def _append_verified_provider_effect_fact(
-    ledger: RealExecutionLedger,
+def _raw_verified_provider_effect_payload(
     *,
     status: AcknowledgementStatus = AcknowledgementStatus.ACCEPTED,
     odds: Decimal = Decimal("2.08"),
     stake: Decimal = Decimal("10.00"),
-) -> None:
-    """Model an already-issued provider-origin fact for read-only projection tests."""
-
-    payload = real_execution_ledger.VerifiedProviderEffectBindingView(
+) -> dict[str, object]:
+    return real_execution_ledger.VerifiedProviderEffectBindingView(
         evidence_id=EVIDENCE_ID,
         observed_at=ACKED,
         source_payload_sha256=SOURCE_PAYLOAD_SHA256,
@@ -160,12 +157,25 @@ def _append_verified_provider_effect_fact(
         accepted_stake=stake,
         provider_order_ref=None,
     ).to_dict()
+
+
+def _append_raw_verified_provider_effect_fact(
+    ledger: RealExecutionLedger,
+    *,
+    status: AcknowledgementStatus = AcknowledgementStatus.ACCEPTED,
+    odds: Decimal = Decimal("2.08"),
+    stake: Decimal = Decimal("10.00"),
+) -> None:
     ledger._append(
         real_execution_ledger.EventType.VERIFIED_PROVIDER_EFFECT_BOUND,
         "plan-1",
         "action-1",
         "attempt-1",
-        payload,
+        _raw_verified_provider_effect_payload(
+            status=status,
+            odds=odds,
+            stake=stake,
+        ),
     )
 
 
@@ -246,7 +256,7 @@ def test_exact_provider_ack_binding_is_visible_without_promoting_price_authority
     assert evidence.chain_complete is False
 
 
-def test_verified_provider_outcome_completes_only_exact_request_chain(
+def test_raw_verified_provider_effect_append_cannot_mint_accepted_price(
     tmp_path,
 ) -> None:
     ledger = _submitted(tmp_path, request_sha256=REQUEST_SHA256)
@@ -256,22 +266,21 @@ def test_verified_provider_outcome_completes_only_exact_request_chain(
         stake=Decimal("10.00"),
         request_sha256=REQUEST_SHA256,
     )
-    _append_verified_provider_effect_fact(ledger)
+    before = _project(ledger)
 
-    evidence = _project(ledger)
+    with pytest.raises(
+        ExecutionLedgerIntegrityError,
+        match="requires canonical origin-verifying ledger writer",
+    ):
+        _append_raw_verified_provider_effect_fact(ledger)
 
-    assert evidence.provider_outcome_evidence_id == EVIDENCE_ID
-    assert evidence.provider_outcome_source_payload_sha256 == SOURCE_PAYLOAD_SHA256
-    assert evidence.provider_outcome_status == "ACCEPTED"
-    assert evidence.provider_accepted_odds == Decimal("2.08")
-    assert evidence.provider_accepted_stake == Decimal("10.00")
-    assert evidence.accepted_price_status == ACCEPTED_PRICE_PROVIDER_VERIFIED
-    assert evidence.accepted_price_verified is True
-    assert evidence.actual_submitted_instruction_bound is True
-    assert evidence.chain_complete is True
+    after = _project(ledger)
+    assert after.to_dict() == before.to_dict()
+    assert after.accepted_price_verified is False
+    assert after.chain_complete is False
 
 
-def test_verified_provider_outcome_without_request_correlation_stays_incomplete(
+def test_raw_verified_provider_effect_append_without_request_binding_is_rejected(
     tmp_path,
 ) -> None:
     ledger = _submitted(tmp_path)
@@ -280,33 +289,39 @@ def test_verified_provider_outcome_without_request_correlation_stays_incomplete(
         odds=Decimal("2.08"),
         stake=Decimal("10.00"),
     )
-    _append_verified_provider_effect_fact(ledger)
+
+    with pytest.raises(
+        ExecutionLedgerIntegrityError,
+        match="requires canonical origin-verifying ledger writer",
+    ):
+        _append_raw_verified_provider_effect_fact(ledger)
 
     evidence = _project(ledger)
-
-    assert evidence.accepted_price_status == ACCEPTED_PRICE_PROVIDER_VERIFIED
-    assert evidence.accepted_price_verified is True
+    assert evidence.accepted_price_verified is False
     assert evidence.actual_submitted_instruction_bound is False
     assert evidence.chain_complete is False
 
 
-def test_verified_provider_outcome_and_chain_completion_survive_restart(
+def test_rejected_raw_verified_provider_effect_does_not_survive_restart(
     tmp_path,
 ) -> None:
     ledger = _submitted(tmp_path, request_sha256=REQUEST_SHA256)
     _ack(ledger, request_sha256=REQUEST_SHA256)
-    _append_verified_provider_effect_fact(ledger)
+    before = _project(ledger)
 
-    first = _project(ledger)
+    with pytest.raises(
+        ExecutionLedgerIntegrityError,
+        match="requires canonical origin-verifying ledger writer",
+    ):
+        _append_raw_verified_provider_effect_fact(ledger)
+
     reopened = RealExecutionLedger(ledger.path)
-    second = _project(reopened)
-
-    assert first.accepted_price_verified is True
-    assert first.chain_complete is True
-    assert second.accepted_price_verified is True
-    assert second.chain_complete is True
-    assert second.to_dict() == first.to_dict()
-    assert second.evidence_sha256 == first.evidence_sha256
+    after = _project(reopened)
+    assert after.source_event_count == before.source_event_count
+    assert after.source_ledger_sha256 == before.source_ledger_sha256
+    assert after.accepted_price_verified is False
+    assert after.chain_complete is False
+    assert after.to_dict() == before.to_dict()
 
 
 def test_exact_request_and_provider_ack_binding_survive_restart(

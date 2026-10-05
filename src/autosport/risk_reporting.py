@@ -102,7 +102,6 @@ class ProductIssuedPaperDrawdownEvidence:
     equity_path_sha256: str
     paperbook_source_state_sha256: str
     equity_path_point_count: int
-    paper_source_state_sha256: str
     goal_id: str
     goal_revision: int
     bankroll_id: str
@@ -663,7 +662,6 @@ def _drawdown_evidence_payload(
         "equity_path_sha256": path.path_sha256,
         "paperbook_source_state_sha256": path.paperbook_source_state_sha256,
         "equity_path_point_count": path.point_count,
-        "paper_source_state_sha256": path.paper_source_state_sha256,
         "goal_id": path.goal_id,
         "goal_revision": path.goal_revision,
         "bankroll_id": path.bankroll_id,
@@ -715,7 +713,6 @@ def build_product_issued_paper_drawdown_evidence(
         equity_path_sha256=path.path_sha256,
         paperbook_source_state_sha256=path.paperbook_source_state_sha256,
         equity_path_point_count=path.point_count,
-        paper_source_state_sha256=path.paper_source_state_sha256,
         goal_id=path.goal_id,
         goal_revision=path.goal_revision,
         bankroll_id=path.bankroll_id,

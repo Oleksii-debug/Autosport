@@ -4,7 +4,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from autosport.operator_source_configuration import OperatorSourceConfiguration
+from autosport.operator_source_configuration import (
+    OperatorSourceConfiguration,
+    OperatorSourceConfigurationError,
+)
 from autosport.operator_source_registry import resolve_product_source_entry
 from autosport.product_windows_gui import ProductWindowsAutosportApp
 
@@ -77,14 +80,12 @@ def test_start_rejects_corrupt_source_configuration(tmp_path: Path) -> None:
 
     with patch(
         "autosport.product_windows_gui.load_operator_source_configuration",
-        side_effect=RuntimeError("should be mapped by configured loader"),
+        side_effect=OperatorSourceConfigurationError("corrupt"),
     ):
-        try:
-            ProductWindowsAutosportApp.start_product_runtime(surface)
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError("unexpected broad exception suppression")
+        ProductWindowsAutosportApp.start_product_runtime(surface)
+
+    assert surface.product_worker.started == []
+    assert "пошкоджена" in surface.product_status.value
 
 
 def test_start_rejects_unsaved_display_choice(tmp_path: Path) -> None:

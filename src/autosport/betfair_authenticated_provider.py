@@ -376,6 +376,8 @@ class BetfairAuthenticatedMarketProvider:
     def _open_quote(
         self,
         evidence: BetfairStreamPublicationEvidence,
+        *,
+        sequence: int,
     ) -> ProviderQuote:
         identity = evidence.quote.identity
         exchange_side = (
@@ -389,7 +391,7 @@ class BetfairAuthenticatedMarketProvider:
             provider_selection_id=_identity_token(identity),
             decimal_odds=evidence.quote.price,
             observed_ts=_iso_from_epoch_ms(evidence.received_time_ms),
-            sequence=self._next_sequence(),
+            sequence=sequence,
             market_type=MarketType.OTHER,
             status="open",
             source_ts=_iso_from_epoch_ms(evidence.publish_time_ms),
@@ -397,7 +399,12 @@ class BetfairAuthenticatedMarketProvider:
             exchange_side=exchange_side,
         )
 
-    def _closed_quote(self, prior: ProviderQuote) -> ProviderQuote:
+    def _closed_quote(
+        self,
+        prior: ProviderQuote,
+        *,
+        sequence: int,
+    ) -> ProviderQuote:
         now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
         metadata = dict(prior.metadata)
         metadata["durable_disposition"] = "closed"
@@ -408,7 +415,7 @@ class BetfairAuthenticatedMarketProvider:
             provider_selection_id=prior.provider_selection_id,
             decimal_odds=prior.decimal_odds,
             observed_ts=now,
-            sequence=self._next_sequence(),
+            sequence=sequence,
             market_type=prior.market_type,
             status="closed",
             source_ts=None,
@@ -422,16 +429,28 @@ class BetfairAuthenticatedMarketProvider:
         issued = self._runtime.read_and_ingest()
         emitted: list[ProviderQuote] = []
         issued_by_identity = {evidence.quote.identity: evidence for evidence in issued}
+        projected_open = dict(self._open_by_identity)
+        projected_sequence = self._sequence
 
-        # First retire any durable open quote that no longer has exact live authority
-        # after the just-consumed authenticated frame.
-        for identity, prior in tuple(self._open_by_identity.items()):
+        def allocate_sequence() -> int:
+            nonlocal projected_sequence
+            if projected_sequence >= _MAX_SQLITE_SEQUENCE:
+                raise OverflowError("Betfair bridge exhausted signed 64-bit provider sequence")
+            projected_sequence += 1
+            return projected_sequence
+
+        # Build the complete frame transition without advancing committed bridge state.
+        # read_batch applies only the page it actually exposes, so later truncated pages
+        # cannot become in-memory authority before they cross their own persistence seam.
+        for identity, prior in tuple(projected_open.items()):
             decision = self._runtime.evaluate(identity, policy=self._policy)
             if not decision.decision_eligible:
-                emitted.append(self._closed_quote(prior))
-                self._open_by_identity.pop(identity, None)
+                emitted.append(
+                    self._closed_quote(prior, sequence=allocate_sequence())
+                )
+                projected_open.pop(identity, None)
 
-        # Then publish only newly issued evidence that remains decision-eligible under
+        # Then plan only newly issued evidence that remains decision-eligible under
         # the same authenticated runtime after all frame-level status/epoch updates.
         for identity in sorted(
             issued_by_identity,
@@ -447,11 +466,14 @@ class BetfairAuthenticatedMarketProvider:
             decision = self._runtime.evaluate(identity, policy=self._policy)
             if not decision.decision_eligible:
                 continue
-            prior = self._open_by_identity.get(identity)
+            prior = projected_open.get(identity)
             if prior is not None and prior.metadata.get("evidence_id") == evidence.evidence_id:
                 continue
-            quote = self._open_quote(evidence)
-            self._open_by_identity[identity] = quote
+            quote = self._open_quote(
+                evidence,
+                sequence=allocate_sequence(),
+            )
+            projected_open[identity] = quote
             emitted.append(quote)
 
         return tuple(emitted)
@@ -479,6 +501,17 @@ class BetfairAuthenticatedMarketProvider:
         stop = min(len(self._pending), start + max_items)
         quotes = self._pending[start:stop]
         self._pending_offset = stop
+        for quote in quotes:
+            identity = _identity_from_metadata(quote.metadata)
+            if quote.status == "open":
+                self._open_by_identity[identity] = quote
+            elif quote.status == "closed":
+                self._open_by_identity.pop(identity, None)
+            else:
+                raise AssertionError("Betfair bridge planned a noncanonical status")
+            if quote.sequence <= self._sequence:
+                raise AssertionError("Betfair bridge planned a non-monotonic sequence")
+            self._sequence = quote.sequence
         truncated = stop < len(self._pending)
         authority_revoked = self._pending_authority_revoked
         if not truncated:

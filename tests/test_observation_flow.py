@@ -275,6 +275,43 @@ class ObservationFlowTests(unittest.TestCase):
             self.assertIn("odds=1.80", text)
             self.assertIn("1 more current quotes not printed", text)
 
+    def test_cli_observation_announces_full_quote_identity(self):
+        def factory(api_key, *, public_preview):
+            self.assertIsNone(api_key)
+            self.assertTrue(public_preview)
+            return InMemoryProvider(
+                "identity-source",
+                [
+                    ProviderQuote(
+                        provider_event_id="match-1",
+                        provider_market_id="winner",
+                        provider_selection_id="player-a",
+                        decimal_odds=Decimal("1.80"),
+                        observed_ts="2026-09-12T20:00:00+00:00",
+                        sequence=1,
+                        sport="tennis",
+                        exchange_side="lay",
+                    ),
+                ],
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = run_observe_table_tennis(
+                    Path(tmp),
+                    public_preview=True,
+                    max_items=10,
+                    show=1,
+                    provider_factory=factory,
+                )
+
+        self.assertEqual(code, 0)
+        rendered = output.getvalue()
+        self.assertIn("sport=tennis", rendered)
+        self.assertIn("side=lay", rendered)
+        self.assertIn("odds=1.80", rendered)
+
     def test_cli_never_passes_environment_key_in_output(self):
         seen = []
 

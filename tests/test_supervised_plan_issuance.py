@@ -569,3 +569,45 @@ def test_product_verifier_does_not_inherit_caller_selected_issuance_authority_ro
                 execution_plan_id=bound.execution_plan.plan_id,
                 action_id=action.action_id,
             )
+
+
+def test_product_verifier_path_global_rebinding_cannot_redirect_workspace(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import autosport.betfair_standard_limit_price_bound_product_verifier as module
+
+    bound, approval, store, _issued = _issue(monkeypatch, tmp_path)
+    action = bound.execution_plan.actions[0]
+    ledger = RealExecutionLedger(store.workspace / "execution-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+    ledger.bind_supervised_approval(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+        approved_at=approval.approved_at,
+        evidence_sha256=approval.evidence_sha256,
+    )
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+    attacker_called = False
+
+    def attacker_path(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound Path must never own workspace authority")
+
+    with _active_runtime_profile(store.workspace) as runtime_profile:
+        monkeypatch.setattr(module, "Path", attacker_path)
+        verified = module.verify_product_betfair_standard_limit_price_bound(
+            evidence=evidence,
+            ledger=ledger,
+            issuance_store=store,
+            runtime_profile=runtime_profile,
+            execution_plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+    assert verified.action_id == action.action_id

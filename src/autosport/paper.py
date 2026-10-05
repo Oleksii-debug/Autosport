@@ -321,9 +321,9 @@ class PaperBook:
 
     @property
     def committed_stake(self) -> Decimal:
+        self._validate_loaded_state(self)
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
-        self._validate_loaded_state(self)
         return sum((t.stake for t in self.tickets.values() if t.status is TicketStatus.OPEN), Decimal("0"))
 
     @classmethod
@@ -355,9 +355,9 @@ class PaperBook:
         bankroll_id: str | None = None,
         currency: str | None = None,
     ) -> PaperTicket:
+        self._validate_loaded_state(self)
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
-        self._validate_loaded_state(self)
         amount = Decimal(str(stake))
         new_balance = self._debit_balance(self.balance, amount)
 
@@ -469,9 +469,9 @@ class PaperBook:
         *,
         settled_at: str | None = None,
     ) -> PaperTicket:
+        self._validate_loaded_state(self)
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
-        self._validate_loaded_state(self)
         ticket = self.tickets[ticket_id]
         if ticket.status is not TicketStatus.OPEN:
             raise ValueError("ticket already settled")
@@ -534,13 +534,13 @@ class PaperBook:
         return payload
 
     def save(self, path: str | Path) -> None:
+        # PaperBook and PaperTicket are intentionally mutable during a paper run.
+        # Validate caller-visible state before hidden authority comparison so
+        # hostile mutated subclasses cannot execute equality/hash hooks at the
+        # opening-authority boundary.
+        self._validate_loaded_state(self)
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
-        # PaperBook and PaperTicket are intentionally mutable during a paper run.
-        # Revalidate the complete economic/identity state immediately before any
-        # durable replacement so caller/agent mutation cannot persist a snapshot
-        # that a trusted fresh load would reject.
-        self._validate_loaded_state(self)
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         raw = {

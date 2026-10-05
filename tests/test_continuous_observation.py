@@ -552,6 +552,63 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertEqual(result.successful_cycles, 0)
             self.assertEqual(provider.calls, 1)
 
+    def test_provider_unavailable_health_reread_failure_is_terminal_and_preserves_primary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            secret = "provider-secret"
+            provider = SequenceProvider(
+                [
+                    ProviderUnavailableError(
+                        f"temporary outage token={secret}"
+                    ),
+                    _batch(_quote(), cursor="must-not-run"),
+                ]
+            )
+            original_get = SourceHealthStore.get
+            get_calls = [0]
+
+            def fail_third_get(store, source_id):
+                get_calls[0] += 1
+                if get_calls[0] == 3:
+                    raise OSError(f"health read failed token={secret}")
+                return original_get(store, source_id)
+
+            with patch.object(
+                SourceHealthStore,
+                "get",
+                autospec=True,
+                side_effect=fail_third_get,
+            ):
+                result = run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=2),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    waiter=lambda _seconds: False,
+                    reporter=None,
+                    redact_values=(secret,),
+                )
+
+            self.assertEqual(result.exit_code, 5)
+            self.assertEqual(
+                result.stop_reason,
+                "local_health_read_failure_after_provider_error",
+            )
+            self.assertEqual(result.attempted_cycles, 1)
+            self.assertEqual(result.successful_cycles, 0)
+            self.assertEqual(provider.calls, 1)
+            self.assertIn("ProviderUnavailableError: temporary outage", result.last_error)
+            self.assertIn("secondary source-health read failure", result.last_error)
+            self.assertNotIn(secret, result.last_error)
+            status_text = (
+                workspace / "continuous_observation_status.json"
+            ).read_text("utf-8")
+            self.assertNotIn(secret, status_text)
+            self.assertIn(
+                "local_health_read_failure_after_provider_error",
+                status_text,
+            )
+
     def test_provider_unavailable_uses_bounded_retry_and_can_recover(self):
         with tempfile.TemporaryDirectory() as tmp:
             provider = SequenceProvider(

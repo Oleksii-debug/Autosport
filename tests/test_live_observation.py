@@ -1532,6 +1532,41 @@ class LiveObservationTests(unittest.TestCase):
         self.assertIsNone(completed.error)
         self.assertFalse(worker.busy)
 
+    def test_presentation_rejects_mutated_observation_health_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._observe(tmp)
+
+        result.health.status = "failed"
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "health status must match durable source health",
+        ):
+            observation_summary(result)
+        with self.assertRaisesRegex(
+            ValueError,
+            "health status must match durable source health",
+        ):
+            observation_quote_lines(result)
+
+    def test_presentation_rejects_observation_result_subclass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        class Result(ObservationResult):
+            pass
+
+        substituted = Result(
+            canonical.stats,
+            canonical.health,
+            canonical.current_quotes,
+        )
+
+        with self.assertRaisesRegex(TypeError, "exact ObservationResult"):
+            observation_summary(substituted)
+        with self.assertRaisesRegex(TypeError, "exact ObservationResult"):
+            observation_quote_lines(substituted)
+
     def test_presentation_is_deterministic_text_for_screen_reader_surface(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self._observe(tmp)

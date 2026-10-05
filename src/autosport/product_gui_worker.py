@@ -254,6 +254,12 @@ def _require_runtime_status_identity(
         raise ProductEntrypointError(
             "product runtime returned a non-canonical session status"
         )
+    if type(status.source_id) is not str or not status.source_id or (
+        status.source_id.strip() != status.source_id
+    ):
+        raise ProductEntrypointError(
+            "product runtime session status has invalid source identity"
+        )
     if type(status.session_id) is not str or not status.session_id or (
         status.session_id.strip() != status.session_id
     ):
@@ -290,6 +296,12 @@ def _require_runtime_tick_identity(
     if type(tick) is not ContinuousTickResult:
         raise ProductEntrypointError(
             "product runtime returned a non-canonical tick result"
+        )
+    if type(tick.source_id) is not str or not tick.source_id or (
+        tick.source_id.strip() != tick.source_id
+    ):
+        raise ProductEntrypointError(
+            "product runtime tick has invalid source identity"
         )
     if type(tick.session_id) is not str or not tick.session_id or (
         tick.session_id.strip() != tick.session_id

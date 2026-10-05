@@ -221,6 +221,14 @@ def _build_product_verifier():
     ledger_approval_active_code = ledger_approval_active.__code__
     ledger_events = ledger_cls._events
     ledger_events_code = ledger_events.__code__
+    ledger_ensure_durable = ledger_cls._ensure_existing_path_durable
+    ledger_ensure_durable_code = ledger_ensure_durable.__code__
+    ledger_parse = ledger_cls._parse.__func__
+    ledger_parse_code = ledger_parse.__code__
+    ledger_validate_event = ledger_cls._validate_event.__func__
+    ledger_validate_event_code = ledger_validate_event.__code__
+    ledger_validate_semantics = ledger_cls._validate_semantics.__func__
+    ledger_validate_semantics_code = ledger_validate_semantics.__code__
 
     def require_canonical_resolver_authority() -> None:
         if (
@@ -273,6 +281,14 @@ def _build_product_verifier():
             or ledger_approval_active.__code__ is not ledger_approval_active_code
             or ledger_cls._events is not ledger_events
             or ledger_events.__code__ is not ledger_events_code
+            or ledger_cls._ensure_existing_path_durable is not ledger_ensure_durable
+            or ledger_ensure_durable.__code__ is not ledger_ensure_durable_code
+            or ledger_cls._parse.__func__ is not ledger_parse
+            or ledger_parse.__code__ is not ledger_parse_code
+            or ledger_cls._validate_event.__func__ is not ledger_validate_event
+            or ledger_validate_event.__code__ is not ledger_validate_event_code
+            or ledger_cls._validate_semantics.__func__ is not ledger_validate_semantics
+            or ledger_validate_semantics.__code__ is not ledger_validate_semantics_code
         ):
             raise error_cls(
                 "canonical Betfair verifier dependency authority changed"
@@ -306,7 +322,13 @@ def _build_product_verifier():
             )
         if hasattr(ledger, "__dict__") and any(
             name in vars(ledger)
-            for name in ("saga", "supervised_approval_is_active", "_events")
+            for name in (
+                "saga",
+                "supervised_approval_is_active",
+                "_events",
+                "_ensure_existing_path_durable",
+                "_parse",
+            )
         ):
             raise error_cls("ledger authority method shadow is not allowed")
         if type(bound) is not bound_cls:

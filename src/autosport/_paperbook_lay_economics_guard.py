@@ -294,6 +294,10 @@ def _validate_lifecycle_reachability(cls, book: _paper.PaperBook) -> None:
         raise ValueError("PaperBook lifecycle must be a canonical list")
     if type(book._settlement_times) is not dict:
         raise ValueError("PaperBook settlement-time witness must be a canonical mapping")
+    if any(type(ticket_id) is not str for ticket_id in book._settlement_times):
+        raise ValueError(
+            "PaperBook settlement-time witness keys must be canonical strings"
+        )
 
     replay_balance = book.initial_bankroll
     opened: set[str] = set()

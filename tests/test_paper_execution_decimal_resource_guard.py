@@ -53,6 +53,26 @@ def test_derived_decimal_text_uses_same_execution_resource_boundary() -> None:
         legacy._decimal_text(Decimal("1E+100000000"))
 
 
+def test_oversized_second_member_fails_before_any_sibling_formatting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _record(odds=Decimal("5"), stake=Decimal("10"))
+    object.__setattr__(record, "accepted_stake", Decimal("1E+100000000"))
+    serialized: list[Decimal] = []
+    original_serializer = legacy._decimal_text
+
+    def spy(value: Decimal) -> str:
+        serialized.append(value)
+        return original_serializer(value)
+
+    monkeypatch.setattr(legacy, "_decimal_text", spy)
+
+    with pytest.raises(ValueError, match="fixed-point representation exceeds resource limit"):
+        record.to_dict()
+
+    assert serialized == []
+
+
 def test_bounded_empirical_evidence_is_context_independent() -> None:
     record = _record(
         odds=Decimal("9.87654321987654321"),

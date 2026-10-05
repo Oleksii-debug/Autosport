@@ -239,6 +239,35 @@ def test_paperbook_schema8_round_trip_preserves_market_semantics(tmp_path) -> No
     assert restored_leg.settlement_identity == ticket.legs[0].settlement_identity
 
 
+def test_schema8_multi_leg_round_trip_preserves_independent_semantics(tmp_path) -> None:
+    path = tmp_path / "paper-book-multi-semantics.json"
+    book = PaperBook("100")
+    first = _leg(_S1)
+    second = TicketLeg(
+        "event-2",
+        "market-2",
+        "selection-2",
+        Decimal("1.80"),
+        sport="soccer",
+        exchange_side="back",
+        market_semantics_id=_S2,
+    )
+    ticket = book.open_ticket([first, second], "10", placed_at=_TS)
+    before = tuple(leg.settlement_identity for leg in ticket.legs)
+
+    book.save(path)
+    restored = PaperBook.load(path)
+    after = tuple(
+        leg.settlement_identity
+        for leg in restored.tickets[ticket.ticket_id].legs
+    )
+
+    assert after == before
+    assert after[0][1] == _S1
+    assert after[1][1] == _S2
+    assert after[0] != after[1]
+
+
 def test_schema8_settled_semantics_round_trip_replays_exact_identity(tmp_path) -> None:
     path = tmp_path / "paper-book-settled-semantics.json"
     book = PaperBook("100")

@@ -118,8 +118,11 @@ def _serialized_decimal(
 
 
 def _decimal_text(value: Decimal) -> str:
+    if type(value) is not Decimal:
+        raise ValueError("Decimal must be an exact canonical Decimal")
     if not value.is_finite():
         raise ValueError("Decimal must be finite")
+    _validate_decimal_text_resource_bound(value)
     return format(value, "f")
 
 
@@ -1145,6 +1148,105 @@ class PaperExecutionLedger:
             worst_case_exposure=worst_case,
             completed=False,
         )
+
+
+def _require_canonical_evidence_record_surface(
+    record: PaperExecutionEvidenceRecord,
+) -> None:
+    if type(record) is not PaperExecutionEvidenceRecord:
+        raise TypeError("record must be exact PaperExecutionEvidenceRecord")
+    for name in (
+        "action_id",
+        "bookmaker_id",
+        "account_id",
+        "event_id",
+        "market_id",
+        "selection_id",
+        "side",
+        "quote_id",
+        "observed_at",
+        "evidence_source",
+        "reason",
+    ):
+        if type(getattr(record, name)) is not str:
+            raise PaperExecutionIntegrityError(
+                f"evidence {name} must retain exact canonical text authority"
+            )
+    if type(record.outcome) is not PaperAttemptOutcome:
+        raise PaperExecutionIntegrityError(
+            "evidence outcome must retain canonical outcome authority"
+        )
+    if type(record.evidence_grade) is not EvidenceGrade:
+        raise PaperExecutionIntegrityError(
+            "evidence grade must retain canonical evidence authority"
+        )
+    if type(record.suspended) is not bool:
+        raise PaperExecutionIntegrityError(
+            "evidence suspended must retain canonical bool authority"
+        )
+    for name in ("accepted_odds", "accepted_stake"):
+        value = getattr(record, name)
+        if value is not None:
+            if type(value) is not Decimal:
+                raise PaperExecutionIntegrityError(
+                    f"evidence {name} must retain exact Decimal authority"
+                )
+            _validate_decimal_text_resource_bound(value)
+
+
+def _require_canonical_attempt_surface(attempt: PaperLegAttempt) -> None:
+    if type(attempt) is not PaperLegAttempt:
+        raise TypeError("attempt must be exact PaperLegAttempt")
+    for name in (
+        "attempt_id",
+        "run_id",
+        "plan_id",
+        "action_id",
+        "bookmaker_id",
+        "account_id",
+        "event_id",
+        "market_id",
+        "selection_id",
+        "side",
+        "decision_quote_id",
+        "decision_observed_at",
+        "execution_observed_at",
+        "evidence_source",
+        "model_fingerprint",
+        "reason",
+    ):
+        if type(getattr(attempt, name)) is not str:
+            raise PaperExecutionIntegrityError(
+                f"attempt {name} must retain exact canonical text authority"
+            )
+    if type(attempt.sequence) is not int:
+        raise PaperExecutionIntegrityError(
+            "attempt sequence must retain canonical integer authority"
+        )
+    if type(attempt.delay_ms) is not int or type(attempt.quote_age_ms) is not int:
+        raise PaperExecutionIntegrityError(
+            "attempt timing must retain canonical integer authority"
+        )
+    if type(attempt.outcome) is not PaperAttemptOutcome:
+        raise PaperExecutionIntegrityError(
+            "attempt outcome must retain canonical outcome authority"
+        )
+    if type(attempt.suspended) is not bool:
+        raise PaperExecutionIntegrityError(
+            "attempt suspended must retain canonical bool authority"
+        )
+    if type(attempt.evidence_grade) is not EvidenceGrade:
+        raise PaperExecutionIntegrityError(
+            "attempt evidence_grade must retain canonical evidence authority"
+        )
+    for name in ("decision_odds", "requested_stake", "execution_odds", "execution_stake"):
+        value = getattr(attempt, name)
+        if value is not None:
+            if type(value) is not Decimal:
+                raise PaperExecutionIntegrityError(
+                    f"attempt {name} must retain exact Decimal authority"
+                )
+            _validate_decimal_text_resource_bound(value)
 
 
 class PaperExecutionEvidenceRegistry:

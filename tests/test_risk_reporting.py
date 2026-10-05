@@ -2523,5 +2523,116 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(resolved.current_equity, Decimal("100"))
 
 
+    def test_durable_resolver_rejects_rebound_goal_store_module_path_before_execution(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper_book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with patch.object(
+                risk_reporting._economic_goal_store,
+                "Path",
+                side_effect=AssertionError("rebound goal-store Path executed"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "economic-goal store authority changed",
+                ):
+                    resolve_durable_product_issued_paper_equity_path(
+                        paper_book_path=str(paper_path),
+                        workspace=str(workspace),
+                    )
+
+    def test_durable_resolver_rejects_rebound_goal_store_file_name(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper_book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with patch.object(EconomicGoalStore, "FILE_NAME", "attacker-goal.json"):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "economic-goal store authority changed",
+                ):
+                    resolve_durable_product_issued_paper_equity_path(
+                        paper_book_path=str(paper_path),
+                        workspace=str(workspace),
+                    )
+
+    def test_durable_resolver_rejects_rebound_goal_parser_before_execution(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+        attacker_calls = 0
+
+        def hostile_parser(_text):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("rebound goal parser executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper_book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with patch.object(
+                risk_reporting._economic_goal_store,
+                "economic_goal_from_json",
+                hostile_parser,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "economic-goal store authority changed",
+                ):
+                    resolve_durable_product_issued_paper_equity_path(
+                        paper_book_path=str(paper_path),
+                        workspace=str(workspace),
+                    )
+
+        self.assertEqual(attacker_calls, 0)
+
+    def test_durable_resolver_rejects_in_place_goal_read_text_code_mutation(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper_book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            reader = risk_reporting._CANONICAL_GOAL_STORE_PATH_READ_TEXT
+            original_code = reader.__code__
+            attacker_calls = 0
+
+            def hostile_read_text(_self, *args, **kwargs):
+                nonlocal attacker_calls
+                attacker_calls += 1
+                raise AssertionError("mutated goal read_text executed")
+
+            try:
+                reader.__code__ = hostile_read_text.__code__
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "canonical durable equity resolver callable code changed",
+                ):
+                    resolve_durable_product_issued_paper_equity_path(
+                        paper_book_path=str(paper_path),
+                        workspace=str(workspace),
+                    )
+            finally:
+                reader.__code__ = original_code
+
+        self.assertEqual(attacker_calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

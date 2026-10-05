@@ -1214,6 +1214,7 @@ class PersistentLiveDecisionLoop:
         self._input_health_boundaries: dict[
             str, tuple[ProviderHealthReplayBoundary, ...]
         ] = {}
+        self._health_eligibility_cache: dict[str, str] = {}
         self._pending_affected: dict[str, None] = {}
         self._needs_cache_rebuild = True
         self._freshness_deadlines: dict[str, datetime | None] = {}
@@ -1746,6 +1747,9 @@ class PersistentLiveDecisionLoop:
         )
         batch_affected = self.dependencies.affected_inputs(batch)
         for input_id in batch_affected:
+            self._pending_affected[input_id] = None
+        health_affected = self._health_eligibility_changed_inputs(now)
+        for input_id in health_affected:
             self._pending_affected[input_id] = None
         if batch.full_refresh_required:
             self._pending_affected = {
@@ -2520,6 +2524,39 @@ class PersistentLiveDecisionLoop:
         for input_id in self.dependencies.input_ids:
             flattened.extend(self._intent_cache.get(input_id, ()))
         return tuple(flattened)
+
+    def _health_eligibility_changed_inputs(
+        self,
+        as_of: datetime,
+    ) -> tuple[str, ...]:
+        if self._health_gate is None:
+            return ()
+        source_inputs: dict[str, set[str]] = {}
+        for input_id in self.dependencies.input_ids:
+            captured = self.dependencies.decision_view(
+                input_id,
+                as_of=as_of,
+                max_age=self.max_quote_age,
+            )
+            for event in captured.events:
+                source_inputs.setdefault(event.source_id, set()).add(input_id)
+
+        affected: set[str] = set()
+        for source_id, input_ids in source_inputs.items():
+            health = self._health_gate.provider_health(
+                source_id,
+                as_of=as_of,
+            )
+            current = health.eligibility.value
+            previous = self._health_eligibility_cache.get(source_id)
+            self._health_eligibility_cache[source_id] = current
+            if previous is not None and previous != current:
+                affected.update(input_ids)
+
+        vanished = set(self._health_eligibility_cache).difference(source_inputs)
+        for source_id in vanished:
+            del self._health_eligibility_cache[source_id]
+        return tuple(sorted(affected))
 
     def _record_freshness_deadline(
         self,
@@ -5216,16 +5253,10 @@ class PersistentLiveDecisionLoop:
 
     @staticmethod
     def _snapshot_state_sha256(snapshot: MirrorSnapshot) -> str:
-        if isinstance(snapshot, HealthGatedMirrorSnapshot):
-            return _canonical_json_sha256(
-                {
-                    "events": [event.to_dict() for event in snapshot.events],
-                    "health_boundaries": [
-                        boundary.to_dict()
-                        for boundary in snapshot.health_boundaries
-                    ],
-                }
-            )
+        # Provider-health horizons are durable replay evidence in _Progress, while
+        # economic market identity changes only when health eligibility changes the
+        # decision-visible event set. Repeated equally-healthy polls therefore do
+        # not manufacture fresh economic decisions.
         return _canonical_json_sha256(
             [event.to_dict() for event in snapshot.events]
         )

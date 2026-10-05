@@ -222,6 +222,24 @@ def test_same_version_time_in_force_write_drift_fails_closed(monkeypatch) -> Non
         )
 
 
+def test_same_version_boolean_handicap_write_drift_fails_closed(monkeypatch) -> None:
+    bound, action, _resolved_evidence = _evidence()
+
+    def replace_handicap_with_boolean(instruction) -> None:
+        instruction["handicap"] = False
+
+    _replace_captured_request(monkeypatch, replace_handicap_with_boolean)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="does not preserve the bound standard LIMIT",
+    ):
+        resolve_betfair_standard_limit_price_bound(
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+
 def test_same_version_price_write_drift_fails_closed(monkeypatch) -> None:
     bound, action, _resolved_evidence = _evidence()
 

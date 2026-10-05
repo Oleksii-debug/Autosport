@@ -1022,6 +1022,20 @@ class PersistentLiveDecisionLoop:
             max_dirty_keys=self.bounds.max_dirty_keys,
         )
         self.dependencies = FocusedMirrorDependencyIndex(mirror)
+        self._health_gate: HealthGatedMirrorDecisionIndex | None = None
+        if observation_runner is None:
+            self._default_health_store = SourceHealthStore(
+                self.workspace / "source_health.json"
+            )
+            effective_health_policy = ingestion_policy or IngestionPolicy()
+            self._health_gate = HealthGatedMirrorDecisionIndex(
+                self.dependencies,
+                self._default_health_store,
+                max_health_age=timedelta(
+                    seconds=effective_health_policy.stale_after_seconds
+                ),
+            )
+        self._health_gate_authority = self._health_gate
         self._dependency_mutation_lock = RLock()
         self.inputs_path = self._workspace_authority / self.INPUTS_FILE_NAME
         self._inputs_path_authority = self.inputs_path
@@ -1076,13 +1090,6 @@ class PersistentLiveDecisionLoop:
                 opened_here = store is None
                 if opened_here:
                     store = SQLiteMarketStore(self.workspace / "market.db")
-                    try:
-                        health_store = SourceHealthStore(
-                            self.workspace / "source_health.json"
-                        )
-                    except BaseException:
-                        store.close()
-                        raise
                 assert store is not None
                 assert health_store is not None
 
@@ -1204,6 +1211,9 @@ class PersistentLiveDecisionLoop:
         self._control = durable_control
         self._intent_cache: dict[str, tuple[object, ...]] = {}
         self._input_market_sha256: dict[str, str] = {}
+        self._input_health_boundaries: dict[
+            str, tuple[ProviderHealthReplayBoundary, ...]
+        ] = {}
         self._pending_affected: dict[str, None] = {}
         self._needs_cache_rebuild = True
         self._freshness_deadlines: dict[str, datetime | None] = {}

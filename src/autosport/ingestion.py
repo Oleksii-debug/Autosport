@@ -302,6 +302,20 @@ class IngestionEngine:
         latest_source: datetime | None = None
         now_point = parse_source_timestamp(now)
         for quote in batch.quotes:
+            try:
+                observed_point = parse_source_timestamp(quote.observed_ts)
+            except (AttributeError, TypeError, ValueError):
+                flags.add("INVALID_QUOTE")
+                rejected += 1
+                continue
+            if observed_point > now_point:
+                # observed_ts is local receipt evidence, not provider clock truth.
+                # A receipt claimed after this already-completed acquisition instant
+                # cannot be causally true for the current poll.
+                flags.add("FUTURE_OBSERVATION_TIMESTAMP")
+                rejected += 1
+                continue
+
             source_point: datetime | None = None
             if quote.source_ts is not None:
                 try:

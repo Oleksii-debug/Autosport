@@ -110,3 +110,29 @@ def test_external_uia_audit_fails_closed_on_writable_readonly_value() -> None:
     assert "value_read_only = $valueReadOnly" in audit
     assert "$valueReadOnlyRequired -and $valueReadOnly -ne $true" in audit
     assert "external UIA ValuePattern is writable or read-only state unavailable" in audit
+
+
+def test_external_uia_audit_uses_isolated_first_run_workspace() -> None:
+    audit = _EXTERNAL_UIA_AUDIT.read_text(encoding="utf-8")
+
+    assert "external-uia-first-run-workspace" in audit
+    assert "$env:AUTOSPORT_WORKSPACE = $firstRunWorkspace" in audit
+    assert "Remove-Item Env:AUTOSPORT_WORKSPACE" in audit
+    assert "first_run_workspace = $null" in audit
+
+
+def test_external_uia_audit_gates_configuration_required_value() -> None:
+    audit = _EXTERNAL_UIA_AUDIT.read_text(encoding="utf-8")
+
+    expected_status = (
+        "[ordered]@{ key = 'product_runtime_status'; automation_id = '208'; "
+        "name = 'Стан тривалої PAPER-роботи'; required_pattern = 'Value'; "
+        "require_external_focus = $true; expected_control_type = 'ControlType.Edit'; "
+        "require_named_rows = $false; require_value_read_only = $true; "
+        "expected_value = 'Оберіть і збережіть джерело даних перед запуском "
+        "тривалої PAPER-роботи.' }"
+    )
+    assert expected_status in audit
+    assert "expected_value = $expectedValue" in audit
+    assert "value = $currentValue" in audit
+    assert "external UIA Value mismatch" in audit

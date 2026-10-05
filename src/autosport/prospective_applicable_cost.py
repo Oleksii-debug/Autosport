@@ -28,7 +28,9 @@ from .betfair_standard_limit_price_bound_product_verifier import (
 )
 from .campaign_cost_evidence import CostClass, REQUIRED_COST_CLASSES
 from .model_compute_router import ModelComputeRouterStore
+from .opportunity import Opportunity
 from .real_execution_ledger import RealExecutionLedger
+from .risk import ProposedTicketRiskContext
 from .supervised_plan_issuance import SupervisedPlanIssuanceStore
 from .trusted_runtime_code_profile import TrustedRuntimeCodeProfile
 from .portfolio_plan import OpportunityIntent, PortfolioPlan
@@ -407,6 +409,8 @@ def _build_canonical_authority():
     error_cls = ProspectiveApplicableCostError
     intent_cls = OpportunityIntent
     plan_cls = PortfolioPlan
+    opportunity_cls = Opportunity
+    risk_context_cls = ProposedTicketRiskContext
     router_store_cls = ModelComputeRouterStore
     model_evidence_cls = ProspectiveModelComputeMoneyEvidence
     model_status_cls = ProspectiveModelComputeMoneyStatus
@@ -521,7 +525,7 @@ def _build_canonical_authority():
         return digest
 
     def instant(value: object, field: str) -> datetime:
-        if isinstance(value, datetime_cls):
+        if type(value) is datetime_cls:
             parsed = value
         elif type(value) is str:
             raw = text(value, field)
@@ -738,8 +742,19 @@ def _build_canonical_authority():
                 "router_store must be the exact canonical ModelComputeRouterStore type"
             )
 
+        risk_context = object.__getattribute__(intent, "risk_context")
+        opportunity = object.__getattribute__(intent, "opportunity")
+        if type(risk_context) is not risk_context_cls:
+            raise error_cls(
+                "intent risk_context must be the exact canonical ProposedTicketRiskContext type"
+            )
+        if type(opportunity) is not opportunity_cls:
+            raise error_cls(
+                "intent opportunity must be the exact canonical Opportunity type"
+            )
+
         cutoff = instant(
-            getattr(intent.risk_context, "proposal_ts", None),
+            object.__getattribute__(risk_context, "proposal_ts"),
             "intent risk_context proposal_ts",
         )
         asserted_cutoff = instant(decision_at, "decision_at")
@@ -747,19 +762,39 @@ def _build_canonical_authority():
             raise error_cls(
                 "caller decision_at does not match canonical OpportunityIntent proposal_ts"
             )
-        plan_cutoff = instant(plan.decision_ts, "portfolio plan decision_ts")
+        plan_cutoff = instant(
+            object.__getattribute__(plan, "decision_ts"),
+            "portfolio plan decision_ts",
+        )
         if plan_cutoff != cutoff:
             raise error_cls(
                 "portfolio plan decision_ts does not match OpportunityIntent proposal_ts"
             )
 
         intent_sha256 = sha256(intent.intent_sha256, "intent.intent_sha256")
-        intent_id = text(getattr(intent, "intent_id", None), "intent.intent_id")
-        if type(plan.intent_sha256s) is not tuple or type(plan.intent_ids) is not tuple:
+        intent_id = text(
+            object.__getattribute__(intent, "intent_id"),
+            "intent.intent_id",
+        )
+        plan_intent_sha256s = object.__getattribute__(plan, "intent_sha256s")
+        plan_intent_ids = object.__getattribute__(plan, "intent_ids")
+        if type(plan_intent_sha256s) is not tuple or type(plan_intent_ids) is not tuple:
             raise error_cls("canonical PortfolioPlan intent identity vectors must be tuples")
+        canonical_plan_digests = tuple(
+            sha256(candidate, "portfolio plan intent_sha256")
+            for candidate in plan_intent_sha256s
+        )
+        canonical_plan_ids = tuple(
+            text(candidate, "portfolio plan intent_id")
+            for candidate in plan_intent_ids
+        )
+        if len(canonical_plan_digests) != len(canonical_plan_ids):
+            raise error_cls(
+                "canonical PortfolioPlan intent identity vectors must have matching cardinality"
+            )
         matches = [
             index
-            for index, candidate_digest in enumerate(plan.intent_sha256s)
+            for index, candidate_digest in enumerate(canonical_plan_digests)
             if candidate_digest == intent_sha256
         ]
         if len(matches) != 1:
@@ -767,7 +802,7 @@ def _build_canonical_authority():
                 "canonical PortfolioPlan must bind the exact intent_sha256 exactly once"
             )
         index = matches[0]
-        if index >= len(plan.intent_ids) or plan.intent_ids[index] != intent_id:
+        if canonical_plan_ids[index] != intent_id:
             raise error_cls("canonical PortfolioPlan intent_id/intent_sha256 binding mismatch")
         portfolio_plan_sha256 = sha256(plan.plan_sha256, "portfolio plan plan_sha256")
         canonical_request_id = text(model_request_id, "model_request_id")
@@ -792,7 +827,7 @@ def _build_canonical_authority():
         ) != intent_sha256:
             raise error_cls("model-compute evidence intent mismatch")
         opportunity_id = text(
-            getattr(intent.opportunity, "opportunity_id", None),
+            object.__getattribute__(opportunity, "opportunity_id"),
             "intent opportunity_id",
         )
         if text(

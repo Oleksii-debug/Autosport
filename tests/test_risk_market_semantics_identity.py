@@ -173,6 +173,31 @@ def test_market_semantics_identity_ignores_rebound_market_event_serializers(
     assert calls == {"to_dict": 0, "from_dict": 0, "eq": 0}
 
 
+
+def test_risk_identity_ignores_rebound_quote_key_properties(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = PaperRiskPolicy.risk_of_ruin_candidate_sha256(_context("rules:s1"))
+    assert baseline is not None
+    calls = {"leg": 0, "quote": 0}
+
+    def hostile_leg_key(self: TicketLeg) -> str:
+        calls["leg"] += 1
+        raise AssertionError("live TicketLeg.quote_key dispatch reached risk identity")
+
+    def hostile_quote_key(self: MarketEvent) -> str:
+        calls["quote"] += 1
+        raise AssertionError("live MarketEvent.quote_key dispatch reached risk identity")
+
+    monkeypatch.setattr(TicketLeg, "quote_key", property(hostile_leg_key))
+    monkeypatch.setattr(MarketEvent, "quote_key", property(hostile_quote_key))
+
+    context = _context("rules:s1")
+    assert PaperRiskPolicy.risk_of_ruin_candidate_sha256(context) == baseline
+    assert PaperRiskPolicy.risk_of_ruin_candidate_vector_sha256((context,)) is not None
+    assert calls == {"leg": 0, "quote": 0}
+
+
 def test_portfolio_digest_ignores_rebound_paperbook_validators(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

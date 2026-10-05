@@ -456,6 +456,77 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(book.tickets, {})
             self.assertEqual(book.balance, Decimal("100.00"))
 
+    def test_cross_ledger_observation_fails_before_exposure_scope_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("cross-ledger-scope", side="BACK")
+            current_prepared = prepared(runtime, current)
+            evidence_ledger = PaperExecutionLedger(
+                Path(tmp) / "other-paper-execution.jsonl"
+            )
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.50",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(evidence_ledger)
+            registry.register(registered)
+            runtime_events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                Exception,
+                "bound to the exact runtime ledger",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="cross-ledger-scope",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                    observations={current.action_id: registered.as_observation()},
+                    evidence_registry=registry,
+                )
+
+            self.assertEqual(ledger.events(), runtime_events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_observation_digest_mismatch_fails_before_exposure_scope_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("digest-mismatch-scope", side="BACK")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.50",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            observation = registered.as_observation()
+            object.__setattr__(observation, "evidence_sha256", "0" * 64)
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                Exception,
+                "digest mismatch",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="digest-mismatch-scope",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                    observations={current.action_id: observation},
+                    evidence_registry=registry,
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
     def test_paper_value_rejects_mutated_side_subclass_without_comparison_hooks(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

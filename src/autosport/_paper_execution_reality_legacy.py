@@ -1250,14 +1250,77 @@ def _synthetic_attempt(
     )
 
 
+def _require_canonical_observation_surface(
+    observation: ObservedPaperExecution,
+) -> None:
+    if type(observation) is not ObservedPaperExecution:
+        raise TypeError("observation values must be exact ObservedPaperExecution")
+    for name in (
+        "action_id",
+        "observed_at",
+        "evidence_source",
+        "evidence_id",
+        "evidence_sha256",
+        "reason",
+    ):
+        if type(getattr(observation, name)) is not str:
+            raise PaperExecutionStateError(
+                f"observation {name} must retain exact canonical text authority"
+            )
+    if type(observation.outcome) is not PaperAttemptOutcome:
+        raise PaperExecutionStateError(
+            "observation outcome must retain canonical outcome authority"
+        )
+    if type(observation.evidence_grade) is not EvidenceGrade:
+        raise PaperExecutionStateError(
+            "observation evidence_grade must retain canonical evidence authority"
+        )
+    if type(observation.suspended) is not bool:
+        raise PaperExecutionStateError(
+            "observation suspended must retain canonical bool authority"
+        )
+    for name in ("accepted_odds", "accepted_stake"):
+        value = getattr(observation, name)
+        if value is not None and type(value) is not Decimal:
+            raise PaperExecutionStateError(
+                f"observation {name} must retain exact Decimal authority"
+            )
+
+
+def _require_canonical_action_surface(action: ExecutionAction) -> None:
+    if type(action) is not ExecutionAction:
+        raise TypeError("action must be exact ExecutionAction")
+    for name in (
+        "action_id",
+        "bookmaker_id",
+        "account_id",
+        "event_id",
+        "market_id",
+        "selection_id",
+        "side",
+        "quote_id",
+        "quote_observed_at",
+        "expires_at",
+    ):
+        if type(getattr(action, name)) is not str:
+            raise PaperExecutionStateError(
+                f"execution action {name} must retain exact canonical text authority"
+            )
+    for name in ("requested_odds", "requested_stake"):
+        if type(getattr(action, name)) is not Decimal:
+            raise PaperExecutionStateError(
+                f"execution action {name} must retain exact Decimal authority"
+            )
+
+
 def _verify_observation_authority(
     *,
     action: ExecutionAction,
     observation: ObservedPaperExecution,
     registry: PaperExecutionEvidenceRegistry,
 ) -> PaperExecutionEvidenceRecord:
-    if not isinstance(observation, ObservedPaperExecution):
-        raise TypeError("observation values must be ObservedPaperExecution")
+    _require_canonical_action_surface(action)
+    _require_canonical_observation_surface(observation)
     record = registry.resolve(observation.evidence_id)
     if observation.evidence_sha256 != record.evidence_sha256:
         raise PaperExecutionStateError("observation evidence digest mismatch")

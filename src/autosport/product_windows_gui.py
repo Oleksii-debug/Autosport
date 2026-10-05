@@ -64,6 +64,19 @@ def _bind_product_workspace_environment(workspace: Path) -> None:
     os.environ[_PRODUCT_WORKSPACE_ENV] = str(workspace)
 
 
+def _product_stop_reason_text(reason: object) -> str:
+    if type(reason) is not str:
+        return product_text("ui.product_runtime.stop_reason.other")
+    key = {
+        "operator_stop": "ui.product_runtime.stop_reason.operator_stop",
+        "app_close": "ui.product_runtime.stop_reason.app_close",
+        "source_identity_mismatch": (
+            "ui.product_runtime.stop_reason.source_identity_mismatch"
+        ),
+    }.get(reason, "ui.product_runtime.stop_reason.other")
+    return product_text(key)
+
+
 def _product_source_display_bindings() -> tuple[tuple[str, str, str], ...]:
     bindings = tuple(
         (
@@ -614,7 +627,7 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             self._product_last_stop = message
             status_text = product_text(
                 "ui.product_runtime.status.stopped",
-                reason=message.stop_reason or "operator_stop",
+                reason=_product_stop_reason_text(message.stop_reason),
                 cycles=message.status.cycles_completed,
             )
             self.product_status.set(status_text)

@@ -29,6 +29,18 @@ STARTED_AT = "2026-09-20T06:00:00.100000+00:00"
 EXPIRES_AT = "2026-09-20T06:01:00+00:00"
 
 
+class _HostileExchangeSide(str):
+    comparisons = 0
+
+    def __hash__(self) -> int:
+        type(self).comparisons += 1
+        return super().__hash__()
+
+    def __eq__(self, other: object) -> bool:
+        type(self).comparisons += 1
+        return super().__eq__(other)
+
+
 def action(
     action_id: str,
     *,
@@ -154,6 +166,36 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             paper_book_path=Path(tmp) / "paper-book.json",
         )
         return book, ledger, runtime
+
+    def test_paper_value_rejects_mutated_side_subclass_without_comparison_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            event = market_event("back")
+            _HostileExchangeSide.comparisons = 0
+            object.__setattr__(
+                event,
+                "exchange_side",
+                _HostileExchangeSide("lay"),
+            )
+            events_before = len(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "exact canonical string",
+            ):
+                runtime.prepare_paper_value_action(
+                    event=event,
+                    stake=Decimal("10.00"),
+                    decision_id="decision-hostile-side",
+                    account_id="paper-account",
+                    bankroll_id="paper-bankroll",
+                    currency="EUR",
+                )
+
+            self.assertEqual(_HostileExchangeSide.comparisons, 0)
+            self.assertEqual(len(ledger.events()), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
 
     def test_paper_value_lay_prepares_canonical_lay_without_book_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:

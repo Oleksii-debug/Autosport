@@ -165,6 +165,9 @@ class ObservationResult:
     current_quotes: tuple[MarketEvent, ...]
 
     def __post_init__(self) -> None:
+        if type(self.stats) is not IngestionStats:
+            raise TypeError("observation stats must be an exact IngestionStats")
+        self.stats.validate()
         if type(self.health) is not SourceHealthState:
             raise TypeError("observation health must be an exact SourceHealthState")
         if type(self.current_quotes) is not tuple:
@@ -173,11 +176,22 @@ class ObservationResult:
             raise TypeError(
                 "observation current_quotes must contain exact MarketEvent values"
             )
+        stats_snapshot = IngestionStats(
+            self.stats.source_id,
+            self.stats.received,
+            self.stats.accepted,
+            self.stats.rejected,
+            self.stats.elapsed_seconds,
+            self.stats.cursor,
+            self.stats.quality_flags,
+            self.stats.health_status,
+        )
         health_snapshot = SourceHealthState(**asdict(self.health))
         quote_snapshots = tuple(
             MarketEvent.from_dict(event.to_dict())
             for event in self.current_quotes
         )
+        object.__setattr__(self, "stats", stats_snapshot)
         object.__setattr__(self, "health", health_snapshot)
         object.__setattr__(self, "current_quotes", quote_snapshots)
         self.validate()

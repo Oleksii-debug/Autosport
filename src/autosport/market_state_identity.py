@@ -10,6 +10,7 @@ from .domain import MarketEvent
 PROPHETX_REST_MARKET_STATE_CONTRACT = "autosport.prophetx-rest-market-state.v1"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_AUTHORITY_ID_RE = re.compile(r"^[a-z0-9._:/-]+$")
 _PROPHETX_SOURCE_ID = "prophetx:sandbox"
 _PROPHETX_PROVIDER = "prophetx"
 _PROPHETX_ENVIRONMENT = "sandbox"
@@ -90,11 +91,10 @@ def _prophetx_rest_state_material(event: MarketEvent) -> dict[str, object]:
     sequence_source_id = metadata.get("sequence_source_id")
     if (
         type(sequence_authority_id) is not str
-        or not sequence_authority_id
-        or sequence_authority_id.strip() != sequence_authority_id
+        or _AUTHORITY_ID_RE.fullmatch(sequence_authority_id) is None
     ):
         raise MarketStateIdentityError(
-            "ProphetX REST market-state contract requires sequence authority identity"
+            "ProphetX REST market-state contract requires canonical sequence authority identity"
         )
     if sequence_source_id != _PROPHETX_SEQUENCE_SOURCE_ID:
         raise MarketStateIdentityError(

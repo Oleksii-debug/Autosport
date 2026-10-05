@@ -1584,6 +1584,8 @@ class PersistentLiveDecisionLoop:
             and self._progress.gate == _GATE_NORMAL
             and self._progress.market_state_sha256 == current_market_sha
             and self._progress.registered_input_ids == registered_input_ids
+            and tuple(self._input_specs.values()) == expected_input_specs
+            and self.dependencies.input_ids == registered_input_ids
             and not batch_affected
             and not batch.full_refresh_required
             and not freshness_expired

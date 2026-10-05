@@ -687,7 +687,11 @@ class BetfairStreamTlsTransport:
             )
         return last_received_monotonic_ns, last_clock_witness
 
-    def read_authenticated_frame(self, *, reader: object | None = None) -> BetfairStreamAuthenticatedFrame:
+    def read_authenticated_frame(
+        self,
+        *,
+        reader: object | None = None,
+    ) -> BetfairStreamAuthenticatedFrame:
         """Return one exact frame with process-local authenticated transport-origin proof."""
 
         with self._receive_lock:
@@ -805,7 +809,9 @@ class BetfairStreamTlsTransport:
         try:
             reader_ref = ref(reader)
         except TypeError as exc:
-            raise TypeError("authenticated frame reader owner must support weak references") from exc
+            raise TypeError(
+                "authenticated frame reader owner must support weak references"
+            ) from exc
         with self._lifecycle_lock:
             if not self.is_authenticated:
                 raise BetfairStreamTransportError(

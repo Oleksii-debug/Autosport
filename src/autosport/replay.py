@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import re
 import secrets
 import threading
@@ -43,12 +44,23 @@ class ReplayLeakageFirewall:
     _UNLOCKED = "unlocked"
 
     def __init__(self, final_results: dict[str, str] | None = None) -> None:
-        self._results = dict(final_results or {})
+        if final_results is not None:
+            if type(final_results) is not dict:
+                raise TypeError("final_results must be an exact dict or null")
+            if any(type(key) is not str for key in final_results):
+                raise TypeError("final result event ids must be exact strings")
+            if any(type(value) is not str for value in final_results.values()):
+                raise TypeError("final result values must be exact strings")
+            self._results = dict(final_results)
+        else:
+            self._results = {}
         self._state = self._SEALED
         self._state_lock = threading.Lock()
         self._active_completion_digest: bytes | None = None
 
     def result_for(self, event_id: str) -> str | None:
+        if type(event_id) is not str:
+            raise TypeError("event_id must be an exact string")
         with self._state_lock:
             if self._state != self._UNLOCKED:
                 raise FutureLeakageError("Final result is sealed until replay completion")
@@ -161,9 +173,22 @@ class ReplayEngine:
         run_id: str | None = None,
         on_raw_event: Callable[[MarketEvent], object] | None = None,
     ) -> ReplayRun:
-        # Claim before any strategy-visible callback. The raw completion capability
-        # remains local to this run; the firewall stores only its digest. A failed
-        # run deliberately leaves the firewall retired IN_USE and therefore sealed.
+        if type(speed) not in {int, float} or type(speed) is bool:
+            raise TypeError("speed must be an exact int or float")
+        if not math.isfinite(float(speed)) or speed < 0:
+            raise ValueError("speed must be finite and non-negative")
+        if run_id is not None and (
+            type(run_id) is not str or not run_id or run_id.strip() != run_id
+        ):
+            raise ValueError("run_id must be a non-empty trimmed exact string or null")
+        if not callable(on_event):
+            raise TypeError("on_event must be callable")
+        if on_raw_event is not None and not callable(on_raw_event):
+            raise TypeError("on_raw_event must be callable or null")
+        effective_run_id = run_id if run_id is not None else str(uuid.uuid4())
+
+        # Validate caller-owned controls before claiming the one-shot firewall.
+        # Invalid invocation must not retire a capability that never began replay.
         completion_capability = self.firewall._claim_for_replay()
         previous: float | None = None
         started = utc_now_iso()
@@ -196,7 +221,7 @@ class ReplayEngine:
                 on_event(_snapshot_replay_event(event))
         self.firewall._complete_replay(completion_capability)
         return ReplayRun(
-            run_id=run_id or str(uuid.uuid4()),
+            run_id=effective_run_id,
             dataset_hash=self.dataset_hash,
             event_count=count,
             started_at=started,

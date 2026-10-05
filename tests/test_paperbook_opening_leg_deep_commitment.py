@@ -285,3 +285,31 @@ def test_opening_registry_rejects_in_place_commitment_code_mutation_before_execu
 
     assert attacker_called is False
     assert book.balance == Decimal("90")
+
+
+@pytest.mark.parametrize("method_name", ["__hash__", "__eq__"])
+def test_hidden_registries_reject_rebound_paperbook_key_methods_before_execution(
+    monkeypatch, method_name: str,
+) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    attacker_calls = 0
+
+    if method_name == "__hash__":
+        def hostile(self):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("rebound PaperBook hash executed")
+    else:
+        def hostile(self, other):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("rebound PaperBook equality executed")
+
+    monkeypatch.setattr(PaperBook, method_name, hostile)
+
+    with pytest.raises(ValueError, match="registry key authority changed"):
+        _ = book.committed_stake
+
+    assert attacker_calls == 0
+    assert book.balance == Decimal("90")

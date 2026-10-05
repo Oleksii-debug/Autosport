@@ -1522,6 +1522,42 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(len(committed_book.tickets), 1)
             self.assertEqual(PaperBook.load(book_path).tickets, committed_book.tickets)
 
+    def test_materialization_bypasses_post_execution_instance_ledger_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("durable-instance-override", stake="10.00")
+            current_prepared = prepared(runtime, current)
+            original_execute = adoption_module.execute_paper_plan
+
+            def forbidden(*args, **kwargs):
+                raise AssertionError("instance ledger override must not own durable truth")
+
+            def execute_then_override_instance_ledger(**kwargs):
+                run = original_execute(**kwargs)
+                ledger.events = forbidden
+                ledger.load_run = forbidden
+                return run
+
+            try:
+                with patch.object(
+                    adoption_module,
+                    "execute_paper_plan",
+                    execute_then_override_instance_ledger,
+                ):
+                    result = runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="trigger-durable-instance-override",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+            finally:
+                ledger.__dict__.pop("events", None)
+                ledger.__dict__.pop("load_run", None)
+
+            self.assertEqual(result.run.attempts[0].execution_stake, Decimal("10.00"))
+            self.assertEqual(len(book.tickets), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+
     def test_materialization_reloads_durable_attempt_economics_after_execution_callback(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, _ledger, runtime = self.runtime(tmp)

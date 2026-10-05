@@ -95,8 +95,11 @@ def _require_runtime_authority(self: PaperExecutionAdoptionRuntime) -> None:
         or self.max_quote_age is not max_quote_age
         or self._execution_lock is not execution_lock
         or self._prepared_authorities is not prepared_authorities
+        or type(self._TICKET_MARKER) is not str
         or self._TICKET_MARKER != ticket_marker
+        or type(self._EXPOSURE_SCOPE_EVENT_TYPE) is not str
         or self._EXPOSURE_SCOPE_EVENT_TYPE != exposure_scope_event_type
+        or type(self._EXPOSURE_SCOPE_SCHEMA) is not str
         or self._EXPOSURE_SCOPE_SCHEMA != exposure_scope_schema
     ):
         raise PaperExecutionAdoptionError(

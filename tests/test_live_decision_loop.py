@@ -9203,5 +9203,48 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             resumed.close()
 
 
+
+
+    def test_constructor_rejects_noncanonical_paper_execution_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            book = PaperBook("1000")
+            model = PaperExecutionModelConfig(
+                model_id="wrong-ledger-test",
+                model_version="1",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="wrong-ledger-test",
+                seed="wrong-ledger",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=PaperExecutionLedger(workspace / "other-execution.jsonl"),
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "canonical live workspace execution ledger",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START),
+                    book=book,
+                    paper_execution=execution,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

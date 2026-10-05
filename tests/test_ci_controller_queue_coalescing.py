@@ -3068,9 +3068,9 @@ def test_historical_association_pagination_bound_cannot_be_rebound_to_hide_ambig
     def canonical_urlopen(request, *, timeout: int):
         assert timeout == 20
         requested.append(request.full_url)
-        if "page=1" in request.full_url:
+        if request.full_url.endswith("page=1"):
             return FakeResponse(page_one)
-        if "page=2" in request.full_url:
+        if request.full_url.endswith("page=2"):
             return FakeResponse(page_two)
         raise AssertionError(request.full_url)
 
@@ -3357,12 +3357,12 @@ def test_active_run_pagination_bound_cannot_be_rebound_to_hide_second_page(
         assert method == "GET"
         assert not allowed_http_errors
         requested.append(path)
-        if "page=1" in path:
+        if path.endswith("page=1"):
             return {
                 "total_count": 101,
                 "workflow_runs": [run_payload(run_id) for run_id in range(1, 101)],
             }
-        if "page=2" in path:
+        if path.endswith("page=2"):
             return {
                 "total_count": 101,
                 "workflow_runs": [run_payload(101)],
@@ -3418,12 +3418,12 @@ def test_active_run_pagination_overlap_cannot_fake_snapshot_completion(
         assert method == "GET"
         assert not allowed_http_errors
         requested.append(path)
-        if "page=1" in path:
+        if path.endswith("page=1"):
             return {
                 "total_count": 200,
                 "workflow_runs": [run_payload(run_id) for run_id in range(1, 101)],
             }
-        if "page=2" in path:
+        if path.endswith("page=2"):
             # Fifty rows overlap page 1 after concurrent queue growth. Counting raw
             # observations would reach total_count=200 here and incorrectly stop,
             # leaving 151..200 invisible to this sweep.
@@ -3431,7 +3431,7 @@ def test_active_run_pagination_overlap_cannot_fake_snapshot_completion(
                 "total_count": 200,
                 "workflow_runs": [run_payload(run_id) for run_id in range(51, 151)],
             }
-        if "page=3" in path:
+        if path.endswith("page=3"):
             return {
                 "total_count": 200,
                 "workflow_runs": [run_payload(run_id) for run_id in range(151, 201)],
@@ -3486,9 +3486,9 @@ def test_active_run_reader_stops_after_full_page_with_no_unique_progress(
         assert method == "GET"
         assert not allowed_http_errors
         requested.append(path)
-        if "page=1" in path:
+        if path.endswith("page=1"):
             return {"total_count": 200, "workflow_runs": first_page}
-        if "page=2" in path:
+        if path.endswith("page=2"):
             return {"total_count": 200, "workflow_runs": list(first_page)}
         raise AssertionError("duplicate full page must terminate moving snapshot")
 

@@ -728,7 +728,7 @@ def test_commit_association_rejects_inflight_request_default_rebase(
     def mutating_urlopen(request, *, timeout: int):
         assert timeout == 20
         requested.append(request.full_url)
-        assert "page=1" in request.full_url
+        assert request.full_url.endswith("page=1")
         monkeypatch.setitem(defaults, "_json_parse_int", str)
         return FakeResponse(page_one)
 
@@ -761,9 +761,9 @@ def test_commit_association_page_bound_cannot_hide_second_pr(monkeypatch) -> Non
 
     def fake_request(path: str, **_kwargs):
         requested.append(path)
-        if "page=1" in path:
+        if path.endswith("page=1"):
             return page_one
-        if "page=2" in path:
+        if path.endswith("page=2"):
             return page_two
         raise AssertionError(path)
 
@@ -954,12 +954,12 @@ def test_base_active_run_page_bound_and_parser_are_frozen(monkeypatch) -> None:
 
     def fake_request(path: str, **_kwargs):
         requested.append(path)
-        if "page=1" in path:
+        if path.endswith("page=1"):
             return {
                 "total_count": 101,
                 "workflow_runs": [run_payload(run_id) for run_id in range(1, 101)],
             }
-        if "page=2" in path:
+        if path.endswith("page=2"):
             return {
                 "total_count": 101,
                 "workflow_runs": [run_payload(101)],
@@ -1009,17 +1009,17 @@ def test_base_active_run_overlap_does_not_fake_total_count_completion(
 
     def fake_request(path: str, **_kwargs):
         requested.append(path)
-        if "page=1" in path:
+        if path.endswith("page=1"):
             return {
                 "total_count": 200,
                 "workflow_runs": [run_payload(run_id) for run_id in range(1, 101)],
             }
-        if "page=2" in path:
+        if path.endswith("page=2"):
             return {
                 "total_count": 200,
                 "workflow_runs": [run_payload(run_id) for run_id in range(51, 151)],
             }
-        if "page=3" in path:
+        if path.endswith("page=3"):
             return {
                 "total_count": 200,
                 "workflow_runs": [run_payload(run_id) for run_id in range(151, 201)],
@@ -1058,12 +1058,12 @@ def test_base_active_run_queue_shrink_uses_short_page_as_safe_terminal_snapshot(
 
     def fake_request(path: str, **_kwargs):
         requested.append(path)
-        if "page=1" in path:
+        if path.endswith("page=1"):
             return {
                 "total_count": 150,
                 "workflow_runs": [run_payload(run_id) for run_id in range(1, 101)],
             }
-        if "page=2" in path:
+        if path.endswith("page=2"):
             # The queue shrank while scanning. A short page is a terminal moving
             # snapshot, not evidence that provider pagination is corrupt.
             return {
@@ -1105,9 +1105,9 @@ def test_base_active_run_reader_stops_after_full_duplicate_page(
 
     def fake_request(path: str, **_kwargs):
         requested.append(path)
-        if "page=1" in path:
+        if path.endswith("page=1"):
             return {"total_count": 200, "workflow_runs": first_page}
-        if "page=2" in path:
+        if path.endswith("page=2"):
             return {"total_count": 200, "workflow_runs": list(first_page)}
         raise AssertionError("duplicate full page must terminate moving snapshot")
 

@@ -95,6 +95,11 @@ def test_workspace_string_subclass_is_rejected_before_path_hooks() -> None:
         operator_source_configuration_path(_StringSubclass("workspace"))
 
 
+def test_relative_workspace_is_rejected_before_configuration_io() -> None:
+    with pytest.raises(OperatorSourceConfigurationError, match="must be absolute"):
+        operator_source_configuration_path("relative-workspace")
+
+
 def test_unknown_stored_identity_fails_closed_after_restart(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     save_operator_source_configuration(workspace, "parlayapi-table-tennis")

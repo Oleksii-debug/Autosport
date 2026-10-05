@@ -477,7 +477,10 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
         if self.session is not None:
             return True
         try:
-            self.session = AutosportSession(self.workspace, "10000")
+            self.session = self._open_session(
+                self._active_strategy_id,
+                self._active_research_plan,
+            )
         except Exception:
             self.session = None
             self._block_workspace_for_recovery(Path(self.workspace))

@@ -213,7 +213,10 @@ class MarketMirror:
         if type(decision_causal) is not bool:
             raise TypeError("decision_causal must be a bool")
         _validate_persistable_sequence(event.sequence)
-        _validate_local_receipt_order(event)
+        _validate_local_receipt_order(
+            event,
+            require_supported_precision=False,
+        )
 
         key = self._key(event)
         with self._lock:

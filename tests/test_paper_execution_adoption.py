@@ -311,6 +311,66 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(book.tickets, {})
             self.assertEqual(book.balance, Decimal("100.00"))
 
+    def test_forged_runtime_witness_attribute_cannot_authorize_ledger_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("forged-runtime-witness", side="BACK"))
+            redirected = PaperExecutionLedger(Path(tmp) / "forged-redirect.jsonl")
+            runtime.ledger = redirected
+            runtime._autosport_lay_runtime_authority_witness = {
+                "book": runtime.book,
+                "ledger": runtime.ledger,
+                "config": runtime.config,
+                "config_fingerprint": runtime.config.fingerprint,
+                "paper_book_path": runtime.paper_book_path,
+                "max_quote_age": runtime.max_quote_age,
+                "execution_lock": runtime._execution_lock,
+                "prepared_authorities": runtime._prepared_authorities,
+            }
+            original_events = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "runtime authority object changed",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="forged-runtime-witness",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), original_events)
+            self.assertEqual(redirected.events(), [])
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_forged_prepared_witness_attribute_cannot_authorize_post_mint_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("forged-prepared-witness", odds="2.50", stake="10.00", side="BACK")
+            current_prepared = prepared(runtime, current)
+            object.__setattr__(current, "requested_stake", Decimal("11.00"))
+            runtime._autosport_lay_prepared_authority_witnesses = {
+                id(current_prepared): "forged-current-witness"
+            }
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "authority changed after mint",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="forged-prepared-witness",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
     def test_invalid_started_at_fails_before_durable_scope_publication(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

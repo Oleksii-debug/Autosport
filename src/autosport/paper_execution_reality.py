@@ -556,6 +556,10 @@ def _validate_lay_execution_surface(
             "LAY PAPER execution is limited to one single-leg action"
         )
     action = lay_actions[0]
+    if action.side != "LAY":
+        raise PaperExecutionStateError(
+            "LAY PAPER execution requires canonical LAY action side before reservation"
+        )
     observation = observations.get(action.action_id)
     if observation is None:
         raise PaperExecutionStateError(

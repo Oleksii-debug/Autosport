@@ -8722,5 +8722,100 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             loop.close()
 
 
+    def test_live_promotion_holds_execution_guard_across_context_and_adoption(self) -> None:
+        from contextlib import contextmanager
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+            model = PaperExecutionModelConfig(
+                model_id="live-coherent-cut-test",
+                model_version="1",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="live-coherent-cut-test",
+                seed="live-coherent-cut",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            book = PaperBook("1000")
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=PaperExecutionLedger(workspace / "paper-execution.jsonl"),
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            goal = EconomicGoalContract(
+                goal_id="goal-live-coherent-cut",
+                revision=1,
+                bankroll_id="bankroll-live-test",
+                currency="EUR",
+                max_risk_of_ruin=Decimal("1"),
+            )
+            authority = EconomicDecisionAuthority(
+                goal,
+                PaperRiskPolicy(economic_goal=goal),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(event,)]),
+                factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                book=book,
+                authority=authority,
+                paper_execution=execution,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            real_guard = execution.execution_guard
+            real_context = loop._decision_context_sha256
+            real_execute = execution.execute
+            guard_active = {"value": False}
+            observed = {"context": False, "execute": False}
+
+            @contextmanager
+            def observed_guard():
+                with real_guard():
+                    self.assertFalse(guard_active["value"])
+                    guard_active["value"] = True
+                    try:
+                        yield
+                    finally:
+                        guard_active["value"] = False
+
+            def observed_context():
+                if guard_active["value"]:
+                    observed["context"] = True
+                return real_context()
+
+            def observed_execute(**kwargs):
+                self.assertTrue(guard_active["value"])
+                observed["execute"] = True
+                return real_execute(**kwargs)
+
+            with (
+                patch.object(execution, "execution_guard", side_effect=observed_guard),
+                patch.object(
+                    loop,
+                    "_decision_context_sha256",
+                    side_effect=observed_context,
+                ),
+                patch.object(execution, "execute", side_effect=observed_execute),
+            ):
+                result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertTrue(observed["context"])
+            self.assertTrue(observed["execute"])
+            self.assertFalse(guard_active["value"])
+            loop.close()
+
+
 if __name__ == "__main__":
     unittest.main()

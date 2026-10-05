@@ -966,8 +966,7 @@ class PaperExecutionLedger:
     def register_observation_evidence(
         self, record: PaperExecutionEvidenceRecord
     ) -> None:
-        if not isinstance(record, PaperExecutionEvidenceRecord):
-            raise TypeError("record must be PaperExecutionEvidenceRecord")
+        _require_canonical_evidence_record_surface(record)
         payload = {
             "evidence_id": record.evidence_id,
             "evidence_sha256": record.evidence_sha256,
@@ -1031,6 +1030,7 @@ class PaperExecutionLedger:
         )
 
     def record_attempt(self, attempt: PaperLegAttempt) -> None:
+        _require_canonical_attempt_surface(attempt)
         self._append_event(
             event_type="ATTEMPT_RECORDED",
             run_id=attempt.run_id,

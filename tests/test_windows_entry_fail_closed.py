@@ -20,7 +20,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         return module
 
     def test_unknown_packaged_argument_fails_before_gui_layout(self) -> None:
-        fake_gui = types.ModuleType("autosport.windows_gui")
+        fake_gui = types.ModuleType("autosport.product_windows_gui")
 
         def unexpected_gui() -> int:
             raise AssertionError("unknown packaged arg must not start GUI")
@@ -30,7 +30,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
             sys.modules,
             {
                 "autosport.windows_layout": self._failing_layout_module(),
-                "autosport.windows_gui": fake_gui,
+                "autosport.product_windows_gui": fake_gui,
             },
         ):
             self.assertEqual(main(["--not-a-real-autosport-mode"]), 2)
@@ -49,7 +49,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
     def test_no_args_preserves_normal_gui_startup_after_layout_install(self) -> None:
         calls: list[str] = []
         fake_layout = types.ModuleType("autosport.windows_layout")
-        fake_gui = types.ModuleType("autosport.windows_gui")
+        fake_gui = types.ModuleType("autosport.product_windows_gui")
 
         def install() -> None:
             calls.append("layout")
@@ -64,7 +64,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
             sys.modules,
             {
                 "autosport.windows_layout": fake_layout,
-                "autosport.windows_gui": fake_gui,
+                "autosport.product_windows_gui": fake_gui,
             },
         ):
             self.assertEqual(main([]), 17)

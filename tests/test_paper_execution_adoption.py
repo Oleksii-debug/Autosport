@@ -213,6 +213,54 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(book.balance, Decimal("60.00"))
             self.assertEqual(book.committed_capital, Decimal("40.00"))
 
+    def test_empirical_accepted_lay_restart_reuses_same_durable_exposure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            book_path = Path(tmp) / "paper-book.json"
+            current = action("lay-restart", odds="5.00", stake="10.00", side="LAY")
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="5.00",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            first = runtime.execute(
+                prepared=prepared(runtime, current),
+                trigger_id="trigger-lay-restart",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            reloaded_book = PaperBook.load(book_path)
+            restarted = PaperExecutionAdoptionRuntime(
+                book=reloaded_book,
+                ledger=ledger,
+                config=runtime.config,
+                max_quote_age=runtime.max_quote_age,
+                paper_book_path=book_path,
+            )
+            second = restarted.execute(
+                prepared=prepared(restarted, current),
+                trigger_id="trigger-lay-restart",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(first.run, second.run)
+            self.assertEqual(first.ticket_ids, second.ticket_ids)
+            self.assertEqual(len(reloaded_book.tickets), 1)
+            ticket = next(iter(reloaded_book.tickets.values()))
+            self.assertEqual(ticket.legs[0].exchange_side, "lay")
+            self.assertEqual(reloaded_book.balance, Decimal("60.00"))
+            self.assertEqual(reloaded_book.committed_capital, Decimal("40.00"))
+
     def test_empirical_partial_lay_materializes_only_partial_liability(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

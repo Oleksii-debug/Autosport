@@ -1253,6 +1253,41 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertEqual(len(snapshot.events), 1)
         self.assertEqual(snapshot.events[0].source_id, "provider-b")
 
+    def test_incremental_view_stays_bounded_across_unrelated_registry_churn(self) -> None:
+        mirror = MarketMirror()
+        event = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        mirror.apply(event)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        dependencies.register("other", source_ids="provider-b")
+        original_bounded = mirror.active_view_for_keys
+
+        def mutate_unrelated_dependency(*args, **kwargs):
+            snapshot = original_bounded(*args, **kwargs)
+            self.assertTrue(dependencies.unregister("other"))
+            dependencies.register("other", source_ids="provider-c")
+            return snapshot
+
+        with (
+            patch.object(
+                mirror,
+                "active_view_for_keys",
+                side_effect=mutate_unrelated_dependency,
+            ),
+            patch.object(
+                mirror,
+                "active_view",
+                side_effect=AssertionError("unrelated churn must stay bounded"),
+            ),
+        ):
+            snapshot = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(snapshot.events, (event,))
+
     def test_incremental_view_uses_replacement_dependency_after_registry_race(self) -> None:
         mirror = MarketMirror()
         provider_a = self.event(source_id="provider-a", selection="selection-a", sequence=1)

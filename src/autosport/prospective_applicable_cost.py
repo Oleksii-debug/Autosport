@@ -833,7 +833,18 @@ def _build_canonical_authority():
             "execution_feasibility_proven": False,
             "realized_price_exact": False,
         }
-        return digest(payload)
+        if json_dumps.__code__ is not json_dumps_code:
+            raise error_cls("canonical JSON proof serializer authority changed")
+        encoded = json_dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        if json_dumps.__code__ is not json_dumps_code:
+            raise error_cls("canonical JSON proof serializer authority changed")
+        return sha256_constructor(encoded).hexdigest()
 
     def resolve(
         *,

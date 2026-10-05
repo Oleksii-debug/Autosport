@@ -414,9 +414,39 @@ class ProductEconomicSessionStore:
         self._state_path_witness = self.state_path
         self._paperbook_path_witness = self.paperbook_path
         self._goal_store_witness = self.goal_store
+        self._goal_store_path_witness = self.goal_store.path
         self._authority_witness = self._authority
+        self._authority_workspace_witness = self._authority.workspace
+        self._authority_domain_witness = self._authority.domain
+        self._authority_key_witness = self._authority.key
+        self._authority_root_witness = self._authority.authority_root
+        self._authority_workspace_binding_witness = self._authority.workspace_binding
+        self._authority_root_selection_witness = self._authority.authority_root_selection
+        self._authority_root_binding_path_witness = self._authority.authority_root_binding_path
+        self._authority_workspace_binding_path_witness = self._authority.workspace_binding_path
+        self._authority_activation_path_witness = self._authority.authority_root_activation_path
+        self._authority_journal_dir_witness = self._authority.journal_dir
+        self._authority_records_dir_witness = self._authority.records_dir
+        self._authority_namespace_marker_path_witness = self._authority.namespace_marker_path
         self._clock_witness = self._clock
         self._product_clock_witness = self._product_clock
+        self._uuid4_witness = _UUID4
+        self._workspace_lock_type_witness = _WORKSPACE_LOCK_TYPE
+        self._paperbook_load_witness = _PAPERBOOK_LOAD
+        self._paperbook_validate_witness = _PAPERBOOK_VALIDATE_LOADED_STATE
+        self._economic_goal_load_witness = _ECONOMIC_GOAL_LOAD
+        self._authority_recover_witness = _AUTHORITY_RECOVER
+        self._authority_prepare_witness = _AUTHORITY_PREPARE
+        self._authority_commit_witness = _AUTHORITY_COMMIT
+        self._authority_schema_witness = (
+            _STATE_SCHEMA,
+            _STATE_SCHEMA_VERSION,
+            _AUTHORITY_DOMAIN,
+            _STATE_FILE_NAME,
+            _MAX_STATE_BYTES,
+            _MAX_PAPERBOOK_BYTES,
+            _STATE_KEYS,
+        )
 
     def _require_configuration_authority(self) -> None:
         if type(self) is not ProductEconomicSessionStore:
@@ -428,17 +458,47 @@ class ProductEconomicSessionStore:
             or self.state_path is not self._state_path_witness
             or self.paperbook_path is not self._paperbook_path_witness
             or self.goal_store is not self._goal_store_witness
+            or self.goal_store.path is not self._goal_store_path_witness
             or self._authority is not self._authority_witness
+            or self._authority.workspace is not self._authority_workspace_witness
+            or self._authority.domain is not self._authority_domain_witness
+            or self._authority.key is not self._authority_key_witness
+            or self._authority.authority_root is not self._authority_root_witness
+            or self._authority.workspace_binding is not self._authority_workspace_binding_witness
+            or self._authority.authority_root_selection is not self._authority_root_selection_witness
+            or self._authority.authority_root_binding_path is not self._authority_root_binding_path_witness
+            or self._authority.workspace_binding_path is not self._authority_workspace_binding_path_witness
+            or self._authority.authority_root_activation_path is not self._authority_activation_path_witness
+            or self._authority.journal_dir is not self._authority_journal_dir_witness
+            or self._authority.records_dir is not self._authority_records_dir_witness
+            or self._authority.namespace_marker_path is not self._authority_namespace_marker_path_witness
             or self._clock is not self._clock_witness
             or self._product_clock is not self._product_clock_witness
-            or EconomicGoalStore.load is not _ECONOMIC_GOAL_LOAD
-            or MonotonicWorkspaceAuthority.recover is not _AUTHORITY_RECOVER
-            or MonotonicWorkspaceAuthority.prepare is not _AUTHORITY_PREPARE
-            or MonotonicWorkspaceAuthority.commit is not _AUTHORITY_COMMIT
-            or PaperBook.load is not _PAPERBOOK_LOAD
-            or PaperBook._validate_loaded_state is not _PAPERBOOK_VALIDATE_LOADED_STATE
-            or WorkspaceEconomicLock is not _WORKSPACE_LOCK_TYPE
-            or uuid.uuid4 is not _UUID4
+            or _ECONOMIC_GOAL_LOAD is not self._economic_goal_load_witness
+            or _AUTHORITY_RECOVER is not self._authority_recover_witness
+            or _AUTHORITY_PREPARE is not self._authority_prepare_witness
+            or _AUTHORITY_COMMIT is not self._authority_commit_witness
+            or _PAPERBOOK_LOAD is not self._paperbook_load_witness
+            or _PAPERBOOK_VALIDATE_LOADED_STATE is not self._paperbook_validate_witness
+            or _WORKSPACE_LOCK_TYPE is not self._workspace_lock_type_witness
+            or _UUID4 is not self._uuid4_witness
+            or EconomicGoalStore.load is not self._economic_goal_load_witness
+            or MonotonicWorkspaceAuthority.recover is not self._authority_recover_witness
+            or MonotonicWorkspaceAuthority.prepare is not self._authority_prepare_witness
+            or MonotonicWorkspaceAuthority.commit is not self._authority_commit_witness
+            or PaperBook.load is not self._paperbook_load_witness
+            or PaperBook._validate_loaded_state is not self._paperbook_validate_witness
+            or WorkspaceEconomicLock is not self._workspace_lock_type_witness
+            or uuid.uuid4 is not self._uuid4_witness
+            or (
+                _STATE_SCHEMA,
+                _STATE_SCHEMA_VERSION,
+                _AUTHORITY_DOMAIN,
+                _STATE_FILE_NAME,
+                _MAX_STATE_BYTES,
+                _MAX_PAPERBOOK_BYTES,
+                _STATE_KEYS,
+            ) != self._authority_schema_witness
         ):
             raise EconomicSessionIntegrityError(
                 "economic-session authority composition changed after construction"

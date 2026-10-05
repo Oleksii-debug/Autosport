@@ -334,8 +334,8 @@ def run_continuous_observation(
         raise ValueError("monotonic must return a finite number")
 
     state = _LoopState(current_run_id, provider_source_id, started_at)
-    stopper = stop_event or threading.Event()
-    wait = waiter or stopper.wait
+    stopper = stop_event if stop_event is not None else threading.Event()
+    wait = waiter if waiter is not None else stopper.wait
 
     root = config.workspace
     root.mkdir(parents=True, exist_ok=True)

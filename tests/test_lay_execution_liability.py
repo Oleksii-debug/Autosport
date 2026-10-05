@@ -1185,6 +1185,42 @@ class PaperExecutionLedgerDispatchAuthorityTests(unittest.TestCase):
             self.assertEqual(result.attempts[0].outcome, PaperAttemptOutcome.ACCEPTED)
 
 
+class PaperExecutionLedgerPrimitiveAuthorityTests(unittest.TestCase):
+    def test_execute_bypasses_instance_events_and_append_event_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            current = _action(
+                "ledger-primitive-dispatch",
+                side="BACK",
+                odds="2.00",
+                stake="10.00",
+            )
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("instance durable primitive override executed")
+
+            ledger.events = forbidden
+            ledger._append_event = forbidden
+            try:
+                result = execute_paper_plan(
+                    plan=_plan(current),
+                    trigger_id="ledger-primitive-dispatch",
+                    config=_config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                )
+            finally:
+                ledger.__dict__.pop("events", None)
+                ledger.__dict__.pop("_append_event", None)
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertTrue(result.completed)
+            self.assertEqual(result.worst_case_exposure, Decimal("10.00"))
+
+
 class PaperBookLayEconomicsTests(unittest.TestCase):
     @staticmethod
     def _lay_leg() -> TicketLeg:

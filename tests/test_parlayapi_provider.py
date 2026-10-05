@@ -1,10 +1,12 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from autosport.domain import MarketType
 from autosport.ingestion import IngestionEngine
 from autosport.market_bus import MarketEventBus
+from autosport.market_mirror import MarketMirror
 from autosport.parlayapi_provider import (
     HttpJsonResponse,
     ParlayApiTableTennisProvider,
@@ -392,6 +394,65 @@ class ParlayApiProviderTests(unittest.TestCase):
         self.assertEqual(clock_calls, [1])
         self.assertEqual(first.quotes[0].observed_ts, "2026-09-12T20:00:05+00:00")
         self.assertEqual(second.quotes[0].observed_ts, "2026-09-12T20:00:05+00:00")
+
+
+    def test_post_receipt_timestamp_blocks_pre_receipt_replay_cutoff(self):
+        state = {"received": False}
+
+        def transport(url, headers, timeout):
+            state["received"] = True
+            return HttpJsonResponse([SAMPLE_EVENT], 200, {})
+
+        def provider_clock():
+            return (
+                "2026-09-12T20:00:05+00:00"
+                if state["received"]
+                else "2026-09-12T20:00:00+00:00"
+            )
+
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=transport,
+            clock=provider_clock,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                bus = MarketEventBus(store)
+                engine = IngestionEngine(
+                    bus,
+                    clock=lambda: "2026-09-12T20:00:06+00:00",
+                )
+                stats = engine.poll_once(provider, max_items=100)
+                self.assertGreater(stats.accepted, 0)
+
+                before_receipt = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(
+                        2026, 9, 12, 20, 0, 3, tzinfo=timezone.utc
+                    ),
+                    max_age=timedelta(minutes=5),
+                )
+                at_receipt = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(
+                        2026, 9, 12, 20, 0, 5, tzinfo=timezone.utc
+                    ),
+                    max_age=timedelta(minutes=5),
+                )
+
+                self.assertEqual(before_receipt.events, ())
+                self.assertTrue(at_receipt.events)
+                self.assertTrue(
+                    all(
+                        event.observed_ts == "2026-09-12T20:00:05+00:00"
+                        and event.ingest_ts == "2026-09-12T20:00:05+00:00"
+                        for event in at_receipt.events
+                    )
+                )
+            finally:
+                store.close()
 
 
 if __name__ == "__main__":

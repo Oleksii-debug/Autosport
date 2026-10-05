@@ -40,6 +40,8 @@ _ORIGINAL_PAPERBOOK_LOAD = _adoption.PaperBook.load
 _ORIGINAL_PAPERBOOK_OPEN_TICKET = _adoption.PaperBook.open_ticket
 _ORIGINAL_LEDGER_EVENTS = _reality.PaperExecutionLedger.events
 _ORIGINAL_LEDGER_LOAD_RUN = _reality.PaperExecutionLedger.load_run
+_ORIGINAL_LEDGER_APPEND_EVENT = _reality.PaperExecutionLedger._append_event
+_ORIGINAL_EXPOSURE_SCOPE_PAYLOAD = PaperExecutionAdoptionRuntime._exposure_scope_payload
 _PREPARED_WITNESSES: dict[int, tuple[PreparedPaperExecution, str]] = {}
 _ACTION_WITNESSES: dict[int, tuple[ExecutionAction, str, str]] = {}
 _BINDING_WITNESSES: dict[int, tuple[PaperExposureBinding, tuple[str, str | None, str | None, str | None]]] = {}
@@ -639,6 +641,27 @@ def _restore_paperbook_from_snapshot(
 
 
 
+
+def _publish_exposure_scope_authority(
+    self: PaperExecutionAdoptionRuntime,
+    *,
+    prepared: PreparedPaperExecution,
+    run_id: str,
+) -> None:
+    """Publish exposure scope through captured canonical ledger authority."""
+    _require_minted(self, prepared)
+    _require_runtime_authority(self)
+    canonical_run_id = _exact_text(run_id, "run_id")
+    payload = _ORIGINAL_EXPOSURE_SCOPE_PAYLOAD(prepared)
+    _require_minted(self, prepared)
+    _ORIGINAL_LEDGER_APPEND_EVENT(
+        self.ledger,
+        event_type=self._EXPOSURE_SCOPE_EVENT_TYPE,
+        run_id=canonical_run_id,
+        key=f"{canonical_run_id}:exposure-scope",
+        payload=payload,
+    )
+
 def _execute(
     self: PaperExecutionAdoptionRuntime,
     *,
@@ -689,7 +712,7 @@ def _execute_unlocked(
     )
     _require_minted(self, prepared)
     expected_run_id = _expected_run_id(self, prepared, trigger_id)
-    _adoption.PaperExecutionAdoptionRuntime._publish_exposure_scope(
+    _publish_exposure_scope_authority(
         self,
         prepared=prepared,
         run_id=expected_run_id,

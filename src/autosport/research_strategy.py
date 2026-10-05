@@ -764,16 +764,39 @@ def _risk_of_ruin_evidence_from_dict(raw: Any) -> RiskOfRuinEvidence:
         raise ValueError("research risk_of_ruin_evidence must be an object")
     try:
         return RiskOfRuinEvidence(
-            evidence_id=str(raw["evidence_id"]),
-            research_protocol_sha256=str(raw["research_protocol_sha256"]),
-            reproducibility_bundle_sha256=str(raw["reproducibility_bundle_sha256"]),
-            producer_identity=str(raw["producer_identity"]),
-            causal_cutoff=str(raw["causal_cutoff"]),
-            evaluated_at=str(raw["evaluated_at"]),
-            bankroll_id=str(raw["bankroll_id"]),
-            currency=str(raw["currency"]),
-            base_portfolio_sha256=str(raw["base_portfolio_sha256"]),
-            candidate_sha256=str(raw["candidate_sha256"]),
+            evidence_id=_canonical_plan_identity(
+                raw["evidence_id"], "research risk evidence_id"
+            ),
+            research_protocol_sha256=_canonical_plan_identity(
+                raw["research_protocol_sha256"],
+                "research risk research_protocol_sha256",
+            ),
+            reproducibility_bundle_sha256=_canonical_plan_identity(
+                raw["reproducibility_bundle_sha256"],
+                "research risk reproducibility_bundle_sha256",
+            ),
+            producer_identity=_canonical_plan_identity(
+                raw["producer_identity"], "research risk producer_identity"
+            ),
+            causal_cutoff=_canonical_plan_identity(
+                raw["causal_cutoff"], "research risk causal_cutoff"
+            ),
+            evaluated_at=_canonical_plan_identity(
+                raw["evaluated_at"], "research risk evaluated_at"
+            ),
+            bankroll_id=_canonical_plan_identity(
+                raw["bankroll_id"], "research risk bankroll_id"
+            ),
+            currency=_canonical_plan_identity(
+                raw["currency"], "research risk currency"
+            ),
+            base_portfolio_sha256=_canonical_plan_identity(
+                raw["base_portfolio_sha256"],
+                "research risk base_portfolio_sha256",
+            ),
+            candidate_sha256=_canonical_plan_identity(
+                raw["candidate_sha256"], "research risk candidate_sha256"
+            ),
             evaluated_stake=Decimal(str(raw["evaluated_stake"])),
             upper_bound=Decimal(str(raw["upper_bound"])),
         )
@@ -792,24 +815,43 @@ def _forecast_from_dict(raw: Any) -> ForecastRecord:
         raise ValueError("ForecastRecord evidence_hashes must be a JSON array")
     if any(not isinstance(item, str) for item in evidence_hashes_raw):
         raise ValueError("ForecastRecord evidence_hashes must contain strings")
+    provenance_raw = raw.get("provenance", {})
+    if type(provenance_raw) is not dict:
+        raise ValueError("ForecastRecord provenance must be a JSON object")
     return ForecastRecord(
-        quote_key=str(raw["quote_key"]),
+        quote_key=_canonical_plan_identity(raw["quote_key"], "ForecastRecord quote_key"),
         probability=Decimal(str(raw["probability"])),
-        model_id=str(raw["model_id"]),
-        model_version=str(raw["model_version"]),
-        strategy_version=str(raw["strategy_version"]),
-        model_training_cutoff_ts=str(raw["model_training_cutoff_ts"]),
-        input_cutoff_ts=str(raw["input_cutoff_ts"]),
-        generated_at=str(raw["generated_at"]),
+        model_id=_canonical_plan_identity(raw["model_id"], "ForecastRecord model_id"),
+        model_version=_canonical_plan_identity(
+            raw["model_version"], "ForecastRecord model_version"
+        ),
+        strategy_version=_canonical_plan_identity(
+            raw["strategy_version"], "ForecastRecord strategy_version"
+        ),
+        model_training_cutoff_ts=_canonical_plan_identity(
+            raw["model_training_cutoff_ts"],
+            "ForecastRecord model_training_cutoff_ts",
+        ),
+        input_cutoff_ts=_canonical_plan_identity(
+            raw["input_cutoff_ts"], "ForecastRecord input_cutoff_ts"
+        ),
+        generated_at=_canonical_plan_identity(
+            raw["generated_at"], "ForecastRecord generated_at"
+        ),
         uncertainty=Decimal(str(raw.get("uncertainty", "0"))),
         evidence_hashes=tuple(evidence_hashes_raw),
         market_snapshot_hash=(
-            raw["market_snapshot_hash"]
+            _canonical_plan_identity(
+                raw["market_snapshot_hash"],
+                "ForecastRecord market_snapshot_hash",
+            )
             if raw.get("market_snapshot_hash") is not None
             else None
         ),
-        provenance=dict(raw.get("provenance", {})),
-        forecast_id=str(raw["forecast_id"]),
+        provenance=provenance_raw,
+        forecast_id=_canonical_plan_identity(
+            raw["forecast_id"], "ForecastRecord forecast_id"
+        ),
     )
 
 
@@ -827,16 +869,31 @@ def _evidence_from_dict(raw: Any) -> ResearchEvidence:
             "ResearchEvidence quality_flags must contain non-empty canonical strings"
         )
     return ResearchEvidence(
-        evidence_id=str(raw["evidence_id"]),
-        quote_key=str(raw["quote_key"]),
-        source_id=str(raw["source_id"]),
-        observed_at=str(raw["observed_at"]),
-        available_at=str(raw["available_at"]),
+        evidence_id=_canonical_plan_identity(
+            raw["evidence_id"], "ResearchEvidence evidence_id"
+        ),
+        quote_key=_canonical_plan_identity(
+            raw["quote_key"], "ResearchEvidence quote_key"
+        ),
+        source_id=_canonical_plan_identity(
+            raw["source_id"], "ResearchEvidence source_id"
+        ),
+        observed_at=_canonical_plan_identity(
+            raw["observed_at"], "ResearchEvidence observed_at"
+        ),
+        available_at=_canonical_plan_identity(
+            raw["available_at"], "ResearchEvidence available_at"
+        ),
         decimal_odds=Decimal(str(raw["decimal_odds"])),
-        content_sha256=str(raw["content_sha256"]),
+        content_sha256=_canonical_plan_identity(
+            raw["content_sha256"], "ResearchEvidence content_sha256"
+        ),
         quality_flags=tuple(quality_flags_raw),
         market_snapshot_hash=(
-            str(raw["market_snapshot_hash"])
+            _canonical_plan_identity(
+                raw["market_snapshot_hash"],
+                "ResearchEvidence market_snapshot_hash",
+            )
             if raw.get("market_snapshot_hash") is not None
             else None
         ),

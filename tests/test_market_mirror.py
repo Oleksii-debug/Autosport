@@ -199,6 +199,45 @@ class MarketMirrorTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
             MarketMirror._from_proven_history(((hostile, 1),))
 
+    def test_decision_boundary_rejects_datetime_and_timedelta_subclasses(self) -> None:
+        class Instant(datetime):
+            pass
+
+        class Age(timedelta):
+            pass
+
+        mirror = MarketMirror()
+        mirror.apply(self.event())
+
+        with self.assertRaisesRegex(TypeError, "exact datetime"):
+            mirror.active_view(
+                as_of=Instant(2026, 9, 16, 19, 0, 1, tzinfo=timezone.utc),
+                max_age=timedelta(seconds=30),
+            )
+        with self.assertRaisesRegex(TypeError, "exact timedelta"):
+            mirror.active_view(
+                as_of=datetime(2026, 9, 16, 19, 0, 1, tzinfo=timezone.utc),
+                max_age=Age(seconds=30),
+            )
+
+    def test_focused_selectors_reject_string_subclasses(self) -> None:
+        class Text(str):
+            pass
+
+        mirror = MarketMirror()
+        mirror.apply(self.event())
+
+        with self.assertRaisesRegex(TypeError, "entries must be exact strings"):
+            mirror.view(source_ids=(Text("provider-a"),))
+        with self.assertRaisesRegex(TypeError, "entries must be exact strings"):
+            mirror.active_view(
+                as_of=datetime(2026, 9, 16, 19, 0, 1, tzinfo=timezone.utc),
+                max_age=timedelta(seconds=30),
+                event_ids=(Text("event-1"),),
+            )
+        with self.assertRaisesRegex(TypeError, "entries must be exact strings"):
+            mirror.view(source_ids=Text("provider-a"))
+
     def test_new_and_forward_updates_are_applied(self) -> None:
         mirror = MarketMirror()
 

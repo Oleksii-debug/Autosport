@@ -3,7 +3,7 @@ import tempfile
 import threading
 import time
 import unittest
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -125,13 +125,26 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         self.assertEqual(restored.committed_stake, book.committed_stake)
         self.assertEqual(set(restored.tickets), set(book.tickets))
 
+    def test_committed_stake_is_independent_of_ambient_decimal_precision(self):
+        book = PaperBook("100")
+        first = TicketLeg("ambient-1", "m", "a", locked_odds=Decimal("2"))
+        second = TicketLeg("ambient-2", "m", "b", locked_odds=Decimal("2"))
+        book.open_ticket([first], Decimal("12.34"))
+        book.open_ticket([second], Decimal("5.67"))
+
+        with localcontext() as context:
+            context.prec = 2
+            committed = book.committed_stake
+
+        self.assertEqual(committed, Decimal("18.01"))
+
     def test_open_ticket_rejects_duplicate_quote_key_without_mutating_bankroll(self):
         book = PaperBook("100")
         first = TicketLeg("e", "m", "a", locked_odds=Decimal("2"))
         duplicate = TicketLeg("e", "m", "a", locked_odds=Decimal("3"))
 
         with self.assertRaisesRegex(ValueError, "duplicate quote_key"):
-            book.open_ticket((leg for leg in [first, duplicate]), "10")
+            book.open_ticket((first, duplicate), "10")
 
         self.assertEqual(book.balance, Decimal("100"))
         self.assertEqual(book.tickets, {})

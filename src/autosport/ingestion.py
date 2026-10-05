@@ -340,7 +340,7 @@ class IngestionEngine:
                             else "provider_or_validation"
                         ),
                     )
-                except Exception as health_error:
+                except BaseException as health_error:
                     try:
                         try:
                             health_detail = str(health_error)

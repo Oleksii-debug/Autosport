@@ -5,6 +5,7 @@ from threading import local
 from .real_execution_ledger import (
     EventType,
     ExecutionLedgerIntegrityError,
+    ExecutionStateError,
     RealExecutionLedger,
     VerifiedProviderEffectBindingView,
 )
@@ -32,6 +33,7 @@ def _install_verified_provider_effect_ledger_mint_fence() -> None:
     verify = assert_verified_provider_evidence_authoritative
     provider_error = ProviderEvidenceError
     integrity_error = ExecutionLedgerIntegrityError
+    state_error = ExecutionStateError
     verified_kind = EventType.VERIFIED_PROVIDER_EFFECT_BOUND
     gate = local()
 
@@ -93,7 +95,7 @@ def _install_verified_provider_effect_ledger_mint_fence() -> None:
         try:
             verify(evidence)
         except provider_error as exc:
-            raise integrity_error(
+            raise state_error(
                 "verified provider effect evidence is not authoritative"
             ) from exc
         if getattr(gate, "active", None) is not None:

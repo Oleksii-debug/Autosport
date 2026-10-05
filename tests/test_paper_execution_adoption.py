@@ -332,6 +332,38 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 recovery_time.isoformat(),
             )
 
+    def test_execute_with_clock_rejects_durable_loader_code_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            loader = PaperExecutionLedger._load_unlocked
+            original_code = loader.__code__
+            hostile_calls = []
+
+            def forged_loader(_self):
+                hostile_calls.append(True)
+                return ()
+
+            loader.__code__ = forged_loader.__code__
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "canonical PAPER execution ledger reader changed",
+                ):
+                    runtime.execute_with_clock(
+                        prepared=current_prepared,
+                        trigger_id="trigger-loader-code-mutation",
+                        clock=lambda: datetime.fromisoformat(
+                            "2026-09-20T06:01:00+00:00"
+                        ),
+                        materialize_exposure=True,
+                    )
+            finally:
+                loader.__code__ = original_code
+
+            self.assertEqual(hostile_calls, [])
+            self.assertEqual(book.tickets, {})
+
     def test_execute_with_clock_rejects_module_durable_loader_rebinding(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, _ledger, runtime = self.runtime(tmp)

@@ -23,6 +23,18 @@ STARTED_AT = "2026-09-20T03:00:00.100000+00:00"
 EXPIRES_AT = "2026-09-20T03:01:00+00:00"
 
 
+class _HostileSide(str):
+    comparisons = 0
+
+    def __hash__(self) -> int:
+        type(self).comparisons += 1
+        return super().__hash__()
+
+    def __eq__(self, other: object) -> bool:
+        type(self).comparisons += 1
+        return super().__eq__(other)
+
+
 def _action(action_id: str, *, side: str, odds: str = "5.00", stake: str = "10.00") -> ExecutionAction:
     return ExecutionAction(
         action_id=action_id,
@@ -93,6 +105,31 @@ def _empirical_acceptance(
     registry = PaperExecutionEvidenceRegistry(ledger)
     registry.register(record)
     return record.as_observation(), registry
+
+
+def test_mutated_side_subclass_fails_before_dispatch_hooks_or_reservation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        current = _action("hostile-side", side="BACK", odds="2.00", stake="5.00")
+        plan = _plan(current)
+        _HostileSide.comparisons = 0
+        object.__setattr__(current, "side", _HostileSide("LAY"))
+        before = len(ledger.events())
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="canonical ExecutionAction side authority",
+        ):
+            execute_paper_plan(
+                plan=plan,
+                trigger_id="hostile-side",
+                config=_config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+
+        assert _HostileSide.comparisons == 0
+        assert len(ledger.events()) == before
 
 
 @pytest.mark.parametrize("side", ("lay", " LAY "))

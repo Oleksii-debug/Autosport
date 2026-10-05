@@ -109,6 +109,7 @@ def _parse_instant(
         raise EconomicSessionIntegrityError("started_at must be timezone-aware")
     return parsed.astimezone(_utc)
 
+
 @dataclass(frozen=True, slots=True)
 class ProductEconomicSession:
     workspace_instance_id: str

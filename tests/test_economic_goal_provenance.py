@@ -116,6 +116,18 @@ def test_provenance_rejects_identity_rebinding() -> None:
         verify_provenance(replace(goal, bankroll_id="other-bankroll"), evidence)
 
 
+def test_provenance_schema_is_detached_from_live_rebinding(monkeypatch) -> None:
+    import autosport.economic_goal_provenance as provenance
+
+    goal = _goal()
+    monkeypatch.setattr(provenance, "PROVENANCE_SCHEMA", "forged-schema")
+    monkeypatch.setattr(provenance, "PROVENANCE_SCHEMA_VERSION", 999)
+
+    evidence = provenance.provenance_for(goal)
+
+    assert evidence.schema == "autosport.economic_goal_provenance"
+    assert evidence.schema_version == 1
+
 def test_provenance_schema_validation_is_fail_closed() -> None:
     with pytest.raises(EconomicGoalProvenanceError, match="SHA-256 hex"):
         EconomicGoalProvenance(

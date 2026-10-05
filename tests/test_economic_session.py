@@ -543,6 +543,30 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
                 setattr(owner, attribute, original)
             self.assertEqual(calls, 0)
 
+        import autosport.economic_goal_provenance as provenance_module
+
+        provenance_symbol_cases = (
+            ("economic_goal_to_payload", "economic_goal_to_payload"),
+            ("contract_sha256", "contract_sha256"),
+            ("EconomicGoalContract", "EconomicGoalContract"),
+        )
+        for name, attribute in provenance_symbol_cases:
+            original = getattr(provenance_module, attribute)
+            calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal calls
+                calls += 1
+                raise AssertionError(f"hostile provenance symbol {name} executed")
+
+            setattr(provenance_module, attribute, forbidden)
+            try:
+                with self.subTest(name=f"provenance:{name}"):
+                    self.assertEqual(existing.current(), first)
+            finally:
+                setattr(provenance_module, attribute, original)
+            self.assertEqual(calls, 0)
+
         fail_closed_dependency_cases = (
             ("sha256", hashlib, "sha256"),
             ("lexists", economic_session.os.path, "lexists"),

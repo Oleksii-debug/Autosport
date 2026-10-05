@@ -1186,6 +1186,44 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         )
         full_view.assert_called_once()
 
+    def test_stale_index_fallback_retries_dependency_replacement_during_full_read(self) -> None:
+        mirror = MarketMirror()
+        first = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        second = self.event(source_id="provider-a", selection="selection-b", sequence=1)
+        provider_b = self.event(source_id="provider-b", selection="selection-c", sequence=1)
+        mirror.apply(first)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        # Advance mirror truth without routing the dependency index so the bounded
+        # read must take the stale-index selector fallback.
+        mirror.apply(second)
+        mirror.apply(provider_b)
+        original_full = mirror.active_view
+        reads = [0]
+
+        def replace_dependency(*args, **kwargs):
+            snapshot = original_full(*args, **kwargs)
+            reads[0] += 1
+            if reads[0] == 1:
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-b")
+            return snapshot
+
+        with patch.object(
+            mirror,
+            "active_view",
+            side_effect=replace_dependency,
+        ):
+            snapshot = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(reads[0], 2)
+        self.assertEqual(len(snapshot.events), 1)
+        self.assertEqual(snapshot.events[0].source_id, "provider-b")
+
     def test_incremental_view_uses_replacement_dependency_after_registry_race(self) -> None:
         mirror = MarketMirror()
         provider_a = self.event(source_id="provider-a", selection="selection-a", sequence=1)

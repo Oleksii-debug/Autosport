@@ -549,12 +549,15 @@ def test_fragmented_crlf_frame_is_reassembled_exactly_with_authenticated_origin(
     frame = b'{"op":"mcm","clk":"next"}\r\n'
     fake = connected_socket(tail=frame[:7])
     fake.chunks.extend([frame[7:-1], frame[-1:]])
+    ticks = iter((100, 200, 300, 400))
+    monkeypatch.setattr(stream.time, "monotonic_ns", lambda: next(ticks))
     transport = make_transport(monkeypatch, fake)
     transport.connect()
 
     issued = transport.read_authenticated_frame()
 
     assert issued.payload == frame
+    assert issued.received_monotonic_ns == 400
     assert issued.payload_sha256 == sha256(frame).hexdigest()
     assert issued.connection_id == "conn-1"
     assert issued.connection_generation == 1
@@ -569,6 +572,8 @@ def test_coalesced_frames_are_split_without_byte_loss(
     first = b'{"op":"mcm","clk":"a"}\r\n'
     second = b'{"op":"mcm","clk":"b"}\r\n'
     fake = connected_socket(tail=first + second)
+    ticks = iter((100, 200))
+    monkeypatch.setattr(stream.time, "monotonic_ns", lambda: next(ticks))
     transport = make_transport(monkeypatch, fake)
     transport.connect()
 
@@ -577,6 +582,7 @@ def test_coalesced_frames_are_split_without_byte_loss(
 
     assert [one.payload, two.payload] == [first, second]
     assert [one.frame_sequence, two.frame_sequence] == [1, 2]
+    assert [one.received_monotonic_ns, two.received_monotonic_ns] == [200, 200]
     assert one.connection_generation == two.connection_generation == 1
 
 def test_oversized_no_newline_frame_fails_before_persistence(
@@ -808,6 +814,7 @@ def test_close_is_idempotent_and_clears_authenticated_and_partial_state(
     assert transport.is_authenticated is False
     assert transport.connection_id is None
     assert transport._receive_buffer == bytearray()
+    assert transport._receive_timing_chunks == []
 
 
 def test_public_protocol_declares_fail_closed_boundaries() -> None:

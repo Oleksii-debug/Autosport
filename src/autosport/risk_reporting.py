@@ -1141,6 +1141,7 @@ def build_paper_risk_report(
         current_equity=drawdown_evidence.current_equity,
         peak_equity=drawdown_evidence.peak_equity,
     )
+    after_source_sha256 = _paper_equity_source_state_sha256(book)
     after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
     if (
         metrics is None
@@ -1151,6 +1152,8 @@ def build_paper_risk_report(
         raise ValueError("canonical PAPER risk state cannot be reported")
     if after_sha256 != before_sha256:
         raise ValueError("canonical PAPER risk state changed during reporting")
+    if after_source_sha256 != before_source_sha256:
+        raise ValueError("canonical PAPER source state changed during reporting")
     if (
         maximum_drawdown.current_equity != metrics.current_equity
         or maximum_drawdown.peak_equity != metrics.peak_equity

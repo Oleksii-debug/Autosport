@@ -517,6 +517,72 @@ def _reject_nonfinite_json_constant(value: str) -> None:
     raise ValueError(f"PaperBook snapshot contains non-finite JSON constant: {value}")
 
 
+def _seal_paperbook_open_transition_authority(method):
+    """Inject closure-captured write authorities into open_ticket."""
+    opening_record = _record_ticket_opening_authority
+    opening_record_code = opening_record.__code__
+    causal_advance = _advance_paperbook_causal_history_open
+    causal_advance_code = causal_advance.__code__
+
+    def record_opening(book: object, ticket: PaperTicket) -> None:
+        if opening_record.__code__ is not opening_record_code:
+            raise ValueError("PaperBook opening write authority changed")
+        opening_record(book, ticket)
+        if opening_record.__code__ is not opening_record_code:
+            raise ValueError("PaperBook opening write authority changed")
+
+    def advance_open(book: object, ticket_id: str) -> None:
+        if causal_advance.__code__ is not causal_advance_code:
+            raise ValueError("PaperBook causal-history open write authority changed")
+        causal_advance(book, ticket_id)
+        if causal_advance.__code__ is not causal_advance_code:
+            raise ValueError("PaperBook causal-history open write authority changed")
+
+    @wraps(method)
+    def sealed(self, *args, **kwargs):
+        return method(
+            self,
+            *args,
+            _opening_authority_record=record_opening,
+            _causal_open_advance=advance_open,
+            **kwargs,
+        )
+
+    del sealed.__wrapped__
+    return sealed
+
+
+def _seal_paperbook_settle_transition_authority(method):
+    """Inject closure-captured write authority into settle."""
+    causal_advance = _advance_paperbook_causal_history_settle
+    causal_advance_code = causal_advance.__code__
+
+    def advance_settle(
+        book: object,
+        ticket_id: str,
+        winners: tuple[str, ...],
+        voids: tuple[str, ...],
+        settled_at: str | None,
+    ) -> None:
+        if causal_advance.__code__ is not causal_advance_code:
+            raise ValueError("PaperBook causal-history settle write authority changed")
+        causal_advance(book, ticket_id, winners, voids, settled_at)
+        if causal_advance.__code__ is not causal_advance_code:
+            raise ValueError("PaperBook causal-history settle write authority changed")
+
+    @wraps(method)
+    def sealed(self, *args, **kwargs):
+        return method(
+            self,
+            *args,
+            _causal_settle_advance=advance_settle,
+            **kwargs,
+        )
+
+    del sealed.__wrapped__
+    return sealed
+
+
 class PaperBook:
     """Virtual bankroll and auditable paper tickets. No real-money execution path exists."""
 
@@ -595,6 +661,7 @@ class PaperBook:
 
     @_serialized_paperbook_operation
     @_guard_paperbook_runtime_authority
+    @_seal_paperbook_open_transition_authority
     def open_ticket(
         self,
         legs,
@@ -606,6 +673,8 @@ class PaperBook:
         provider_accounts: tuple[tuple[str, str], ...] = (),
         bankroll_id: str | None = None,
         currency: str | None = None,
+        _opening_authority_record=None,
+        _causal_open_advance=None,
     ) -> PaperTicket:
         amount = self._canonical_decimal_input(stake, "stake")
         new_balance = self._debit_balance(self.balance, amount)
@@ -646,11 +715,11 @@ class PaperBook:
             bankroll_id=bankroll_id,
             currency=currency,
         )
-        _record_ticket_opening_authority(self, ticket)
+        _opening_authority_record(self, ticket)
         self.balance = new_balance
         self.tickets[ticket.ticket_id] = ticket
         self._lifecycle.append(("open", ticket.ticket_id, (), ()))
-        _advance_paperbook_causal_history_open(self, ticket.ticket_id)
+        _causal_open_advance(self, ticket.ticket_id)
         return ticket
 
     @staticmethod
@@ -714,6 +783,7 @@ class PaperBook:
 
     @_serialized_paperbook_operation
     @_guard_paperbook_runtime_authority
+    @_seal_paperbook_settle_transition_authority
     def settle(
         self,
         ticket_id: str,
@@ -721,6 +791,7 @@ class PaperBook:
         void_quote_keys: set[str] | None = None,
         *,
         settled_at: str | None = None,
+        _causal_settle_advance=None,
     ) -> PaperTicket:
         ticket_id = self._require_canonical_text(ticket_id, "settlement ticket_id")
         ticket = self.tickets[ticket_id]
@@ -758,7 +829,7 @@ class PaperBook:
             )
         )
         self._settlement_times[ticket.ticket_id] = settlement_time
-        _advance_paperbook_causal_history_settle(
+        _causal_settle_advance(
             self,
             ticket.ticket_id,
             tuple(sorted(winners)),

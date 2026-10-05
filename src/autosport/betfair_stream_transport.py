@@ -617,11 +617,13 @@ class BetfairStreamTlsTransport:
                 "Betfair stream receive block must be non-empty bytes"
             )
         if time.monotonic_ns is not _MONOTONIC_NS:
+            self._close_with_backoff()
             raise BetfairStreamTransportError(
                 "Betfair stream monotonic receive clock dispatch changed"
             )
         received_monotonic_ns = _MONOTONIC_NS()
         if type(received_monotonic_ns) is not int or received_monotonic_ns <= 0:
+            self._close_with_backoff()
             raise BetfairStreamTransportError(
                 "Betfair stream monotonic receive clock is invalid"
             )

@@ -1763,6 +1763,58 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertEqual(committed, Decimal("0"))
         self.assertEqual(book.balance, Decimal("110.00"))
 
+    def test_first_lay_open_rejects_hostile_lifecycle_container_before_economic_mutation(self):
+        book = PaperBook(Decimal("100"))
+        hostile_appends = 0
+
+        class HostileLifecycle(list):
+            def append(self, value):
+                nonlocal hostile_appends
+                hostile_appends += 1
+                return super().append(value)
+
+        book._lifecycle = HostileLifecycle(book._lifecycle)
+
+        def skip_reachability(_cls, _book):
+            return None
+
+        with patch.object(
+            PaperBook,
+            "_validate_lifecycle_reachability",
+            classmethod(skip_reachability),
+        ):
+            with self.assertRaisesRegex(ValueError, "lifecycle must be a canonical list"):
+                book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+
+        self.assertEqual(hostile_appends, 0)
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+
+    def test_first_lay_open_rejects_hostile_settlement_witness_before_economic_mutation(self):
+        book = PaperBook(Decimal("100"))
+
+        class HostileSettlementWitness(dict):
+            pass
+
+        book._settlement_times = HostileSettlementWitness(book._settlement_times)
+
+        def skip_reachability(_cls, _book):
+            return None
+
+        with patch.object(
+            PaperBook,
+            "_validate_lifecycle_reachability",
+            classmethod(skip_reachability),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "settlement-time witness must be a canonical mapping",
+            ):
+                book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+
     def test_open_lay_snapshot_round_trip_preserves_liability_and_side(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-book.json"

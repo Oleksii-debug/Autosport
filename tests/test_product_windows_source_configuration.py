@@ -168,7 +168,13 @@ def test_valid_source_save_uses_stable_registry_identity(tmp_path: Path) -> None
         _product_busy=False,
         product_status=_Value(),
         status=_Value(),
-        product_source=_Value("parlayapi-table-tennis"),
+        product_source=_Value("Parlay API — настільний теніс"),
+        _product_source_display_to_id={
+            "Parlay API — настільний теніс": "parlayapi-table-tennis"
+        },
+        _product_source_id_to_display={
+            "parlayapi-table-tennis": "Parlay API — настільний теніс"
+        },
         workspace=tmp_path / "workspace",
         bell=lambda: None,
         _append_log=lambda _message: None,

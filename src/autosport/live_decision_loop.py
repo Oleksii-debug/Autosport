@@ -879,9 +879,14 @@ class PersistentLiveDecisionLoop:
         self._default_health_store: SourceHealthStore | None = None
         self._default_market_change_token: int | None = None
 
-        self.progress_path = self.workspace / self.PROGRESS_FILE_NAME
-        self.pre_action_book_path = self.workspace / self.PRE_ACTION_BOOK_FILE_NAME
-        self.control_path = self.workspace / self.CONTROL_FILE_NAME
+        self.progress_path = self._workspace_authority / self.PROGRESS_FILE_NAME
+        self.pre_action_book_path = (
+            self._workspace_authority / self.PRE_ACTION_BOOK_FILE_NAME
+        )
+        self.control_path = self._workspace_authority / self.CONTROL_FILE_NAME
+        self._progress_path_authority = self.progress_path
+        self._pre_action_book_path_authority = self.pre_action_book_path
+        self._control_path_authority = self.control_path
         self._progress = self._load_progress()
         if self._progress is not None and self._progress.loop_id != self.loop_id:
             raise LiveDecisionProgressError(
@@ -925,7 +930,8 @@ class PersistentLiveDecisionLoop:
         )
         self.dependencies = FocusedMirrorDependencyIndex(mirror)
         self._dependency_mutation_lock = RLock()
-        self.inputs_path = self.workspace / self.INPUTS_FILE_NAME
+        self.inputs_path = self._workspace_authority / self.INPUTS_FILE_NAME
+        self._inputs_path_authority = self.inputs_path
         durable_input_specs = self._load_input_registry() or ()
         if len(durable_input_specs) > self.bounds.max_registered_inputs:
             raise LiveDecisionProgressError(
@@ -2550,6 +2556,22 @@ class PersistentLiveDecisionLoop:
         if self.mode is not self._configured_mode:
             raise LiveDecisionProgressError(
                 "live decision mode authority changed after decision preparation"
+            )
+        if self.progress_path != self._progress_path_authority:
+            raise LiveDecisionProgressError(
+                "live progress path authority changed after construction"
+            )
+        if self.pre_action_book_path != self._pre_action_book_path_authority:
+            raise LiveDecisionProgressError(
+                "pre-action PaperBook path authority changed after construction"
+            )
+        if self.control_path != self._control_path_authority:
+            raise LiveDecisionProgressError(
+                "live control path authority changed after construction"
+            )
+        if self.inputs_path != self._inputs_path_authority:
+            raise LiveDecisionProgressError(
+                "live input-registry path authority changed after construction"
             )
         if self.book is not self._book_authority:
             raise LiveDecisionProgressError(

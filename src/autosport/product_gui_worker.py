@@ -455,7 +455,11 @@ class ProductGuiWorker:
         ):
             raise ValueError("poll_seconds must be a finite positive number")
 
+        if type(workspace) not in {str, type(Path("."))}:
+            raise ValueError("workspace must be exact str or exact Path")
         root = Path(workspace)
+        if expected_source_id is not None and not root.is_absolute():
+            raise ValueError("profiled runtime workspace must be absolute")
         with self._lock:
             if self._busy:
                 return False

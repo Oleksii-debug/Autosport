@@ -414,8 +414,11 @@ def test_product_verifier_rejects_rebound_ledger_rlock_factory_before_execution(
         attacker_called = True
         raise AssertionError("rebound ledger RLock must never execute")
 
+    class AttackerThreading:
+        RLock = staticmethod(attacker_rlock)
+
     with _active_runtime_profile(store.workspace) as runtime_profile:
-        monkeypatch.setattr(ledger_module.threading, "RLock", attacker_rlock)
+        monkeypatch.setattr(ledger_module, "threading", AttackerThreading)
         with pytest.raises(
             BetfairStandardLimitPriceBoundError,
             match="product verifier reopen authority changed",

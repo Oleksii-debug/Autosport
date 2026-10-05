@@ -233,6 +233,7 @@ class _WitnessWebview:
         self.witness_path = witness_path
         self.witness_seen_before_start_return = False
         self.requested_gui: str | None = None
+        self.before_before_load = None
         self.settings = {
             "WEBVIEW2_RUNTIME_PATH": None,
             "REMOTE_DEBUGGING_PORT": None,
@@ -247,6 +248,8 @@ class _WitnessWebview:
         for handler in tuple(self.window.events.initialized.handlers):
             if handler("edgechromium") is False:
                 raise RuntimeError("renderer qualification rejected")
+        if self.before_before_load is not None:
+            self.before_before_load()
         for handler in tuple(self.window.events.before_load.handlers):
             if handler() is False:
                 raise RuntimeError("trusted document qualification rejected")
@@ -342,6 +345,45 @@ def test_invalid_actual_runtime_identity_never_publishes_witness(
             storage_path=tmp_path / "webview2",
         )
 
+    assert witness_path.exists() is False
+    assert controller._close_complete is True
+
+
+def test_inflight_runtime_witness_writer_rebind_fails_closed(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    witness_path = workspace / "webview2-runtime-witness.json"
+    fake = _install_witness_webview(
+        monkeypatch,
+        "154.0.2847.51",
+        witness_path,
+    )
+    controller = AutosportWebController(workspace)
+    bridge = AutosportWebBridge(controller)
+    hostile_called = []
+
+    def hostile_writer(path: Path, browser_version: str) -> None:
+        hostile_called.append((path, browser_version))
+
+    def rebind_writer() -> None:
+        monkeypatch.setattr(
+            windows_webview_shell,
+            "_write_webview2_runtime_witness",
+            hostile_writer,
+        )
+
+    fake.before_before_load = rebind_writer
+
+    with pytest.raises(WindowsWebViewUnavailable):
+        launch_windows_shell(
+            bridge,
+            storage_path=tmp_path / "webview2",
+        )
+
+    assert hostile_called == []
     assert witness_path.exists() is False
     assert controller._close_complete is True
 

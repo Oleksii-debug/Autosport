@@ -962,6 +962,29 @@ class LiveObservationTests(unittest.TestCase):
         )
         self.assertFalse(worker.busy)
 
+    def test_worker_rejects_observation_result_subclass_as_terminal_error(self):
+        class SubstitutedResult(live_observation_module.ObservationResult):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = self._observe(tmp)
+        substituted = SubstitutedResult(
+            expected.stats,
+            expected.health,
+            expected.current_quotes,
+        )
+        worker = OneShotObservationWorker()
+
+        self.assertTrue(worker.start(lambda: substituted))
+
+        message = self._wait_for_message(worker)
+        self.assertIsNone(message.result)
+        self.assertEqual(
+            message.error,
+            "TypeError: observation task must return an exact ObservationResult",
+        )
+        self.assertFalse(worker.busy)
+
     def test_worker_refuses_second_start_until_terminal_message_is_consumed(self):
         # Build the real observation result outside the worker timing window. This
         # test owns the worker single-flight/message-consumption contract; SQLite

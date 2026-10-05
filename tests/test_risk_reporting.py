@@ -1324,6 +1324,61 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertFalse(report.money_scope_complete)
         self.assertFalse(report.opening_capital_authority_complete)
 
+    def test_paper_equity_path_never_claims_correction_lineage_completeness(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(87),),
+            Decimal("10"),
+            placed_at="2026-09-21T17:10:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T17:15:00+00:00",
+        )
+        goal = self._goal()
+
+        path = build_product_issued_paper_equity_path(book, goal)
+        drawdown = build_product_issued_paper_drawdown_evidence(book, goal)
+        report = build_paper_risk_report(book, goal)
+
+        self.assertFalse(path.correction_lineage_complete)
+        self.assertFalse(path.restated_history_authoritative)
+        self.assertFalse(drawdown.correction_lineage_complete)
+        self.assertFalse(drawdown.restated_history_authoritative)
+        self.assertFalse(report.correction_lineage_complete)
+        self.assertFalse(report.restated_history_authoritative)
+
+    def test_correction_completeness_cannot_be_caller_upgraded(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(88),),
+            Decimal("10"),
+            placed_at="2026-09-21T17:20:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T17:25:00+00:00",
+        )
+        goal = self._goal()
+        path = build_product_issued_paper_equity_path(book, goal)
+        forged = replace(
+            path,
+            correction_lineage_complete=True,
+            restated_history_authoritative=True,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "equity-path evidence does not match canonical product state",
+        ):
+            verify_product_issued_paper_equity_path(book, goal, forged)
+
     def test_paper_equity_path_never_claims_net_cost_completeness(self) -> None:
         book = PaperBook("100")
         ticket = book.open_ticket(

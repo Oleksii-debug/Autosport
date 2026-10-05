@@ -588,3 +588,30 @@ def test_profiled_builder_closes_runtime_on_invalid_manifest_source_identity(
         )
 
     assert runtime.closed is True
+
+
+def test_worker_keeps_mutation_fence_until_terminal_stop_is_consumed(
+    tmp_path: Path,
+) -> None:
+    runtime = _FakeRuntime()
+    worker = ProductGuiWorker(runtime_builder=lambda *_args: runtime)
+
+    assert worker.start(
+        workspace=tmp_path,
+        source_factory="provider.module:factory",
+        poll_seconds=60,
+    )
+    assert runtime.tick_called.wait(2)
+    assert worker.request_stop("operator_stop")
+    assert worker.join(2)
+
+    # Thread completion alone is not terminal acknowledgement to the GUI.
+    assert worker.busy is True
+
+    first = worker.poll()
+    second = worker.poll()
+    terminal = worker.poll()
+    assert first is not None and first.kind == "STARTED"
+    assert second is not None and second.kind == "TICK"
+    assert terminal is not None and terminal.kind == "STOPPED"
+    assert worker.busy is False

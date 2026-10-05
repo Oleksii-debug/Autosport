@@ -52,6 +52,10 @@ class _FakeHttpResponse:
             return self.payload
         return self.payload[:limit]
 
+    def info(self):
+        # urllib's HTTPErrorProcessor consults response headers even for 2xx.
+        return {}
+
 
 class QueueUrlopen:
     def __init__(self, *results):
@@ -441,6 +445,60 @@ def test_account_protocol_authority_replacement_during_dispatch_fails_closed(
     assert opener.calls[0][0].full_url == canonical_endpoint
 
 
+def test_account_dispatch_uses_validated_protocol_snapshot_after_request_builder_rebind(
+    monkeypatch,
+):
+    canonical_endpoint = betdaq_account_module._CANONICAL_SECURE_ENDPOINT
+    canonical_external_ns = betdaq_account_module._CANONICAL_EXTERNAL_NS
+    hostile_endpoint = "https://example.invalid/credential-capture"
+    hostile_ns = "urn:foreign:betdaq:credential-capture"
+    original_request_xml = BetdaqAccountReadOnlyClient._request_xml
+
+    def rebinding_request_xml(self, method, fields, **kwargs):
+        body = original_request_xml(self, method, fields, **kwargs)
+        monkeypatch.setattr(
+            betdaq_account_module,
+            "_CANONICAL_SECURE_ENDPOINT",
+            hostile_endpoint,
+        )
+        monkeypatch.setattr(
+            betdaq_account_module,
+            "_CANONICAL_EXTERNAL_NS",
+            hostile_ns,
+        )
+        return body
+
+    opener = QueueUrlopen(balance())
+    _install_https_test_dispatch(monkeypatch, opener)
+    monkeypatch.setattr(
+        BetdaqAccountReadOnlyClient,
+        "_request_xml",
+        rebinding_request_xml,
+    )
+    value = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "p@ss", "app-id"),
+        clock=clock,
+    )
+
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="canonical BETDAQ account protocol authority was replaced",
+    ):
+        value.read_account_balance()
+
+    assert len(opener.calls) == 1
+    request = opener.calls[0][0]
+    assert request.full_url == canonical_endpoint
+    soap_action = next(
+        header_value
+        for header_name, header_value in request.headers.items()
+        if header_name.lower() == "soapaction"
+    )
+    assert soap_action == f'"{canonical_external_ns}GetAccountBalances"'
+
+
+
+
 @pytest.mark.parametrize(
     "attribute",
     ("_credential_context_binding", "_authenticated_account_context"),
@@ -546,7 +604,7 @@ def test_coordinated_transport_class_and_canonical_alias_rebind_fails_before_io(
 
     with pytest.raises(
         BetdaqAccountReadOnlyError,
-        match="canonical BETDAQ account transport was replaced or shadowed",
+        match="canonical BETDAQ account evidence authority was replaced",
     ):
         value.read_account_evidence(
             frozenset({BookmakerCapability.BALANCE_READ})

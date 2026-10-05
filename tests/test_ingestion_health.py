@@ -11,6 +11,7 @@ from autosport.ingestion import IngestionEngine, IngestionStats
 from autosport.ingestion_health import IngestionPolicy, SourceHealthStore
 from autosport.market_bus import MarketEventBus
 from autosport.providers import (
+    CanonicalNormalizer,
     InMemoryProvider,
     ProviderBatch,
     ProviderQuote,
@@ -47,6 +48,53 @@ class StaticProvider:
 
 
 class IngestionHealthTests(unittest.TestCase):
+    def test_ingestion_engine_rejects_substituted_authority_components(self):
+        class Bus(MarketEventBus):
+            pass
+
+        class Normalizer(CanonicalNormalizer):
+            pass
+
+        class Policy(IngestionPolicy):
+            pass
+
+        class HealthStore(SourceHealthStore):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            health = SourceHealthStore(root / "source-health.json")
+            bus = MarketEventBus(store)
+            try:
+                with self.assertRaisesRegex(TypeError, "exact MarketEventBus"):
+                    IngestionEngine(Bus(store))
+                with self.assertRaisesRegex(TypeError, "exact CanonicalNormalizer"):
+                    IngestionEngine(bus, Normalizer())
+                with self.assertRaisesRegex(TypeError, "exact IngestionPolicy"):
+                    IngestionEngine(bus, policy=Policy())
+                with self.assertRaisesRegex(TypeError, "exact SourceHealthStore"):
+                    IngestionEngine(
+                        bus,
+                        health_store=HealthStore(root / "other-health.json"),
+                    )
+                with self.assertRaisesRegex(TypeError, "clock must be callable"):
+                    IngestionEngine(bus, health_store=health, clock=object())
+            finally:
+                store.close()
+
+    def test_ingestion_poll_rejects_integer_subclass_batch_bound(self):
+        class BatchSize(int):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, _health = self._engine(tmp)
+            try:
+                with self.assertRaisesRegex(ValueError, "max_items"):
+                    engine.poll_once(StaticProvider("source", []), max_items=BatchSize(1))
+            finally:
+                store.close()
+
     def test_ingestion_policy_rejects_numeric_subclasses(self):
         class BatchSize(int):
             pass

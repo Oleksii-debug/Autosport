@@ -354,5 +354,65 @@ class ResearchPipelineInputIntegrityTests(unittest.TestCase):
             self.assertFalse(ledger.path.exists())
 
 
+    def test_pipeline_rejects_duplicate_evidence_ids_before_economic_work(self):
+        pipeline = ResearchDecisionPipeline()
+        book = PaperBook("100")
+        candidate, groups, forecasts, evidence = self._approved_inputs()
+        duplicate = replace(
+            evidence[0],
+            content_sha256="c" * 64,
+            available_at="2026-09-14T10:00:02+00:00",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = JsonlDecisionLedger(Path(tmp) / "decisions.jsonl")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "research evidence_id values must be unique",
+            ):
+                pipeline.decide_and_open(
+                    book=book,
+                    candidate=candidate,
+                    groups=groups,
+                    forecasts=forecasts,
+                    evidence=(evidence[0], duplicate),
+                    stake="10",
+                    decision_ts="2026-09-14T10:00:03+00:00",
+                    decision_ledger=ledger,
+                    replay_run_id="research-run",
+                )
+
+            self.assertEqual(book.balance, Decimal("100"))
+            self.assertEqual(book.tickets, {})
+            self.assertFalse(ledger.path.exists())
+
+    def test_pipeline_rejects_non_evidence_items_before_economic_work(self):
+        pipeline = ResearchDecisionPipeline()
+        book = PaperBook("100")
+        candidate, groups, forecasts, _evidence = self._approved_inputs()
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = JsonlDecisionLedger(Path(tmp) / "decisions.jsonl")
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "evidence must contain ResearchEvidence items",
+            ):
+                pipeline.decide_and_open(
+                    book=book,
+                    candidate=candidate,
+                    groups=groups,
+                    forecasts=forecasts,
+                    evidence=({"forged": True},),
+                    stake="10",
+                    decision_ts="2026-09-14T10:00:03+00:00",
+                    decision_ledger=ledger,
+                    replay_run_id="research-run",
+                )
+
+            self.assertEqual(book.balance, Decimal("100"))
+            self.assertEqual(book.tickets, {})
+            self.assertFalse(ledger.path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -95,6 +95,7 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
         self.product_worker = ProductGuiWorker()
         self._product_close_pending = False
         self._product_last_stop: ProductGuiMessage | None = None
+        self._product_expected_provider_source_id: str | None = None
         super().__init__()
 
     @property
@@ -426,11 +427,14 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             self.bell()
             return
 
+        self._product_expected_provider_source_id = (
+            configured.entry.expected_provider_source_id
+        )
         try:
             started = self.product_worker.start(
                 workspace=workspace,
                 source_factory=configured.entry.factory_spec,
-                expected_source_id=configured.entry.expected_provider_source_id,
+                expected_source_id=self._product_expected_provider_source_id,
                 initial_bankroll="10000",
                 poll_seconds=_PRODUCT_POLL_SECONDS,
             )
@@ -438,6 +442,7 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             started = False
 
         if not started:
+            self._product_expected_provider_source_id = None
             self._restore_base_session_after_product()
             message = product_text("ui.product_runtime.status.start_failed")
             self.product_status.set(message)
@@ -501,10 +506,17 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
 
     def _apply_product_message(self, message: ProductGuiMessage) -> None:
         if message.kind == "STARTED" and message.status is not None:
+            expected_source_id = self.__dict__.get(
+                "_product_expected_provider_source_id"
+            )
             source_label = self._product_provider_id_to_display.get(
                 message.status.source_id
             )
-            if source_label is None:
+            if (
+                type(expected_source_id) is not str
+                or message.status.source_id != expected_source_id
+                or source_label is None
+            ):
                 self.product_worker.request_stop("source_identity_mismatch")
                 self._block_workspace_for_recovery(Path(self.workspace))
                 status_text = product_text(
@@ -543,6 +555,7 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             return
 
         if message.kind == "STOPPED" and message.status is not None:
+            self._product_expected_provider_source_id = None
             self._product_last_stop = message
             status_text = product_text(
                 "ui.product_runtime.status.stopped",
@@ -555,6 +568,7 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             return
 
         if message.kind == "ERROR" and message.error_type is not None:
+            self._product_expected_provider_source_id = None
             self._product_last_stop = None
             self._block_workspace_for_recovery(Path(self.workspace))
             status_text = product_text(
@@ -589,6 +603,7 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
         if self._product_last_stop is not None:
             self._restore_base_session_after_product()
         else:
+            self._product_expected_provider_source_id = None
             self._block_workspace_for_recovery(Path(self.workspace))
             self.bank.set(self._bank_text())
             self._refresh_tickets()

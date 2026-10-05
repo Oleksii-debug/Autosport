@@ -21,6 +21,8 @@ _ORIGINAL_DEBIT_BALANCE = _paper.PaperBook._debit_balance.__func__
 _ORIGINAL_VALIDATE_PLACED_AT = _paper.PaperBook._validate_placed_at.__func__
 _ORIGINAL_REQUIRE_UTF8_STRING = _paper.PaperBook._require_utf8_string
 _ORIGINAL_VALIDATE_TICKET_PROVENANCE = _paper.PaperBook._validate_ticket_provenance.__func__
+_ORIGINAL_VALIDATE_LIFECYCLE_ENTRY = _paper.PaperBook._validate_lifecycle_entry.__func__
+_ORIGINAL_VALIDATE_SETTLED_AT = _paper.PaperBook._validate_settled_at.__func__
 
 
 def _paperbook_operation_context(book: _paper.PaperBook):
@@ -251,9 +253,9 @@ def _settlement_result(
         )
 
     _require_supported_ticket_shape(ticket)
-    cls._require_finite(balance, "balance")
+    _ORIGINAL_REQUIRE_FINITE(balance, "balance")
     leg = ticket.legs[0]
-    cls._validate_ticket_leg(leg, ticket_id=ticket.ticket_id)
+    _validate_ticket_leg(_paper.PaperBook, leg, ticket_id=ticket.ticket_id)
     known = {leg.quote_key}
     if winning_quote_keys - known:
         raise ValueError("PaperBook settlement contains unknown winning quote_key")
@@ -281,7 +283,7 @@ def _settlement_result(
                 "PaperBook LAY settlement arithmetic is not representable"
             ) from exc
 
-    cls._require_finite(payout, f"settlement payout for ticket {ticket.ticket_id}")
+    _ORIGINAL_REQUIRE_FINITE(payout, f"settlement payout for ticket {ticket.ticket_id}")
     try:
         with localcontext(_paper._paper_decimal_context()) as context:
             new_balance = balance + payout
@@ -291,7 +293,7 @@ def _settlement_result(
         raise ValueError(
             "PaperBook LAY settlement arithmetic is not representable"
         ) from exc
-    cls._require_finite(
+    _ORIGINAL_REQUIRE_FINITE(
         new_balance,
         f"balance after settling ticket {ticket.ticket_id}",
     )
@@ -319,8 +321,9 @@ def _validate_lifecycle_reachability(cls, book: _paper.PaperBook) -> None:
     open_order: list[str] = []
 
     for raw_entry in book._lifecycle:
-        action, ticket_id, winners_raw, voids_raw = cls._validate_lifecycle_entry(
-            raw_entry
+        action, ticket_id, winners_raw, voids_raw = _ORIGINAL_VALIDATE_LIFECYCLE_ENTRY(
+            _paper.PaperBook,
+            raw_entry,
         )
         ticket = book.tickets.get(ticket_id)
         if ticket is None:
@@ -331,7 +334,8 @@ def _validate_lifecycle_reachability(cls, book: _paper.PaperBook) -> None:
             if ticket_id in opened:
                 raise ValueError("PaperBook lifecycle opens a ticket more than once")
             try:
-                replay_balance = cls._debit_balance(
+                replay_balance = _ORIGINAL_DEBIT_BALANCE(
+                    _paper.PaperBook,
                     replay_balance,
                     _locked_capital_for_ticket(ticket),
                 )
@@ -357,14 +361,16 @@ def _validate_lifecycle_reachability(cls, book: _paper.PaperBook) -> None:
                 f"PaperBook ticket {ticket_id} settled_at is inconsistent with lifecycle provenance"
             )
         if settlement_time is not None:
-            cls._validate_settled_at(
+            _ORIGINAL_VALIDATE_SETTLED_AT(
+                _paper.PaperBook,
                 settlement_time,
                 ticket.placed_at,
                 snapshot=True,
             )
         winners = set(winners_raw)
         voids = set(voids_raw)
-        status, payout, replay_balance = cls._settlement_result(
+        status, payout, replay_balance = _settlement_result(
+            _paper.PaperBook,
             ticket,
             replay_balance,
             winners,
@@ -453,7 +459,7 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
                 "PaperBook snapshot ticket requires a canonical non-empty leg tuple"
             )
         for leg in ticket.legs:
-            cls._validate_ticket_leg(leg, ticket_id=ticket.ticket_id)
+            _validate_ticket_leg(_paper.PaperBook, leg, ticket_id=ticket.ticket_id)
         _require_supported_ticket_shape(ticket)
         quote_keys = [leg.quote_key for leg in ticket.legs]
         if len(quote_keys) != len(set(quote_keys)):
@@ -501,7 +507,7 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
                 "PaperBook snapshot LAY payout is inconsistent with locked-capital economics"
             )
 
-    cls._validate_lifecycle_reachability(book)
+    _validate_lifecycle_reachability(_paper.PaperBook, book)
 
 
 def _committed_capital_unlocked(self: _paper.PaperBook) -> Decimal:

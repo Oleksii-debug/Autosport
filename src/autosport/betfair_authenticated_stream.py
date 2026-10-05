@@ -414,6 +414,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
         transport: BetfairStreamTlsTransport,
         subscription: BetfairAuthenticatedMarketSubscription,
     ) -> None:
+        _require_clock_dispatch()
         if type(transport) is not BetfairStreamTlsTransport:
             raise TypeError("transport must be canonical BetfairStreamTlsTransport")
         if type(subscription) is not BetfairAuthenticatedMarketSubscription:
@@ -721,11 +722,19 @@ def _transport_generation(transport: BetfairStreamTlsTransport) -> int:
     return value
 
 
-def _wall_time_ms() -> int:
+def _require_clock_dispatch() -> None:
     if time.time_ns is not _WALL_TIME_NS:
         raise BetfairAuthenticatedStreamError(
             "product wall-clock dispatch changed"
         )
+    if time.monotonic_ns is not _MONOTONIC_NS:
+        raise BetfairAuthenticatedStreamError(
+            "product monotonic-clock dispatch changed"
+        )
+
+
+def _wall_time_ms() -> int:
+    _require_clock_dispatch()
     value = _WALL_TIME_NS() // 1_000_000
     if type(value) is not int or value <= 0:
         raise BetfairAuthenticatedStreamError("product wall clock is unavailable")

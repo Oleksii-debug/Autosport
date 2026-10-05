@@ -6146,6 +6146,70 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             resumed.close()
 
+    def test_capture_retries_dependency_replacement_during_availability_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=2)
+            provider_a = self._event(sequence=1)
+            provider_b = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-b",
+                decimal_odds=Decimal("3.00"),
+                observed_ts=self.START.isoformat(),
+                source_id="provider-b",
+                sequence=1,
+                status="open",
+                source_ts=self.START.isoformat(),
+                ingest_ts=self.START.isoformat(),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(provider_a, provider_b)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input("input-a", source_ids="provider-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            original_causal = loop.dependencies.causal_view
+            calls = [0]
+
+            def replace_during_availability(input_id):
+                snapshot = original_causal(input_id)
+                calls[0] += 1
+                if calls[0] == 1:
+                    self.assertTrue(loop.dependencies.unregister("input-a"))
+                    loop.dependencies.register(
+                        "input-a",
+                        source_ids="provider-b",
+                    )
+                return snapshot
+
+            with patch.object(
+                loop.dependencies,
+                "causal_view",
+                side_effect=replace_during_availability,
+            ):
+                snapshots = loop._capture_input_views(
+                    ("input-a",),
+                    decision_time,
+                    incremental=False,
+                )
+
+            self.assertGreaterEqual(calls[0], 2)
+            self.assertEqual(
+                tuple(
+                    (event.source_id, event.selection_id, event.sequence)
+                    for event in snapshots["input-a"].events
+                ),
+                (("provider-b", "selection-b", 1),),
+            )
+            loop.close()
+
     def test_capture_retries_history_classification_after_dependency_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

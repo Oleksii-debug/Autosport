@@ -141,5 +141,36 @@ class ResearchStrategyPlanJsonIntegrityTests(unittest.TestCase):
             )
 
 
+    def test_plan_rejects_numeric_decision_identity_instead_of_string_coercion(self):
+        raw = json.loads(_PACKAGED_PLAN.read_text(encoding="utf-8"))
+        raw["decisions"][0]["decision_id"] = 123
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "research decision_id must be non-empty canonical text",
+        ):
+            ResearchStrategyPlan.from_dict(raw)
+
+    def test_plan_rejects_noncanonical_whitespace_decision_identity(self):
+        raw = json.loads(_PACKAGED_PLAN.read_text(encoding="utf-8"))
+        raw["decisions"][0]["decision_id"] = " research-demo-1 "
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "research decision_id must be non-empty canonical text",
+        ):
+            ResearchStrategyPlan.from_dict(raw)
+
+    def test_plan_rejects_numeric_trigger_identity_instead_of_string_coercion(self):
+        raw = json.loads(_PACKAGED_PLAN.read_text(encoding="utf-8"))
+        raw["decisions"][0]["trigger_quote_key"] = 123
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "research trigger_quote_key must be non-empty canonical text",
+        ):
+            ResearchStrategyPlan.from_dict(raw)
+
+
 if __name__ == "__main__":
     unittest.main()

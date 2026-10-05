@@ -788,3 +788,41 @@ def test_restart_missing_source_returns_configuration_required_state(
 
     assert surface.product_source.value == ""
     assert "Оберіть і збережіть джерело" in surface.product_status.value
+
+
+def test_async_runtime_error_quarantines_root_and_blocks_session_restore(
+    tmp_path: Path,
+) -> None:
+    surface = _start_surface(tmp_path)
+    root = Path(surface.workspace)
+    surface._product_restore_workspace = root
+    quarantined: set[Path] = set()
+    open_calls: list[str] = []
+    surface._block_workspace_for_recovery = lambda workspace: quarantined.add(
+        Path(workspace)
+    )
+    surface._workspace_requires_recovery = lambda workspace: (
+        Path(workspace) in quarantined
+    )
+    surface._open_session = lambda _strategy_id, _plan: (
+        open_calls.append("open") or SimpleNamespace(workspace=root)
+    )
+    surface._active_strategy_id = "baseline-v1"
+    surface._active_research_plan = None
+    surface.session = None
+    surface.bank = _Value()
+    surface._bank_text = lambda: "bank"
+    surface._refresh_tickets = lambda: None
+
+    ProductWindowsAutosportApp._apply_product_message(
+        surface,
+        ProductGuiMessage(kind="ERROR", error_type="RuntimeError"),
+    )
+
+    assert root in quarantined
+    assert surface._product_expected_provider_source_id is None
+    assert surface._product_last_stop is None
+    assert not ProductWindowsAutosportApp._restore_base_session_after_product(surface)
+    assert open_calls == []
+    assert surface.session is None
+    assert surface._active_workspace == root

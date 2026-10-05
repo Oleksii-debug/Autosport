@@ -1406,3 +1406,80 @@ def test_duplicate_runner_definition_poison_closes_generation(
 
     assert fake.closed
     assert not transport.is_authenticated
+
+
+def test_market_authority_state_bound_overflow_closes_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autosport import betfair_authenticated_stream as auth
+
+    monkeypatch.setattr(auth, "_MAX_TRACKED_MARKET_AUTHORITY", 1)
+    publish_time_ms = time.time_ns() // 1_000_000
+    payload = {
+        "op": "mcm",
+        "id": 7,
+        "ct": "SUB_IMAGE",
+        "initialClk": "i1",
+        "clk": "c1",
+        "pt": publish_time_ms,
+        "conflateMs": 0,
+        "heartbeatMs": 5000,
+        "mc": [
+            {
+                "id": market_id,
+                "img": True,
+                "con": False,
+                "marketDefinition": {
+                    "status": "OPEN",
+                    "runners": [{"id": 1, "hc": 0, "status": "ACTIVE"}],
+                },
+                "rc": [{"id": 1, "hc": 0, "ltp": 2.0}],
+            }
+            for market_id in ("1.A", "1.B")
+        ],
+    }
+    frame = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
+    transport, fake = _transport(
+        monkeypatch,
+        _subscription_status() + frame,
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+
+    with pytest.raises(
+        BetfairAuthenticatedStreamError,
+        match="market-status authority map exceeded",
+    ):
+        runtime.read_and_ingest()
+
+    assert fake.closed
+    assert not transport.is_authenticated
+
+
+def test_runner_authority_state_bound_overflow_closes_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autosport import betfair_authenticated_stream as auth
+
+    monkeypatch.setattr(auth, "_MAX_TRACKED_RUNNER_AUTHORITY", 1)
+    transport, fake = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(
+            runners=[
+                {"id": 1, "hc": 0, "ltp": 2.0},
+                {"id": 2, "hc": 0, "ltp": 2.1},
+            ]
+        ),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+
+    with pytest.raises(
+        BetfairAuthenticatedStreamError,
+        match="runner-status authority map exceeded",
+    ):
+        runtime.read_and_ingest()
+
+    assert fake.closed
+    assert not transport.is_authenticated

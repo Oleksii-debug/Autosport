@@ -5797,6 +5797,59 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertFalse(loop.progress_path.exists())
             loop.close()
 
+    def test_pending_process_state_is_published_before_mutation_guard_releases(self) -> None:
+        from contextlib import contextmanager
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            real_guard = loop.dependencies.registry_mutation_guard
+            observed_pending_guard_exit = [False]
+
+            @contextmanager
+            def observed_guard():
+                with real_guard():
+                    yield
+                    if not loop.progress_path.exists():
+                        return
+                    raw = json.loads(
+                        loop.progress_path.read_text(encoding="utf-8")
+                    )
+                    if raw["phase"] != "pending":
+                        return
+                    observed_pending_guard_exit[0] = True
+                    self.assertIsNotNone(loop._progress)
+                    self.assertEqual(loop._progress.phase, "pending")
+                    self.assertIsNotNone(loop._pending_dependency_revisions)
+                    self.assertEqual(
+                        loop._pending_dependency_revisions,
+                        tuple(
+                            (dependency.input_id, revision)
+                            for dependency, revision
+                            in loop.dependencies.registry_state_snapshot()
+                        ),
+                    )
+
+            with patch.object(
+                loop.dependencies,
+                "registry_mutation_guard",
+                side_effect=observed_guard,
+            ):
+                result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertTrue(observed_pending_guard_exit[0])
+            loop.close()
+
     def test_same_selector_reincarnation_during_pending_preaction_blocks_publication(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

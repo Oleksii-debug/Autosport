@@ -939,7 +939,11 @@ def test_aggregate_rereads_durable_router_request_after_child_method_substitutio
             required_capability=request.required_capability + "-forged",
         )
 
+        attacker_calls = 0
+
         def substituted_get_request(_store, request_id):
+            nonlocal attacker_calls
+            attacker_calls += 1
             assert request_id == request.request_id
             return forged
 
@@ -951,7 +955,7 @@ def test_aggregate_rereads_durable_router_request_after_child_method_substitutio
 
         with pytest.raises(
             subject.ProspectiveApplicableCostError,
-            match="request digest disagrees with durable router state",
+            match="router request reader authority changed",
         ):
             subject.resolve_prospective_applicable_costs(
                 intent=intent,
@@ -980,7 +984,11 @@ def test_aggregate_rereads_durable_router_decision_after_child_method_substituti
             decision_id=decision.decision_id + "-forged",
         )
 
+        attacker_calls = 0
+
         def substituted_get_decision(_store, request_id):
+            nonlocal attacker_calls
+            attacker_calls += 1
             assert request_id == request.request_id
             return forged
 
@@ -992,7 +1000,7 @@ def test_aggregate_rereads_durable_router_decision_after_child_method_substituti
 
         with pytest.raises(
             subject.ProspectiveApplicableCostError,
-            match="decision digest disagrees with durable router state",
+            match="router decision reader authority changed",
         ):
             subject.resolve_prospective_applicable_costs(
                 intent=intent,
@@ -1001,3 +1009,6 @@ def test_aggregate_rereads_durable_router_decision_after_child_method_substituti
                 model_request_id=request.request_id,
                 decision_at=decision_at,
             )
+
+
+        assert attacker_calls == 0

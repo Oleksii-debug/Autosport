@@ -3,6 +3,8 @@ from __future__ import annotations
 from decimal import Decimal
 from types import FunctionType
 
+from .real_execution_ledger import _validate_decimal_text_resource_bound
+
 
 _SUPPORTED_EXCHANGE_SIDES = frozenset({"BACK", "LAY", "back", "lay"})
 
@@ -68,6 +70,7 @@ _EXACT_HELPER_WITNESSES = tuple(
         _from_coefficient,
         _subtract_exact,
         _multiply_exact,
+        _validate_decimal_text_resource_bound,
     )
 )
 
@@ -80,6 +83,7 @@ def _build_locked_capital_calculator(
     multiply,
     helper_witnesses,
     function_type,
+    resource_validator,
 ):
     """Seal the money-moving arithmetic graph outside caller-controlled kwargs."""
 
@@ -109,6 +113,8 @@ def _build_locked_capital_calculator(
             raise ValueError("stake must be a finite Decimal > 0")
         if not odds.is_finite() or odds <= 1:
             raise ValueError("odds must be a finite Decimal > 1")
+        resource_validator(stake)
+        resource_validator(odds)
 
         if exchange_side not in supported_sides:
             raise ValueError(
@@ -116,7 +122,12 @@ def _build_locked_capital_calculator(
             )
         if exchange_side in {"BACK", "back"}:
             return stake
-        return multiply(stake, subtract(odds, decimal_type("1")))
+        locked_capital = multiply(
+            stake,
+            subtract(odds, decimal_type("1")),
+        )
+        resource_validator(locked_capital)
+        return locked_capital
 
     return calculate
 
@@ -128,6 +139,7 @@ locked_capital_for_exchange_side = _build_locked_capital_calculator(
     multiply=_multiply_exact,
     helper_witnesses=_EXACT_HELPER_WITNESSES,
     function_type=FunctionType,
+    resource_validator=_validate_decimal_text_resource_bound,
 )
 locked_capital_for_exchange_side.__name__ = "locked_capital_for_exchange_side"
 locked_capital_for_exchange_side.__qualname__ = "locked_capital_for_exchange_side"

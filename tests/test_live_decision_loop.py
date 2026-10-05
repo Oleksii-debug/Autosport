@@ -24,6 +24,7 @@ from autosport.event_lifecycle import (
     ContinuousEventLifecycle,
     EventPhase,
 )
+from autosport.ingestion_health import IngestionPolicy
 from autosport.live_decision_loop import (
     LiveCycleStatus,
     LiveDecisionMode,
@@ -339,6 +340,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
         catalog_required_history: timedelta = timedelta(0),
         paper_execution: PaperExecutionAdoptionRuntime | None = None,
         max_quote_age: timedelta | None = timedelta(seconds=5),
+        ingestion_policy: IngestionPolicy | None = None,
     ) -> PersistentLiveDecisionLoop:
         selected_strategy = strategy_version or self._strategy_version()
         registry = self._scientific_registry(workspace, selected_strategy)
@@ -360,6 +362,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             intent_factory=factory,
             scientific_registry=registry,
             observation_runner=observer,
+            ingestion_policy=ingestion_policy,
             bounds=bounds,
             max_quote_age=max_quote_age,
             clock=clock,
@@ -10172,6 +10175,103 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(observer.calls, 0)
             self.assertFalse(loop.progress_path.exists())
             loop.close()
+
+
+    def test_cycle_entry_rejects_in_place_live_intent_provenance_semantic_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),)],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            object.__setattr__(
+                loop.intent_provenance,
+                "source_sha256",
+                "0" * 64,
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "live intent provenance semantics changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(observer.calls, 0)
+            self.assertFalse(loop.progress_path.exists())
+            loop.close()
+
+    def test_cycle_entry_rejects_in_place_ingestion_policy_semantic_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),)],
+            )
+            policy = IngestionPolicy(
+                max_batch_size=250,
+                stale_after_seconds=30.0,
+                max_future_skew_seconds=2.0,
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                ingestion_policy=policy,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            object.__setattr__(policy, "max_batch_size", 1)
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "live ingestion policy semantics changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(observer.calls, 0)
+            self.assertFalse(loop.progress_path.exists())
+            loop.close()
+
+    def test_cycle_entry_rejects_in_place_loop_bounds_semantic_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),)],
+            )
+            bounds = LiveLoopBounds(
+                observation_max_items=250,
+                max_dirty_keys=4096,
+                max_dirty_per_cycle=250,
+                max_registered_inputs=4096,
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                bounds=bounds,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            object.__setattr__(bounds, "max_dirty_per_cycle", 1)
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "live loop bounds semantics changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(observer.calls, 0)
+            self.assertFalse(loop.progress_path.exists())
+            loop.close()
+
 
 if __name__ == "__main__":
     unittest.main()

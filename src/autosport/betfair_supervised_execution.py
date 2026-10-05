@@ -1162,6 +1162,7 @@ def execute_betfair_supervised_action(
         evidence_id=evidence_id,
         observed_at=report.observed_at,
         source=f"betfair:placeOrders:{report.response_sha256}",
+        request_sha256=report.request_sha256,
     )
     outcome = _report_outcome(report, action)
     receipt = report.instruction.bet_id

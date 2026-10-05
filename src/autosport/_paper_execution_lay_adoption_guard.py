@@ -38,6 +38,7 @@ _ORIGINAL_EXECUTE_UNLOCKED = PaperExecutionAdoptionRuntime._execute_unlocked
 _ORIGINAL_PAPERBOOK_SAVE = _adoption.PaperBook.save
 _ORIGINAL_PAPERBOOK_LOAD = _adoption.PaperBook.load
 _ORIGINAL_PAPERBOOK_OPEN_TICKET = _adoption.PaperBook.open_ticket
+_ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE = _adoption.PaperBook._validate_loaded_state
 _ORIGINAL_LEDGER_EVENTS = _reality.PaperExecutionLedger.events
 _ORIGINAL_LEDGER_LOAD_RUN = _reality.PaperExecutionLedger.load_run
 _ORIGINAL_LEDGER_APPEND_EVENT = _reality.PaperExecutionLedger._append_event
@@ -501,7 +502,7 @@ def _authorized_paperbook_copy(book: _adoption.PaperBook) -> _adoption.PaperBook
     if type(book) is not _adoption.PaperBook:
         raise TypeError("book must be exact PaperBook")
     try:
-        type(book)._validate_loaded_state(book)
+        _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(book)
     except (TypeError, ValueError) as exc:
         raise PaperExecutionAdoptionError(
             "PaperBook copy source is not canonical"
@@ -512,7 +513,7 @@ def _authorized_paperbook_copy(book: _adoption.PaperBook) -> _adoption.PaperBook
             "PaperBook copy must retain exact PaperBook authority"
         )
     try:
-        type(shadow)._validate_loaded_state(shadow)
+        _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(shadow)
         _paper._install_validated_ticket_opening_authority(shadow)
         _paper._install_validated_paperbook_causal_history_authority(shadow)
     except (TypeError, ValueError) as exc:
@@ -533,7 +534,7 @@ def _preflight_materialization_batch(
         return
     _require_runtime_authority(self)
     try:
-        type(self.book)._validate_loaded_state(self.book)
+        _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(self.book)
     except (TypeError, ValueError) as exc:
         raise PaperExecutionAdoptionError(
             "PaperBook state is invalid before batch materialization preflight"
@@ -573,7 +574,7 @@ def _preflight_materialization_batch(
             continue
 
         try:
-            type(shadow).open_ticket(shadow,
+            _ORIGINAL_PAPERBOOK_OPEN_TICKET(shadow,
                 [
                     TicketLeg(
                         event_id=attempt.event_id,
@@ -601,7 +602,7 @@ def _preflight_materialization_batch(
             ) from exc
 
     try:
-        type(shadow)._validate_loaded_state(shadow)
+        _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(shadow)
     except (TypeError, ValueError) as exc:
         raise PaperExecutionAdoptionError(
             "batch materialization preflight produced invalid PaperBook state"
@@ -619,7 +620,7 @@ def _restore_paperbook_from_snapshot(
             "PaperBook rollback requires exact PaperBook authority"
         )
     try:
-        type(snapshot)._validate_loaded_state(snapshot)
+        _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(snapshot)
     except (TypeError, ValueError) as exc:
         raise PaperExecutionAdoptionError(
             "PaperBook rollback snapshot is not canonical"
@@ -633,7 +634,7 @@ def _restore_paperbook_from_snapshot(
     try:
         _paper._install_validated_ticket_opening_authority(target)
         _paper._install_validated_paperbook_causal_history_authority(target)
-        type(target)._validate_loaded_state(target)
+        _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(target)
     except (TypeError, ValueError) as exc:
         raise PaperExecutionAdoptionError(
             "PaperBook rollback could not restore canonical authority"
@@ -829,7 +830,7 @@ def _execute_unlocked(
             for _attempt, action, binding in accepted_attempts:
                 _require_materialization_authority(action, binding)
             try:
-                type(self.book)._validate_loaded_state(self.book)
+                _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(self.book)
             except (TypeError, ValueError) as exc:
                 raise PaperExecutionAdoptionError(
                     "PaperBook state is invalid after batch materialization"
@@ -847,7 +848,7 @@ def _execute_unlocked(
         # complete economic snapshot and pin exact persistence authority before I/O.
         _require_minted(self, prepared)
         try:
-            type(self.book)._validate_loaded_state(self.book)
+            _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(self.book)
         except (TypeError, ValueError) as exc:
             raise PaperExecutionAdoptionError(
                 "PaperBook state is invalid before durable publication"
@@ -875,7 +876,7 @@ def _execute_unlocked(
                 "PAPER adoption persistence authority changed during save"
             )
         try:
-            type(book)._validate_loaded_state(book)
+            _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(book)
         except (TypeError, ValueError) as exc:
             raise PaperExecutionAdoptionError(
                 "PaperBook state changed or became invalid during durable publication"
@@ -895,8 +896,8 @@ def _execute_unlocked(
                 "durable PaperBook must retain exact PaperBook authority"
             )
         try:
-            type(durable_book)._validate_loaded_state(durable_book)
-            type(book)._validate_loaded_state(book)
+            _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(durable_book)
+            _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(book)
         except (TypeError, ValueError) as exc:
             raise PaperExecutionAdoptionError(
                 "PaperBook changed or became invalid across durable publication"
@@ -1139,7 +1140,7 @@ def _materialize_attempt(
     # ticket fields so a mutated/faulty in-memory ticket cannot execute custom
     # equality/hash hooks or participate in restart idempotence decisions.
     try:
-        type(self.book)._validate_loaded_state(self.book)
+        _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(self.book)
     except (TypeError, ValueError) as exc:
         raise PaperExecutionAdoptionError(
             "PaperBook state is invalid before execution materialization"
@@ -1277,8 +1278,8 @@ def _assert_recoverable_book_state(
     # field/container equality so corrupted frozen values cannot execute custom
     # comparison hooks or mint an idempotent recovery result.
     try:
-        type(self.book)._validate_loaded_state(self.book)
-        type(pre_action_book)._validate_loaded_state(pre_action_book)
+        _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(self.book)
+        _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(pre_action_book)
     except (TypeError, ValueError) as exc:
         raise PaperExecutionAdoptionError(
             "PAPER recovery requires canonical validated PaperBook state"
@@ -1345,7 +1346,7 @@ def _assert_recoverable_book_state(
             raise PaperExecutionAdoptionError(
                 "accepted-equivalent durable attempt lacks execution truth"
             )
-        type(expected).open_ticket(expected,
+        _ORIGINAL_PAPERBOOK_OPEN_TICKET(expected,
             [
                 TicketLeg(
                     event_id=attempt.event_id,
@@ -1376,8 +1377,8 @@ def _assert_recoverable_book_state(
     # into a successful restart reconciliation.
     _require_minted(self, prepared)
     try:
-        type(self.book)._validate_loaded_state(self.book)
-        type(expected)._validate_loaded_state(expected)
+        _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(self.book)
+        _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(expected)
     except (TypeError, ValueError) as exc:
         raise PaperExecutionAdoptionError(
             "PAPER recovery state changed or became invalid during reconstruction"

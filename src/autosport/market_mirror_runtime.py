@@ -698,7 +698,6 @@ class FocusedMirrorDependencyIndex:
                 ) from exc
             keys = tuple(sorted(self._matched_keys.get(normalized_id, set())))
             index_revision = self._matched_revisions.get(normalized_id)
-            registry_revision = self._registry_revision
 
         bounded = self._mirror.active_view_for_keys(
             keys,
@@ -708,10 +707,9 @@ class FocusedMirrorDependencyIndex:
 
         with self._lock:
             current_dependency = self._dependencies.get(normalized_id)
-            registry_stable = self._registry_revision == registry_revision
         if current_dependency is None:
             raise KeyError(f"unknown focused mirror input {normalized_id!r}")
-        if not registry_stable or current_dependency != dependency:
+        if current_dependency != dependency:
             # Never return a bounded snapshot captured against selectors that ceased
             # to be authoritative while the mirror read was in flight. The fallback
             # itself is revision-stamped because the registry can change again while

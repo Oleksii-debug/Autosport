@@ -392,6 +392,23 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 "PAPER execution ledger storage authority changed after construction"
             )
 
+    def _ensure_existing_path_durable(self) -> None:
+        self._require_storage_authority()
+        if not self.path.exists():
+            self._path_durable = False
+            return
+        try:
+            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.flush()
+                os.fsync(handle.fileno())
+            _CANONICAL_LEDGER_SYNC_PARENT_DIRECTORY(self)
+        except OSError as exc:
+            self._path_durable = False
+            raise PaperExecutionIntegrityError(
+                "PAPER execution ledger durability barrier failed"
+            ) from exc
+        self._path_durable = True
+
     def register_observation_evidence(
         self,
         record: PaperExecutionEvidenceRecord,
@@ -548,8 +565,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 handle.write(encoded)
                 handle.flush()
                 os.fsync(handle.fileno())
-            if not path_existed_before or not self._path_durable:
-                _CANONICAL_LEDGER_SYNC_PARENT_DIRECTORY(self)
+            _CANONICAL_LEDGER_SYNC_PARENT_DIRECTORY(self)
             _CANONICAL_LEDGER_WRITE_ANCHOR_UNLOCKED(self, events + [event])
         except OSError as exc:
             self._path_durable = False
@@ -699,8 +715,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 handle.write(encoded)
                 handle.flush()
                 os.fsync(handle.fileno())
-            if not path_existed_before or not self._path_durable:
-                _CANONICAL_LEDGER_SYNC_PARENT_DIRECTORY(self)
+            _CANONICAL_LEDGER_SYNC_PARENT_DIRECTORY(self)
             _CANONICAL_LEDGER_WRITE_ANCHOR_UNLOCKED(self, events + [event])
         except OSError as exc:
             self._path_durable = False

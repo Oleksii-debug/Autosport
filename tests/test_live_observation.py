@@ -1369,6 +1369,20 @@ class LiveObservationTests(unittest.TestCase):
         self.assertEqual(message.error, "RuntimeError: network-test")
         self.assertFalse(worker.busy)
 
+    def test_worker_revalidates_mutated_observation_health_before_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._observe(tmp)
+
+        result.health.status = "failed"
+
+        worker = OneShotObservationWorker()
+        self.assertTrue(worker.start(lambda: result))
+        message = self._wait_for_message(worker)
+        self.assertIsNone(message.result)
+        self.assertIsNotNone(message.error)
+        self.assertIn("ValueError", message.error)
+        self.assertFalse(worker.busy)
+
     def test_worker_unprintable_exception_still_publishes_terminal_error(self):
         class UnprintableError(RuntimeError):
             def __str__(self) -> str:

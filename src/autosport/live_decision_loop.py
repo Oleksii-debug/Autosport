@@ -2583,7 +2583,7 @@ class PersistentLiveDecisionLoop:
             )
         if self.paper_execution.config is not self._paper_execution_config_authority:
             raise LiveDecisionProgressError(
-                "PAPER execution model object authority changed after construction"
+                "PAPER execution model authority changed after construction"
             )
         if (
             self.paper_execution.config.fingerprint

@@ -158,6 +158,14 @@ def _capture_profiled_runtime_builder(
         try:
             runtime_workspace = canonical_workspace(runtime.workspace)
             runtime_source_id = runtime.manifest.source_id
+            if (
+                type(runtime_source_id) is not str
+                or not runtime_source_id
+                or runtime_source_id.strip() != runtime_source_id
+            ):
+                raise ProductEntrypointError(
+                    "profiled runtime manifest has invalid source identity"
+                )
             runtime_source = runtime.collector.source
         except (AttributeError, TypeError, ValueError) as exc:
             try:
@@ -484,12 +492,20 @@ class ProductGuiWorker:
         ):
             raise ValueError("expected_source_id must be a non-empty trimmed string")
         if (
-            isinstance(poll_seconds, bool)
-            or not isinstance(poll_seconds, (int, float))
+            type(initial_bankroll) is not str
+            or not initial_bankroll
+            or initial_bankroll.strip() != initial_bankroll
+            or len(initial_bankroll) > 128
+        ):
+            raise ValueError(
+                "initial_bankroll must be bounded non-empty exact text"
+            )
+        if (
+            type(poll_seconds) not in {int, float}
             or not math.isfinite(float(poll_seconds))
             or poll_seconds <= 0
         ):
-            raise ValueError("poll_seconds must be a finite positive number")
+            raise ValueError("poll_seconds must be an exact finite positive number")
 
         if type(workspace) not in {str, type(Path("."))}:
             raise ValueError("workspace must be exact str or exact Path")

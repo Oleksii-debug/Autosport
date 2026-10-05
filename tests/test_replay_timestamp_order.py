@@ -142,7 +142,7 @@ class ReplayTimestampOrderTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(
                     ValueError,
-                    "precision finer than microseconds is unsupported",
+                    "replay event must be canonical",
                 ):
                     ReplayEngine([event])
 

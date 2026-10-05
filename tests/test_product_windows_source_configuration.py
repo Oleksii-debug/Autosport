@@ -551,3 +551,30 @@ def test_source_mismatch_quarantine_prevents_baseline_reopen(
     assert open_calls == []
     assert surface.session is None
     assert surface._active_workspace == root
+
+
+def test_active_strategy_quarantine_blocks_product_runtime_before_teardown(
+    tmp_path: Path,
+) -> None:
+    surface = _start_surface(tmp_path)
+    active_workspace = tmp_path / "strategy-workspace"
+    surface._active_workspace = active_workspace
+    teardown_calls: list[str] = []
+    surface._workspace_requires_recovery = lambda workspace: (
+        Path(workspace) == active_workspace
+    )
+    surface._hide_uncertain_economic_state = lambda _message: (
+        teardown_calls.append("teardown") or True
+    )
+
+    with patch(
+        "autosport.product_windows_gui.load_operator_source_configuration",
+        return_value=_configured(),
+    ) as load_config:
+        ProductWindowsAutosportApp.start_product_runtime(surface)
+
+    load_config.assert_not_called()
+    assert teardown_calls == []
+    assert surface.product_worker.started == []
+    assert surface._active_workspace == active_workspace
+    assert "відновіть карантинований workspace" in surface.product_status.value

@@ -28,7 +28,11 @@ from .betfair_standard_limit_price_bound_product_verifier import (
     verify_product_betfair_standard_limit_price_bound,
 )
 from .campaign_cost_evidence import CostClass, REQUIRED_COST_CLASSES
-from .model_compute_router import ModelComputeRouterStore
+from .model_compute_router import (
+    ComputeRouteDecision,
+    ComputeRouteRequest,
+    ModelComputeRouterStore,
+)
 from .opportunity import Opportunity
 from .real_execution_ledger import RealExecutionLedger
 from .risk import ProposedTicketRiskContext
@@ -418,6 +422,16 @@ def _build_canonical_authority():
     opportunity_cls = Opportunity
     risk_context_cls = ProposedTicketRiskContext
     router_store_cls = ModelComputeRouterStore
+    router_request_cls = ComputeRouteRequest
+    router_decision_cls = ComputeRouteDecision
+    router_get_request = router_store_cls.get_request
+    router_get_request_code = router_get_request.__code__
+    router_get_decision = router_store_cls.get_decision
+    router_get_decision_code = router_get_decision.__code__
+    router_request_payload = router_request_cls.payload
+    router_request_payload_code = router_request_payload.__code__
+    router_decision_payload = router_decision_cls.payload
+    router_decision_payload_code = router_decision_payload.__code__
     model_evidence_cls = ProspectiveModelComputeMoneyEvidence
     model_status_cls = ProspectiveModelComputeMoneyStatus
     model_reason_cls = ProspectiveModelComputeMoneyReason
@@ -996,6 +1010,46 @@ def _build_canonical_authority():
             model_evidence,
             expected_request_id=canonical_request_id,
         )
+
+        # The child resolver is not authority by return value. Re-read the exact
+        # durable router state through closure-captured class methods and compare
+        # canonical payload digests against the child evidence.
+        if router_get_request.__code__ is not router_get_request_code:
+            raise error_cls("canonical router request reader authority changed")
+        durable_request = router_get_request(router_store, canonical_request_id)
+        if router_get_request.__code__ is not router_get_request_code:
+            raise error_cls("canonical router request reader authority changed")
+        if type(durable_request) is not router_request_cls:
+            raise error_cls("canonical router request read returned non-canonical type")
+        if router_request_payload.__code__ is not router_request_payload_code:
+            raise error_cls("canonical router request payload authority changed")
+        durable_request_payload = router_request_payload(durable_request)
+        if router_request_payload.__code__ is not router_request_payload_code:
+            raise error_cls("canonical router request payload authority changed")
+        if digest(durable_request_payload) != sha256(
+            object.__getattribute__(model_evidence, "router_request_sha256"),
+            "model router_request_sha256",
+        ):
+            raise error_cls("model-compute evidence request digest disagrees with durable router state")
+
+        if router_get_decision.__code__ is not router_get_decision_code:
+            raise error_cls("canonical router decision reader authority changed")
+        durable_decision = router_get_decision(router_store, canonical_request_id)
+        if router_get_decision.__code__ is not router_get_decision_code:
+            raise error_cls("canonical router decision reader authority changed")
+        if type(durable_decision) is not router_decision_cls:
+            raise error_cls("canonical router decision read returned non-canonical type")
+        if router_decision_payload.__code__ is not router_decision_payload_code:
+            raise error_cls("canonical router decision payload authority changed")
+        durable_decision_payload = router_decision_payload(durable_decision)
+        if router_decision_payload.__code__ is not router_decision_payload_code:
+            raise error_cls("canonical router decision payload authority changed")
+        if digest(durable_decision_payload) != sha256(
+            object.__getattribute__(model_evidence, "router_decision_sha256"),
+            "model router_decision_sha256",
+        ):
+            raise error_cls("model-compute evidence decision digest disagrees with durable router state")
+
         if sha256(
             object.__getattribute__(model_evidence, "intent_sha256"),
             "model intent_sha256",

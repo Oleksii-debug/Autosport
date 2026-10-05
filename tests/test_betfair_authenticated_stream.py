@@ -100,6 +100,7 @@ def _mcm(
     request_id: int = 7,
     pt: int | None = None,
     runners: list[dict[str, object]] | None = None,
+    conflate_ms: int = 0,
 ) -> bytes:
     if pt is None:
         pt = time.time_ns() // 1_000_000
@@ -119,7 +120,7 @@ def _mcm(
         "initialClk": "i1",
         "clk": "c1",
         "pt": pt,
-        "conflateMs": 0,
+        "conflateMs": conflate_ms,
         "heartbeatMs": 5000,
         "mc": [
             {
@@ -1483,3 +1484,88 @@ def test_runner_authority_state_bound_overflow_closes_generation(
 
     assert fake.closed
     assert not transport.is_authenticated
+
+
+def test_live_key_with_provider_forced_delay_never_becomes_live_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(
+            pt=publish_time_ms,
+            conflate_ms=180_000,
+        ),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=200_000),
+    )
+
+    assert decision.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    assert "conflation does not match" in decision.reason
+    assert decision.evidence_id is not None
+    assert not decision.decision_eligible
+    assert transport.is_authenticated
+
+
+def test_provider_conflation_change_revokes_existing_live_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    delayed_delta = {
+        "op": "mcm",
+        "id": 7,
+        "clk": "c2",
+        "pt": publish_time_ms + 1,
+        "conflateMs": 180_000,
+        "heartbeatMs": 5000,
+        "mc": [
+            {
+                "id": "1.A",
+                "img": False,
+                "con": False,
+                "marketDefinition": {
+                    "status": "OPEN",
+                    "runners": [
+                        {"id": 1, "hc": 0, "status": "ACTIVE"},
+                    ],
+                },
+                "rc": [{"id": 1, "hc": 0, "ltp": 2.2}],
+            }
+        ],
+    }
+    delayed_frame = (
+        json.dumps(delayed_delta, separators=(",", ":")).encode("utf-8")
+        + b"\r\n"
+    )
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(pt=publish_time_ms)
+        + delayed_frame,
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=200_000),
+    )
+    assert decision.decision_eligible
+
+    runtime.read_and_ingest()
+
+    assert not decision.decision_eligible
+    delayed = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=200_000),
+    )
+    assert delayed.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    assert "conflation does not match" in delayed.reason
+    assert not delayed.decision_eligible

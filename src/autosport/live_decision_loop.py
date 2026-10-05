@@ -2756,6 +2756,12 @@ class PersistentLiveDecisionLoop:
             )
         if self.paper_execution is None:
             return
+        try:
+            self.paper_execution._assert_runtime_authority()
+        except PaperExecutionAdoptionError as exc:
+            raise LiveDecisionProgressError(
+                "PAPER execution runtime authority changed after construction"
+            ) from exc
         if self.paper_execution.book is not self._book_authority:
             raise LiveDecisionProgressError(
                 "PAPER execution PaperBook authority changed after construction"

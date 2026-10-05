@@ -581,8 +581,11 @@ def poll_open_market_store_once(
 
         if type(provider) is not BetfairAuthenticatedMarketProvider:
             raise TypeError("noncanonical Betfair stream provider reached durable ingress")
+        durable_current = store.current_by_source()
         if not provider.durable_bound:
-            provider.bind_durable_current(store.current_by_source())
+            provider.bind_durable_current(durable_current)
+        else:
+            provider.assert_durable_current(durable_current)
 
     bus = MarketEventBus(store)
     bus.subscribe(mirror_updates.accept_persisted)
@@ -665,8 +668,11 @@ def observe_workspace_once(
 
             if type(provider) is not BetfairAuthenticatedMarketProvider:
                 raise TypeError("noncanonical Betfair stream provider reached durable ingress")
+            durable_current = store.current_by_source()
             if not provider.durable_bound:
-                provider.bind_durable_current(store.current_by_source())
+                provider.bind_durable_current(durable_current)
+            else:
+                provider.assert_durable_current(durable_current)
 
         bus = MarketEventBus(store)
         bus.subscribe(mirror_updates.accept_persisted)

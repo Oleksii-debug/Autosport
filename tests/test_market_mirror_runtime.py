@@ -987,6 +987,18 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertEqual(mirror.snapshot(), ())
         self.assertEqual(runtime.pending_count, 0)
 
+    def test_dependency_revision_changes_across_same_selector_reregistration(self) -> None:
+        mirror = MarketMirror()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        first_revision = dependencies.dependency_revision("decision")
+
+        self.assertTrue(dependencies.unregister("decision"))
+        dependencies.register("decision", source_ids="provider-a")
+        second_revision = dependencies.dependency_revision("decision")
+
+        self.assertGreater(second_revision, first_revision)
+
     def test_focused_causal_view_excludes_generation_zero_audit_state(self) -> None:
         mirror = MarketMirror()
         legacy = self.event(sequence=1, odds="2.00")

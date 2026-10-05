@@ -624,12 +624,27 @@ class FocusedMirrorDependencyIndex:
                 ) from exc
             keys = tuple(sorted(self._matched_keys.get(normalized_id, set())))
             index_revision = self._matched_revisions.get(normalized_id)
+            registry_revision = self._registry_revision
 
         bounded = self._mirror.active_view_for_keys(
             keys,
             as_of=as_of,
             max_age=max_age,
         )
+
+        with self._lock:
+            current_dependency = self._dependencies.get(normalized_id)
+            registry_stable = self._registry_revision == registry_revision
+        if current_dependency is None:
+            raise KeyError(f"unknown focused mirror input {normalized_id!r}")
+        if not registry_stable or current_dependency != dependency:
+            # Never return a bounded snapshot captured against selectors that ceased
+            # to be authoritative while the mirror read was in flight.
+            return self._mirror.active_view(
+                as_of=as_of,
+                max_age=max_age,
+                **self._selectors(current_dependency),
+            )
         if index_revision is not None and bounded.revision == index_revision:
             return bounded
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -1170,6 +1171,38 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             ):
                 with runtime.execution_guard():
                     self.fail("rebound ledger process lock must not be entered")
+
+
+
+    def test_execution_guard_rejects_relative_persistence_path_cwd_drift(self):
+        original_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            try:
+                os.chdir(first)
+                book = PaperBook("1000")
+                ledger = PaperExecutionLedger("paper-execution.jsonl")
+                runtime = PaperExecutionAdoptionRuntime(
+                    book=book,
+                    ledger=ledger,
+                    config=config(),
+                    max_quote_age=__import__("datetime").timedelta(seconds=5),
+                    paper_book_path="paper_book.json",
+                )
+                os.chdir(second)
+
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "persistence authority changed|path resolution changed",
+                ):
+                    with runtime.execution_guard():
+                        self.fail("CWD drift must not retarget durable execution authority")
+            finally:
+                os.chdir(original_cwd)
 
 
 if __name__ == "__main__":

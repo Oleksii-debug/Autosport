@@ -141,6 +141,35 @@ class IngestionHealthTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_ingestion_stats_rejects_noncanonical_payloads(self):
+        class Text(str):
+            pass
+
+        with self.assertRaisesRegex(ValueError, "source_id"):
+            IngestionStats(Text("source-a"), 1, 1, 0, 0.1, None)
+        with self.assertRaisesRegex(ValueError, "received"):
+            IngestionStats("source-a", True, 0, 0, 0.1, None)
+        with self.assertRaisesRegex(ValueError, "cannot exceed received"):
+            IngestionStats("source-a", 1, 1, 1, 0.1, None)
+        with self.assertRaisesRegex(ValueError, "elapsed_seconds"):
+            IngestionStats("source-a", 1, 1, 0, float("nan"), None)
+        with self.assertRaisesRegex(TypeError, "cursor"):
+            IngestionStats("source-a", 1, 1, 0, 0.1, Text("cursor"))
+        with self.assertRaisesRegex(TypeError, "quality_flags"):
+            IngestionStats("source-a", 1, 1, 0, 0.1, None, ["STALE_SOURCE"])
+        with self.assertRaisesRegex(ValueError, "duplicates"):
+            IngestionStats(
+                "source-a",
+                1,
+                1,
+                0,
+                0.1,
+                None,
+                ("STALE_SOURCE", "STALE_SOURCE"),
+            )
+        with self.assertRaisesRegex(ValueError, "health_status"):
+            IngestionStats("source-a", 1, 1, 0, 0.1, None, (), Text("healthy"))
+
     def test_ingestion_poll_rejects_integer_subclass_batch_bound(self):
         class BatchSize(int):
             pass

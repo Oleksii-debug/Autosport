@@ -824,6 +824,101 @@ class LayExecutionLiabilityTests(unittest.TestCase):
             self.assertEqual(result.worst_case_exposure, Decimal("10.00"))
 
 
+class ReservationIdentitySnapshotTests(unittest.TestCase):
+    def test_reserve_run_does_not_reread_plan_or_config_after_identity_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            plan = _plan(_action("snapshot-reserve"))
+            config = _config()
+            trigger_id = "snapshot-reserve-trigger"
+            run_id = paper_reality._impl._run_id(plan, trigger_id, config)
+            expected_plan_id = plan.plan_id
+            expected_plan_fingerprint = plan.fingerprint
+            expected_model_fingerprint = config.fingerprint
+            original = paper_reality._canonical_observation_evidence_ids
+
+            def interleaving(mapping, *, action_ids):
+                result = original(mapping, action_ids=action_ids)
+                object.__setattr__(plan, "plan_id", "mutated-after-snapshot")
+                object.__setattr__(config, "model_id", "mutated-after-snapshot")
+                return result
+
+            with patch.object(
+                paper_reality,
+                "_canonical_observation_evidence_ids",
+                interleaving,
+            ):
+                ledger.reserve_run(
+                    run_id=run_id,
+                    trigger_id=trigger_id,
+                    plan=plan,
+                    config=config,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={},
+                )
+
+            reservations = [
+                event
+                for event in ledger.events(run_id)
+                if event["event_type"] == "RUN_RESERVED"
+            ]
+            self.assertEqual(len(reservations), 1)
+            payload = reservations[0]["payload"]
+            self.assertEqual(payload["plan_id"], expected_plan_id)
+            self.assertEqual(payload["plan_fingerprint"], expected_plan_fingerprint)
+            self.assertEqual(payload["model_fingerprint"], expected_model_fingerprint)
+
+    def test_load_run_does_not_reread_plan_or_config_after_identity_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            action = _action("snapshot-load")
+            plan = _plan(action)
+            config = _config()
+            trigger_id = "snapshot-load-trigger"
+            run_id = paper_reality._impl._run_id(plan, trigger_id, config)
+            expected_plan_id = plan.plan_id
+            expected_plan_fingerprint = plan.fingerprint
+            expected_model_fingerprint = config.fingerprint
+            ledger.reserve_run(
+                run_id=run_id,
+                trigger_id=trigger_id,
+                plan=plan,
+                config=config,
+                started_at=STARTED_AT,
+                observation_evidence_ids={},
+            )
+
+            load_plan = _plan(_action("snapshot-load"))
+            load_config = _config()
+            original = paper_reality._canonical_observation_evidence_ids
+
+            def interleaving(mapping, *, action_ids):
+                result = original(mapping, action_ids=action_ids)
+                object.__setattr__(load_plan, "plan_id", "mutated-after-snapshot")
+                object.__setattr__(load_config, "model_id", "mutated-after-snapshot")
+                return result
+
+            with patch.object(
+                paper_reality,
+                "_canonical_observation_evidence_ids",
+                interleaving,
+            ):
+                loaded = ledger.load_run(
+                    run_id=run_id,
+                    trigger_id=trigger_id,
+                    plan=load_plan,
+                    config=load_config,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={},
+                )
+
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.plan_id, expected_plan_id)
+            self.assertEqual(loaded.plan_fingerprint, expected_plan_fingerprint)
+            self.assertEqual(loaded.model_fingerprint, expected_model_fingerprint)
+
+
 class _HostileStake:
     calls = 0
 

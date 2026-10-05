@@ -1885,5 +1885,112 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(path.bankroll_id, "paper-bankroll")
 
 
+    def test_product_issued_equity_path_bypasses_rebound_paperbook_replay_methods(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(93),),
+            Decimal("10"),
+            placed_at="2026-09-21T18:10:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T18:15:00+00:00",
+        )
+        goal = self._goal()
+        expected = build_product_issued_paper_equity_path(book, goal)
+
+        with (
+            patch.object(
+                PaperBook,
+                "_validate_loaded_state",
+                side_effect=AssertionError("rebound validator executed"),
+            ),
+            patch.object(
+                PaperBook,
+                "_validate_lifecycle_entry",
+                side_effect=AssertionError("rebound lifecycle validator executed"),
+            ),
+            patch.object(
+                PaperBook,
+                "_debit_balance",
+                side_effect=AssertionError("rebound debit executed"),
+            ),
+            patch.object(
+                PaperBook,
+                "_settlement_result",
+                side_effect=AssertionError("rebound settlement executed"),
+            ),
+        ):
+            actual = build_product_issued_paper_equity_path(book, goal)
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual.current_equity, Decimal("90"))
+        self.assertEqual(actual.minimum_equity, Decimal("90"))
+
+    def test_product_issued_equity_path_bypasses_rebound_risk_arithmetic_methods(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(94),),
+            Decimal("25"),
+            placed_at="2026-09-21T18:20:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T18:25:00+00:00",
+        )
+        goal = self._goal()
+        expected = build_product_issued_paper_equity_path(book, goal)
+
+        with (
+            patch.object(
+                PaperRiskPolicy,
+                "risk_of_ruin_portfolio_sha256",
+                side_effect=AssertionError("rebound risk digest executed"),
+            ),
+            patch.object(
+                PaperRiskPolicy,
+                "_exact_positive_sum",
+                side_effect=AssertionError("rebound exact sum executed"),
+            ),
+            patch.object(
+                PaperRiskPolicy,
+                "_decimal_context",
+                side_effect=AssertionError("rebound decimal context executed"),
+            ),
+        ):
+            actual = build_product_issued_paper_equity_path(book, goal)
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual.current_equity, Decimal("75"))
+        self.assertEqual(actual.minimum_equity, Decimal("75"))
+
+    def test_product_issued_equity_path_bypasses_rebound_detached_authority_checks(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+        expected = build_product_issued_paper_equity_path(book, goal)
+
+        with (
+            patch.object(
+                risk_reporting,
+                "_require_ticket_opening_authority",
+                side_effect=AssertionError("rebound opening authority executed"),
+            ),
+            patch.object(
+                risk_reporting,
+                "_require_paperbook_causal_history_authority",
+                side_effect=AssertionError("rebound causal authority executed"),
+            ),
+        ):
+            actual = build_product_issued_paper_equity_path(book, goal)
+
+        self.assertEqual(actual, expected)
+
+
 if __name__ == "__main__":
     unittest.main()

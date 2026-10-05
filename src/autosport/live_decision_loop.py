@@ -2862,6 +2862,7 @@ class PersistentLiveDecisionLoop:
                 if self.post_append_hook is not None:
                     self.post_append_hook()
                 self._assert_canonical_persistence_authority(
+                    expected_live_mode=expected_live_mode,
                     expected_execution_model_fingerprint=(
                         None
                         if expected_execution_payload is None

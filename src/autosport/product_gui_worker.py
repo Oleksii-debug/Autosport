@@ -284,6 +284,21 @@ def _require_runtime_status_identity(
         raise ProductEntrypointError(
             "product runtime session status has unexpected lifecycle state"
         )
+    if (
+        type(status.cycles_completed) is not int
+        or status.cycles_completed < 0
+    ):
+        raise ProductEntrypointError(
+            "product runtime session status has invalid cycle count"
+        )
+    if status.last_success_at is not None and (
+        type(status.last_success_at) is not str
+        or not status.last_success_at
+        or len(status.last_success_at) > 128
+    ):
+        raise ProductEntrypointError(
+            "product runtime session status has invalid last-success instant"
+        )
     return status
 
 
@@ -319,6 +334,27 @@ def _require_runtime_tick_identity(
     ):
         raise ProductEntrypointError(
             "product runtime tick changed lifecycle session identity"
+        )
+    if type(tick.cycle_index) is not int or tick.cycle_index < 1:
+        raise ProductEntrypointError(
+            "product runtime tick has invalid cycle index"
+        )
+    for field_name in (
+        "committed_delta_ids",
+        "delivered_delta_ids",
+        "settled_ticket_ids",
+    ):
+        if type(getattr(tick, field_name)) is not tuple:
+            raise ProductEntrypointError(
+                f"product runtime tick has invalid {field_name}"
+            )
+    if tick.last_success_at is not None and (
+        type(tick.last_success_at) is not str
+        or not tick.last_success_at
+        or len(tick.last_success_at) > 128
+    ):
+        raise ProductEntrypointError(
+            "product runtime tick has invalid last-success instant"
         )
     return tick
 

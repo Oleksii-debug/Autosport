@@ -2929,5 +2929,55 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertEqual(book._lifecycle, [])
 
 
+    def test_lay_settlement_rejects_in_place_decimal_context_code_mutation_before_execution(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        context_factory = lay_guard._ORIGINAL_PAPER_DECIMAL_CONTEXT
+        original_code = context_factory.__code__
+        attacker_calls = 0
+
+        def hostile_context():
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("mutated Decimal context factory executed")
+
+        try:
+            context_factory.__code__ = hostile_context.__code__
+            with self.assertRaisesRegex(
+                ValueError,
+                "Decimal arithmetic authority changed",
+            ):
+                book.settle(ticket.ticket_id, set())
+        finally:
+            context_factory.__code__ = original_code
+
+        self.assertEqual(attacker_calls, 0)
+        self.assertEqual(book.balance, Decimal("60.00"))
+        self.assertEqual(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+
+    def test_lay_settlement_rejects_rebound_localcontext_before_execution(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        attacker_calls = 0
+
+        def hostile_localcontext(*_args, **_kwargs):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("rebound localcontext executed")
+
+        with patch.object(lay_guard, "_LOCALCONTEXT", hostile_localcontext):
+            with self.assertRaisesRegex(
+                ValueError,
+                "Decimal arithmetic authority changed",
+            ):
+                book.settle(ticket.ticket_id, set())
+
+        self.assertEqual(attacker_calls, 0)
+        self.assertEqual(book.balance, Decimal("60.00"))
+        self.assertEqual(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+
+
 if __name__ == "__main__":
     unittest.main()

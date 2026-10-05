@@ -36,6 +36,19 @@ def _build_product_entrypoint():
     canonical_require_runtime_code = canonical_require_runtime.__code__
     canonical_profile_type = _runtime_profile.TrustedRuntimeCodeProfile
     canonical_profile_error = _runtime_profile.TrustedRuntimeCodeProfileError
+    profile_field_descriptors = tuple(
+        (name, getattr(canonical_profile_type, name))
+        for name in (
+            "profile_id",
+            "operator_source_id",
+            "factory_spec",
+            "provider_source_id",
+            "workspace",
+            "trust_boundary",
+        )
+    )
+    profile_evidence_getter = canonical_profile_type.evidence_sha256.fget
+    profile_evidence_getter_code = profile_evidence_getter.__code__
     canonical_store_type = SupervisedPlanIssuanceStore
     canonical_store_init = canonical_store_type.__init__
     canonical_store_init_code = canonical_store_init.__code__
@@ -56,6 +69,12 @@ def _build_product_entrypoint():
             and canonical_require_runtime.__code__ is canonical_require_runtime_code
             and _runtime_profile.TrustedRuntimeCodeProfile is canonical_profile_type
             and _runtime_profile.TrustedRuntimeCodeProfileError is canonical_profile_error
+            and all(
+                getattr(canonical_profile_type, name, None) is descriptor
+                for name, descriptor in profile_field_descriptors
+            )
+            and canonical_profile_type.evidence_sha256.fget is profile_evidence_getter
+            and profile_evidence_getter.__code__ is profile_evidence_getter_code
         )
 
     def reopen_graph_unchanged() -> bool:

@@ -735,6 +735,48 @@ def _materialize_attempt(
     )
 
 
+def _durable_observation_evidence_ids(
+    ledger: _reality.PaperExecutionLedger,
+    *,
+    run_id: str,
+    action_ids: tuple[str, ...],
+) -> dict[str, str]:
+    reservations = [
+        event
+        for event in ledger.events(run_id)
+        if event["event_type"] == "RUN_RESERVED"
+    ]
+    if len(reservations) != 1:
+        raise PaperExecutionAdoptionError(
+            "recovery requires exactly one durable run reservation"
+        )
+    raw = reservations[0]["payload"].get("observation_evidence_ids")
+    if type(raw) is not dict:
+        raise PaperExecutionAdoptionError(
+            "durable reservation observation evidence map is invalid"
+        )
+    canonical: dict[str, str] = {}
+    permitted = set(action_ids)
+    for action_id, evidence_id in raw.items():
+        if (
+            type(action_id) is not str
+            or not action_id
+            or action_id.strip() != action_id
+            or type(evidence_id) is not str
+            or not evidence_id
+            or evidence_id.strip() != evidence_id
+        ):
+            raise PaperExecutionAdoptionError(
+                "durable reservation observation evidence identity is invalid"
+            )
+        if action_id not in permitted:
+            raise PaperExecutionAdoptionError(
+                "durable reservation observation evidence is outside prepared plan"
+            )
+        canonical[action_id] = evidence_id
+    return dict(sorted(canonical.items()))
+
+
 def _assert_recoverable_book_state(
     self: PaperExecutionAdoptionRuntime,
     *,
@@ -774,13 +816,21 @@ def _assert_recoverable_book_state(
         )
 
     run_id = self.expected_run_id(prepared, trigger_id)
+    action_ids = tuple(
+        action.action_id for action in prepared.execution_plan.actions
+    )
+    observation_evidence_ids = _durable_observation_evidence_ids(
+        self.ledger,
+        run_id=run_id,
+        action_ids=action_ids,
+    )
     run = self.ledger.load_run(
         run_id=run_id,
         trigger_id=trigger_id,
         plan=prepared.execution_plan,
         config=self.config,
         started_at=started_at,
-        observation_evidence_ids={},
+        observation_evidence_ids=observation_evidence_ids,
     )
     if run is None:
         raise PaperExecutionAdoptionError(

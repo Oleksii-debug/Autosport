@@ -174,6 +174,8 @@ def _build_product_verifier():
     evidence_cls = BetfairStandardLimitPriceBoundEvidence
     issuance_store_cls = SupervisedPlanIssuanceStore
     issued_plan_cls = IssuedSupervisedPlan
+    issued_plan_init = issued_plan_cls.__init__
+    issued_plan_init_code = issued_plan_init.__code__
     issuance_error_cls = SupervisedPlanIssuanceError
     ledger_cls = RealExecutionLedger
     bound_cls = BoundSupervisedExecutionPlan
@@ -426,6 +428,9 @@ def _build_product_verifier():
             or issuance_provider_resolver.__code__ is not issuance_provider_resolver_code
             or _issuance_module._decode_execution_plan is not issuance_decode_execution_plan
             or issuance_decode_execution_plan.__code__ is not issuance_decode_execution_plan_code
+            or _issuance_module.IssuedSupervisedPlan is not issued_plan_cls
+            or issued_plan_cls.__init__ is not issued_plan_init
+            or issued_plan_init.__code__ is not issued_plan_init_code
             or _issuance_module.ExecutionAction is not issuance_execution_action_cls
             or _issuance_module.ExecutionPlan is not issuance_execution_plan_cls
             or _issuance_module.SupervisedApproval is not issuance_supervised_approval_cls

@@ -289,20 +289,24 @@ def test_product_verifier_rejects_path_resolve_rebinding_before_execution(
         attacker_called = True
         raise AssertionError("rebound Path.resolve must never execute")
 
+    original_resolve = path_type.resolve
     with _active_runtime_profile(store.workspace) as runtime_profile:
-        monkeypatch.setattr(path_type, "resolve", attacker_resolve)
-        with pytest.raises(
-            BetfairStandardLimitPriceBoundError,
-            match="product verifier reopen authority changed",
-        ):
-            verify_product_betfair_standard_limit_price_bound(
-                evidence=evidence,
-                ledger=ledger,
-                issuance_store=store,
-                runtime_profile=runtime_profile,
-                execution_plan_id=bound.execution_plan.plan_id,
-                action_id=action.action_id,
-            )
+        try:
+            path_type.resolve = attacker_resolve
+            with pytest.raises(
+                BetfairStandardLimitPriceBoundError,
+                match="product verifier reopen authority changed",
+            ):
+                verify_product_betfair_standard_limit_price_bound(
+                    evidence=evidence,
+                    ledger=ledger,
+                    issuance_store=store,
+                    runtime_profile=runtime_profile,
+                    execution_plan_id=bound.execution_plan.plan_id,
+                    action_id=action.action_id,
+                )
+        finally:
+            path_type.resolve = original_resolve
 
     assert attacker_called is False
 
@@ -320,9 +324,9 @@ def test_product_verifier_rejects_in_place_path_resolve_code_mutation_before_exe
         attacker_called = True
         raise AssertionError("mutated Path.resolve must never execute")
 
-    try:
-        resolver.__code__ = attacker_resolve.__code__
-        with _active_runtime_profile(store.workspace) as runtime_profile:
+    with _active_runtime_profile(store.workspace) as runtime_profile:
+        try:
+            resolver.__code__ = attacker_resolve.__code__
             with pytest.raises(
                 BetfairStandardLimitPriceBoundError,
                 match="product verifier reopen authority changed",
@@ -335,7 +339,7 @@ def test_product_verifier_rejects_in_place_path_resolve_code_mutation_before_exe
                     execution_plan_id=bound.execution_plan.plan_id,
                     action_id=action.action_id,
                 )
-    finally:
-        resolver.__code__ = original_code
+        finally:
+            resolver.__code__ = original_code
 
     assert attacker_called is False

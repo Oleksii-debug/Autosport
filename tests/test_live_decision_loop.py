@@ -513,7 +513,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             workspace = root / "uncreated-age-workspace"
 
-            with self.assertRaisesRegex(TypeError, "exact non-negative timedelta"):
+            with self.assertRaisesRegex(TypeError, "exact timedelta"):
                 PersistentLiveDecisionLoop(
                     workspace,
                     loop_id="live-test-loop",

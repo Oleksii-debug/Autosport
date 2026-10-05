@@ -798,6 +798,7 @@ class PersistentLiveDecisionLoop:
         self.mode = mode
         self._configured_mode = mode
         self.book = book
+        self._book_authority = book
         self.authority = authority
         self.intent_factory = intent_factory
         self.intent_provenance = intent_provenance
@@ -809,6 +810,7 @@ class PersistentLiveDecisionLoop:
             raise ValueError(
                 "decision_ledger must use the canonical live workspace Decision Ledger"
             )
+        self._decision_ledger_authority = self.decision_ledger
         if paper_execution is not None:
             if not isinstance(paper_execution, PaperExecutionAdoptionRuntime):
                 raise TypeError(
@@ -831,6 +833,13 @@ class PersistentLiveDecisionLoop:
                     "paper_execution must use the canonical live workspace execution ledger"
                 )
         self.paper_execution = paper_execution
+        self._paper_execution_authority = paper_execution
+        self._paper_execution_ledger_authority = (
+            None if paper_execution is None else paper_execution.ledger
+        )
+        self._paper_execution_model_fingerprint_authority = (
+            None if paper_execution is None else paper_execution.config.fingerprint
+        )
         self.ingestion_policy = ingestion_policy
         self.max_quote_age = max_quote_age
         self.bounds = bounds or LiveLoopBounds()
@@ -2525,11 +2534,7 @@ class PersistentLiveDecisionLoop:
         context_hash = _canonical_json_sha256(context_payload)
         return context_hash, f"live-{context_hash}"
 
-    def _assert_canonical_persistence_authority(
-        self,
-        *,
-        expected_execution_model_fingerprint: str | None = None,
-    ) -> None:
+    def _assert_canonical_persistence_authority(self) -> None:
         if self.workspace != self._workspace_authority:
             raise LiveDecisionProgressError(
                 "live workspace persistence authority changed after construction"
@@ -2538,18 +2543,26 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "live decision mode authority changed after decision preparation"
             )
+        if self.book is not self._book_authority:
+            raise LiveDecisionProgressError(
+                "live PaperBook authority changed after construction"
+            )
+        if self.decision_ledger is not self._decision_ledger_authority:
+            raise LiveDecisionProgressError(
+                "live Decision Ledger object authority changed after construction"
+            )
         canonical_decision_ledger = self._workspace_authority / "decisions.jsonl"
         if self.decision_ledger.path != canonical_decision_ledger:
             raise LiveDecisionProgressError(
                 "live Decision Ledger persistence authority changed after construction"
             )
+        if self.paper_execution is not self._paper_execution_authority:
+            raise LiveDecisionProgressError(
+                "PAPER execution runtime authority changed after construction"
+            )
         if self.paper_execution is None:
-            if expected_execution_model_fingerprint is not None:
-                raise LiveDecisionProgressError(
-                    "PAPER execution authority disappeared after decision preparation"
-                )
             return
-        if self.paper_execution.book is not self.book:
+        if self.paper_execution.book is not self._book_authority:
             raise LiveDecisionProgressError(
                 "PAPER execution PaperBook authority changed after construction"
             )
@@ -2557,17 +2570,20 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "PAPER execution PaperBook path authority changed after construction"
             )
+        if self.paper_execution.ledger is not self._paper_execution_ledger_authority:
+            raise LiveDecisionProgressError(
+                "PAPER execution ledger object authority changed after construction"
+            )
         if self.paper_execution.ledger.path != self._workspace_authority / "paper-execution.jsonl":
             raise LiveDecisionProgressError(
                 "PAPER execution ledger authority changed after construction"
             )
         if (
-            expected_execution_model_fingerprint is not None
-            and self.paper_execution.config.fingerprint
-            != expected_execution_model_fingerprint
+            self.paper_execution.config.fingerprint
+            != self._paper_execution_model_fingerprint_authority
         ):
             raise LiveDecisionProgressError(
-                "PAPER execution model authority changed after decision preparation"
+                "PAPER execution model authority changed after construction"
             )
 
     def _persist_plan(
@@ -2622,13 +2638,7 @@ class PersistentLiveDecisionLoop:
                     "intent_evidence_json": prepared_execution.intent_evidence_json,
                 }
 
-        self._assert_canonical_persistence_authority(
-            expected_execution_model_fingerprint=(
-                None
-                if expected_execution_payload is None
-                else expected_execution_payload["model_fingerprint"]
-            )
-        )
+        self._assert_canonical_persistence_authority()
 
         progress_market_append_generation = (
             None
@@ -2680,13 +2690,7 @@ class PersistentLiveDecisionLoop:
             execution_guard,
             self.dependencies.registry_mutation_guard(),
         ):
-            self._assert_canonical_persistence_authority(
-                    expected_execution_model_fingerprint=(
-                    None
-                    if expected_execution_payload is None
-                    else expected_execution_payload["model_fingerprint"]
-                )
-            )
+            self._assert_canonical_persistence_authority()
             focused_dependency_state = self.dependencies.registry_state_snapshot()
             durable_progress = self._load_progress()
             if (
@@ -2863,13 +2867,7 @@ class PersistentLiveDecisionLoop:
                 self.decision_ledger.append_economic(record, self.authority)
                 if self.post_append_hook is not None:
                     self.post_append_hook()
-                self._assert_canonical_persistence_authority(
-                            expected_execution_model_fingerprint=(
-                        None
-                        if expected_execution_payload is None
-                        else expected_execution_payload["model_fingerprint"]
-                    )
-                )
+                self._assert_canonical_persistence_authority()
                 if self.dependencies.registry_state_snapshot() != focused_dependency_state:
                     raise LiveDecisionProgressError(
                         "focused dependency registry changed during durable ledger publication"
@@ -2880,11 +2878,7 @@ class PersistentLiveDecisionLoop:
             # therefore re-enters this same append-pending identity and resumes
             # the exact run instead of fabricating a fresh fill.
             if prepared_execution is not None:
-                self._assert_canonical_persistence_authority(
-                            expected_execution_model_fingerprint=expected_execution_payload[
-                        "model_fingerprint"
-                    ]
-                )
+                self._assert_canonical_persistence_authority()
                 execution_result = self.paper_execution.execute(
                     prepared=prepared_execution,
                     trigger_id=decision_id,

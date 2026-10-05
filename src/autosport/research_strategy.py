@@ -295,15 +295,19 @@ class ResearchStrategyPlan:
         first_observed_event_times: dict[str, Any] = {}
         first_observed_market_times: dict[tuple[str, str], Any] = {}
         for event in ordered:
-            observed_time = parse_iso_timestamp(event.observed_ts)
-            first_observed_quote_times.setdefault(event.quote_key, observed_time)
-            first_observed_event_times.setdefault(event.event_id, observed_time)
-            first_observed_market_times.setdefault(
-                (event.event_id, event.market_id),
-                observed_time,
-            )
+            available_time = _event_causal_availability_time(event)
+            previous_quote_time = first_observed_quote_times.get(event.quote_key)
+            if previous_quote_time is None or available_time < previous_quote_time:
+                first_observed_quote_times[event.quote_key] = available_time
+            previous_event_time = first_observed_event_times.get(event.event_id)
+            if previous_event_time is None or available_time < previous_event_time:
+                first_observed_event_times[event.event_id] = available_time
+            market_identity = (event.event_id, event.market_id)
+            previous_market_time = first_observed_market_times.get(market_identity)
+            if previous_market_time is None or available_time < previous_market_time:
+                first_observed_market_times[market_identity] = available_time
         for event in ordered:
-            latest[event.quote_key] = event
+            _advance_research_latest(latest, event)
             instruction = by_trigger.get((event.observed_ts, event.quote_key))
             if instruction is None:
                 continue
@@ -395,15 +399,42 @@ class ResearchReplayAgent:
 
 
 
-def _event_causally_available(event: MarketEvent, decision_time) -> bool:
+def _event_causal_availability_time(event: MarketEvent):
     source_time = parse_iso_timestamp(event.source_ts or event.observed_ts)
     observed_time = parse_iso_timestamp(event.observed_ts)
     ingest_time = parse_iso_timestamp(event.ingest_ts)
-    return (
-        source_time <= decision_time
-        and observed_time <= decision_time
-        and ingest_time <= decision_time
-    )
+    if ingest_time < observed_time:
+        raise ValueError("research market event ingest_ts precedes observed_ts")
+    return max(source_time, observed_time, ingest_time)
+
+
+def _event_causally_available(event: MarketEvent, decision_time) -> bool:
+    return _event_causal_availability_time(event) <= decision_time
+
+
+def _advance_research_latest(
+    latest_quotes: dict[str, MarketEvent],
+    event: MarketEvent,
+) -> None:
+    previous = latest_quotes.get(event.quote_key)
+    if previous is None:
+        latest_quotes[event.quote_key] = event
+        return
+    if previous.source_id != event.source_id:
+        raise ValueError(
+            "research replay quote_key is ambiguous across provider sources: "
+            + event.quote_key
+        )
+    if event.sequence < previous.sequence:
+        return
+    if event.sequence == previous.sequence:
+        if event.to_dict() == previous.to_dict():
+            return
+        raise ValueError(
+            "research replay conflicting payload reused provider-local sequence: "
+            + event.quote_key
+        )
+    latest_quotes[event.quote_key] = event
 
 
 def _causal_latest_quotes(

@@ -31,6 +31,7 @@ from .market_mirror import MarketMirror, MirrorSnapshot
 from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependency,
+    FocusedMirrorDependencyChurnError,
     FocusedMirrorDependencyIndex,
 )
 from .opportunity import Opportunity, OpportunityContractError, QuoteRef
@@ -2243,6 +2244,10 @@ class PersistentLiveDecisionLoop:
                     input_id,
                     next_history_availability,
                 )
+        except FocusedMirrorDependencyChurnError as exc:
+            raise LiveDecisionProgressError(
+                "focused dependency changed continuously during snapshot capture"
+            ) from exc
         finally:
             if owns_history_store and history_store is not None:
                 history_store.close()

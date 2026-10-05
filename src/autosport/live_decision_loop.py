@@ -3101,6 +3101,10 @@ class PersistentLiveDecisionLoop:
                         "durable PAPER execution run identity drifted after decision publication"
                     )
 
+            # Execution is an external side-effect boundary. A runtime/configuration
+            # mutation that happens while #623 adoption is in flight must not be
+            # laundered into a COMMITTED cursor under a different live authority.
+            self._assert_canonical_persistence_authority()
             if self.dependencies.registry_state_snapshot() != focused_dependency_state:
                 raise LiveDecisionProgressError(
                     "focused dependency registry changed before committed publication"

@@ -199,6 +199,7 @@ class ObservationResult:
     def validate(self) -> None:
         if type(self.stats) is not IngestionStats:
             raise TypeError("observation stats must be an exact IngestionStats")
+        self.stats.validate()
         if type(self.health) is not SourceHealthState:
             raise TypeError("observation health must be an exact SourceHealthState")
         self.health.validate()

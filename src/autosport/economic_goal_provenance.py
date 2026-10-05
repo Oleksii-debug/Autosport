@@ -96,11 +96,15 @@ def contract_sha256(
     if not isinstance(contract, _goal_type):
         raise _goal_error("provenance hashing requires an EconomicGoalContract")
     return _sha256(_canonical(_to_payload(contract))).hexdigest()
+
+
 def provenance_for(
     contract: EconomicGoalContract,
     *,
     _goal_type=_ECONOMIC_GOAL_TYPE,
     _goal_error=_ECONOMIC_GOAL_ERROR,
+    _schema=PROVENANCE_SCHEMA,
+    _version=PROVENANCE_SCHEMA_VERSION,
     _provenance_type=EconomicGoalProvenance,
     _contract_sha=contract_sha256,
 ) -> EconomicGoalProvenance:
@@ -109,13 +113,15 @@ def provenance_for(
     if not isinstance(contract, _goal_type):
         raise _goal_error("provenance requires an EconomicGoalContract")
     return _provenance_type(
-        schema=PROVENANCE_SCHEMA,
-        schema_version=PROVENANCE_SCHEMA_VERSION,
+        schema=_schema,
+        schema_version=_version,
         goal_id=contract.goal_id,
         revision=contract.revision,
         bankroll_id=contract.bankroll_id,
         contract_sha256=_contract_sha(contract),
     )
+
+
 def verify_provenance(
     contract: EconomicGoalContract,
     provenance: EconomicGoalProvenance,

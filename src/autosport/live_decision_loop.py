@@ -454,27 +454,7 @@ class _Control:
             )
         if raw["schema"] != _CONTROL_SCHEMA or raw["schema_version"] != _CONTROL_VERSION:
             raise LiveDecisionProgressError("unsupported live decision control schema")
-        health_boundaries_raw = (
-            None if schema_version in {1, 2} else raw["health_boundaries"]
-        )
-        if health_boundaries_raw is not None and type(health_boundaries_raw) is not list:
-            raise LiveDecisionProgressError(
-                "health_boundaries must be a JSON array or null"
-            )
         try:
-            health_boundaries = (
-                None
-                if health_boundaries_raw is None
-                else tuple(
-                    sorted(
-                        (
-                            ProviderHealthReplayBoundary.from_dict(value)
-                            for value in health_boundaries_raw
-                        ),
-                        key=lambda value: value.source_id,
-                    )
-                )
-            )
             return cls(
                 loop_id=raw["loop_id"],
                 state=LiveControlState(raw["state"]),
@@ -752,7 +732,30 @@ class _Progress:
             raise LiveDecisionProgressError(
                 "registered_input_ids must be a JSON string array"
             )
+        health_boundaries_raw = (
+            None if schema_version in {1, 2} else raw["health_boundaries"]
+        )
+        if (
+            health_boundaries_raw is not None
+            and type(health_boundaries_raw) is not list
+        ):
+            raise LiveDecisionProgressError(
+                "health_boundaries must be a JSON array or null"
+            )
         try:
+            health_boundaries = (
+                None
+                if health_boundaries_raw is None
+                else tuple(
+                    sorted(
+                        (
+                            ProviderHealthReplayBoundary.from_dict(value)
+                            for value in health_boundaries_raw
+                        ),
+                        key=lambda value: value.source_id,
+                    )
+                )
+            )
             return cls(
                 loop_id=raw["loop_id"],
                 phase=raw["phase"],
@@ -5389,7 +5392,7 @@ class PersistentLiveDecisionLoop:
         events,
         *,
         as_of: datetime | None = None,
-        health_boundaries: tuple[ProviderHealthReplayBoundary, ...] = (),
+        health_boundaries: tuple[ProviderHealthReplayBoundary, ...] | None = None,
     ) -> str:
         event_tuple = tuple(events)
         boundary_map = (

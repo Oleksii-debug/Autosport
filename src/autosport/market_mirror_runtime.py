@@ -305,6 +305,10 @@ class FocusedMirrorDependencyIndex:
             )
         material_keys = changed_keys - refresh_keys
 
+        with self._lock:
+            dependencies = tuple(self._dependencies.values())
+            registry_revision = self._registry_revision
+
         captured = self._mirror.view_for_keys(changed_keys, _causal_only=True)
         events = {
             (event.source_id, event.quote_key): event
@@ -322,10 +326,6 @@ class FocusedMirrorDependencyIndex:
             # A later acquisition already advanced this key after the batch was
             # drained. Stale refresh-only provenance must never relabel newer state.
             return ()
-
-        with self._lock:
-            dependencies = tuple(self._dependencies.values())
-            registry_revision = self._registry_revision
 
         refresh_only: list[str] = []
         for dependency in dependencies:

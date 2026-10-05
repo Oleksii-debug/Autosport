@@ -967,7 +967,7 @@ def test_semantic_breach_revocation_blocks_concurrent_stale_evaluation(
     assert "no longer bound" in str(evaluation_results[0])
 
 
-def test_out_of_band_frame_consumption_revokes_existing_decision(
+def test_out_of_band_frame_consumption_is_rejected_without_advancing_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     publish_time_ms = time.time_ns() // 1_000_000
@@ -985,36 +985,29 @@ def test_out_of_band_frame_consumption_revokes_existing_decision(
         policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
     )
     assert decision.decision_eligible
+    sequence_before = transport._frame_sequence
 
-    stolen = transport.read_authenticated_frame()
-    stolen.assert_transport_issued()
+    with pytest.raises(stream.BetfairStreamTransportError, match="owned by another runtime"):
+        transport.read_authenticated_frame()
 
-    assert not decision.decision_eligible
-    assert fake.closed
-    assert not transport.is_authenticated
+    assert transport._frame_sequence == sequence_before
+    assert transport.is_authenticated
+    assert not fake.closed
+    assert decision.decision_eligible
+
+    runtime.read_and_ingest()
+    assert transport._frame_sequence == sequence_before + 1
 
 
-def test_out_of_band_frame_consumption_prevents_later_gap_ingest(
+def test_second_runtime_cannot_claim_same_authenticated_reader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    publish_time_ms = time.time_ns() // 1_000_000
-    transport, fake = _transport(
-        monkeypatch,
-        _subscription_status()
-        + _mcm(pt=publish_time_ms)
-        + _mcm(pt=publish_time_ms + 1),
-    )
+    transport, _ = _transport(monkeypatch, _subscription_status())
     subscription = _open(transport)
-    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    first = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
 
-    stolen = transport.read_authenticated_frame()
-    stolen.assert_transport_issued()
+    with pytest.raises(stream.BetfairStreamTransportError, match="reader is already owned"):
+        BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
 
-    with pytest.raises(
-        BetfairAuthenticatedStreamError,
-        match="frame position advanced outside",
-    ):
-        runtime.read_and_ingest()
-
-    assert fake.closed
-    assert not transport.is_authenticated
+    assert first.subscription is subscription
+    assert transport.is_authenticated

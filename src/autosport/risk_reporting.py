@@ -596,6 +596,77 @@ def resolve_durable_product_issued_paper_drawdown_evidence(
     return build_product_issued_paper_drawdown_evidence(book, goal)
 
 
+def verify_durable_product_issued_paper_equity_path(
+    *,
+    paper_book_path: str,
+    workspace: str,
+    evidence: ProductIssuedPaperEquityPath,
+) -> ProductIssuedPaperEquityPath:
+    """Require caller evidence to equal a fresh durable product re-resolution."""
+
+    if type(evidence) is not ProductIssuedPaperEquityPath:
+        raise TypeError("equity-path evidence must be exact ProductIssuedPaperEquityPath")
+    resolved = resolve_durable_product_issued_paper_equity_path(
+        paper_book_path=paper_book_path,
+        workspace=workspace,
+    )
+    if resolved != evidence:
+        raise ValueError("equity-path evidence does not match durable product state")
+    return resolved
+
+
+def verify_durable_product_issued_paper_drawdown_evidence(
+    *,
+    paper_book_path: str,
+    workspace: str,
+    evidence: ProductIssuedPaperDrawdownEvidence,
+) -> ProductIssuedPaperDrawdownEvidence:
+    """Require drawdown evidence to equal a fresh durable product re-resolution."""
+
+    if type(evidence) is not ProductIssuedPaperDrawdownEvidence:
+        raise TypeError(
+            "drawdown evidence must be exact ProductIssuedPaperDrawdownEvidence"
+        )
+    resolved = resolve_durable_product_issued_paper_drawdown_evidence(
+        paper_book_path=paper_book_path,
+        workspace=workspace,
+    )
+    if resolved != evidence:
+        raise ValueError("drawdown evidence does not match durable product state")
+    return resolved
+
+
+def resolve_durable_verified_settled_minimum_equity(
+    *,
+    paper_book_path: str,
+    workspace: str,
+) -> tuple[Decimal, str, str]:
+    """Return minimum equity only from complete durable product-owned history.
+
+    The third value is the equity-path SHA-256. This function supplies a
+    re-resolvable causal capital-history fact only; it does not estimate or
+    authorize risk of ruin.
+    """
+
+    resolved = resolve_durable_product_issued_paper_equity_path(
+        paper_book_path=paper_book_path,
+        workspace=workspace,
+    )
+    if not resolved.availability_complete:
+        raise ValueError(
+            "minimum equity requires complete durable availability chronology"
+        )
+    if not resolved.settled_history_complete:
+        raise ValueError(
+            "minimum equity requires all economically material PAPER tickets settled"
+        )
+    return (
+        resolved.minimum_equity,
+        resolved.minimum_equity_point_id,
+        resolved.path_sha256,
+    )
+
+
 def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
     """Replay the durable PAPER equity path and preserve its worst drawdown episode.
 

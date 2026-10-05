@@ -130,6 +130,18 @@ _PAPER_EXECUTION_LEDGER_LOAD_UNL_CODE = getattr(
     "__code__",
     None,
 )
+_PAPER_EXECUTION_RUN_ID = _paper_impl._run_id
+_PAPER_EXECUTION_RUN_ID_CODE = getattr(
+    _PAPER_EXECUTION_RUN_ID,
+    "__code__",
+    None,
+)
+_PAPER_EXECUTION_UTC_TIMESTAMP = _utc_timestamp
+_PAPER_EXECUTION_UTC_TIMESTAMP_CODE = getattr(
+    _PAPER_EXECUTION_UTC_TIMESTAMP,
+    "__code__",
+    None,
+)
 
 
 class PaperExecutionAdoptionRuntime:
@@ -515,7 +527,16 @@ class PaperExecutionAdoptionRuntime:
         if not isinstance(prepared, PreparedPaperExecution):
             raise TypeError("prepared must be PreparedPaperExecution")
         self._require_minted(prepared)
-        return _paper_impl._run_id(
+        run_id_resolver = _PAPER_EXECUTION_RUN_ID
+        if (
+            _paper_impl._run_id is not run_id_resolver
+            or getattr(run_id_resolver, "__code__", None)
+            is not _PAPER_EXECUTION_RUN_ID_CODE
+        ):
+            raise PaperExecutionAdoptionError(
+                "canonical PAPER execution run identity resolver changed"
+            )
+        return run_id_resolver(
             prepared.execution_plan,
             trigger_id,
             self.config,
@@ -538,11 +559,20 @@ class PaperExecutionAdoptionRuntime:
         if not isinstance(prepared, PreparedPaperExecution):
             raise TypeError("prepared must be PreparedPaperExecution")
         self._require_minted(prepared)
-        proposed_time = _utc_timestamp(
+        timestamp_parser = _PAPER_EXECUTION_UTC_TIMESTAMP
+        if (
+            _utc_timestamp is not timestamp_parser
+            or getattr(timestamp_parser, "__code__", None)
+            is not _PAPER_EXECUTION_UTC_TIMESTAMP_CODE
+        ):
+            raise PaperExecutionAdoptionError(
+                "canonical PAPER execution timestamp parser changed"
+            )
+        proposed_time = timestamp_parser(
             proposed_started_at,
             "proposed PAPER execution started_at",
         )
-        plan_time = _utc_timestamp(
+        plan_time = timestamp_parser(
             prepared.execution_plan.created_at,
             "PAPER execution plan created_at",
         )

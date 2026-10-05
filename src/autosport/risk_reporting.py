@@ -85,6 +85,9 @@ _CANONICAL_PAPERBOOK_DURABLE_LOAD_SURFACE = tuple(
 _CANONICAL_ECONOMIC_GOAL_STORE = EconomicGoalStore
 _CANONICAL_ECONOMIC_GOAL_STORE_INIT = EconomicGoalStore.__dict__["__init__"]
 _CANONICAL_ECONOMIC_GOAL_STORE_LOAD = EconomicGoalStore.load
+_CANONICAL_PATH = Path
+_CANONICAL_NORMCASE = os.path.normcase
+_CANONICAL_NORMPATH = os.path.normpath
 
 
 def _captured_callable_code(authority: object):
@@ -128,11 +131,19 @@ _CANONICAL_DURABLE_RESOLVER_CODE_WITNESSES = tuple(
         _CANONICAL_PAPERBOOK_LOAD,
         _CANONICAL_ECONOMIC_GOAL_STORE_INIT,
         _CANONICAL_ECONOMIC_GOAL_STORE_LOAD,
+        _CANONICAL_NORMCASE,
+        _CANONICAL_NORMPATH,
     )
 )
 
 
 def _require_canonical_durable_resolver_code_authority() -> None:
+    if (
+        Path is not _CANONICAL_PATH
+        or os.path.normcase is not _CANONICAL_NORMCASE
+        or os.path.normpath is not _CANONICAL_NORMPATH
+    ):
+        raise ValueError("canonical durable equity resolver path dispatch changed")
     if (
         _CANONICAL_ECONOMIC_GOAL_STORE.__dict__.get("__init__")
         is not _CANONICAL_ECONOMIC_GOAL_STORE_INIT
@@ -989,15 +1000,19 @@ def _durable_source_pair(
     if type(workspace) is not str or not workspace:
         raise TypeError("workspace must be an exact non-empty str")
 
-    workspace_path = Path(workspace)
-    paper_path = Path(paper_book_path)
+    workspace_path = _CANONICAL_PATH(workspace)
+    paper_path = _CANONICAL_PATH(paper_book_path)
     if not workspace_path.is_absolute():
         raise ValueError("workspace must be an absolute canonical product workspace path")
     if not paper_path.is_absolute():
         raise ValueError("paper_book_path must be an absolute canonical product path")
     expected_paper_path = workspace_path / "paper_book.json"
-    actual_locator = os.path.normcase(os.path.normpath(str(paper_path)))
-    expected_locator = os.path.normcase(os.path.normpath(str(expected_paper_path)))
+    actual_locator = _CANONICAL_NORMCASE(
+        _CANONICAL_NORMPATH(str(paper_path))
+    )
+    expected_locator = _CANONICAL_NORMCASE(
+        _CANONICAL_NORMPATH(str(expected_paper_path))
+    )
     if actual_locator != expected_locator:
         raise ValueError(
             "paper_book_path must be the canonical workspace/paper_book.json"

@@ -153,18 +153,20 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         store.current()
 
         corrupt = store.state_path
-        corrupt.write_bytes(b"{\\n  \\"unexpected\\": true\\n}\\n")
+        valid_bytes = corrupt.read_bytes()
+        corrupt.write_bytes(b"{\n  \"unexpected\": true\n}\n")
         with self.assertRaises(EconomicSessionIntegrityError):
             self._store().current()
 
         # Restore the valid durable state, then alter one canonical field without
         # updating the independent monotonic authority digest.
+        corrupt.write_bytes(valid_bytes)
         fresh = self._store()
         expected = fresh.current()
         payload = json.loads(fresh.state_path.read_text(encoding="utf-8"))
         payload["started_at"] = "2026-01-01T00:00:00Z"
         fresh.state_path.write_text(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\\n",
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
             encoding="utf-8",
         )
         with self.assertRaises(MonotonicAuthorityRollbackError):

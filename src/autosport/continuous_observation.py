@@ -299,6 +299,30 @@ def run_continuous_observation(
     ):
         raise ValueError("provider source_id must be canonical")
 
+    if run_id is not None and (
+        type(run_id) is not str or not run_id or run_id != run_id.strip()
+    ):
+        raise ValueError("run_id must be a non-empty trimmed exact string")
+    if not callable(monotonic):
+        raise TypeError("monotonic must be callable")
+    if not callable(wall_clock):
+        raise TypeError("wall_clock must be callable")
+    if waiter is not None and not callable(waiter):
+        raise TypeError("waiter must be callable")
+    if reporter is not None and not callable(reporter):
+        raise TypeError("reporter must be callable")
+    if stop_event is not None:
+        if not callable(getattr(stop_event, "is_set", None)):
+            raise TypeError("stop_event is_set must be callable")
+        if waiter is None and not callable(getattr(stop_event, "wait", None)):
+            raise TypeError("stop_event wait must be callable when waiter is omitted")
+
+    current_run_id = run_id or uuid.uuid4().hex
+    started_at = wall_clock()
+    state = _LoopState(current_run_id, provider_source_id, started_at)
+    stopper = stop_event or threading.Event()
+    wait = waiter or stopper.wait
+
     root = config.workspace
     root.mkdir(parents=True, exist_ok=True)
     status_path = config.resolved_status_path
@@ -306,14 +330,6 @@ def run_continuous_observation(
     previous_run_id = previous.get("run_id") if previous else None
     previous_state = previous.get("state") if previous else None
     previous_unclean = previous_state in {"starting", "running", "attempting", "provider_unavailable"}
-
-    current_run_id = run_id or uuid.uuid4().hex
-    if not isinstance(current_run_id, str) or not current_run_id or current_run_id != current_run_id.strip():
-        raise ValueError("run_id must be a non-empty trimmed string")
-    started_at = wall_clock()
-    state = _LoopState(current_run_id, provider_source_id, started_at)
-    stopper = stop_event or threading.Event()
-    wait = waiter or stopper.wait
 
     def publish(lifecycle_state: str, *, stop_reason: str | None = None, full_refresh: bool = False) -> None:
         payload = _status_payload(

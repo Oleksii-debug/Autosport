@@ -82,6 +82,29 @@ def test_candidate_vector_digest_inherits_market_semantics_identity() -> None:
     assert first != second
 
 
+
+def test_candidate_vector_digest_ignores_rebound_scalar_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _context("rules:s1")
+    baseline = PaperRiskPolicy.risk_of_ruin_candidate_vector_sha256((context,))
+    assert baseline is not None
+    calls = {"scalar": 0}
+
+    def hostile_scalar(candidate: object) -> str:
+        calls["scalar"] += 1
+        raise AssertionError("live scalar candidate digest dispatch reached vector identity")
+
+    monkeypatch.setattr(
+        PaperRiskPolicy,
+        "risk_of_ruin_candidate_sha256",
+        staticmethod(hostile_scalar),
+    )
+
+    assert PaperRiskPolicy.risk_of_ruin_candidate_vector_sha256((context,)) == baseline
+    assert calls == {"scalar": 0}
+
+
 def test_candidate_vector_digest_is_in_stake_vector_executable_witness() -> None:
     descriptor = vars(PaperRiskPolicy)["risk_of_ruin_candidate_vector_sha256"]
     assert type(descriptor) is classmethod

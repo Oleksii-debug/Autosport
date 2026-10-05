@@ -302,6 +302,31 @@ def test_coalesced_buffered_second_frame_retains_original_socket_ingress_age(
     assert not decision.decision_eligible
 
 
+def test_authenticated_runtime_rejects_frame_minted_under_alternate_clock_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autosport import betfair_authenticated_stream as auth
+
+    transport, fake = _transport(monkeypatch, _subscription_status())
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+
+    alternate_clock = lambda: 7_000_000_000
+    monkeypatch.setattr(stream, "_MONOTONIC_NS", alternate_clock)
+    monkeypatch.setattr(stream.time, "monotonic_ns", alternate_clock)
+    fake.chunks.append(_mcm())
+
+    with pytest.raises(
+        BetfairAuthenticatedStreamError,
+        match="receive clock authority mismatch",
+    ):
+        runtime.read_and_ingest()
+
+    assert transport.is_authenticated is False
+    assert transport.connection_id is None
+    assert fake.closed is True
+
+
 def test_authenticated_freshness_rejects_local_consumer_lag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

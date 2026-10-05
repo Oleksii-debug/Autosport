@@ -81,19 +81,17 @@ def _timestamp_text(value: datetime) -> str:
 
 
 def _decimal(value: object, name: str, *, allow_zero: bool = False) -> Decimal:
-    try:
-        if type(value) is Decimal:
-            parsed = value
-        elif type(value) is str:
+    if type(value) is Decimal:
+        parsed = value
+    elif type(value) is str:
+        try:
             parsed = Decimal(value)
-        elif type(value) is int:
-            parsed = Decimal(value)
-        else:
-            raise ValueError(f"{name} must be an exact Decimal, string or integer")
-    except (InvalidOperation, ValueError, TypeError) as exc:
-        if isinstance(exc, ValueError) and "exact Decimal" in str(exc):
-            raise
-        raise ValueError(f"{name} must be a finite Decimal") from exc
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"{name} must be a finite Decimal") from exc
+    elif type(value) is int:
+        parsed = Decimal(value)
+    else:
+        raise ValueError(f"{name} must be an exact Decimal, string or integer")
     if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):
         comparator = ">= 0" if allow_zero else "> 0"
         raise ValueError(f"{name} must be finite and {comparator}")

@@ -960,3 +960,44 @@ def test_aggregate_rereads_durable_router_request_after_child_method_substitutio
                 model_request_id=request.request_id,
                 decision_at=decision_at,
             )
+
+
+
+def test_aggregate_rereads_durable_router_decision_after_child_method_substitution(
+    monkeypatch,
+) -> None:
+    with canonical_applicable_cost_case() as (
+        intent,
+        plan,
+        router_store,
+        request,
+        decision_at,
+    ):
+        decision = router_store.get_decision(request.request_id)
+        assert decision is not None
+        forged = replace(
+            decision,
+            decision_id=decision.decision_id + "-forged",
+        )
+
+        def substituted_get_decision(_store, request_id):
+            assert request_id == request.request_id
+            return forged
+
+        monkeypatch.setattr(
+            subject.ModelComputeRouterStore,
+            "get_decision",
+            substituted_get_decision,
+        )
+
+        with pytest.raises(
+            subject.ProspectiveApplicableCostError,
+            match="decision digest disagrees with durable router state",
+        ):
+            subject.resolve_prospective_applicable_costs(
+                intent=intent,
+                plan=plan,
+                router_store=router_store,
+                model_request_id=request.request_id,
+                decision_at=decision_at,
+            )

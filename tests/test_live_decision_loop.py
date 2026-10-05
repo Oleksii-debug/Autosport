@@ -9275,5 +9275,92 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 )
 
 
+
+
+    def test_pending_recovery_rejects_orphan_execution_history_before_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+            model = PaperExecutionModelConfig(
+                model_id="pending-orphan-execution-test",
+                model_version="1",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="pending-orphan-execution-test",
+                seed="pending-orphan-execution",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            book = PaperBook("1000")
+            execution_ledger = PaperExecutionLedger(
+                workspace / "paper-execution.jsonl"
+            )
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=execution_ledger,
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            goal = EconomicGoalContract(
+                goal_id="goal-pending-orphan-execution",
+                revision=1,
+                bankroll_id="bankroll-live-test",
+                currency="EUR",
+                max_risk_of_ruin=Decimal("1"),
+            )
+            authority = EconomicDecisionAuthority(
+                goal,
+                PaperRiskPolicy(economic_goal=goal),
+            )
+
+            def fail_after_pending(input_id, snapshot):
+                del input_id, snapshot
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(event,)]),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                book=book,
+                authority=authority,
+                paper_execution=execution,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                loop.run_cycle()
+
+            loop.intent_factory = _PositiveIntentFactory(
+                self.INTENT_CONFIG_SHA256
+            )
+            with patch.object(
+                execution_ledger,
+                "events",
+                return_value=({"event_type": "RUN_RESERVED"},),
+            ):
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "orphan #623 execution history",
+                ):
+                    loop.run_cycle()
+
+            pending = json.loads(loop.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(pending["phase"], "pending")
+            self.assertEqual(
+                JsonlDecisionLedger(
+                    workspace / "decisions.jsonl"
+                ).verified_records(),
+                (),
+            )
+            loop.close()
+
+
 if __name__ == "__main__":
     unittest.main()

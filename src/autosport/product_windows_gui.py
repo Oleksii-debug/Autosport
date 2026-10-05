@@ -15,7 +15,6 @@ from .operator_source_configuration import (
 )
 from .operator_source_registry import list_product_source_entries
 from .product_gui_worker import ProductGuiMessage, ProductGuiWorker
-from .session import AutosportSession
 from .windows_gui import WindowsAutosportApp
 
 
@@ -443,7 +442,8 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
 
         if not started:
             self._product_expected_provider_source_id = None
-            self._restore_base_session_after_product()
+            if not self._restore_base_session_after_product():
+                return
             message = product_text("ui.product_runtime.status.start_failed")
             self.product_status.set(message)
             self.status.set(message)

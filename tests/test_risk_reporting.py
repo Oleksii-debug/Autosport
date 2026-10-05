@@ -2634,5 +2634,70 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(attacker_calls, 0)
 
 
+    def test_durable_resolver_rejects_rebound_goal_json_loader_before_execution(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+        attacker_calls = 0
+
+        def hostile_loader(_text):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("rebound strict JSON loader executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper_book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with patch.object(
+                risk_reporting._economic_goal_store,
+                "strict_json_loads",
+                hostile_loader,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "economic-goal store authority changed",
+                ):
+                    resolve_durable_product_issued_paper_equity_path(
+                        paper_book_path=str(paper_path),
+                        workspace=str(workspace),
+                    )
+
+        self.assertEqual(attacker_calls, 0)
+
+    def test_durable_resolver_rejects_rebound_goal_payload_parser_before_execution(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+        attacker_calls = 0
+
+        def hostile_parser(_payload):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("rebound goal payload parser executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper_book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with patch.object(
+                risk_reporting._economic_goal_store,
+                "economic_goal_from_payload",
+                hostile_parser,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "economic-goal store authority changed",
+                ):
+                    resolve_durable_product_issued_paper_equity_path(
+                        paper_book_path=str(paper_path),
+                        workspace=str(workspace),
+                    )
+
+        self.assertEqual(attacker_calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

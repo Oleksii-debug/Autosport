@@ -10020,5 +10020,59 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.close()
 
+
+    def test_cycle_entry_rejects_observation_authority_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),)],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            foreign_observer = _DurableObserver(workspace, [()])
+            loop._observe = foreign_observer
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "observation authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(observer.calls, 0)
+            self.assertEqual(foreign_observer.calls, 0)
+            loop.close()
+
+
+    def test_cycle_entry_rejects_ingestion_policy_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),)],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            loop.ingestion_policy = object()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "ingestion policy authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(observer.calls, 0)
+            loop.close()
+
 if __name__ == "__main__":
     unittest.main()

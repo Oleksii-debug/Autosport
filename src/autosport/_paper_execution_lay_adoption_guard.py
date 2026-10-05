@@ -35,6 +35,8 @@ _ORIGINAL_MINT_PREPARED = PaperExecutionAdoptionRuntime._mint_prepared
 _ORIGINAL_REQUIRE_MINTED = PaperExecutionAdoptionRuntime._require_minted
 _ORIGINAL_EXPECTED_RUN_ID = PaperExecutionAdoptionRuntime.expected_run_id
 _ORIGINAL_EXECUTE_UNLOCKED = PaperExecutionAdoptionRuntime._execute_unlocked
+_ORIGINAL_PAPERBOOK_SAVE = _adoption.PaperBook.save
+_ORIGINAL_PAPERBOOK_LOAD = _adoption.PaperBook.load
 _PREPARED_WITNESSES: dict[int, tuple[PreparedPaperExecution, str]] = {}
 _ACTION_WITNESSES: dict[int, tuple[ExecutionAction, str, str]] = {}
 _BINDING_WITNESSES: dict[int, tuple[PaperExposureBinding, tuple[str, str | None, str | None, str | None]]] = {}
@@ -797,7 +799,7 @@ def _execute_unlocked(
             # Persistence is economic authority. Dispatch through the exact
             # validated PaperBook class so caller-owned instance attributes cannot
             # replace save() and turn a successful live debit into an undurable one.
-            type(book).save(book, paper_book_path)
+            _ORIGINAL_PAPERBOOK_SAVE(book, paper_book_path)
         except Exception:
             # Canonical PaperBook.save publishes only via an atomic os.replace.
             # Any exception means that replacement did not complete, so restore
@@ -820,7 +822,7 @@ def _execute_unlocked(
                 "PaperBook state changed or became invalid during durable publication"
             ) from exc
 
-        durable_book = _adoption.PaperBook.load(paper_book_path)
+        durable_book = _ORIGINAL_PAPERBOOK_LOAD(paper_book_path)
 
         # Load is another callback/I/O boundary. Do not compare or accept the
         # reloaded state using pre-load runtime or prepared assumptions.
@@ -1239,7 +1241,8 @@ def _assert_recoverable_book_state(
         run_id=run_id,
         action_ids=action_ids,
     )
-    run = self.ledger.load_run(
+    run = type(self.ledger).load_run(
+        self.ledger,
         run_id=run_id,
         trigger_id=trigger_id,
         plan=prepared.execution_plan,

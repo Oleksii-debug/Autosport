@@ -323,6 +323,14 @@ class _ReplayableBatchProvider:
         if not callable(reset_snapshot):
             reset_snapshot = getattr(self._provider, "_clear_pending_snapshot", None)
         try:
+            current_source_id = getattr(self._provider, "source_id", None)
+            if (
+                type(current_source_id) is not str
+                or current_source_id != self.source_id
+            ):
+                raise RuntimeError(
+                    "provider source identity changed before pending-snapshot reset"
+                )
             if callable(reset_snapshot):
                 reset_snapshot()
         finally:

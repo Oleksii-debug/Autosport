@@ -97,6 +97,43 @@ def _evaluator(tmp_path: Path, name: str = "workspace") -> ProductRiskOfRuinEval
     )
 
 
+
+@pytest.mark.parametrize("field", ("causal_cutoff", "evaluated_at"))
+def test_request_rejects_lossy_submicrosecond_causal_clocks(field: str) -> None:
+    request = _request(planned=2)
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="precision finer than microseconds is unsupported",
+    ):
+        replace(
+            request,
+            **{field: "2026-01-02T00:00:00.0000001+00:00"},
+        )
+
+
+def test_observation_rejects_lossy_submicrosecond_availability_clock() -> None:
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="precision finer than microseconds is unsupported",
+    ):
+        _observation(
+            1,
+            available_at="2026-01-01T00:00:00.0000001+00:00",
+        )
+
+
+def test_request_accepts_zero_only_excess_fractional_clock_precision() -> None:
+    request = replace(
+        _request(planned=2),
+        causal_cutoff="2026-01-02T00:00:00.123456000+00:00",
+        evaluated_at="2026-01-03T00:00:00.123456000+00:00",
+    )
+
+    payload = request.canonical_payload()
+
+    assert payload["causal_cutoff"] == "2026-01-02T00:00:00.123456+00:00"
+    assert payload["evaluated_at"] == "2026-01-03T00:00:00.123456+00:00"
+
 def test_request_has_no_caller_upper_bound_field() -> None:
     names = {field.name for field in fields(RiskOfRuinEvaluationRequest)}
     assert "upper_bound" not in names

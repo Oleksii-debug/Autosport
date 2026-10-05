@@ -409,6 +409,7 @@ class BetfairStreamTlsTransport:
         self._lifecycle_generation = 0
         self._active_connect_cancel: Event | None = None
         self._lifecycle_lock = RLock()
+        self._receive_lock = RLock()
 
     def __repr__(self) -> str:
         return (
@@ -688,94 +689,95 @@ class BetfairStreamTlsTransport:
     def read_authenticated_frame(self) -> BetfairStreamAuthenticatedFrame:
         """Return one exact frame with process-local authenticated transport-origin proof."""
 
-        stream = self._socket
-        connection_id = self._connection_id
-        connection_generation = self._connection_generation
-        if stream is None or connection_id is None or connection_generation <= 0:
-            raise BetfairStreamTransportError(
-                "Betfair stream transport is not authenticated"
-            )
+        with self._receive_lock:
+            stream = self._socket
+            connection_id = self._connection_id
+            connection_generation = self._connection_generation
+            if stream is None or connection_id is None or connection_generation <= 0:
+                raise BetfairStreamTransportError(
+                    "Betfair stream transport is not authenticated"
+                )
 
-        while True:
-            marker = self._receive_buffer.find(b"\r\n")
-            if marker >= 0:
-                if marker > self._max_frame_bytes:
+            while True:
+                marker = self._receive_buffer.find(b"\r\n")
+                if marker >= 0:
+                    if marker > self._max_frame_bytes:
+                        self._close_with_backoff()
+                        raise BetfairStreamProtocolError(
+                            "Betfair stream frame exceeded the configured size limit"
+                        )
+                    payload_size = marker + 2
+                    payload = bytes(self._receive_buffer[:payload_size])
+                    (
+                        received_monotonic_ns,
+                        received_clock_witness,
+                    ) = self._consume_received_bytes(payload_size)
+                    del self._receive_buffer[:payload_size]
+                    if marker == 0:
+                        self._close_with_backoff()
+                        raise BetfairStreamProtocolError(
+                            "Betfair stream frame must not be empty"
+                        )
+                    break
+
+                bare_lf = self._receive_buffer.find(b"\n")
+                if bare_lf >= 0 and (
+                    bare_lf == 0 or self._receive_buffer[bare_lf - 1] != 0x0D
+                ):
+                    self._close_with_backoff()
+                    raise BetfairStreamProtocolError(
+                        "Betfair stream frame used a non-CRLF delimiter"
+                    )
+                if len(self._receive_buffer) > self._max_frame_bytes:
                     self._close_with_backoff()
                     raise BetfairStreamProtocolError(
                         "Betfair stream frame exceeded the configured size limit"
                     )
-                payload_size = marker + 2
-                payload = bytes(self._receive_buffer[:payload_size])
-                (
-                    received_monotonic_ns,
-                    received_clock_witness,
-                ) = self._consume_received_bytes(payload_size)
-                del self._receive_buffer[:payload_size]
-                if marker == 0:
+
+                try:
+                    block = stream.recv(_SOCKET_READ_BYTES)
+                except (OSError, ssl.SSLError, TimeoutError):
                     self._close_with_backoff()
-                    raise BetfairStreamProtocolError(
-                        "Betfair stream frame must not be empty"
+                    raise BetfairStreamTransportError(
+                        "Betfair stream receive failed"
+                    ) from None
+                if not block:
+                    had_partial = bool(self._receive_buffer)
+                    self._close_with_backoff()
+                    if had_partial:
+                        raise BetfairStreamProtocolError(
+                            "Betfair stream disconnected with a truncated frame"
+                        )
+                    raise BetfairStreamTransportError(
+                        "Betfair stream connection closed before receiving data"
                     )
-                break
+                self._append_received_block(block)
 
-            bare_lf = self._receive_buffer.find(b"\n")
-            if bare_lf >= 0 and (
-                bare_lf == 0 or self._receive_buffer[bare_lf - 1] != 0x0D
-            ):
-                self._close_with_backoff()
-                raise BetfairStreamProtocolError(
-                    "Betfair stream frame used a non-CRLF delimiter"
-                )
-            if len(self._receive_buffer) > self._max_frame_bytes:
-                self._close_with_backoff()
-                raise BetfairStreamProtocolError(
-                    "Betfair stream frame exceeded the configured size limit"
-                )
-
-            try:
-                block = stream.recv(_SOCKET_READ_BYTES)
-            except (OSError, ssl.SSLError, TimeoutError):
-                self._close_with_backoff()
-                raise BetfairStreamTransportError(
-                    "Betfair stream receive failed"
-                ) from None
-            if not block:
-                had_partial = bool(self._receive_buffer)
-                self._close_with_backoff()
-                if had_partial:
-                    raise BetfairStreamProtocolError(
-                        "Betfair stream disconnected with a truncated frame"
+            with self._lifecycle_lock:
+                if (
+                    self._socket is not stream
+                    or self._connection_id != connection_id
+                    or self._connection_generation != connection_generation
+                ):
+                    raise BetfairStreamTransportError(
+                        "Betfair stream connection changed during frame acquisition"
                     )
-                raise BetfairStreamTransportError(
-                    "Betfair stream connection closed before receiving data"
-                )
-            self._append_received_block(block)
+                self._frame_sequence += 1
+                frame_sequence = self._frame_sequence
 
-        with self._lifecycle_lock:
-            if (
-                self._socket is not stream
-                or self._connection_id != connection_id
-                or self._connection_generation != connection_generation
-            ):
-                raise BetfairStreamTransportError(
-                    "Betfair stream connection changed during frame acquisition"
-                )
-            self._frame_sequence += 1
-            frame_sequence = self._frame_sequence
-
-        issued = BetfairStreamAuthenticatedFrame(
-            connection_id=connection_id,
-            connection_generation=connection_generation,
-            frame_sequence=frame_sequence,
-            payload=payload,
-            payload_sha256=sha256(payload).hexdigest(),
-            received_monotonic_ns=received_monotonic_ns,
-        )
-        _ISSUED_AUTHENTICATED_FRAMES[issued] = (
-            _authenticated_frame_fingerprint(issued),
-            received_clock_witness,
-        )
-        return issued
+            issued = BetfairStreamAuthenticatedFrame(
+                connection_id=connection_id,
+                connection_generation=connection_generation,
+                frame_sequence=frame_sequence,
+                payload=payload,
+                payload_sha256=sha256(payload).hexdigest(),
+                received_monotonic_ns=received_monotonic_ns,
+            )
+            _ISSUED_AUTHENTICATED_FRAMES[issued] = (
+                _authenticated_frame_fingerprint(issued),
+                received_clock_witness,
+            )
+            return issued
 
     def read_persisted_frame(
         self,

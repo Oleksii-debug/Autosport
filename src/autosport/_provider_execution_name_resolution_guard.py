@@ -16,6 +16,7 @@ from types import FunctionType
 # Import the consumer first; it legally composes timeout/provider dependencies before
 # this final witness layer observes their already-installed public entrypoints.
 from . import supervised_execution as _execution
+from . import betfair_supervised_execution as _betfair_write
 from . import betfair_timeout_reconciliation as _timeout
 from . import supervised_provider_evidence as _provider
 
@@ -313,6 +314,7 @@ def _install() -> None:
     provider_verifier = _provider.verify_betfair_provider_state
     provider_assertion = _provider.assert_verified_provider_evidence_authoritative
     not_found_reconciler = _execution.reconcile_provider_not_found
+    betfair_write_executor = _betfair_write.execute_betfair_supervised_action
     if not all(
         type(value) is FunctionType
         for value in (
@@ -320,6 +322,7 @@ def _install() -> None:
             provider_verifier,
             provider_assertion,
             not_found_reconciler,
+            betfair_write_executor,
         )
     ):
         raise RuntimeError("canonical provider execution authority callables are unavailable")
@@ -339,6 +342,10 @@ def _install() -> None:
     _execution.reconcile_provider_not_found = _sealed(
         not_found_reconciler,
         label="provider NOT_FOUND reconciler",
+    )
+    _betfair_write.execute_betfair_supervised_action = _sealed(
+        betfair_write_executor,
+        label="Betfair supervised write executor",
     )
 
 

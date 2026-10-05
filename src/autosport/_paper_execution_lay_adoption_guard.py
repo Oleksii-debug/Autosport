@@ -203,6 +203,7 @@ def _ticket_matches_attempt(
         and leg.locked_odds == attempt.execution_odds
         and leg.sport == binding.sport
         and leg.exchange_side == side.lower()
+        and leg.market_semantics_id == binding.market_semantics_id
     )
 
 
@@ -252,6 +253,7 @@ def _materialize_attempt(
                 locked_odds=attempt.execution_odds,
                 sport=binding.sport,
                 exchange_side=side.lower(),
+                market_semantics_id=binding.market_semantics_id,
             )
         ],
         attempt.execution_stake,
@@ -353,6 +355,7 @@ def _assert_recoverable_book_state(
                     locked_odds=attempt.execution_odds,
                     sport=binding.sport,
                     exchange_side=side.lower(),
+                    market_semantics_id=binding.market_semantics_id,
                 )
             ],
             attempt.execution_stake,

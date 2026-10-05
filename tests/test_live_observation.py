@@ -1434,7 +1434,8 @@ class LiveObservationTests(unittest.TestCase):
         self.assertFalse(worker.start(slow_task))
         release.set()
         message = self._wait_for_message(worker)
-        self.assertIs(message.result, expected)
+        self.assertEqual(message.result, expected)
+        self.assertIsNot(message.result, expected)
         self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 
@@ -1458,7 +1459,8 @@ class LiveObservationTests(unittest.TestCase):
         self.assertFalse(worker._thread.daemon)
         release.set()
         message = self._wait_for_message(worker)
-        self.assertIs(message.result, expected)
+        self.assertEqual(message.result, expected)
+        self.assertIsNot(message.result, expected)
         self.assertFalse(worker.busy)
 
     def test_worker_thread_start_failure_publishes_terminal_error_and_allows_retry(self):
@@ -1491,7 +1493,8 @@ class LiveObservationTests(unittest.TestCase):
         self.assertTrue(worker.start(task))
         message = self._wait_for_message(worker)
         self.assertTrue(task_ran.is_set())
-        self.assertIs(message.result, expected)
+        self.assertEqual(message.result, expected)
+        self.assertIsNot(message.result, expected)
         self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 
@@ -1524,7 +1527,8 @@ class LiveObservationTests(unittest.TestCase):
         self.assertTrue(worker.start(task))
         message = self._wait_for_message(worker)
         self.assertTrue(task_ran.is_set())
-        self.assertIs(message.result, expected)
+        self.assertEqual(message.result, expected)
+        self.assertIsNot(message.result, expected)
         self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 
@@ -1558,7 +1562,8 @@ class LiveObservationTests(unittest.TestCase):
         self.assertTrue(worker.start(task))
         message = self._wait_for_message(worker)
         self.assertTrue(task_ran.is_set())
-        self.assertIs(message.result, expected)
+        self.assertEqual(message.result, expected)
+        self.assertIsNot(message.result, expected)
         self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 
@@ -1682,7 +1687,8 @@ class LiveObservationTests(unittest.TestCase):
 
         self.assertTrue(worker.start(lambda: expected))
         completed = self._wait_for_message(worker)
-        self.assertIs(completed.result, expected)
+        self.assertEqual(completed.result, expected)
+        self.assertIsNot(completed.result, expected)
         self.assertIsNone(completed.error)
         self.assertFalse(worker.busy)
 

@@ -33,6 +33,15 @@ _SCHEMA_MISSING = object()
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
 
 
+def _require_registry_book_key_authority(book: object) -> None:
+    book_type = type(book)
+    if (
+        book_type.__hash__ is not object.__hash__
+        or book_type.__eq__ is not object.__eq__
+    ):
+        raise ValueError("PaperBook registry key authority changed")
+
+
 def _ticket_opening_commitment(ticket: PaperTicket) -> tuple[object, ...]:
     """Return detached immutable opening facts that authorized PAPER economics."""
     leg_commitments = tuple(
@@ -72,10 +81,12 @@ def _make_ticket_opening_authority_registry():
             raise ValueError("PaperBook ticket opening commitment authority changed")
 
     def register_book(book: object) -> None:
+        _require_registry_book_key_authority(book)
         with guard:
             authorities[book] = {}
 
     def record(book: object, ticket: PaperTicket) -> None:
+        _require_registry_book_key_authority(book)
         require_commitment_authority()
         commitment = commitment_for(ticket)
         require_commitment_authority()
@@ -89,10 +100,12 @@ def _make_ticket_opening_authority_registry():
             current[ticket.ticket_id] = commitment
 
     def revoke(book: object) -> None:
+        _require_registry_book_key_authority(book)
         with guard:
             authorities.pop(book, None)
 
     def install_validated_snapshot(book: object) -> None:
+        _require_registry_book_key_authority(book)
         require_commitment_authority()
         commitments = {
             ticket_id: commitment_for(ticket)
@@ -105,6 +118,7 @@ def _make_ticket_opening_authority_registry():
             authorities[book] = commitments
 
     def require_current(book: object) -> None:
+        _require_registry_book_key_authority(book)
         require_commitment_authority()
         with guard:
             current = authorities.get(book)
@@ -126,6 +140,8 @@ def _make_ticket_opening_authority_registry():
                 )
 
     def require_candidate(source_book: object, candidate_book: object) -> None:
+        _require_registry_book_key_authority(source_book)
+        _require_registry_book_key_authority(candidate_book)
         require_commitment_authority()
         with guard:
             current = authorities.get(source_book)
@@ -189,19 +205,23 @@ def _make_paperbook_causal_history_authority_registry():
     guard = threading.RLock()
 
     def register_book(book: object) -> None:
+        _require_registry_book_key_authority(book)
         with guard:
             authorities[book] = ((), ())
 
     def revoke(book: object) -> None:
+        _require_registry_book_key_authority(book)
         with guard:
             authorities.pop(book, None)
 
     def install_validated_snapshot(book: object) -> None:
+        _require_registry_book_key_authority(book)
         snapshot = _paperbook_causal_history_snapshot(book)
         with guard:
             authorities[book] = snapshot
 
     def require_current(book: object) -> None:
+        _require_registry_book_key_authority(book)
         actual = _paperbook_causal_history_snapshot(book)
         with guard:
             expected = authorities.get(book)
@@ -215,6 +235,8 @@ def _make_paperbook_causal_history_authority_registry():
             )
 
     def require_candidate(source_book: object, candidate_book: object) -> None:
+        _require_registry_book_key_authority(source_book)
+        _require_registry_book_key_authority(candidate_book)
         candidate = _paperbook_causal_history_snapshot(candidate_book)
         with guard:
             expected = authorities.get(source_book)
@@ -228,6 +250,7 @@ def _make_paperbook_causal_history_authority_registry():
             )
 
     def advance_open(book: object, ticket_id: str) -> None:
+        _require_registry_book_key_authority(book)
         with guard:
             expected = authorities.get(book)
             if expected is None:
@@ -247,6 +270,7 @@ def _make_paperbook_causal_history_authority_registry():
         voids: tuple[str, ...],
         settled_at: str | None,
     ) -> None:
+        _require_registry_book_key_authority(book)
         with guard:
             expected = authorities.get(book)
             if expected is None:

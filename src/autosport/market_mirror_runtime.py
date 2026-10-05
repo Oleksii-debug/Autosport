@@ -694,10 +694,12 @@ class FocusedMirrorDependencyIndex:
         # advanced beyond the revision proven by routed invalidations, fall back to
         # the canonical selector-based focused view so a newly matching quote cannot
         # disappear from a live decision merely because routing raced this read.
-        return self._mirror.active_view(
+        # Registry truth can also change during that full read, so use the same
+        # revision-stamped retry fence as the explicit replacement path above.
+        return self._stable_live_decision_view(
+            normalized_id,
             as_of=as_of,
             max_age=max_age,
-            **self._selectors(dependency),
         )
 
     def replay_view(

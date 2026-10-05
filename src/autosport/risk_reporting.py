@@ -87,7 +87,6 @@ class ProductIssuedPaperDrawdownEvidence:
     schema: str
     metric_class: str
     equity_path_sha256: str
-    drawdown_evidence_sha256: str
     equity_path_point_count: int
     goal_id: str
     goal_revision: int
@@ -130,6 +129,7 @@ class PaperRiskReport:
     live_execution_headroom_authoritative: bool
     portfolio_risk_state_sha256: str
     equity_path_sha256: str
+    drawdown_evidence_sha256: str
     equity_path_point_count: int
     equity_path_availability_complete: bool
     settled_history_complete: bool

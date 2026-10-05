@@ -119,6 +119,21 @@ def _registered_observation(
     return record.as_observation(), registry
 
 
+class ExactPaperArithmeticTests(unittest.TestCase):
+    def test_large_exact_addition_bypasses_python_int_string_digit_limit(self):
+        left = Decimal("0." + ("9" * 5000))
+        right = Decimal("0." + ("1" * 5000))
+        expected_coefficient = Decimal(
+            int("9" * 5000) + int("1" * 5000)
+        ).as_tuple().digits
+        expected = Decimal((0, expected_coefficient, -5000))
+
+        actual = paper_reality._decimal_add_exact(left, right)
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual.as_tuple(), expected.as_tuple())
+
+
 class ExchangeLockedCapitalTests(unittest.TestCase):
     def test_back_locks_stake_exactly(self):
         stake = Decimal("10.000")

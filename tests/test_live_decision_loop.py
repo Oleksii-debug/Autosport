@@ -6146,6 +6146,87 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             resumed.close()
 
+    def test_market_frontier_retries_history_classification_after_selector_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=2)
+            provider_a = self._event(sequence=1)
+            provider_b_predecessor = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-b",
+                decimal_odds=Decimal("3.00"),
+                observed_ts=(self.START + timedelta(seconds=1)).isoformat(),
+                source_id="provider-b",
+                sequence=1,
+                status="open",
+                source_ts=(self.START + timedelta(seconds=1)).isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=1)).isoformat(),
+            )
+            provider_b_future = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-b",
+                decimal_odds=Decimal("3.20"),
+                observed_ts=decision_time.isoformat(),
+                source_id="provider-b",
+                sequence=2,
+                status="open",
+                source_ts=decision_time.isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=4)).isoformat(),
+            )
+            seed = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed).publish_many(
+                    (provider_a, provider_b_predecessor, provider_b_future)
+                )
+            finally:
+                seed.close()
+
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input("input-a", source_ids="provider-a")
+            original_requires = (
+                loop.dependencies.requires_current_history_fallback
+            )
+            calls = [0]
+
+            def replace_after_classification(input_id, *, as_of):
+                result = original_requires(input_id, as_of=as_of)
+                calls[0] += 1
+                if calls[0] == 1:
+                    self.assertFalse(result)
+                    self.assertTrue(loop.dependencies.unregister("input-a"))
+                    loop.dependencies.register(
+                        "input-a",
+                        source_ids="provider-b",
+                    )
+                return result
+
+            with patch.object(
+                loop.dependencies,
+                "requires_current_history_fallback",
+                side_effect=replace_after_classification,
+            ):
+                sampled = loop._sample_decision_market_frontier()
+
+            self.assertEqual(sampled, decision_time)
+            self.assertGreaterEqual(calls[0], 2)
+            self.assertTrue(loop._decision_market_history_frozen)
+            self.assertIsNotNone(loop._decision_market_history)
+            self.assertIn(
+                provider_b_predecessor.dedupe_key,
+                {
+                    event.dedupe_key
+                    for event, _generation in loop._decision_market_history
+                },
+            )
+            loop.close()
+
     def test_capture_retries_dependency_replacement_during_availability_scan(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

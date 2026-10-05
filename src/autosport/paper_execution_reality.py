@@ -229,7 +229,7 @@ def _canonical_run_reservation_inputs(
     config: PaperExecutionModelConfig,
     started_at: str,
     observation_evidence_ids: Mapping[str, str],
-) -> tuple[str, str, tuple[str, ...], dict[str, str]]:
+) -> tuple[str, str, tuple[str, ...], dict[str, str], str, str, str]:
     _require_canonical_execution_plan_surface(plan)
     _require_canonical_execution_config_surface(config)
     run_id = _impl._text(run_id, "run_id")
@@ -240,12 +240,28 @@ def _canonical_run_reservation_inputs(
         raise PaperExecutionStateError(
             "run_id does not match canonical plan/trigger/config identity"
         )
+    # Snapshot every reservation identity derived from caller-owned frozen
+    # objects before consulting any caller-controlled evidence mapping. A
+    # Mapping can execute arbitrary code while iterating, including mutating a
+    # frozen dataclass through object.__setattr__. Durable state must therefore
+    # never re-read plan/config after evidence canonicalization begins.
+    plan_id = plan.plan_id
+    plan_fingerprint = plan.fingerprint
+    model_fingerprint = config.fingerprint
     action_ids = tuple(action.action_id for action in plan.actions)
     evidence_ids = _canonical_observation_evidence_ids(
         observation_evidence_ids,
         action_ids=action_ids,
     )
-    return run_id, trigger_id, action_ids, evidence_ids
+    return (
+        run_id,
+        trigger_id,
+        action_ids,
+        evidence_ids,
+        plan_id,
+        plan_fingerprint,
+        model_fingerprint,
+    )
 
 
 class PaperExecutionLedger(_impl.PaperExecutionLedger):
@@ -301,6 +317,9 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             trigger_id,
             action_ids,
             observation_evidence_ids,
+            plan_id,
+            plan_fingerprint,
+            model_fingerprint,
         ) = _canonical_run_reservation_inputs(
             run_id=run_id,
             trigger_id=trigger_id,
@@ -319,9 +338,9 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             )
         base_payload = {
             "trigger_id": trigger_id,
-            "plan_id": plan.plan_id,
-            "plan_fingerprint": plan.fingerprint,
-            "model_fingerprint": config.fingerprint,
+            "plan_id": plan_id,
+            "plan_fingerprint": plan_fingerprint,
+            "model_fingerprint": model_fingerprint,
             "started_at": started_at,
             "action_ids": list(action_ids),
             "observation_evidence_ids": observation_evidence_ids,
@@ -669,6 +688,9 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             trigger_id,
             action_ids,
             observation_evidence_ids,
+            plan_id,
+            plan_fingerprint,
+            model_fingerprint,
         ) = _canonical_run_reservation_inputs(
             run_id=run_id,
             trigger_id=trigger_id,
@@ -786,9 +808,9 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             return PaperExecutionRun(
                 run_id=run_id,
                 trigger_id=trigger_id,
-                plan_id=plan.plan_id,
-                plan_fingerprint=plan.fingerprint,
-                model_fingerprint=config.fingerprint,
+                plan_id=plan_id,
+                plan_fingerprint=plan_fingerprint,
+                model_fingerprint=model_fingerprint,
                 started_at=started_at,
                 attempts=attempts,
                 pending_action_ids=derived.pending_action_ids,
@@ -800,9 +822,9 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         return PaperExecutionRun(
             run_id=run_id,
             trigger_id=trigger_id,
-            plan_id=plan.plan_id,
-            plan_fingerprint=plan.fingerprint,
-            model_fingerprint=config.fingerprint,
+            plan_id=plan_id,
+            plan_fingerprint=plan_fingerprint,
+            model_fingerprint=model_fingerprint,
             started_at=started_at,
             attempts=attempts,
             pending_action_ids=derived.pending_action_ids,

@@ -22,6 +22,7 @@ from . import betfair_standard_limit_price_bound as _price_bound_module
 from . import real_execution_ledger as _ledger_module
 from . import supervised_plan_issuance as _issuance_module
 from . import monotonic_workspace_authority as _monotonic_module
+from . import json_integrity as _json_integrity_module
 from .betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundError,
     BetfairStandardLimitPriceBoundEvidence,
@@ -283,6 +284,19 @@ def _build_product_verifier():
     monotonic_digest_code = monotonic_digest.__code__
     monotonic_text = _monotonic_module._text
     monotonic_text_code = monotonic_text.__code__
+    strict_json_function = _json_integrity_module.strict_json_loads
+    strict_json_function_code = strict_json_function.__code__
+    strict_json_loader = _json_integrity_module.json.loads
+    strict_json_loader_code = strict_json_loader.__code__
+    strict_json_unique_object = _json_integrity_module._unique_json_object
+    strict_json_unique_object_code = strict_json_unique_object.__code__
+    strict_json_reject_constant = _json_integrity_module._reject_nonstandard_json_constant
+    strict_json_reject_constant_code = strict_json_reject_constant.__code__
+    strict_json_parse_integer = _json_integrity_module._parse_bounded_json_integer
+    strict_json_parse_integer_code = strict_json_parse_integer.__code__
+    strict_json_validate_value = _json_integrity_module._validate_strict_json_value
+    strict_json_validate_value_code = strict_json_validate_value.__code__
+    strict_json_integer_limit = _json_integrity_module._JSON_INTEGER_MAX_DIGITS
     ledger_saga = ledger_cls.saga
     ledger_saga_code = ledger_saga.__code__
     ledger_approval_active = ledger_cls.supervised_approval_is_active
@@ -420,6 +434,19 @@ def _build_product_verifier():
             or monotonic_digest.__code__ is not monotonic_digest_code
             or _monotonic_module._text is not monotonic_text
             or monotonic_text.__code__ is not monotonic_text_code
+            or _json_integrity_module.strict_json_loads is not strict_json_function
+            or strict_json_function.__code__ is not strict_json_function_code
+            or _json_integrity_module.json.loads is not strict_json_loader
+            or strict_json_loader.__code__ is not strict_json_loader_code
+            or _json_integrity_module._unique_json_object is not strict_json_unique_object
+            or strict_json_unique_object.__code__ is not strict_json_unique_object_code
+            or _json_integrity_module._reject_nonstandard_json_constant is not strict_json_reject_constant
+            or strict_json_reject_constant.__code__ is not strict_json_reject_constant_code
+            or _json_integrity_module._parse_bounded_json_integer is not strict_json_parse_integer
+            or strict_json_parse_integer.__code__ is not strict_json_parse_integer_code
+            or _json_integrity_module._validate_strict_json_value is not strict_json_validate_value
+            or strict_json_validate_value.__code__ is not strict_json_validate_value_code
+            or _json_integrity_module._JSON_INTEGER_MAX_DIGITS != strict_json_integer_limit
             or ledger_cls.saga is not ledger_saga
             or ledger_saga.__code__ is not ledger_saga_code
             or ledger_cls.supervised_approval_is_active is not ledger_approval_active

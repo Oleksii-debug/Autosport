@@ -424,15 +424,14 @@ class ProposedTicketRiskContext:
             ):
                 raise ValueError("proposed ticket context contains an invalid quote")
             try:
-                validated_quote = _CANONICAL_MARKET_EVENT_FROM_DICT(
-                    _CANONICAL_MARKET_EVENT_TO_DICT(quote)
-                )
+                serialized_quote = _CANONICAL_MARKET_EVENT_TO_DICT(quote)
+                validated_quote = _CANONICAL_MARKET_EVENT_FROM_DICT(serialized_quote)
                 _canonical_context_timestamp("quote observed_ts", quote.observed_ts)
                 if quote.source_ts is not None:
                     _canonical_context_timestamp("quote source_ts", quote.source_ts)
             except (AttributeError, TypeError, ValueError) as exc:
                 raise ValueError("proposed ticket context contains an invalid quote") from exc
-            if validated_quote != quote:
+            if _CANONICAL_MARKET_EVENT_TO_DICT(validated_quote) != serialized_quote:
                 raise ValueError("proposed ticket context contains a non-canonical quote")
             if quote.quote_key in quote_keys:
                 raise ValueError("proposed ticket context contains duplicate quote identity")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import heapq
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
@@ -2583,7 +2584,12 @@ class PersistentLiveDecisionLoop:
 
         duplicate = False
         execution_result = None
-        with WorkspaceEconomicLock(self.workspace):
+        execution_guard = (
+            nullcontext()
+            if self.paper_execution is None
+            else self.paper_execution.execution_guard()
+        )
+        with WorkspaceEconomicLock(self.workspace), execution_guard:
             if (
                 decision_context_sha256_override is None
                 and self._decision_context_sha256() != decision_context_sha256

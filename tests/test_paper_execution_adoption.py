@@ -332,6 +332,63 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 recovery_time.isoformat(),
             )
 
+    def test_expected_run_id_rejects_run_identity_resolver_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            hostile_calls = []
+
+            def forged_run_id(*_args):
+                hostile_calls.append(True)
+                return "forged-run"
+
+            original = adoption_module._paper_impl._run_id
+            adoption_module._paper_impl._run_id = forged_run_id
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "canonical PAPER execution run identity resolver changed",
+                ):
+                    runtime.expected_run_id(
+                        current_prepared,
+                        "trigger-run-id-rebind",
+                    )
+            finally:
+                adoption_module._paper_impl._run_id = original
+
+            self.assertEqual(hostile_calls, [])
+
+    def test_execute_with_clock_rejects_timestamp_parser_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            hostile_calls = []
+
+            def forged_timestamp(*_args):
+                hostile_calls.append(True)
+                return datetime.fromisoformat(STARTED_AT)
+
+            original = adoption_module._utc_timestamp
+            adoption_module._utc_timestamp = forged_timestamp
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "canonical PAPER execution timestamp parser changed",
+                ):
+                    runtime.execute_with_clock(
+                        prepared=current_prepared,
+                        trigger_id="trigger-timestamp-parser-rebind",
+                        clock=lambda: datetime.fromisoformat(
+                            "2026-09-20T06:01:00+00:00"
+                        ),
+                        materialize_exposure=True,
+                    )
+            finally:
+                adoption_module._utc_timestamp = original
+
+            self.assertEqual(hostile_calls, [])
+            self.assertEqual(book.tickets, {})
+
     def test_execute_with_clock_rejects_durable_loader_code_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, _ledger, runtime = self.runtime(tmp)

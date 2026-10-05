@@ -725,6 +725,13 @@ def _build_capability():
             or not description.startswith(transaction_charge_description_prefix)
         ):
             return None, None
+        description_suffix = description[len(transaction_charge_description_prefix):]
+        if (
+            not description_suffix
+            or description_suffix != description_suffix.strip()
+            or "\x00" in description_suffix
+        ):
+            return None, None
 
         transaction_id = nested.get("transactionId")
         if (

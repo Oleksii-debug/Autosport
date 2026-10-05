@@ -460,27 +460,25 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
         with self._read_lock:
             self._require_current_connection()
             frame = self._transport.read_authenticated_frame()
-            frame.assert_transport_issued()
-            try:
-                frame.assert_receive_clock_authority(_MONOTONIC_NS)
-            except BetfairStreamAuthenticationError as exc:
-                self._transport.close()
-                raise BetfairAuthenticatedStreamError(
-                    "authenticated frame receive clock authority mismatch"
-                ) from exc
-            try:
-                _require_same_connection(
-                    frame,
-                    self._subscription.connection_id,
-                    self._subscription.connection_generation,
-                )
-                raw = _decode_exact_transport_frame(frame)
-                if raw.get("op") != "mcm":
-                    raise BetfairAuthenticatedStreamError(
-                        "authenticated market freshness runtime accepts only mcm frames after subscription acknowledgement"
+            # Once recv() returns, semantic validation and any resulting revocation are
+            # one state-critical transition.  This prevents a concurrent evaluate()
+            # from issuing authority from older evidence after a newly received frame
+            # has already made the stream generation untrustworthy.
+            with self._state_lock:
+                try:
+                    frame.assert_transport_issued()
+                    frame.assert_receive_clock_authority(_MONOTONIC_NS)
+                    _require_same_connection(
+                        frame,
+                        self._subscription.connection_id,
+                        self._subscription.connection_generation,
                     )
-                accepted_ms = _wall_time_ms()
-                with self._state_lock:
+                    raw = _decode_exact_transport_frame(frame)
+                    if raw.get("op") != "mcm":
+                        raise BetfairAuthenticatedStreamError(
+                            "authenticated market freshness runtime accepts only mcm frames after subscription acknowledgement"
+                        )
+                    accepted_ms = _wall_time_ms()
                     self._require_current_connection()
                     issued = self._freshness.ingest_raw(
                         raw,
@@ -504,16 +502,21 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                             frame.received_monotonic_ns,
                         )
                     return issued
-            except Exception:
-                # Once an authenticated post-subscription frame cannot be proved and
-                # ingested under the exact canonical protocol, continuing on the same
-                # socket would silently bridge an unknown stream-state gap.  Tear down
-                # the connection so recovery must establish a fresh authenticated
-                # generation and subscription capability before any later datum can
-                # become decision-eligible.
-                self._transport_by_identity.clear()
-                self._transport.close()
-                raise
+                except BetfairStreamAuthenticationError as exc:
+                    self._transport_by_identity.clear()
+                    self._transport.close()
+                    raise BetfairAuthenticatedStreamError(
+                        "authenticated frame receive clock authority mismatch"
+                    ) from exc
+                except Exception:
+                    # Once an authenticated post-subscription frame cannot be proved
+                    # and ingested under the exact canonical protocol, continuing on
+                    # the same socket would silently bridge an unknown stream-state
+                    # gap. Tear down while holding the decision-state lock so no older
+                    # evidence can be promoted concurrently with revocation.
+                    self._transport_by_identity.clear()
+                    self._transport.close()
+                    raise
 
     def evaluate(
         self,

@@ -264,6 +264,40 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             ]
             self.assertEqual(len(run_events), 1)
 
+    def test_runtime_book_replacement_after_attempt_fails_before_materialization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("runtime-book-replacement", side="BACK")
+            current_prepared = prepared(runtime, current)
+            replacement = PaperBook("100.00")
+            original_execute = adoption_module.execute_paper_plan
+
+            def execute_then_replace(**kwargs):
+                run = original_execute(**kwargs)
+                runtime.book = replacement
+                return run
+
+            with patch.object(
+                adoption_module,
+                "execute_paper_plan",
+                execute_then_replace,
+            ):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "runtime authority object changed after construction",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="runtime-book-replacement",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(replacement.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+            self.assertEqual(replacement.balance, Decimal("100.00"))
+
     def test_post_mint_binding_mutation_fails_before_durable_scope_publication(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

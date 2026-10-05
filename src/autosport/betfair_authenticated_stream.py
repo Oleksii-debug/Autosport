@@ -919,7 +919,12 @@ def _runner_status_updates(
                 raise BetfairAuthenticatedStreamError(
                     "Betfair runner definition status is unsupported"
                 )
-            updates[(market_id, selection_id, handicap)] = status
+            runner_key = (market_id, selection_id, handicap)
+            if runner_key in updates:
+                raise BetfairAuthenticatedStreamError(
+                    "Betfair marketDefinition contains duplicate runner identity"
+                )
+            updates[runner_key] = status
     return updates
 
 

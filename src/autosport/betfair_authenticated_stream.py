@@ -680,6 +680,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
 
     def _require_runtime_frame_position(self) -> None:
         if _transport_frame_sequence(self._transport) != self._next_frame_sequence - 1:
+            self._transport.close()
             raise BetfairAuthenticatedStreamError(
                 "authenticated transport frame position advanced outside the market runtime"
             )

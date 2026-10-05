@@ -5,6 +5,7 @@ import os
 import tempfile
 import threading
 import uuid
+from functools import wraps
 from decimal import (
     Context,
     Decimal,
@@ -341,6 +342,35 @@ def _make_paperbook_causal_history_authority_registry():
 ) = _make_paperbook_causal_history_authority_registry()
 
 
+def _guard_paperbook_runtime_authority(method):
+    """Seal public PaperBook authority checks against module-level rebinding."""
+    opening_authority = _require_ticket_opening_authority
+    opening_authority_code = opening_authority.__code__
+    causal_authority = _require_paperbook_causal_history_authority
+    causal_authority_code = causal_authority.__code__
+
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        # Preserve the existing safety order: canonical visible state must be
+        # validated before hidden registries compare or hash caller-controlled
+        # values. Then invoke closure-captured authorities so rebinding their
+        # module globals cannot launder coherent economic/history mutation.
+        self._validate_loaded_state(self)
+        if opening_authority.__code__ is not opening_authority_code:
+            raise ValueError("PaperBook opening authority dispatch changed")
+        opening_authority(self)
+        if opening_authority.__code__ is not opening_authority_code:
+            raise ValueError("PaperBook opening authority dispatch changed")
+        if causal_authority.__code__ is not causal_authority_code:
+            raise ValueError("PaperBook causal-history authority dispatch changed")
+        causal_authority(self)
+        if causal_authority.__code__ is not causal_authority_code:
+            raise ValueError("PaperBook causal-history authority dispatch changed")
+        return method(self, *args, **kwargs)
+
+    return guarded
+
+
 def _paper_decimal_context() -> Context:
     context = Context(
         prec=_PAPER_DECIMAL_PRECISION,
@@ -391,6 +421,7 @@ class PaperBook:
         self._settlement_times: dict[str, str | None] = {}
 
     @property
+    @_guard_paperbook_runtime_authority
     def committed_stake(self) -> Decimal:
         self._validate_loaded_state(self)
         _require_ticket_opening_authority(self)
@@ -414,6 +445,7 @@ class PaperBook:
             raise ValueError("PaperBook stake debit arithmetic is not representable") from exc
         return new_balance
 
+    @_guard_paperbook_runtime_authority
     def open_ticket(
         self,
         legs,
@@ -532,6 +564,7 @@ class PaperBook:
             raise ValueError("PaperBook settlement arithmetic is not representable") from exc
         return status, payout, new_balance
 
+    @_guard_paperbook_runtime_authority
     def settle(
         self,
         ticket_id: str,
@@ -604,6 +637,7 @@ class PaperBook:
                 )
         return payload
 
+    @_guard_paperbook_runtime_authority
     def save(self, path: str | Path) -> None:
         # PaperBook and PaperTicket are intentionally mutable during a paper run.
         # Validate caller-visible state before hidden authority comparison so

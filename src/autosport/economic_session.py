@@ -147,41 +147,46 @@ class ProductEconomicSession:
         return False
 
 
-def _is_sha256(value: object) -> bool:
+def _is_sha256(value: object, *, _hex=_HEX) -> bool:
     return (
         type(value) is str
         and len(value) == 64
-        and all(character in _HEX for character in value)
+        and all(character in _hex for character in value)
     )
 
 
-def _is_transition_id(value: object) -> bool:
+def _is_transition_id(value: object, *, _hex=_HEX) -> bool:
     return (
         type(value) is str
         and len(value) == 32
-        and all(character in _HEX for character in value)
+        and all(character in _hex for character in value)
     )
 
 
-def _parse_instant(value: object) -> datetime:
+def _parse_instant(
+    value: object,
+    *,
+    _fromisoformat=datetime.fromisoformat,
+    _utc=timezone.utc,
+) -> datetime:
     if type(value) is not str or not value or value != value.strip():
         raise EconomicSessionIntegrityError("started_at must be canonical text")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = _fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise EconomicSessionIntegrityError("started_at must be valid ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise EconomicSessionIntegrityError("started_at must be timezone-aware")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(_utc)
 
 
-def _clock_instant(clock: Callable[[], int]) -> str:
+def _clock_instant(clock: Callable[[], int], *, _fromtimestamp=_DATETIME_FROMTIMESTAMP) -> str:
     epoch_ns = clock()
     if type(epoch_ns) is not int or epoch_ns < 0:
         raise EconomicSessionIntegrityError("economic-session clock is invalid")
     seconds, nanoseconds = divmod(epoch_ns, 1_000_000_000)
     try:
-        instant = _DATETIME_FROMTIMESTAMP(seconds, timezone.utc).replace(
+        instant = _fromtimestamp(seconds, timezone.utc).replace(
             microsecond=nanoseconds // 1000
         )
     except (OverflowError, OSError, ValueError) as exc:
@@ -191,10 +196,10 @@ def _clock_instant(clock: Callable[[], int]) -> str:
     return instant.isoformat().replace("+00:00", "Z")
 
 
-def _canonical_json_bytes(payload: dict[str, object]) -> bytes:
+def _canonical_json_bytes(payload: dict[str, object], *, _dumps=json.dumps) -> bytes:
     try:
         return (
-            json.dumps(
+            _dumps(
                 payload,
                 ensure_ascii=False,
                 sort_keys=True,
@@ -209,47 +214,69 @@ def _canonical_json_bytes(payload: dict[str, object]) -> bytes:
         ) from exc
 
 
-def _state_sha256(payload: dict[str, object]) -> str:
-    return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
+def _state_sha256(
+    payload: dict[str, object],
+    *,
+    _sha256=hashlib.sha256,
+    _canonical=_canonical_json_bytes,
+) -> str:
+    return _sha256(_canonical(payload)).hexdigest()
 
 
-def _semantic_binding(payload: dict[str, object]) -> str:
-    material = json.dumps(
+def _semantic_binding(
+    payload: dict[str, object],
+    *,
+    _dumps=json.dumps,
+    _sha256=hashlib.sha256,
+    _domain=_AUTHORITY_DOMAIN,
+) -> str:
+    material = _dumps(
         payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    return hashlib.sha256(
-        _AUTHORITY_DOMAIN.encode("utf-8") + b"\0" + material
+    return _sha256(
+        _domain.encode("utf-8") + b"\0" + material
     ).hexdigest()
 
 
-def _tx_id(payload: dict[str, object]) -> str:
+def _tx_id(payload: dict[str, object], *, _validator=_is_transition_id) -> str:
     value = payload["transition_id"]
-    if not _is_transition_id(value):
+    if not _validator(value):
         raise EconomicSessionIntegrityError("transition_id is invalid")
     return f"economic-session-{value}"
 
 
-def _read_regular_bytes(path: Path, *, limit: int, label: str) -> bytes:
+def _read_regular_bytes(
+    path: Path,
+    *,
+    limit: int,
+    label: str,
+    _stat=os.stat,
+    _fstat=os.fstat,
+    _read=os.read,
+    _close=os.close,
+    _open=_open_read_only_descriptor,
+    _is_regular=stat.S_ISREG,
+) -> bytes:
     try:
-        before = os.stat(path, follow_symlinks=False)
+        before = _stat(path, follow_symlinks=False)
     except OSError as exc:
         raise EconomicSessionIntegrityError(f"cannot inspect {label}") from exc
-    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+    if not _is_regular(before.st_mode) or before.st_nlink != 1:
         raise EconomicSessionIntegrityError(f"{label} must be a single-link regular file")
     if before.st_size < 0 or before.st_size > limit:
         raise EconomicSessionIntegrityError(f"{label} exceeds bounded size")
     try:
-        descriptor = _open_read_only_descriptor(path)
+        descriptor = _open(path)
     except OSError as exc:
         raise EconomicSessionIntegrityError(f"cannot safely open {label}") from exc
     try:
-        opened = os.fstat(descriptor)
+        opened = _fstat(descriptor)
         if (
-            not stat.S_ISREG(opened.st_mode)
+            not _is_regular(opened.st_mode)
             or opened.st_nlink != 1
             or opened.st_size < 0
             or opened.st_size > limit
@@ -261,15 +288,15 @@ def _read_regular_bytes(path: Path, *, limit: int, label: str) -> bytes:
             remaining = limit + 1 - total
             if remaining <= 0:
                 raise EconomicSessionIntegrityError(f"{label} exceeds bounded size")
-            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            chunk = _read(descriptor, min(64 * 1024, remaining))
             if not chunk:
                 break
             chunks.append(chunk)
             total += len(chunk)
             if total > limit:
                 raise EconomicSessionIntegrityError(f"{label} exceeds bounded size")
-        after = os.fstat(descriptor)
-        path_after = os.stat(path, follow_symlinks=False)
+        after = _fstat(descriptor)
+        path_after = _stat(path, follow_symlinks=False)
         if (
             opened.st_dev != after.st_dev
             or opened.st_ino != after.st_ino
@@ -278,30 +305,38 @@ def _read_regular_bytes(path: Path, *, limit: int, label: str) -> bytes:
             or opened.st_ctime_ns != after.st_ctime_ns
             or after.st_dev != path_after.st_dev
             or after.st_ino != path_after.st_ino
-            or not stat.S_ISREG(path_after.st_mode)
+            or not _is_regular(path_after.st_mode)
             or path_after.st_nlink != 1
         ):
             raise EconomicSessionIntegrityError(f"{label} changed while being read")
         return b"".join(chunks)
     finally:
-        os.close(descriptor)
+        _close(descriptor)
 
 
-def _opening_paperbook_sha256(path: Path) -> str:
-    before = _read_regular_bytes(path, limit=_MAX_PAPERBOOK_BYTES, label="canonical PaperBook")
+def _opening_paperbook_sha256(
+    path: Path,
+    *,
+    _read=_read_regular_bytes,
+    _load=_PAPERBOOK_LOAD,
+    _validate=_PAPERBOOK_VALIDATE_LOADED_STATE,
+    _sha256=hashlib.sha256,
+    _limit=_MAX_PAPERBOOK_BYTES,
+) -> str:
+    before = _read(path, limit=_limit, label="canonical PaperBook")
     try:
-        book = _PAPERBOOK_LOAD(path)
-        _PAPERBOOK_VALIDATE_LOADED_STATE(book)
+        book = _load(path)
+        _validate(book)
     except (OSError, TypeError, ValueError) as exc:
         raise EconomicSessionIntegrityError(
             "canonical PaperBook cannot establish economic session"
         ) from exc
-    after = _read_regular_bytes(path, limit=_MAX_PAPERBOOK_BYTES, label="canonical PaperBook")
+    after = _read(path, limit=_limit, label="canonical PaperBook")
     if before != after:
         raise EconomicSessionIntegrityError(
             "canonical PaperBook changed during economic-session issuance"
         )
-    return hashlib.sha256(after).hexdigest()
+    return _sha256(after).hexdigest()
 
 
 def _state_payload(
@@ -317,10 +352,12 @@ def _state_payload(
     opening_paperbook_sha256: str,
     product_clock_authoritative: bool,
     transition_id: str,
+    _schema=_STATE_SCHEMA,
+    _version=_STATE_SCHEMA_VERSION,
 ) -> dict[str, object]:
     return {
-        "schema": _STATE_SCHEMA,
-        "schema_version": _STATE_SCHEMA_VERSION,
+        "schema": _schema,
+        "schema_version": _version,
         "workspace_instance_id": workspace_instance_id,
         "transition_id": transition_id,
         "session_id": session_id,
@@ -335,20 +372,33 @@ def _state_payload(
     }
 
 
-def _decode_state(raw: bytes, *, workspace_instance_id: str) -> dict[str, object]:
+def _decode_state(
+    raw: bytes,
+    *,
+    workspace_instance_id: str,
+    _load_json=strict_json_loads,
+    _keys=_STATE_KEYS,
+    _schema=_STATE_SCHEMA,
+    _version=_STATE_SCHEMA_VERSION,
+    _transition_validator=_is_transition_id,
+    _sha_validator=_is_sha256,
+    _parse=_parse_instant,
+    _payload=_state_payload,
+    _canonical=_canonical_json_bytes,
+) -> dict[str, object]:
     try:
-        parsed = strict_json_loads(raw.decode("utf-8"))
+        parsed = _load_json(raw.decode("utf-8"))
     except (UnicodeError, TypeError, ValueError) as exc:
         raise EconomicSessionIntegrityError(
             "economic-session state is not strict UTF-8 JSON"
         ) from exc
-    if type(parsed) is not dict or frozenset(parsed) != _STATE_KEYS:
+    if type(parsed) is not dict or frozenset(parsed) != _keys:
         raise EconomicSessionIntegrityError("economic-session state schema keys mismatch")
     if (
-        parsed["schema"] != _STATE_SCHEMA
-        or parsed["schema_version"] != _STATE_SCHEMA_VERSION
+        parsed["schema"] != _schema
+        or parsed["schema_version"] != _version
         or parsed["workspace_instance_id"] != workspace_instance_id
-        or not _is_transition_id(parsed["transition_id"])
+        or not _transition_validator(parsed["transition_id"])
         or type(parsed["session_id"]) is not str
         or not parsed["session_id"]
         or type(parsed["goal_id"]) is not str
@@ -359,13 +409,13 @@ def _decode_state(raw: bytes, *, workspace_instance_id: str) -> dict[str, object
         or not parsed["bankroll_id"]
         or type(parsed["currency"]) is not str
         or not parsed["currency"]
-        or not _is_sha256(parsed["goal_contract_sha256"])
-        or not _is_sha256(parsed["opening_paperbook_sha256"])
+        or not _sha_validator(parsed["goal_contract_sha256"])
+        or not _sha_validator(parsed["opening_paperbook_sha256"])
         or type(parsed["product_clock_authoritative"]) is not bool
     ):
         raise EconomicSessionIntegrityError("economic-session state identity is invalid")
-    _parse_instant(parsed["started_at"])
-    canonical = _state_payload(
+    _parse(parsed["started_at"])
+    canonical = _payload(
         workspace_instance_id=workspace_instance_id,
         session_id=str(parsed["session_id"]),
         goal_id=str(parsed["goal_id"]),
@@ -378,7 +428,7 @@ def _decode_state(raw: bytes, *, workspace_instance_id: str) -> dict[str, object
         product_clock_authoritative=bool(parsed["product_clock_authoritative"]),
         transition_id=str(parsed["transition_id"]),
     )
-    if parsed != canonical or raw != _CANONICAL_JSON_BYTES(canonical):
+    if parsed != canonical or raw != _canonical(canonical):
         raise EconomicSessionIntegrityError("economic-session state is not canonical")
     return canonical
 
@@ -447,6 +497,10 @@ class ProductEconomicSessionStore:
         self._read_regular_bytes_witness = _read_regular_bytes
         self._decode_state_witness = _decode_state
         self._state_payload_witness = _state_payload
+        self._sha256_witness = hashlib.sha256
+        self._lexists_witness = os.path.lexists
+        self._provenance_for_witness = provenance_for
+        self._atomic_write_json_witness = atomic_write_json
         self._authority_schema_witness = (
             _STATE_SCHEMA,
             _STATE_SCHEMA_VERSION,
@@ -498,6 +552,10 @@ class ProductEconomicSessionStore:
             or _read_regular_bytes is not self._read_regular_bytes_witness
             or _decode_state is not self._decode_state_witness
             or _state_payload is not self._state_payload_witness
+            or hashlib.sha256 is not self._sha256_witness
+            or os.path.lexists is not self._lexists_witness
+            or provenance_for is not self._provenance_for_witness
+            or atomic_write_json is not self._atomic_write_json_witness
             or _UUID4 is not self._uuid4_witness
             or _opening_paperbook_sha256 is not self._opening_paperbook_sha256_witness
             or EconomicGoalStore.load is not self._economic_goal_load_witness
@@ -527,8 +585,8 @@ class ProductEconomicSessionStore:
         with _WORKSPACE_LOCK_TYPE(self._workspace_witness):
             self._require_configuration_authority()
             goal = _ECONOMIC_GOAL_LOAD(self._goal_store_witness)
-            provenance = provenance_for(goal)
-            if os.path.lexists(self._state_path_witness):
+            provenance = self._provenance_for_witness(goal)
+            if self._lexists_witness(self._state_path_witness):
                 raw = self._read_regular_bytes_witness(
                     self._state_path_witness, limit=_MAX_STATE_BYTES, label="economic-session state"
                 )
@@ -536,7 +594,7 @@ class ProductEconomicSessionStore:
                     raw,
                     workspace_instance_id=self._authority_witness.workspace_instance_id,
                 )
-                observed = hashlib.sha256(raw).hexdigest()
+                observed = self._sha256_witness(raw).hexdigest()
                 self._require_configuration_authority()
                 recovery = _AUTHORITY_RECOVER(
                     self._authority_witness,
@@ -626,11 +684,11 @@ class ProductEconomicSessionStore:
             intended_state_sha256=intended,
             semantic_binding_sha256=binding,
         )
-        atomic_write_json(self._state_path_witness, payload)
+        self._atomic_write_json_witness(self._state_path_witness, payload)
         raw = self._read_regular_bytes_witness(
             self._state_path_witness, limit=_MAX_STATE_BYTES, label="economic-session state"
         )
-        observed = hashlib.sha256(raw).hexdigest()
+        observed = self._sha256_witness(raw).hexdigest()
         if observed != intended:
             raise EconomicSessionIntegrityError(
                 "published economic-session state does not match prepared digest"

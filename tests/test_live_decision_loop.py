@@ -8295,6 +8295,69 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.close()
 
+    def test_same_selector_reincarnation_after_ledger_append_blocks_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            mutated = [False]
+            loop = None
+
+            def reincarnate_after_append():
+                if mutated[0]:
+                    return
+                mutated[0] = True
+                assert loop is not None
+                self.assertTrue(loop.dependencies.unregister("input-a"))
+                loop.dependencies.register(
+                    "input-a",
+                    selection_ids="selection-a",
+                )
+
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                post_append_hook=reincarnate_after_append,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "focused dependency registry changed during durable ledger publication",
+            ):
+                loop.run_cycle()
+
+            self.assertTrue(mutated[0])
+            pending = json.loads(loop.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(pending["phase"], "append_pending")
+            records = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()
+            self.assertEqual(len(records), 1)
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "changed before durable ledger publication",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(
+                json.loads(loop.progress_path.read_text(encoding="utf-8"))["phase"],
+                "append_pending",
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+            loop.close()
+
     def test_pending_recovery_rejects_same_selector_reincarnation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

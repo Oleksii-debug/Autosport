@@ -12,9 +12,11 @@ This path is observation-only. It has no bookmaker account, wager placement, fun
 
 and returns:
 
-- ingestion statistics;
-- persistent source-health state;
-- sorted current quotes for that provider source.
+- validated ingestion statistics;
+- persistent source-health state bound to the same source/cursor/quality evidence;
+- decision-causal current quotes for that provider source, ordered by the full canonical `quote_key`.
+
+Sealed generation-zero migration rows remain audit/sequence evidence in durable history but are excluded from the returned live result until positive product-issued append provenance exists.
 
 It does not invoke paper strategy agents and does not open PaperBook tickets.
 

@@ -10,6 +10,7 @@ from autosport.paper_execution_reality import (
     EvidenceGrade,
     PaperAttemptOutcome,
     PaperExecutionEvidenceRecord,
+    PaperExecutionIntegrityError,
     PaperExecutionLedger,
     PaperExecutionRun,
     RecoveryDecision,
@@ -62,6 +63,42 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
             "decimal fixed-point representation exceeds resource limit",
         ):
             record.to_dict()
+
+    def test_all_evidence_decimal_siblings_preflight_before_any_formatting(self) -> None:
+        record = evidence()
+        object.__setattr__(record, "accepted_stake", Decimal("1E+8192"))
+        formatted: list[Decimal] = []
+
+        def tracking_format(value: Decimal, spec: str) -> str:
+            formatted.append(value)
+            return value.__format__(spec)
+
+        sentinel = object()
+        previous = legacy.__dict__.get("format", sentinel)
+        legacy.format = tracking_format
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal fixed-point representation exceeds resource limit",
+            ):
+                record.to_dict()
+        finally:
+            if previous is sentinel:
+                del legacy.format
+            else:
+                legacy.format = previous
+
+        self.assertEqual(formatted, [])
+
+    def test_reload_rejects_oversized_evidence_under_same_resource_law(self) -> None:
+        payload = evidence().to_dict()
+        payload["accepted_stake"] = "1E+8192"
+
+        with self.assertRaisesRegex(
+            PaperExecutionIntegrityError,
+            "invalid evidence record",
+        ):
+            PaperExecutionEvidenceRecord.from_dict(payload)
 
     def test_mutated_oversized_evidence_cannot_append_durable_authority(
         self,

@@ -9,6 +9,8 @@ from .domain import PaperTicket, TicketLeg, TicketStatus
 from .exchange_exposure import locked_capital_for_exchange_side
 
 
+_ORIGINAL_LOCKED_CAPITAL = locked_capital_for_exchange_side
+
 _ORIGINAL_OPEN_TICKET = _paper.PaperBook.open_ticket
 _ORIGINAL_SETTLE = _paper.PaperBook.settle
 _ORIGINAL_VALIDATE_TICKET_LEG = _paper.PaperBook._validate_ticket_leg.__func__
@@ -234,7 +236,7 @@ def _require_supported_ticket_shape(ticket: PaperTicket) -> None:
 def _locked_capital_for_ticket(ticket: PaperTicket) -> Decimal:
     _require_supported_ticket_shape(ticket)
     if len(ticket.legs) == 1 and _is_lay_leg(ticket.legs[0]):
-        return locked_capital_for_exchange_side(
+        return _ORIGINAL_LOCKED_CAPITAL(
             stake=ticket.stake,
             odds=ticket.legs[0].locked_odds,
             exchange_side="LAY",
@@ -348,7 +350,7 @@ def _open_ticket_unlocked(
     amount = _canonical_open_stake(self, stake)
     if amount <= 0:
         raise ValueError("stake must be positive")
-    locked_capital = locked_capital_for_exchange_side(
+    locked_capital = _ORIGINAL_LOCKED_CAPITAL(
         stake=amount,
         odds=leg.locked_odds,
         exchange_side="LAY",

@@ -6,6 +6,8 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
+import autosport.paper_execution_adoption as adoption_module
+
 from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
@@ -329,6 +331,37 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 reservations[0]["payload"]["started_at"],
                 recovery_time.isoformat(),
             )
+
+    def test_execute_with_clock_rejects_module_durable_loader_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            hostile_calls = []
+
+            def forged_loader(_ledger):
+                hostile_calls.append(True)
+                return ()
+
+            original = adoption_module._PAPER_EXECUTION_LEDGER_LOAD_UNL
+            adoption_module._PAPER_EXECUTION_LEDGER_LOAD_UNL = forged_loader
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "canonical PAPER execution ledger reader changed",
+                ):
+                    runtime.execute_with_clock(
+                        prepared=current_prepared,
+                        trigger_id="trigger-module-loader-rebind",
+                        clock=lambda: datetime.fromisoformat(
+                            "2026-09-20T06:01:00+00:00"
+                        ),
+                        materialize_exposure=True,
+                    )
+            finally:
+                adoption_module._PAPER_EXECUTION_LEDGER_LOAD_UNL = original
+
+            self.assertEqual(hostile_calls, [])
+            self.assertEqual(book.tickets, {})
 
     def test_execute_with_clock_ignores_rebound_durable_loader_for_start_authority(self):
         with tempfile.TemporaryDirectory() as tmp:

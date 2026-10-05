@@ -659,6 +659,57 @@ def _synthetic_attempt(
     )
 
 
+def _require_canonical_execution_config_surface(
+    config: PaperExecutionModelConfig,
+) -> None:
+    if type(config) is not PaperExecutionModelConfig:
+        raise TypeError("config must be exact PaperExecutionModelConfig")
+    for name in ("model_id", "model_version", "evidence_source", "seed"):
+        if type(getattr(config, name)) is not str:
+            raise PaperExecutionStateError(
+                f"execution config {name} must retain exact canonical text authority"
+            )
+    if type(config.evidence_grade) is not EvidenceGrade:
+        raise PaperExecutionStateError(
+            "execution config evidence_grade must retain canonical evidence authority"
+        )
+    for name in (
+        "max_quote_age_ms",
+        "min_delay_ms",
+        "max_delay_ms",
+        "rejected_bps",
+        "partial_bps",
+        "unknown_bps",
+        "partial_fill_bps",
+        "max_slippage_bps",
+    ):
+        value = getattr(config, name)
+        if type(value) is not int or value < 0:
+            raise PaperExecutionStateError(
+                f"execution config {name} must retain canonical non-negative integer authority"
+            )
+    if config.max_delay_ms < config.min_delay_ms:
+        raise PaperExecutionStateError(
+            "execution config delay bounds are no longer canonical"
+        )
+    if config.max_quote_age_ms <= 0:
+        raise PaperExecutionStateError(
+            "execution config max_quote_age_ms must remain positive"
+        )
+    if config.rejected_bps + config.partial_bps + config.unknown_bps > 10_000:
+        raise PaperExecutionStateError(
+            "execution config outcome basis points exceed canonical total"
+        )
+    if not 0 < config.partial_fill_bps < 10_000:
+        raise PaperExecutionStateError(
+            "execution config partial_fill_bps left canonical range"
+        )
+    if config.max_slippage_bps >= 10_000:
+        raise PaperExecutionStateError(
+            "execution config max_slippage_bps left canonical range"
+        )
+
+
 def _require_canonical_execution_plan_surface(plan: ExecutionPlan) -> None:
     if type(plan) is not ExecutionPlan:
         raise TypeError("plan must be exact ExecutionPlan")
@@ -736,12 +787,10 @@ def execute_paper_plan(
     suspended_action_ids: frozenset[str] = frozenset(),
 ) -> PaperExecutionRun:
     """Execute/resume one PAPER/SHADOW run without provider writes or real money."""
-    if not isinstance(plan, ExecutionPlan):
-        raise TypeError("plan must be ExecutionPlan")
-    if not isinstance(config, PaperExecutionModelConfig):
-        raise TypeError("config must be PaperExecutionModelConfig")
-    if not isinstance(ledger, PaperExecutionLedger):
-        raise TypeError("ledger must be PaperExecutionLedger")
+    _require_canonical_execution_plan_surface(plan)
+    _require_canonical_execution_config_surface(config)
+    if type(ledger) is not PaperExecutionLedger:
+        raise TypeError("ledger must be exact PaperExecutionLedger")
     trigger_id = _impl._text(trigger_id, "trigger_id")
     _impl._timestamp(started_at, "started_at")
     if observations is None:

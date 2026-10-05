@@ -107,11 +107,28 @@ def build_operator_source_config(source_id: str) -> OperatorSourceConfig:
 
 
 def parse_operator_source_config(payload: bytes | bytearray | memoryview) -> OperatorSourceConfig:
-    if not isinstance(payload, (bytes, bytearray, memoryview)):
-        raise TypeError("payload must be bytes-like")
-    raw = bytes(payload)
-    if not raw or len(raw) > 4096:
+    # Reject user-defined bytes-like subclasses before any len()/bytes() dispatch,
+    # and prove the bounded size before making a detached materialized copy.
+    if type(payload) not in {bytes, bytearray, memoryview}:
+        raise TypeError("payload must be exact bytes-like")
+    try:
+        payload_size = payload.nbytes if type(payload) is memoryview else len(payload)
+    except (BufferError, ValueError):
+        raise OperatorSourceConfigError(
+            "operator source configuration payload cannot be inspected"
+        ) from None
+    if payload_size <= 0 or payload_size > 4096:
         raise OperatorSourceConfigError("operator source configuration payload size is invalid")
+    try:
+        raw = bytes(payload)
+    except (BufferError, TypeError, ValueError):
+        raise OperatorSourceConfigError(
+            "operator source configuration payload cannot be materialized"
+        ) from None
+    if len(raw) != payload_size:
+        raise OperatorSourceConfigError(
+            "operator source configuration payload size changed during materialization"
+        )
     try:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError:

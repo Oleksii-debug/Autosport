@@ -11,6 +11,51 @@ from autosport.storage import SQLiteMarketStore
 
 
 class MarketEventBusDeliverySnapshotIntegrityTests(unittest.TestCase):
+    def test_bus_rejects_substituted_store_callback_and_event_types(self) -> None:
+        class Store(SQLiteMarketStore):
+            pass
+
+        class Event(MarketEvent):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hostile_store = Store(root / "hostile.db")
+            try:
+                with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+                    MarketEventBus(hostile_store)
+            finally:
+                hostile_store.close()
+
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                bus = MarketEventBus(store)
+                with self.assertRaisesRegex(TypeError, "callback must be callable"):
+                    bus.subscribe(None)
+
+                canonical = MarketEvent.from_dict(
+                    {
+                        "event_id": "event-1",
+                        "market_id": "winner",
+                        "selection_id": "alice",
+                        "decimal_odds": "2.0",
+                        "observed_ts": "2026-09-14T00:00:00+00:00",
+                        "source_id": "source-1",
+                        "sequence": 1,
+                    }
+                )
+                hostile = Event.from_dict(canonical.to_dict())
+                self.assertIs(type(hostile), Event)
+
+                with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+                    bus.publish(hostile)
+                with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+                    bus.publish_many((canonical, hostile))
+
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
     def test_subscriber_mutation_cannot_rewrite_later_delivery_or_failure_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SQLiteMarketStore(Path(tmp) / "market.db")

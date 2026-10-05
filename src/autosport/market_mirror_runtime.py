@@ -161,6 +161,7 @@ class FocusedMirrorDependencyIndex:
         self._dependencies: dict[str, FocusedMirrorDependency] = {}
         self._matched_keys: dict[str, set[MirrorQuoteKey]] = {}
         self._matched_revisions: dict[str, int] = {}
+        self._dependency_revisions: dict[str, int] = {}
         self._registry_revision = 0
         self._lock = RLock()
 
@@ -213,6 +214,7 @@ class FocusedMirrorDependencyIndex:
             self._matched_keys[normalized_id] = initial_keys
             self._matched_revisions[normalized_id] = initial_view.revision
             self._registry_revision += 1
+            self._dependency_revisions[normalized_id] = self._registry_revision
 
         # Close the mirror-view -> registry-publication race without making this
         # index a second market-state authority. If mirror truth advanced after
@@ -238,9 +240,18 @@ class FocusedMirrorDependencyIndex:
             removed = self._dependencies.pop(normalized_id, None)
             self._matched_keys.pop(normalized_id, None)
             self._matched_revisions.pop(normalized_id, None)
+            self._dependency_revisions.pop(normalized_id, None)
             if removed is not None:
                 self._registry_revision += 1
             return removed is not None
+
+    def dependency_revision(self, input_id: str) -> int:
+        """Return the incarnation token for one currently registered dependency."""
+        normalized_id = self._input_id(input_id)
+        with self._lock:
+            if normalized_id not in self._dependencies:
+                raise KeyError(f"unknown focused mirror input {normalized_id!r}")
+            return self._dependency_revisions[normalized_id]
 
     @property
     def input_ids(self) -> tuple[str, ...]:

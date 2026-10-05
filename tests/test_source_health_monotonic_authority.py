@@ -675,8 +675,13 @@ def test_bootstrap_digest_is_from_the_exact_validated_snapshot(
 
     assert swapped is True
     probe = object.__new__(SourceHealthStore)
-    probe.path = path
-    probe._lock_path = path.with_name(path.name + ".lock")
+    probe.path = path.resolve(strict=False)
+    probe._path_authority = probe.path
+    probe._lock_path = probe.path.with_name(probe.path.name + ".lock")
+    probe._lock_path_authority = probe._lock_path
+    probe._temporary_path_authority = probe.path.with_suffix(probe.path.suffix + ".tmp")
+    parent_info = probe.path.parent.stat()
+    probe._parent_identity_authority = (parent_info.st_dev, parent_info.st_ino)
     assert probe._monotonic_authority().read_history() == ()
 
 
@@ -723,8 +728,13 @@ def test_bootstrap_rejects_bytes_changed_during_durability_barrier(
     # The raced bytes must not acquire a COMMIT from the digest that was validated
     # before the durability barrier.
     probe = object.__new__(SourceHealthStore)
-    probe.path = path
-    probe._lock_path = path.with_name(path.name + ".lock")
+    probe.path = path.resolve(strict=False)
+    probe._path_authority = probe.path
+    probe._lock_path = probe.path.with_name(probe.path.name + ".lock")
+    probe._lock_path_authority = probe._lock_path
+    probe._temporary_path_authority = probe.path.with_suffix(probe.path.suffix + ".tmp")
+    parent_info = probe.path.parent.stat()
+    probe._parent_identity_authority = (parent_info.st_dev, parent_info.st_ino)
     assert probe._monotonic_authority().read_history() == ()
 
 
@@ -900,8 +910,13 @@ def test_first_legacy_baseline_can_retry_after_aborted_prepare(
     # Build the same authority identity without running SourceHealthStore.__init__
     # so the test can stop the first-ever baseline at PREPARE.
     probe = object.__new__(SourceHealthStore)
-    probe.path = path
-    probe._lock_path = path.with_name(path.name + ".lock")
+    probe.path = path.resolve(strict=False)
+    probe._path_authority = probe.path
+    probe._lock_path = probe.path.with_name(probe.path.name + ".lock")
+    probe._lock_path_authority = probe._lock_path
+    probe._temporary_path_authority = probe.path.with_suffix(probe.path.suffix + ".tmp")
+    parent_info = probe.path.parent.stat()
+    probe._parent_identity_authority = (parent_info.st_dev, parent_info.st_ino)
     observed = _sha256(legacy_bytes)
     authority = probe._monotonic_authority()
     binding = probe._authority_binding(None, observed, kind="BOOTSTRAP")

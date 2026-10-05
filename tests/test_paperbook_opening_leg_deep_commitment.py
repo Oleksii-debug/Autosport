@@ -361,6 +361,31 @@ def test_hidden_registries_reject_in_place_registry_key_validator_code_mutation(
     assert book.balance == Decimal("90")
 
 
+def test_settlement_resolution_keys_reject_str_subclass_before_internal_hashing() -> None:
+    class HostileResolutionKey(str):
+        hash_calls = 0
+
+        def __hash__(self) -> int:
+            type(self).hash_calls += 1
+            return super().__hash__()
+
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+    hostile = HostileResolutionKey(ticket.legs[0].quote_key)
+    HostileResolutionKey.hash_calls = 0
+
+    with pytest.raises(
+        ValueError,
+        match="winning_quote_keys must contain non-empty string quote keys",
+    ):
+        book.settle(ticket.ticket_id, [hostile], settled_at=_TS)
+
+    assert HostileResolutionKey.hash_calls == 0
+    assert ticket.status.value == "open"
+    assert ticket.payout == Decimal("0")
+
+
+
 def test_causal_registry_ignores_rebound_snapshot_module_dispatch(monkeypatch) -> None:
     book = PaperBook("100")
     book.open_ticket([_leg()], "10", placed_at=_TS)

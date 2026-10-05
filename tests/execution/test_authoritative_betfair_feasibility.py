@@ -1021,12 +1021,10 @@ def test_builtin_type_rebinding_cannot_mask_ledger_subclass(
                 return RealExecutionLedger
             return real_type(value)
 
+        caught = None
         with monkeypatch.context() as patch:
             patch.setattr(builtins, "type", forged_type)
-            with pytest.raises(
-                TypeError,
-                match="ledger must be exact RealExecutionLedger",
-            ):
+            try:
                 assess_authoritative_betfair_execution_feasibility(
                     ledger,
                     bound,
@@ -1034,6 +1032,11 @@ def test_builtin_type_rebinding_cannot_mask_ledger_subclass(
                     action_id=ACTION_ID,
                     max_snapshot_age=timedelta(seconds=2),
                 )
+            except TypeError as exc:
+                caught = exc
+
+        assert caught is not None
+        assert "ledger must be exact RealExecutionLedger" in str(caught)
     assert called is False
 
 

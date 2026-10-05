@@ -85,6 +85,7 @@ class ProductIssuedPaperEquityPath:
     availability_complete: bool
     settled_history_complete: bool
     money_scope_complete: bool
+    opening_capital_authority_complete: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +112,7 @@ class ProductIssuedPaperDrawdownEvidence:
     availability_complete: bool
     settled_history_complete: bool
     money_scope_complete: bool
+    opening_capital_authority_complete: bool
     evidence_sha256: str
 
 
@@ -140,6 +142,7 @@ class PaperRiskReport:
     equity_path_availability_complete: bool
     settled_history_complete: bool
     money_scope_complete: bool
+    opening_capital_authority_complete: bool
     history_view: str
     historical_as_known_supported: bool
     goal_id: str
@@ -186,6 +189,7 @@ def _equity_path_payload(
     availability_complete: bool,
     settled_history_complete: bool,
     money_scope_complete: bool,
+    opening_capital_authority_complete: bool,
 ) -> dict[str, object]:
     return {
         "schema": EQUITY_PATH_SCHEMA,
@@ -202,6 +206,7 @@ def _equity_path_payload(
         "availability_complete": availability_complete,
         "settled_history_complete": settled_history_complete,
         "money_scope_complete": money_scope_complete,
+        "opening_capital_authority_complete": opening_capital_authority_complete,
         "points": [
             {
                 "sequence": point.sequence,
@@ -350,11 +355,17 @@ def build_product_issued_paper_equity_path(
     settled_history_complete = all(
         ticket.status is not TicketStatus.OPEN for ticket in book.tickets.values()
     )
-    money_scope_complete = all(
+    money_scope_complete = bool(book.tickets) and all(
         ticket.bankroll_id == goal_snapshot.bankroll_id
         and ticket.currency == goal_snapshot.currency
         for ticket in book.tickets.values()
     )
+    # Current PaperBook persistence owns the opening numeric balance but does not
+    # durably bind that opening capital to EconomicGoal.bankroll_id/currency.
+    # Ticket-level provenance cannot retroactively mint that owner-capital
+    # authority. Keep the fact explicit and fail closed for downstream financial
+    # consumers until the canonical PaperBook/opening-capital authority carries it.
+    opening_capital_authority_complete = False
     payload = _equity_path_payload(
         goal_snapshot=goal_snapshot,
         goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
@@ -364,6 +375,7 @@ def build_product_issued_paper_equity_path(
         availability_complete=availability_complete,
         settled_history_complete=settled_history_complete,
         money_scope_complete=money_scope_complete,
+        opening_capital_authority_complete=opening_capital_authority_complete,
     )
     path_sha256 = hashlib.sha256(
         json.dumps(
@@ -395,6 +407,7 @@ def build_product_issued_paper_equity_path(
         availability_complete=availability_complete,
         settled_history_complete=settled_history_complete,
         money_scope_complete=money_scope_complete,
+        opening_capital_authority_complete=opening_capital_authority_complete,
     )
 
 
@@ -477,6 +490,10 @@ def verified_settled_minimum_equity(
         raise ValueError(
             "minimum equity requires exact bankroll and currency provenance"
         )
+    if not resolved.opening_capital_authority_complete:
+        raise ValueError(
+            "minimum equity requires product-issued opening-capital authority"
+        )
     return resolved.minimum_equity, resolved.minimum_equity_point_id
 
 
@@ -512,6 +529,7 @@ def _drawdown_evidence_payload(
         "availability_complete": path.availability_complete,
         "settled_history_complete": path.settled_history_complete,
         "money_scope_complete": path.money_scope_complete,
+        "opening_capital_authority_complete": path.opening_capital_authority_complete,
     }
 
 
@@ -553,6 +571,7 @@ def build_product_issued_paper_drawdown_evidence(
         availability_complete=path.availability_complete,
         settled_history_complete=path.settled_history_complete,
         money_scope_complete=path.money_scope_complete,
+        opening_capital_authority_complete=path.opening_capital_authority_complete,
         evidence_sha256=evidence_sha256,
     )
 
@@ -704,6 +723,10 @@ def resolve_durable_verified_settled_minimum_equity(
     if not resolved.money_scope_complete:
         raise ValueError(
             "minimum equity requires exact bankroll and currency provenance"
+        )
+    if not resolved.opening_capital_authority_complete:
+        raise ValueError(
+            "minimum equity requires product-issued opening-capital authority"
         )
     return (
         resolved.minimum_equity,
@@ -942,6 +965,7 @@ def build_paper_risk_report(
         equity_path_availability_complete=equity_path.availability_complete,
         settled_history_complete=equity_path.settled_history_complete,
         money_scope_complete=equity_path.money_scope_complete,
+        opening_capital_authority_complete=equity_path.opening_capital_authority_complete,
         history_view=equity_path.history_view,
         historical_as_known_supported=equity_path.historical_as_known_supported,
         goal_id=goal_snapshot.goal_id,

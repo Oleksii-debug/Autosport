@@ -68,6 +68,67 @@ class PaperRiskReportingTests(unittest.TestCase):
             sport=sport,
         )
 
+    def test_equity_builder_ignores_rebound_locked_capital_helper(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(110),),
+            Decimal("10"),
+            placed_at="2026-09-21T19:00:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        goal = self._goal()
+        expected = build_product_issued_paper_equity_path(book, goal)
+        attacker_called = False
+
+        def attacker_helper(_ticket):
+            nonlocal attacker_called
+            attacker_called = True
+            return Decimal("0")
+
+        with patch.object(
+            risk_reporting,
+            "_paper_ticket_equity_locked_capital",
+            side_effect=attacker_helper,
+        ):
+            actual = build_product_issued_paper_equity_path(book, goal)
+
+        self.assertFalse(attacker_called)
+        self.assertEqual(actual, expected)
+
+
+    def test_equity_builder_rejects_in_place_locked_capital_helper_code_mutation(self) -> None:
+        book = PaperBook("100")
+        book.open_ticket(
+            (self._leg(111),),
+            Decimal("10"),
+            placed_at="2026-09-21T19:05:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        goal = self._goal()
+        helper = risk_reporting._CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL
+        original_code = helper.__code__
+        attacker_called = False
+
+        def attacker_helper(_ticket):
+            nonlocal attacker_called
+            attacker_called = True
+            return Decimal("0")
+
+        try:
+            helper.__code__ = attacker_helper.__code__
+            with self.assertRaisesRegex(
+                ValueError,
+                "locked-capital authority changed",
+            ):
+                build_product_issued_paper_equity_path(book, goal)
+        finally:
+            helper.__code__ = original_code
+
+        self.assertFalse(attacker_called)
+
+
     def test_equity_locked_capital_fails_closed_for_lay_until_liability_authority_is_consumed(self) -> None:
         back = PaperTicket(
             ticket_id="back-ticket",

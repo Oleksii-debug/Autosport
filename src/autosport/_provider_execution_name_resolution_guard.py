@@ -346,3 +346,8 @@ _install()
 del _install
 del _sealed
 del _capture_function_graph
+
+# The final provider assertion is now LOAD_GLOBAL/closure sealed. Install the
+# verified-effect ledger mint fence only after that final wrapper exists, so the
+# positive durable write path cannot capture an earlier, less-composed assertion.
+from . import _verified_provider_effect_ledger_mint_fence as _verified_provider_effect_ledger_mint_fence  # noqa: F401,E402

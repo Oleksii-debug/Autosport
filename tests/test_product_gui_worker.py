@@ -486,3 +486,43 @@ def test_runtime_status_guard_rejects_unbounded_last_success() -> None:
             expected_source_id="source-1",
             expected_state=SessionState.RUNNING,
         )
+
+
+def test_worker_rejects_poll_seconds_subclass_before_float_dispatch(
+    tmp_path: Path,
+) -> None:
+    class HostileFloat(float):
+        def __float__(self) -> float:
+            raise AssertionError("poll_seconds subtype conversion must not execute")
+
+    worker = ProductGuiWorker(runtime_builder=lambda *_args: _FakeRuntime())
+
+    with pytest.raises(ValueError):
+        worker.start(
+            workspace=tmp_path,
+            source_factory="provider.module:factory",
+            poll_seconds=HostileFloat(30.0),
+        )
+
+    assert worker.busy is False
+
+
+@pytest.mark.parametrize(
+    "bankroll",
+    ["", " 10000", "10000 ", "x" * 129],
+)
+def test_worker_rejects_noncanonical_initial_bankroll(
+    tmp_path: Path,
+    bankroll: str,
+) -> None:
+    worker = ProductGuiWorker(runtime_builder=lambda *_args: _FakeRuntime())
+
+    with pytest.raises(ValueError):
+        worker.start(
+            workspace=tmp_path,
+            source_factory="provider.module:factory",
+            initial_bankroll=bankroll,
+            poll_seconds=60,
+        )
+
+    assert worker.busy is False

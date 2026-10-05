@@ -857,3 +857,66 @@ def test_resolver_rejects_custom_tzinfo_before_timezone_hooks_execute():
             )
 
     assert attacker_called is False
+
+
+def test_slippage_source_digest_rejects_decimal_subclass_before_string_hook(
+    monkeypatch,
+    tmp_path,
+):
+    bound, _approval, _issuance_store, _issued = _issue(monkeypatch, tmp_path)
+    action = bound.execution_plan.actions[0]
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+    closure = inspect.getclosurevars(
+        subject.resolve_prospective_applicable_costs_with_betfair_standard_limit
+    )
+    sealed_digest = closure.nonlocals["slippage_evidence_id"]
+    attacker_called = False
+
+    class HostileDecimal(Decimal):
+        def __str__(self):
+            nonlocal attacker_called
+            attacker_called = True
+            raise AssertionError("Decimal subclass string hook must never execute")
+
+    original = object.__getattribute__(evidence, "requested_stake")
+    try:
+        object.__setattr__(evidence, "requested_stake", HostileDecimal("10"))
+        with pytest.raises(
+            subject.ProspectiveApplicableCostError,
+            match="requested_stake must be an exact finite positive Decimal",
+        ):
+            sealed_digest(evidence)
+    finally:
+        object.__setattr__(evidence, "requested_stake", original)
+
+    assert attacker_called is False
+
+
+def test_slippage_source_digest_rejects_non_boolean_proof_flags(
+    monkeypatch,
+    tmp_path,
+):
+    bound, _approval, _issuance_store, _issued = _issue(monkeypatch, tmp_path)
+    action = bound.execution_plan.actions[0]
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+    closure = inspect.getclosurevars(
+        subject.resolve_prospective_applicable_costs_with_betfair_standard_limit
+    )
+    sealed_digest = closure.nonlocals["slippage_evidence_id"]
+
+    original = object.__getattribute__(evidence, "matchme_applicability_proven")
+    try:
+        object.__setattr__(evidence, "matchme_applicability_proven", 1)
+        with pytest.raises(
+            subject.ProspectiveApplicableCostError,
+            match="proof flags must be exact bool",
+        ):
+            sealed_digest(evidence)
+    finally:
+        object.__setattr__(evidence, "matchme_applicability_proven", original)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import ntpath
 import os
 import re
 import stat
@@ -9,6 +11,13 @@ from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
 from typing import BinaryIO
+
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicAuthorityRecoveryRequiredError,
+    MonotonicAuthorityRollbackError,
+    MonotonicWorkspaceAuthority,
+)
 
 
 _ALLOWED_HEALTH_STATUSES = frozenset({"unknown", "healthy", "degraded", "failed"})
@@ -35,6 +44,16 @@ _SCHEMA_V3 = 3
 _SCHEMA_V4 = 4
 _HISTORY_ENTRY_V2_FIELDS = frozenset({"recorded_at", "state"})
 _HISTORY_ENTRY_V3_FIELDS = frozenset({"recorded_at", "transition_order", "state"})
+_SOURCE_HEALTH_AUTHORITY_DOMAIN = "autosport.source-health-store.v1"
+
+
+def _source_health_authority_key(
+    path: Path,
+    *,
+    windows: bool | None = None,
+) -> str:
+    use_windows_rules = os.name == "nt" if windows is None else windows
+    return ntpath.normcase(path.name) if use_windows_rules else path.name
 
 
 def parse_source_timestamp(value: str) -> datetime:
@@ -372,7 +391,161 @@ class SourceHealthStore:
             if not self.path.exists():
                 self._write({"schema_version": _SCHEMA_V4, "sources": {}, "history": {}})
             else:
-                self._read()
+                _, observed = self._read_snapshot(verify_authority=False)
+                self._recover_or_bootstrap_authority(observed)
+            self._read()
+
+    def _monotonic_authority(self) -> MonotonicWorkspaceAuthority:
+        return MonotonicWorkspaceAuthority(
+            workspace=self._path_authority.parent.resolve(strict=False),
+            domain=_SOURCE_HEALTH_AUTHORITY_DOMAIN,
+            key=_source_health_authority_key(self._path_authority),
+        )
+
+    @staticmethod
+    def _sha256_bytes(value: bytes) -> str:
+        return hashlib.sha256(value).hexdigest()
+
+    def _current_state_sha256(self) -> str | None:
+        if not self._path_authority.exists():
+            return None
+        self._assert_target_shape()
+        return self._sha256_bytes(self._path_authority.read_bytes())
+
+    def _authority_binding(
+        self,
+        observed: str | None,
+        intended: str,
+        *,
+        kind: str,
+    ) -> str:
+        material = "\0".join(
+            (
+                _SOURCE_HEALTH_AUTHORITY_DOMAIN,
+                kind,
+                _source_health_authority_key(self._path_authority),
+                observed or "<PRISTINE>",
+                intended,
+            )
+        ).encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
+
+    def _sync_existing_file(self) -> None:
+        self._assert_target_shape()
+        try:
+            with self._path_authority.open("rb") as handle:
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise RuntimeError(
+                "source health durability barrier failed"
+            ) from exc
+
+    def _bootstrap_validated_authority_state(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+        observed: str,
+    ) -> None:
+        self._sync_existing_file()
+        self._sync_parent_directory()
+        if self._current_state_sha256() != observed:
+            raise MonotonicAuthorityRollbackError(
+                "source health state changed during authority bootstrap durability barrier"
+            )
+        binding = self._authority_binding(None, observed, kind="BOOTSTRAP")
+        tx_id = self._next_authority_tx_id(
+            authority,
+            None,
+            observed,
+            binding,
+        )
+        authority.prepare(
+            tx_id=tx_id,
+            observed_state_sha256=None,
+            intended_state_sha256=observed,
+            semantic_binding_sha256=binding,
+        )
+        authority.commit(
+            tx_id=tx_id,
+            observed_state_sha256=observed,
+            semantic_binding_sha256=binding,
+        )
+
+    def _recover_or_bootstrap_authority(
+        self,
+        observed: str | None,
+    ) -> MonotonicWorkspaceAuthority:
+        authority = self._monotonic_authority()
+        history = authority.read_history()
+        if not history:
+            if observed is not None:
+                self._bootstrap_validated_authority_state(authority, observed)
+            return authority
+
+        pending = history[-1] if history[-1].phase is AuthorityPhase.PREPARE else None
+        if pending is not None:
+            if observed == pending.intended_state_sha256:
+                self._sync_existing_file()
+                self._sync_parent_directory()
+                observed = self._current_state_sha256()
+            authority.recover(
+                observed_state_sha256=observed,
+                tx_id=pending.tx_id,
+                semantic_binding_sha256=pending.semantic_binding_sha256,
+            )
+            return authority
+
+        has_committed_state = any(
+            record.phase is AuthorityPhase.COMMIT for record in history
+        )
+        if not has_committed_state and observed is not None:
+            self._bootstrap_validated_authority_state(authority, observed)
+            return authority
+
+        authority.recover(observed_state_sha256=observed)
+        return authority
+
+    def _recover_current_for_write(self) -> None:
+        self._recover_or_bootstrap_authority(self._current_state_sha256())
+
+    def _next_authority_tx_id(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+        observed: str | None,
+        intended: str,
+        semantic_binding_sha256: str,
+    ) -> str:
+        history = authority.read_history()
+        authority_tip = history[-1].record_sha256 if history else "<PRISTINE>"
+        material = "\0".join(
+            (
+                _source_health_authority_key(self._path_authority),
+                authority_tip,
+                observed or "<PRISTINE>",
+                intended,
+                semantic_binding_sha256,
+            )
+        ).encode("utf-8")
+        return f"source-health-{hashlib.sha256(material).hexdigest()}"
+
+    def _verify_authority_current(self, observed: str) -> None:
+        authority = self._monotonic_authority()
+        history = authority.read_history()
+        if not history:
+            raise MonotonicAuthorityRollbackError(
+                "source health state is missing independent monotonic authority"
+            )
+        pending = history[-1] if history[-1].phase is AuthorityPhase.PREPARE else None
+        if pending is not None:
+            if observed == pending.previous_committed_state_sha256:
+                return
+            if observed == pending.intended_state_sha256:
+                raise MonotonicAuthorityRecoveryRequiredError(
+                    "source health publication requires monotonic commit recovery"
+                )
+            raise MonotonicAuthorityRollbackError(
+                "source health state matches neither committed nor prepared authority"
+            )
+        authority.recover(observed_state_sha256=observed)
 
     def _assert_persistence_authority(self) -> None:
         if (
@@ -569,6 +742,7 @@ class SourceHealthStore:
         )
 
         with self._writer_guard():
+            self._recover_current_for_write()
             state = self.get(source_id)
             return self._record_success_locked(
                 state,
@@ -612,6 +786,7 @@ class SourceHealthStore:
         )
 
         with self._writer_guard():
+            self._recover_current_for_write()
             current = self.get(expected_before.source_id)
             if ambiguous_after is not None and current == ambiguous_after:
                 raise RuntimeError(
@@ -648,6 +823,7 @@ class SourceHealthStore:
         ):
             raise ValueError("invalid source health failure kind")
         with self._writer_guard():
+            self._recover_current_for_write()
             state = self.get(source_id)
             state.poll_count += 1
             state.total_failures += 1
@@ -774,12 +950,17 @@ class SourceHealthStore:
         value["quality_flags"] = tuple(value["quality_flags"])
         SourceHealthState(**value)
 
-    def _read(self) -> dict:
+    def _read_snapshot(
+        self,
+        *,
+        verify_authority: bool = True,
+    ) -> tuple[dict, str]:
         self._assert_persistence_authority()
         self._assert_target_shape()
         try:
+            raw_bytes = self._path_authority.read_bytes()
             raw = json.loads(
-                self._path_authority.read_text(encoding="utf-8"),
+                raw_bytes.decode("utf-8"),
                 object_pairs_hook=_reject_duplicate_json_keys,
                 parse_constant=_reject_nonfinite_json_constant,
             )
@@ -866,6 +1047,13 @@ class SourceHealthStore:
                         raise ValueError("source health latest projection/history mismatch")
         except (TypeError, ValueError) as exc:
             raise ValueError("invalid source health state/history") from exc
+        digest = self._sha256_bytes(raw_bytes)
+        if verify_authority:
+            self._verify_authority_current(digest)
+        return raw, digest
+
+    def _read(self, *, verify_authority: bool = True) -> dict:
+        raw, _ = self._read_snapshot(verify_authority=verify_authority)
         return raw
 
     def _write(self, raw: dict) -> None:
@@ -892,9 +1080,35 @@ class SourceHealthStore:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+            intended = self._sha256_bytes(temporary.read_bytes())
+            observed = self._current_state_sha256()
+            authority = self._recover_or_bootstrap_authority(observed)
+            binding = self._authority_binding(observed, intended, kind="PUBLISH")
+            tx_id = self._next_authority_tx_id(
+                authority,
+                observed,
+                intended,
+                binding,
+            )
+            authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=observed,
+                intended_state_sha256=intended,
+                semantic_binding_sha256=binding,
+            )
             self._assert_persistence_authority()
             os.replace(temporary, self._path_authority)
             self._sync_parent_directory()
+            published = self._current_state_sha256()
+            if published != intended:
+                raise RuntimeError(
+                    "published source health bytes do not match prepared authority digest"
+                )
+            authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=intended,
+                semantic_binding_sha256=binding,
+            )
             self._assert_persistence_authority()
         finally:
             try:

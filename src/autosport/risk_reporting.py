@@ -13,11 +13,16 @@ import hashlib
 import json
 from dataclasses import dataclass
 from decimal import Decimal, DecimalException, Inexact, localcontext
+from pathlib import Path
 
 from .domain import TicketStatus
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
-from .economic_goal_store import economic_goal_from_payload, economic_goal_to_payload
+from .economic_goal_store import (
+    EconomicGoalStore,
+    economic_goal_from_payload,
+    economic_goal_to_payload,
+)
 from .paper import PaperBook
 from .risk import PaperRiskPolicy
 
@@ -495,6 +500,62 @@ def verify_product_issued_paper_drawdown_evidence(
     if resolved != evidence:
         raise ValueError("drawdown evidence does not match canonical product state")
     return resolved
+
+
+def _durable_source_pair(
+    *,
+    paper_book_path: str,
+    workspace: str,
+) -> tuple[PaperBook, EconomicGoalContract]:
+    if type(paper_book_path) is not str or not paper_book_path:
+        raise TypeError("paper_book_path must be an exact non-empty str")
+    if type(workspace) is not str or not workspace:
+        raise TypeError("workspace must be an exact non-empty str")
+
+    store = EconomicGoalStore(Path(workspace))
+    goal_before = store.load()
+    goal_before_provenance = provenance_for(goal_before)
+    book = PaperBook.load(Path(paper_book_path))
+    goal_after = store.load()
+    if provenance_for(goal_after) != goal_before_provenance:
+        raise ValueError("durable economic goal changed during equity-path resolution")
+
+    before_state = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    if before_state is None:
+        raise ValueError("durable PaperBook cannot issue canonical equity-path evidence")
+    book_after = PaperBook.load(Path(paper_book_path))
+    after_state = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book_after)
+    if after_state is None or after_state != before_state:
+        raise ValueError("durable PaperBook changed during equity-path resolution")
+    return book_after, goal_after
+
+
+def resolve_durable_product_issued_paper_equity_path(
+    *,
+    paper_book_path: str,
+    workspace: str,
+) -> ProductIssuedPaperEquityPath:
+    """Re-resolve equity-path evidence from durable product-owned state only."""
+
+    book, goal = _durable_source_pair(
+        paper_book_path=paper_book_path,
+        workspace=workspace,
+    )
+    return build_product_issued_paper_equity_path(book, goal)
+
+
+def resolve_durable_product_issued_paper_drawdown_evidence(
+    *,
+    paper_book_path: str,
+    workspace: str,
+) -> ProductIssuedPaperDrawdownEvidence:
+    """Re-resolve drawdown evidence from the same durable equity-path source."""
+
+    book, goal = _durable_source_pair(
+        paper_book_path=paper_book_path,
+        workspace=workspace,
+    )
+    return build_product_issued_paper_drawdown_evidence(book, goal)
 
 
 def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:

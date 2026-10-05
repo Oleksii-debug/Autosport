@@ -78,6 +78,24 @@ Both approvals and rejections are written as `DecisionRecord` entries with:
 
 The later generic contract must preserve equivalent auditability while binding strategy class, exact event/market/selection/provider identities, source/receive timestamps, quote freshness, evidence/provenance hashes, portfolio identity, decision timestamp, strategy/model/config identity, exact/approximate/completeness truth and risk-policy result.
 
+## Replay market truth
+
+Research replay uses the same causal market boundary as the canonical Market Mirror.
+A quote is decision-visible only when its provider/source clock (or local observation
+fallback), local `observed_ts`, and local `ingest_ts` are all no later than the
+decision cutoff. A quote that was observed but not yet locally ingested is not evidence
+available to that historical decision.
+
+Provider-local `sequence` is the latest-state authority; later wall-clock observation
+does not allow a lower sequence to replace a newer quote. Reusing one sequence with a
+different payload fails closed. Because the research candidate quote identity does not
+independently carry provider identity, the same `quote_key` appearing from multiple
+`source_id` values is treated as ambiguous rather than silently collapsed.
+
+Legacy evidence hashes remain stable when `ingest_ts == observed_ts`. A material local
+receipt delay is identity-bearing and is included in the research event/snapshot hash,
+so changing historical availability changes the bound evidence identity.
+
 ## Transaction boundary
 
 When this pipeline is used inside a persistent dataset run, its PaperBook and Decision Ledger must be the staged objects owned by the run transaction introduced in PR #24. That gives the research decision the same early-crash atomicity as the rest of the paper run.

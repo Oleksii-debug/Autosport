@@ -217,6 +217,51 @@ def test_transaction_charge_signal_is_bound_into_billing_evidence_identity() -> 
         )
 
 
+
+class _HostileProviderChargeClass(str):
+    comparisons = 0
+
+    def __eq__(self, other: object) -> bool:
+        type(self).comparisons += 1
+        return super().__eq__(other)
+
+
+class _HostileProviderTransactionId(int):
+    comparisons = 0
+
+    def __le__(self, other: object) -> bool:
+        type(self).comparisons += 1
+        return super().__le__(other)
+
+
+def test_revalidation_rejects_provider_charge_class_subclass_before_equality() -> None:
+    observation = _read(_statement_row())
+    item = observation.statement.items[0]
+    hostile = _HostileProviderChargeClass(item.provider_charge_class or "")
+    _HostileProviderChargeClass.comparisons = 0
+
+    from dataclasses import replace
+
+    with pytest.raises(BetfairReadOnlyError, match="unsupported provider charge class"):
+        replace(item, provider_charge_class=hostile)
+
+    assert _HostileProviderChargeClass.comparisons == 0
+
+
+def test_revalidation_rejects_provider_transaction_id_subclass_before_numeric_dispatch() -> None:
+    observation = _read(_statement_row())
+    item = observation.statement.items[0]
+    hostile = _HostileProviderTransactionId(item.provider_transaction_id or 1)
+    _HostileProviderTransactionId.comparisons = 0
+
+    from dataclasses import replace
+
+    with pytest.raises(BetfairReadOnlyError, match="positive exact integer"):
+        replace(item, provider_transaction_id=hostile)
+
+    assert _HostileProviderTransactionId.comparisons == 0
+
+
 def test_transaction_charge_signal_does_not_mint_intent_allocation() -> None:
     observation = _read(_statement_row())
     evidence = resolve_provider_billing_row_attribution(observation, "0")

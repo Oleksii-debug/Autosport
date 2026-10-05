@@ -2,6 +2,7 @@ import threading
 import unittest
 
 from autosport.domain import MarketEvent
+from autosport.market_state_identity import PROPHETX_REST_MARKET_STATE_CONTRACT
 from autosport.replay import FutureLeakageError, ReplayEngine, ReplayLeakageFirewall
 
 
@@ -19,6 +20,48 @@ class ReplayFirewallReuseTests(unittest.TestCase):
                 "sequence": 1,
             }
         )
+
+    @staticmethod
+    def _semantic_refresh_event(sequence: int) -> MarketEvent:
+        timestamp = f"2026-01-01T00:00:0{sequence}+00:00"
+        return MarketEvent.from_dict(
+            {
+                "event_id": "event-1",
+                "market_id": "winner",
+                "selection_id": "alice",
+                "decimal_odds": "2.0",
+                "observed_ts": timestamp,
+                "ingest_ts": timestamp,
+                "source_id": "prophetx:sandbox",
+                "sequence": sequence,
+                "status": "open",
+                "metadata": {
+                    "provider": "prophetx",
+                    "environment": "sandbox",
+                    "transport_surface": "v3_affiliate_get_markets",
+                    "request_fingerprint_sha256": "a" * 64,
+                    "product_acquisition_sequence": sequence,
+                    "response_sha256": f"{sequence:x}".rjust(64, "0"),
+                    "snapshot_fingerprint_sha256": f"{sequence + 10:x}".rjust(64, "0"),
+                    "sequence_authority_id": "prophetx-rest-test-authority",
+                    "sequence_source_id": "prophetx:sandbox:rest:v3-affiliate-get-markets",
+                    "semantic_state_contract": PROPHETX_REST_MARKET_STATE_CONTRACT,
+                },
+            }
+        )
+
+    def test_semantic_refresh_remains_strategy_visible_in_replay(self) -> None:
+        first = self._semantic_refresh_event(1)
+        refresh = self._semantic_refresh_event(2)
+        seen: list[int] = []
+
+        run = ReplayEngine([first, refresh]).run(
+            lambda event: seen.append(event.sequence),
+            run_id="semantic-refresh",
+        )
+
+        self.assertEqual(run.event_count, 2)
+        self.assertEqual(seen, [1, 2])
 
     def test_replay_engine_rejects_firewall_subclasses_before_event_iteration(self) -> None:
         class Firewall(ReplayLeakageFirewall):

@@ -117,6 +117,7 @@ def _mcm(
                 "id": "1.A",
                 "img": True,
                 "con": False,
+                "marketDefinition": {"status": "OPEN"},
                 "rc": runners
                 or [{"id": 1, "hc": 0, "ltp": 2.0}],
             }
@@ -144,7 +145,34 @@ def _delta_mcm(
                 "id": "1.A",
                 "img": False,
                 "con": False,
+                "marketDefinition": {"status": "OPEN"},
                 "rc": [{"id": 1, "hc": 0, "ltp": price}],
+            }
+        ],
+    }
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
+
+
+def _market_status_mcm(
+    status: str,
+    *,
+    pt: int | None = None,
+    clk: str = "c-status",
+) -> bytes:
+    if pt is None:
+        pt = time.time_ns() // 1_000_000
+    payload = {
+        "op": "mcm",
+        "id": 7,
+        "clk": clk,
+        "pt": pt,
+        "mc": [
+            {
+                "id": "1.A",
+                "img": False,
+                "con": False,
+                "marketDefinition": {"status": status},
+                "rc": [],
             }
         ],
     }
@@ -183,7 +211,7 @@ def _open(
         transport,
         provider_request_id=7,
         market_filter={"marketIds": ["1.A"]},
-        market_data_fields=("EX_LTP",),
+        market_data_fields=("EX_LTP", "EX_MARKET_DEF"),
         ladder_levels=None,
         heartbeat_ms=5000,
         conflate_ms=0,
@@ -235,7 +263,7 @@ def test_authenticated_subscription_to_freshness_is_product_issued_and_read_only
         "conflateMs": 0,
         "heartbeatMs": 5000,
         "id": 7,
-        "marketDataFilter": {"fields": ["EX_LTP"]},
+        "marketDataFilter": {"fields": ["EX_LTP", "EX_MARKET_DEF"]},
         "marketFilter": {"marketIds": ["1.A"]},
         "op": "marketSubscription",
     }
@@ -1120,3 +1148,71 @@ def test_delayed_app_key_never_becomes_live_decision_authority(
     assert decision.evidence_id is not None
     assert not decision.decision_eligible
     assert transport.is_authenticated
+
+
+def test_market_suspension_revokes_previously_fresh_quote_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(pt=publish_time_ms)
+        + _market_status_mcm(
+            "SUSPENDED",
+            pt=publish_time_ms + 1,
+            clk="c2",
+        ),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert decision.decision_eligible
+
+    runtime.read_and_ingest()
+
+    assert not decision.decision_eligible
+    suspended = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert suspended.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    assert "market status is not authoritatively OPEN" in suspended.reason
+    assert not suspended.decision_eligible
+
+
+def test_market_reopen_requires_quote_from_new_open_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(pt=publish_time_ms)
+        + _market_status_mcm("SUSPENDED", pt=publish_time_ms + 1, clk="c2")
+        + _market_status_mcm("OPEN", pt=publish_time_ms + 2, clk="c3")
+        + _delta_mcm(pt=publish_time_ms + 3, clk="c4", price=2.2),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+    runtime.read_and_ingest()
+    runtime.read_and_ingest()
+
+    reopened_without_quote = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert reopened_without_quote.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    assert not reopened_without_quote.decision_eligible
+
+    runtime.read_and_ingest()
+    refreshed = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert refreshed.decision_eligible

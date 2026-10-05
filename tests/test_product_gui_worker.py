@@ -240,3 +240,38 @@ def test_runtime_tick_identity_guard_rejects_source_drift() -> None:
             runtime.tick(),
             expected_source_id="source-1",
         )
+
+
+def test_runtime_status_identity_guard_rejects_session_drift() -> None:
+    from autosport.product_gui_worker import _require_runtime_status_identity
+
+    with pytest.raises(ProductEntrypointError):
+        _require_runtime_status_identity(
+            _status(SessionState.STOPPED, cycles=1),
+            expected_source_id="source-1",
+            expected_session_id="different-session",
+            expected_state=SessionState.STOPPED,
+        )
+
+
+def test_runtime_status_identity_guard_rejects_wrong_terminal_state() -> None:
+    from autosport.product_gui_worker import _require_runtime_status_identity
+
+    with pytest.raises(ProductEntrypointError):
+        _require_runtime_status_identity(
+            _status(SessionState.RUNNING, cycles=1),
+            expected_source_id="source-1",
+            expected_session_id="session-1",
+            expected_state=SessionState.STOPPED,
+        )
+
+
+def test_runtime_tick_identity_guard_rejects_session_drift() -> None:
+    from autosport.product_gui_worker import _require_runtime_tick_identity
+
+    with pytest.raises(ProductEntrypointError):
+        _require_runtime_tick_identity(
+            _tick(),
+            expected_source_id="source-1",
+            expected_session_id="different-session",
+        )

@@ -241,3 +241,46 @@ def test_profiled_builder_closes_runtime_on_manifest_source_subclass(
         )
 
     assert runtime.closed is True
+
+
+def test_profiled_worker_run_rejects_wrong_started_source_before_profile_issue(
+    tmp_path: Path,
+) -> None:
+    class Runtime:
+        def __init__(self) -> None:
+            self.stop_reasons: list[str] = []
+            self.closed = False
+
+        def start(self) -> ContinuousSessionStatus:
+            return _status(source_id="wrong-source")
+
+        def stop(self, reason: str) -> ContinuousSessionStatus:
+            self.stop_reasons.append(reason)
+            return _status(
+                state=SessionState.STOPPED,
+                source_id="wrong-source",
+            )
+
+        def close(self) -> None:
+            self.closed = True
+
+    runtime = Runtime()
+    worker = ProductGuiWorker()
+    worker._busy = True
+
+    worker._run(
+        workspace=tmp_path,
+        source_factory="provider.module:factory",
+        expected_source_id="source-1",
+        initial_bankroll="10000",
+        poll_seconds=30.0,
+        _profiled_runtime_builder=lambda *_args, **_kwargs: runtime,
+    )
+
+    terminal = worker.poll()
+    assert terminal is not None
+    assert terminal.kind == "ERROR"
+    assert terminal.error_type == "ProductEntrypointError"
+    assert runtime.stop_reasons == ["runtime_error"]
+    assert runtime.closed is True
+    assert worker.busy is False

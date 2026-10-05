@@ -649,6 +649,13 @@ def _require_minimum_equity_prerequisites(
         raise ValueError(
             "minimum equity requires complete authoritative net monetary costs"
         )
+    if (
+        not path.correction_lineage_complete
+        or not path.restated_history_authoritative
+    ):
+        raise ValueError(
+            "minimum equity requires authoritative correction/restatement lineage"
+        )
 
 
 def verified_settled_minimum_equity(

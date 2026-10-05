@@ -192,9 +192,10 @@ class FocusedMirrorDependencyIndex:
             market_ids=self._selector(market_ids, name="market_ids"),
             selection_ids=self._selector(selection_ids, name="selection_ids"),
         )
+        initial_view = self._mirror.view()
         initial_keys = {
             (event.source_id, event.quote_key)
-            for event in self._mirror.snapshot()
+            for event in initial_view.events
             if dependency.matches(event)
         }
         with self._lock:
@@ -203,6 +204,22 @@ class FocusedMirrorDependencyIndex:
             self._dependencies[normalized_id] = dependency
             self._matched_keys[normalized_id] = initial_keys
             self._registry_revision += 1
+
+        # Close the mirror-view -> registry-publication race without making this
+        # index a second market-state authority. If mirror truth advanced after
+        # the initial view but before registration became visible, a post-publication
+        # coherent catch-up observes those keys. Later advances are covered by normal
+        # invalidation routing because the dependency is already registered.
+        catch_up = self._mirror.view()
+        if catch_up.revision != initial_view.revision:
+            catch_up_keys = {
+                (event.source_id, event.quote_key)
+                for event in catch_up.events
+                if dependency.matches(event)
+            }
+            with self._lock:
+                if self._dependencies.get(normalized_id) == dependency:
+                    self._matched_keys[normalized_id].update(catch_up_keys)
         return dependency
 
     def unregister(self, input_id: str) -> bool:

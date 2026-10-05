@@ -583,6 +583,7 @@ class ProductEconomicSessionStore:
         self._authority_prepare_witness = _AUTHORITY_PREPARE
         self._authority_commit_witness = _AUTHORITY_COMMIT
         self._clock_instant_witness = _clock_instant
+        self._parse_instant_witness = _parse_instant
         self._state_sha256_witness = _state_sha256
         self._semantic_binding_witness = _semantic_binding
         self._tx_id_witness = _tx_id
@@ -638,6 +639,7 @@ class ProductEconomicSessionStore:
             or _PAPERBOOK_VALIDATE_LOADED_STATE is not self._paperbook_validate_witness
             or _WORKSPACE_LOCK_TYPE is not self._workspace_lock_type_witness
             or _clock_instant is not self._clock_instant_witness
+            or _parse_instant is not self._parse_instant_witness
             or _state_sha256 is not self._state_sha256_witness
             or _semantic_binding is not self._semantic_binding_witness
             or _tx_id is not self._tx_id_witness
@@ -798,7 +800,7 @@ class ProductEconomicSessionStore:
                     "canonical paper_book.json is required before economic-session transition"
                 )
             terminal_at = self._clock_instant_witness(self._clock)
-            if _parse_instant(terminal_at) < _parse_instant(previous.started_at):
+            if self._parse_instant_witness(terminal_at) < self._parse_instant_witness(previous.started_at):
                 raise EconomicSessionIntegrityError(
                     "economic-session transition clock precedes predecessor start"
                 )

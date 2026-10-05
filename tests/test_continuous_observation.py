@@ -164,6 +164,58 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertFalse(workspace.exists())
             self.assertEqual(provider.calls, 0)
 
+    def test_late_invalid_wall_clock_never_enters_status_payload(self):
+        samples = iter([_NOW, object()])
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            with self.assertRaisesRegex(TypeError, "wall_clock must return"):
+                run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    wall_clock=lambda: next(samples),
+                    reporter=None,
+                )
+
+            self.assertEqual(provider.calls, 0)
+            self.assertFalse(
+                (workspace / "continuous_observation_status.json").exists()
+            )
+
+    def test_monotonic_regression_fails_closed_after_committed_cycle(self):
+        samples = iter([0.0, 1.0, 0.5])
+        provider = SequenceProvider([_batch(_quote(), cursor="first")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            with self.assertRaisesRegex(ValueError, "monotonic clock must not regress"):
+                run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=2),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: next(samples),
+                    waiter=lambda _seconds: False,
+                    reporter=None,
+                )
+
+            self.assertEqual(provider.calls, 1)
+            store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
+            status = json.loads(
+                (workspace / "continuous_observation_status.json").read_text("utf-8")
+            )
+            self.assertEqual(status["state"], "failed")
+            self.assertEqual(
+                status["last_error_kind"],
+                "local_startup_or_status_failure",
+            )
+
     def test_invalid_stop_event_contract_fails_before_workspace_creation(self):
         class InvalidStopEvent:
             is_set = object()

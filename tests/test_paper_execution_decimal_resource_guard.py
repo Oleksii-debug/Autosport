@@ -73,6 +73,37 @@ def test_oversized_second_member_fails_before_any_sibling_formatting(
     assert serialized == []
 
 
+def test_decimal_parser_preserves_noninjectable_authority_roots() -> None:
+    assert legacy._decimal.__kwdefaults__ == {"allow_zero": False}
+    with pytest.raises(TypeError):
+        legacy._decimal(
+            Decimal("5"),
+            "value",
+            _validate=lambda _value: None,  # type: ignore[call-arg]
+        )
+    with pytest.raises(TypeError):
+        legacy._decimal(
+            Decimal("5"),
+            "value",
+            _parse=lambda value, _name, **_kwargs: value,  # type: ignore[call-arg]
+        )
+
+
+def test_decimal_serializer_preserves_noninjectable_authority_roots() -> None:
+    assert legacy._decimal_text.__defaults__ is None
+    assert legacy._decimal_text.__kwdefaults__ is None
+    with pytest.raises(TypeError):
+        legacy._decimal_text(
+            Decimal("5"),
+            _validate=lambda _value: None,  # type: ignore[call-arg]
+        )
+    with pytest.raises(TypeError):
+        legacy._decimal_text(
+            Decimal("5"),
+            _serialize=lambda _value: "5",  # type: ignore[call-arg]
+        )
+
+
 def test_evidence_serializer_preserves_noninjectable_public_call_shape() -> None:
     record = _record(odds=Decimal("5"), stake=Decimal("10"))
 

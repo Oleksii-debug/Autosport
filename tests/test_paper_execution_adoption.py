@@ -181,7 +181,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 PaperExecutionAdoptionError,
-                "canonical ExecutionAction side authority",
+                "prepared action side|canonical ExecutionAction side authority",
             ):
                 runtime.assert_recoverable_book_state(
                     pre_action_book=book,
@@ -235,6 +235,28 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 runtime.execute(
                     prepared=current_prepared,
                     trigger_id="action-mutation",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_post_init_config_mutation_fails_before_durable_scope_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("config-mutation", side="BACK"))
+            object.__setattr__(runtime.config, "model_version", "mutated-model-version")
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                Exception,
+                "execution config|canonical|changed",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="config-mutation",
                     started_at=STARTED_AT,
                     materialize_exposure=False,
                 )

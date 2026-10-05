@@ -440,7 +440,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
 
         existing = [
             event
-            for event in self.events(run_id)
+            for event in _CANONICAL_LEDGER_EVENTS(self, run_id)
             if event["event_type"] == "RUN_RESERVED"
         ]
         if existing:
@@ -457,7 +457,8 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 "run execution-control state conflicts with durable reservation"
             )
 
-        self._append_event(
+        _CANONICAL_LEDGER_APPEND_EVENT(
+            self,
             event_type="RUN_RESERVED",
             run_id=run_id,
             key=f"{run_id}:reserve",
@@ -534,8 +535,8 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         attempt = canonical_attempt
 
         def mutate() -> None:
-            self._ensure_existing_path_durable()
-            events = self._load_unlocked()
+            _CANONICAL_LEDGER_ENSURE_EXISTING_PATH_DURABLE(self)
+            events = _CANONICAL_LEDGER_LOAD_UNLOCKED(self)
             run_events = [event for event in events if event["run_id"] == attempt.run_id]
             reservations = [
                 event for event in run_events if event["event_type"] == "RUN_RESERVED"
@@ -586,7 +587,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     raise PaperExecutionStateError(
                         "attempt conflicts with already durable sequence"
                     )
-                self._append_attempt_unlocked(events=events, attempt=attempt)
+                _CANONICAL_LEDGER_APPEND_ATTEMPT_UNLOCKED(self, events=events, attempt=attempt)
                 return
             if attempt.sequence != len(existing_attempts):
                 raise PaperExecutionStateError(
@@ -607,9 +608,9 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 raise PaperExecutionStateError(
                     "cannot record attempt after terminal non-ACCEPTED outcome"
                 )
-            self._append_attempt_unlocked(events=events, attempt=attempt)
+            _CANONICAL_LEDGER_APPEND_ATTEMPT_UNLOCKED(self, events=events, attempt=attempt)
 
-        self._with_writer_lock(mutate)
+        _CANONICAL_LEDGER_WITH_WRITER_LOCK(self, mutate)
 
     def _append_completion_unlocked(
         self,
@@ -703,8 +704,8 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         )
 
         def mutate() -> None:
-            self._ensure_existing_path_durable()
-            events = self._load_unlocked()
+            _CANONICAL_LEDGER_ENSURE_EXISTING_PATH_DURABLE(self)
+            events = _CANONICAL_LEDGER_LOAD_UNLOCKED(self)
             run_events = [event for event in events if event["run_id"] == run_id]
             reservations = [
                 event for event in run_events if event["event_type"] == "RUN_RESERVED"
@@ -761,13 +762,14 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     derived.worst_case_exposure
                 ),
             }
-            self._append_completion_unlocked(
+            _CANONICAL_LEDGER_APPEND_COMPLETION_UNLOCKED(
+                self,
                 events=events,
                 run_id=run_id,
                 payload=payload,
             )
 
-        self._with_writer_lock(mutate)
+        _CANONICAL_LEDGER_WITH_WRITER_LOCK(self, mutate)
 
     def load_run(
         self,
@@ -798,7 +800,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             started_at=started_at,
             observation_evidence_ids=observation_evidence_ids,
         )
-        events = self.events(run_id)
+        events = _CANONICAL_LEDGER_EVENTS(self, run_id)
         if not events:
             return None
         reserve = [event for event in events if event["event_type"] == "RUN_RESERVED"]
@@ -858,7 +860,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             )
         )
         evidence_events = (
-            self.events()
+            _CANONICAL_LEDGER_EVENTS(self)
             if any(
                 attempt.evidence_grade is not EvidenceGrade.SYNTHETIC
                 for attempt in attempts
@@ -1358,6 +1360,13 @@ _CANONICAL_LEDGER_RESERVE_RUN = PaperExecutionLedger.reserve_run
 _CANONICAL_LEDGER_LOAD_RUN = PaperExecutionLedger.load_run
 _CANONICAL_LEDGER_RECORD_ATTEMPT = PaperExecutionLedger.record_attempt
 _CANONICAL_LEDGER_COMPLETE_RUN = PaperExecutionLedger.complete_run
+_CANONICAL_LEDGER_EVENTS = PaperExecutionLedger.events
+_CANONICAL_LEDGER_APPEND_EVENT = PaperExecutionLedger._append_event
+_CANONICAL_LEDGER_WITH_WRITER_LOCK = PaperExecutionLedger._with_writer_lock
+_CANONICAL_LEDGER_LOAD_UNLOCKED = PaperExecutionLedger._load_unlocked
+_CANONICAL_LEDGER_ENSURE_EXISTING_PATH_DURABLE = PaperExecutionLedger._ensure_existing_path_durable
+_CANONICAL_LEDGER_APPEND_ATTEMPT_UNLOCKED = PaperExecutionLedger._append_attempt_unlocked
+_CANONICAL_LEDGER_APPEND_COMPLETION_UNLOCKED = PaperExecutionLedger._append_completion_unlocked
 
 def execute_paper_plan(
     *,

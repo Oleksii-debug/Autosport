@@ -167,3 +167,65 @@ def test_excluded_sequence_authority_still_requires_canonical_text() -> None:
     with pytest.raises(MarketStateIdentityError, match="sequence authority identity"):
         semantic_market_state_identity(malformed)
 
+@pytest.mark.parametrize(
+    "authority_id",
+    (
+        "UPPERCASE",
+        "authority\nwith-control",
+        "authority with-space",
+        "аuthority-unicode",
+    ),
+)
+def test_sequence_authority_requires_canonical_ascii_identity(
+    authority_id: str,
+) -> None:
+    payload = _event(sequence=1).to_dict()
+    payload["metadata"]["sequence_authority_id"] = authority_id
+    malformed = MarketEvent.from_dict(payload)
+
+    with pytest.raises(
+        MarketStateIdentityError,
+        match="canonical sequence authority identity",
+    ):
+        semantic_market_state_identity(malformed)
+
+
+def test_provider_source_timestamp_remains_semantic_state() -> None:
+    first_payload = _event(sequence=1).to_dict()
+    first_payload["source_ts"] = "2026-09-16T18:59:59+00:00"
+    first = MarketEvent.from_dict(first_payload)
+
+    second_payload = _event(sequence=2).to_dict()
+    second_payload["source_ts"] = "2026-09-16T19:00:00+00:00"
+    second = MarketEvent.from_dict(second_payload)
+
+    assert semantic_market_state_identity(first) != (
+        semantic_market_state_identity(second)
+    )
+    assert not same_semantic_market_state(first, second)
+
+
+def test_unknown_metadata_remains_conservatively_semantic() -> None:
+    first = _event(sequence=1)
+    second_payload = _event(sequence=2).to_dict()
+    second_payload["metadata"]["provider_market_phase"] = "in_play"
+    second = MarketEvent.from_dict(second_payload)
+
+    assert semantic_market_state_identity(first) != (
+        semantic_market_state_identity(second)
+    )
+    assert not same_semantic_market_state(first, second)
+
+
+def test_local_receipt_clocks_are_not_semantic_market_state() -> None:
+    first = _event(sequence=1)
+    second_payload = _event(sequence=2).to_dict()
+    second_payload["observed_ts"] = "2026-09-16T20:00:00+00:00"
+    second_payload["ingest_ts"] = "2026-09-16T20:00:01+00:00"
+    second = MarketEvent.from_dict(second_payload)
+
+    assert semantic_market_state_identity(first) == (
+        semantic_market_state_identity(second)
+    )
+    assert same_semantic_market_state(first, second)
+

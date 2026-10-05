@@ -554,7 +554,20 @@ def run_continuous_observation(
                     terminal_exit = 5
                     publish("failed", stop_reason=terminal_reason)
                     break
-                durable_health = health_store.get(state.source_id)
+                try:
+                    durable_health = health_store.get(state.source_id)
+                except Exception as health_error:
+                    state.health_status = "unknown"
+                    state.last_error_kind = "local_health_read_failure_after_provider_error"
+                    primary = _redacted_error(exc, redaction_secrets)
+                    secondary = _redacted_error(health_error, redaction_secrets)
+                    state.last_error = (
+                        f"{primary}; secondary source-health read failure: {secondary}"
+                    )
+                    terminal_reason = state.last_error_kind
+                    terminal_exit = 5
+                    publish("failed", stop_reason=terminal_reason)
+                    break
                 if (
                     durable_health.status != "failed"
                     or durable_health.last_failure_kind != "provider_unavailable"

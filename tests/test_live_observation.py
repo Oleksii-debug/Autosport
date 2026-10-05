@@ -1250,6 +1250,29 @@ class LiveObservationTests(unittest.TestCase):
                 tuple(reversed(canonical.current_quotes)),
             )
 
+    def test_observation_result_orders_full_quote_identity_dimensions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        base = canonical.current_quotes[0].to_dict()
+        first_payload = dict(base)
+        first_payload["sport"] = "basketball"
+        first_payload["exchange_side"] = "back"
+        second_payload = dict(base)
+        second_payload["sport"] = "tennis"
+        second_payload["exchange_side"] = "lay"
+        first = MarketEvent.from_dict(first_payload)
+        second = MarketEvent.from_dict(second_payload)
+        ordered = tuple(sorted((first, second), key=lambda event: event.quote_key))
+        self.assertNotEqual(ordered[0].quote_key, ordered[1].quote_key)
+
+        with self.assertRaisesRegex(ValueError, "canonical order"):
+            ObservationResult(
+                canonical.stats,
+                canonical.health,
+                tuple(reversed(ordered)),
+            )
+
     def test_observation_result_snapshots_mutable_quote_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             canonical = self._observe(tmp)

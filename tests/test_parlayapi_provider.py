@@ -330,5 +330,69 @@ class ParlayApiProviderTests(unittest.TestCase):
             provider.historical_coverage("2026-09-12", "2026-09-01")
 
 
+    def test_live_snapshot_receipt_timestamp_is_sampled_after_transport_returns(self):
+        order = []
+        state = {"received": False}
+
+        def transport(url, headers, timeout):
+            order.append("transport")
+            state["received"] = True
+            return HttpJsonResponse([SAMPLE_EVENT], 200, {})
+
+        def clock():
+            order.append("clock")
+            return (
+                "2026-09-12T20:00:05+00:00"
+                if state["received"]
+                else "2026-09-12T20:00:00+00:00"
+            )
+
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=transport,
+            clock=clock,
+        )
+
+        batch = provider.read_batch()
+
+        self.assertEqual(order[:2], ["transport", "clock"])
+        self.assertTrue(batch.quotes)
+        self.assertTrue(
+            all(
+                quote.observed_ts == "2026-09-12T20:00:05+00:00"
+                for quote in batch.quotes
+            )
+        )
+
+    def test_truncated_snapshot_reuses_one_post_receipt_timestamp_without_resampling(self):
+        clock_calls = []
+        state = {"received": False}
+
+        def transport(url, headers, timeout):
+            state["received"] = True
+            return HttpJsonResponse([SAMPLE_EVENT], 200, {})
+
+        def clock():
+            clock_calls.append(len(clock_calls) + 1)
+            return (
+                "2026-09-12T20:00:05+00:00"
+                if state["received"]
+                else "2026-09-12T20:00:00+00:00"
+            )
+
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=transport,
+            clock=clock,
+        )
+
+        first = provider.read_batch(max_items=1)
+        second = provider.read_batch(max_items=1)
+
+        self.assertEqual(clock_calls, [1])
+        self.assertEqual(first.quotes[0].observed_ts, "2026-09-12T20:00:05+00:00")
+        self.assertEqual(second.quotes[0].observed_ts, "2026-09-12T20:00:05+00:00")
+
+
 if __name__ == "__main__":
     unittest.main()

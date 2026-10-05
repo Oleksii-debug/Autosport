@@ -855,6 +855,8 @@ def _build_canonical_authority():
         validate_resolution(resolution)
         return resolution
 
+    resolve_code = resolve.__code__
+
     def resolve_with_betfair_standard_limit(
         *,
         intent: OpportunityIntent,
@@ -871,6 +873,8 @@ def _build_canonical_authority():
     ) -> ProspectiveApplicableCostResolution:
         """Re-resolve aggregate truth with one exact product-verified slippage source."""
 
+        if resolve.__code__ is not resolve_code:
+            raise error_cls("canonical base applicable-cost resolver authority changed")
         if type(slippage_evidence) is not slippage_evidence_cls:
             raise error_cls(
                 "slippage_evidence must be exact BetfairStandardLimitPriceBoundEvidence"
@@ -924,6 +928,8 @@ def _build_canonical_authority():
                 "Betfair slippage evidence does not prove the narrow zero-adverse-price contract"
             )
 
+        if resolve.__code__ is not resolve_code:
+            raise error_cls("canonical base applicable-cost resolver authority changed")
         base = resolve(
             intent=intent,
             plan=plan,
@@ -931,6 +937,8 @@ def _build_canonical_authority():
             model_request_id=model_request_id,
             decision_at=decision_at,
         )
+        if resolve.__code__ is not resolve_code:
+            raise error_cls("canonical base applicable-cost resolver authority changed")
         canonical_intent_sha = object.__getattribute__(base, "intent_sha256")
         canonical_plan_sha = object.__getattribute__(base, "portfolio_plan_sha256")
         canonical_opportunity_id = object.__getattribute__(base, "opportunity_id")

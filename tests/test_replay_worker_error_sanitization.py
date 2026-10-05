@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import NoReturn
 
 from autosport.replay_worker import OneShotReplayWorker, _terminal_error
-from autosport.secret_redaction import REDACTED
 
 
 _SECRET = "sk_live_do_not_leak_953"
@@ -70,5 +69,4 @@ def test_replay_terminal_redacts_short_escaped_credential_key() -> None:
 
     assert short_escape_secret not in rendered
     assert rendered == "RuntimeError: exception details unavailable"
-    assert r"api\\tkey" in rendered
     assert "ShortEscapedCredentialError" not in rendered

@@ -315,21 +315,24 @@ def test_policy_estimate_dispatch_rejects_derivation_helper_rebinding(
         "grants_real_money_authority",
     ),
 )
-def test_policy_estimate_dispatch_rejects_authority_property_rebinding(
-    monkeypatch: pytest.MonkeyPatch,
+def test_policy_estimate_authority_property_rebinding_is_rejected(
     property_name: str,
 ) -> None:
-    monkeypatch.setattr(
-        ProductFixedNRiskPolicyEstimate,
-        property_name,
-        property(lambda _self: True),
-    )
+    with pytest.raises(
+        TypeError,
+        match="risk policy estimate authority surface is sealed",
+    ):
+        setattr(
+            ProductFixedNRiskPolicyEstimate,
+            property_name,
+            property(lambda _self: True),
+        )
 
     with pytest.raises(
-        ProductFixedNRiskPolicyEstimateError,
-        match="dispatch changed",
+        TypeError,
+        match="risk policy estimate authority surface is sealed",
     ):
-        policy_module._require_dispatch()
+        delattr(ProductFixedNRiskPolicyEstimate, property_name)
 
 
 def test_policy_estimate_dispatch_rejects_authority_property_code_replacement() -> None:

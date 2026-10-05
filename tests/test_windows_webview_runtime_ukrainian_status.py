@@ -480,3 +480,55 @@ def test_started_runtime_without_prior_source_observation_remains_unknown(
     assert projection["attention_required"] is None
     assert projection["last_success_at"] == ""
     assert "ще не підтверджено" in projection["status"].casefold()
+
+
+def test_quarantined_runtime_stopped_message_cannot_reopen_economic_state(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        SimpleNamespace(
+            kind="STOPPED",
+            status=_runtime_status(cycles_completed=3),
+            tick=None,
+            stop_reason="runtime_error",
+            error_type=None,
+        ),
+    )
+    controller._product_runtime_identity = (tmp_path, "session-1", "source-1")
+    controller._recovery_required_workspaces.add(tmp_path)
+    controller._refresh_economic_projection = lambda: (_ for _ in ()).throw(
+        AssertionError("quarantined STOP must not reopen economic state")
+    )
+
+    controller._poll_workers()
+
+    assert tmp_path in controller._recovery_required_workspaces
+    assert "віднов" in controller.product_runtime_status.casefold()
+    assert "операторська зупинка" not in controller.product_runtime_status.casefold()
+    assert controller.product_worker.stop_reasons == []
+
+
+def test_economic_projection_does_not_open_quarantined_workspace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    controller = _controller(tmp_path, None)
+    controller.product_worker = _IdleWorker()
+    controller.strategy_id = "baseline-v1"
+    controller.research_plan = None
+    controller._recovery_required_workspaces.add(tmp_path)
+
+    def forbidden_session(*_args, **_kwargs):
+        raise AssertionError("quarantined workspace must not open AutosportSession")
+
+    monkeypatch.setattr(
+        "autosport.windows_webview_shell.AutosportSession",
+        forbidden_session,
+    )
+
+    controller._refresh_economic_projection()
+
+    assert controller._active_workspace == tmp_path
+    assert "віднов" in controller.status.casefold()
+    assert "quarantined" not in controller.status.casefold()

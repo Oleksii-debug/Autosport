@@ -304,13 +304,17 @@ def run_continuous_observation(
         not provider_source_id
         or provider_source_id != provider_source_id.strip()
         or "|" in provider_source_id
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in provider_source_id)
     ):
         raise ValueError("provider source_id must be canonical")
 
     if run_id is not None and (
-        type(run_id) is not str or not run_id or run_id != run_id.strip()
+        type(run_id) is not str
+        or not run_id
+        or run_id != run_id.strip()
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in run_id)
     ):
-        raise ValueError("run_id must be a non-empty trimmed exact string")
+        raise ValueError("run_id must be a canonical non-empty exact string")
     if isinstance(redact_values, (str, bytes, bytearray)):
         raise TypeError("redact_values must be a sequence of exact strings")
     try:

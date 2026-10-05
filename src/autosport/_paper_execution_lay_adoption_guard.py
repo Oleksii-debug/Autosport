@@ -388,7 +388,11 @@ def _expected_run_id(
     _require_minted(self, prepared)
     _reality._require_canonical_execution_plan_surface(prepared.execution_plan)
     _reality._require_canonical_execution_config_surface(self.config)
-    return _ORIGINAL_EXPECTED_RUN_ID(self, prepared, trigger_id)
+    return _reality._impl._run_id(
+        prepared.execution_plan,
+        _exact_text(trigger_id, "trigger_id"),
+        self.config,
+    )
 
 def _preflight_adoption_inputs(
     self: PaperExecutionAdoptionRuntime,

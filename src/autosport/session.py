@@ -191,6 +191,21 @@ class ObservationResult:
             raise ValueError(
                 "observation current quotes must belong to the observed source"
             )
+        quote_keys = tuple(event.quote_key for event in self.current_quotes)
+        if len(set(quote_keys)) != len(quote_keys):
+            raise ValueError("observation current quotes must have unique quote keys")
+        canonical_order = tuple(
+            sorted(
+                self.current_quotes,
+                key=lambda event: (
+                    event.event_id,
+                    event.market_id,
+                    event.selection_id,
+                ),
+            )
+        )
+        if self.current_quotes != canonical_order:
+            raise ValueError("observation current quotes must use canonical order")
 
 
 class AutosportSession(metaclass=_AutosportSessionMeta):

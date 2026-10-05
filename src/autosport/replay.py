@@ -115,8 +115,8 @@ class ReplayRun:
 def _snapshot_replay_event(event: MarketEvent) -> MarketEvent:
     """Own one canonical value snapshot without retaining caller metadata aliases."""
 
-    if not isinstance(event, MarketEvent):
-        raise TypeError("replay events must be MarketEvent values")
+    if type(event) is not MarketEvent:
+        raise TypeError("replay events must be exact MarketEvent values")
     try:
         # Dispatch through the canonical base-class serializer so subclasses cannot
         # replace replay identity through an overridden to_dict implementation.

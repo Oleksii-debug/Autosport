@@ -1621,7 +1621,14 @@ class PersistentLiveDecisionLoop:
             freshness_expired_inputs or availability_reached_inputs
         )
 
-        registered_dependencies = self.dependencies.registry_snapshot()
+        registered_dependency_state = self.dependencies.registry_state_snapshot()
+        registered_dependencies = tuple(
+            dependency for dependency, _revision in registered_dependency_state
+        )
+        expected_dependency_revisions = tuple(
+            (dependency.input_id, revision)
+            for dependency, revision in registered_dependency_state
+        )
         registered_input_ids = tuple(
             dependency.input_id for dependency in registered_dependencies
         )
@@ -1688,6 +1695,7 @@ class PersistentLiveDecisionLoop:
             affected_input_ids=affected,
             gate=_GATE_NORMAL,
             expected_input_specs=expected_input_specs,
+            expected_dependency_revisions=expected_dependency_revisions,
         )
         self._refresh_intents_from_snapshots(snapshots)
 
@@ -2416,7 +2424,14 @@ class PersistentLiveDecisionLoop:
         exc: Exception,
     ) -> LiveCycleResult:
         decision_ts = now.isoformat()
-        registered_dependencies = self.dependencies.registry_snapshot()
+        registered_dependency_state = self.dependencies.registry_state_snapshot()
+        registered_dependencies = tuple(
+            dependency for dependency, _revision in registered_dependency_state
+        )
+        expected_dependency_revisions = tuple(
+            (dependency.input_id, revision)
+            for dependency, revision in registered_dependency_state
+        )
         affected = tuple(
             dependency.input_id for dependency in registered_dependencies
         )
@@ -2439,6 +2454,7 @@ class PersistentLiveDecisionLoop:
             affected_input_ids=affected,
             gate=_GATE_PROVIDER_GAP,
             expected_input_specs=expected_input_specs,
+            expected_dependency_revisions=expected_dependency_revisions,
         )
         plan = build_portfolio_plan(
             self.book,
@@ -2817,6 +2833,7 @@ class PersistentLiveDecisionLoop:
         affected_input_ids: tuple[str, ...],
         gate: str,
         expected_input_specs: tuple[_InputSpec, ...] | None = None,
+        expected_dependency_revisions: tuple[tuple[str, int], ...] | None = None,
     ) -> None:
         _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
         self.intent_provenance.assert_available_at(decision_time)
@@ -2879,6 +2896,11 @@ class PersistentLiveDecisionLoop:
                         for dependency in current_dependencies
                     )
                     != bound_input_specs
+                    or (
+                        expected_dependency_revisions is not None
+                        and pending_dependency_revisions
+                        != expected_dependency_revisions
+                    )
                 ):
                     raise LiveDecisionProgressError(
                         "focused dependency registry changed after snapshot capture"

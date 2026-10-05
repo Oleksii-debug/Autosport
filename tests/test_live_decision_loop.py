@@ -10074,5 +10074,61 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(observer.calls, 0)
             loop.close()
 
+
+    def test_cycle_entry_rejects_clock_authority_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),)],
+            )
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            loop.clock = _ManualClock(clock.value)
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "clock authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(observer.calls, 0)
+            loop.close()
+
+
+    def test_cycle_entry_rejects_loop_bounds_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),)],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            replacement = copy.deepcopy(loop.bounds)
+            self.assertEqual(replacement, loop.bounds)
+            self.assertIsNot(replacement, loop.bounds)
+            loop.bounds = replacement
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "bounds authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(observer.calls, 0)
+            loop.close()
+
 if __name__ == "__main__":
     unittest.main()

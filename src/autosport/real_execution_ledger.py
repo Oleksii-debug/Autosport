@@ -799,28 +799,39 @@ class RealExecutionLedger:
                 file_name=self._lock_path.name,
             )
             data_fd: int | None = None
+            lock_acquired = False
+            primary_error: BaseException | None = None
             try:
                 lock.acquire()
+                lock_acquired = True
                 data_fd = self._acquire_posix_ledger_lock()
                 self._serialization_owner_thread_id = threading.get_ident()
                 return operation()
             except WorkspaceEconomicLockBusyError as exc:
+                primary_error = exc
                 raise ExecutionLedgerBusyError(
                     "writer lock is owned by another process; fail closed until release"
                 ) from exc
             except WorkspaceEconomicLockError as exc:
+                primary_error = exc
                 raise ExecutionLedgerIntegrityError(
                     "execution ledger crash-releasing writer lock failed"
                 ) from exc
+            except BaseException as exc:
+                primary_error = exc
+                raise
             finally:
                 self._serialization_owner_thread_id = None
                 if data_fd is not None:
                     os.close(data_fd)
-                try:
-                    lock.release()
-                except WorkspaceEconomicLockError:
-                    if data_fd is None:
-                        raise
+                if lock_acquired:
+                    try:
+                        lock.release()
+                    except WorkspaceEconomicLockError as exc:
+                        if primary_error is None:
+                            raise ExecutionLedgerIntegrityError(
+                                "execution ledger writer lock release failed"
+                            ) from exc
 
     @classmethod
     def _validate_event(

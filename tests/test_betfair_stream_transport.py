@@ -604,6 +604,36 @@ def test_monotonic_receive_clock_rebinding_fails_closed_before_frame_issue(
     ):
         transport.read_authenticated_frame()
 
+    assert fake.closed is True
+    assert transport.is_authenticated is False
+    assert transport.connection_id is None
+    assert transport._receive_buffer == bytearray()
+    assert transport._receive_timing_chunks == []
+
+
+def test_invalid_monotonic_receive_clock_value_poisons_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = connected_socket()
+    transport = make_transport(monkeypatch, fake)
+    transport.connect()
+    fake.chunks.append(b'{"op":"mcm","clk":"next"}\r\n')
+
+    invalid_monotonic_ns = lambda: 0
+    monkeypatch.setattr(stream, "_MONOTONIC_NS", invalid_monotonic_ns)
+    monkeypatch.setattr(stream.time, "monotonic_ns", invalid_monotonic_ns)
+
+    with pytest.raises(
+        stream.BetfairStreamTransportError,
+        match="monotonic receive clock is invalid",
+    ):
+        transport.read_authenticated_frame()
+
+    assert fake.closed is True
+    assert transport.is_authenticated is False
+    assert transport._receive_buffer == bytearray()
+    assert transport._receive_timing_chunks == []
+
 
 def test_oversized_no_newline_frame_fails_before_persistence(
     monkeypatch: pytest.MonkeyPatch,

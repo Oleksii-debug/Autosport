@@ -5126,6 +5126,13 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             progress = json.loads(progress_path.read_text(encoding="utf-8"))
             self.assertEqual(progress["schema_version"], 3)
             self.assertTrue(progress["health_boundaries"])
+            legacy_pre_action = PaperBook.load(first.pre_action_book_path)
+            progress["decision_context_sha256"] = (
+                first._decision_context_sha256_for_book(
+                    legacy_pre_action,
+                    health_aware=False,
+                )
+            )
             progress["schema_version"] = 2
             del progress["health_boundaries"]
             progress_path.write_text(

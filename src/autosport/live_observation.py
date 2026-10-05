@@ -24,6 +24,10 @@ _MAX_SNAPSHOT_BATCHES = 256
 _MAX_BATCH_ATTEMPTS = 2
 
 
+class _ProviderAuthorityDriftError(RuntimeError):
+    """Cached live batch can no longer be retried under its bound provider identity."""
+
+
 def _exception_text(exc: BaseException) -> str:
     try:
         detail = str(exc)
@@ -285,7 +289,7 @@ class _ReplayableBatchProvider:
         else:
             current_source_id = getattr(self._provider, "source_id", None)
             if type(current_source_id) is not str or current_source_id != self.source_id:
-                raise RuntimeError(
+                raise _ProviderAuthorityDriftError(
                     "provider source identity changed before live batch retry"
                 )
             if max_items != self._inflight_max_items:
@@ -388,6 +392,22 @@ def _poll_acknowledged(
                         pass
                 raise
             continue
+        except _ProviderAuthorityDriftError as exc:
+            # This failure can occur only while reusing a cached batch after an
+            # earlier sqlite3.Error. That prior attempt did not commit market state,
+            # so retaining the provider's pending snapshot would strand an
+            # unacknowledged prefix behind a changed authority identity.
+            try:
+                provider.abandon_uncommitted()
+            except BaseException as reset_error:
+                try:
+                    exc.add_note(
+                        "provider pending-snapshot reset also failed: "
+                        f"{_exception_text(reset_error)}"
+                    )
+                except BaseException:
+                    pass
+            raise
         except Exception:
             # Do not replay after an arbitrary later-stage failure (for example a
             # source-health JSON write): market events may already be durable, and

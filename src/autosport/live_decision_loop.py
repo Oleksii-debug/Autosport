@@ -837,6 +837,9 @@ class PersistentLiveDecisionLoop:
         self._paper_execution_ledger_authority = (
             None if paper_execution is None else paper_execution.ledger
         )
+        self._paper_execution_config_authority = (
+            None if paper_execution is None else paper_execution.config
+        )
         self._paper_execution_model_fingerprint_authority = (
             None if paper_execution is None else paper_execution.config.fingerprint
         )
@@ -2577,6 +2580,10 @@ class PersistentLiveDecisionLoop:
         if self.paper_execution.ledger.path != self._workspace_authority / "paper-execution.jsonl":
             raise LiveDecisionProgressError(
                 "PAPER execution ledger authority changed after construction"
+            )
+        if self.paper_execution.config is not self._paper_execution_config_authority:
+            raise LiveDecisionProgressError(
+                "PAPER execution model object authority changed after construction"
             )
         if (
             self.paper_execution.config.fingerprint

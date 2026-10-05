@@ -104,6 +104,35 @@ class ContinuousObservationTests(unittest.TestCase):
 
             self.assertFalse(workspace.exists())
 
+    def test_provider_source_id_control_character_fails_before_workspace_creation(self):
+        class Provider:
+            source_id = "continuous\nforged-status"
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider I/O must not run")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(ValueError, "source_id must be canonical"):
+                self._run(Provider(), self._config(workspace, max_cycles=1))
+
+            self.assertFalse(workspace.exists())
+
+    def test_run_id_control_character_fails_before_workspace_creation(self):
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(ValueError, "run_id must be a canonical"):
+                self._run(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    run_id="run\rforged",
+                )
+
+            self.assertFalse(workspace.exists())
+            self.assertEqual(provider.calls, 0)
+
     def test_string_redaction_config_fails_before_workspace_creation(self):
         provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
 

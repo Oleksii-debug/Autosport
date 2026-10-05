@@ -1205,5 +1205,43 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 os.chdir(original_cwd)
 
 
+
+    def test_execution_guard_rejects_ledger_path_authority_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, runtime = self.runtime(tmp)
+            ledger.path = Path(tmp) / "alternate-execution.jsonl"
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "ledger persistence authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("mutated ledger path authority must not be entered")
+
+    def test_execution_guard_rejects_ledger_lock_authority_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, runtime = self.runtime(tmp)
+            ledger._lock = RLock()
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "ledger persistence authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("rebound ledger lock authority must not be entered")
+
+    def test_execution_guard_rejects_ledger_anchor_path_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, runtime = self.runtime(tmp)
+            ledger._anchor_path = Path(tmp) / "alternate-anchor.json"
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "ledger persistence authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("mutated ledger anchor authority must not be entered")
+
+
 if __name__ == "__main__":
     unittest.main()

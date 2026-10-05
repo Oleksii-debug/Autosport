@@ -279,15 +279,19 @@ class FocusedMirrorDependencyIndex:
         if not batch.changed_keys or not dependencies:
             return ()
 
-        changed_events = tuple(
-            event
-            for source_id, quote_key in batch.changed_keys
-            if (
-                event := self._mirror.event_for_quote_key(source_id, quote_key)
-            ) is not None
-        )
-        if not changed_events:
-            return ()
+        changed_keys = frozenset(batch.changed_keys)
+        captured = self._mirror.view_for_keys(changed_keys)
+        changed_events = {
+            (event.source_id, event.quote_key): event
+            for event in captured.events
+        }
+        if len(changed_events) != len(changed_keys):
+            # A drained dirty key should still exist in canonical latest truth.
+            # If a malformed/manual batch or concurrent invariant break violates
+            # that law, missing the affected dependency would be less safe than
+            # conservatively recomputing every currently registered input.
+            with self._lock:
+                return tuple(self._dependencies)
 
         affected: list[str] = []
         with self._lock:
@@ -296,11 +300,16 @@ class FocusedMirrorDependencyIndex:
                     continue
                 matched = self._matched_keys.setdefault(dependency.input_id, set())
                 dependency_affected = False
-                for event in changed_events:
-                    if not dependency.matches(event):
-                        continue
-                    matched.add((event.source_id, event.quote_key))
-                    dependency_affected = True
+                for key in batch.changed_keys:
+                    event = changed_events[key]
+                    previously_matched = key in matched
+                    currently_matches = dependency.matches(event)
+                    if currently_matches:
+                        matched.add(key)
+                    elif previously_matched:
+                        matched.discard(key)
+                    if previously_matched or currently_matches:
+                        dependency_affected = True
                 if dependency_affected:
                     affected.append(dependency.input_id)
         return tuple(affected)

@@ -743,3 +743,48 @@ def test_app_close_requests_canonical_stop_and_freezes_runtime_controls() -> Non
     assert source.configured[-1] == {"state": "disabled"}
     assert save.states[-1] == ("disabled",)
     assert scheduled and scheduled[0][0] == 100
+
+
+def test_restart_display_resolves_exact_persisted_source_identity(
+    tmp_path: Path,
+) -> None:
+    surface = SimpleNamespace(
+        workspace=tmp_path / "workspace",
+        product_source=_Value(),
+        product_status=_Value(),
+        _product_source_id_to_display={
+            "parlayapi-table-tennis": "Parlay API — настільний теніс"
+        },
+    )
+
+    with patch(
+        "autosport.product_windows_gui.load_operator_source_configuration",
+        return_value=_configured(),
+    ):
+        ProductWindowsAutosportApp._load_product_source_for_display(surface)
+
+    assert surface.product_source.value == "Parlay API — настільний теніс"
+    assert "autosport.product_source" not in surface.product_source.value
+    assert "parlayapi-table-tennis" not in surface.product_source.value
+
+
+def test_restart_missing_source_returns_configuration_required_state(
+    tmp_path: Path,
+) -> None:
+    surface = SimpleNamespace(
+        workspace=tmp_path / "workspace",
+        product_source=_Value("stale"),
+        product_status=_Value(),
+        _product_source_id_to_display={
+            "parlayapi-table-tennis": "Parlay API — настільний теніс"
+        },
+    )
+
+    with patch(
+        "autosport.product_windows_gui.load_operator_source_configuration",
+        return_value=None,
+    ):
+        ProductWindowsAutosportApp._load_product_source_for_display(surface)
+
+    assert surface.product_source.value == ""
+    assert "Оберіть і збережіть джерело" in surface.product_status.value

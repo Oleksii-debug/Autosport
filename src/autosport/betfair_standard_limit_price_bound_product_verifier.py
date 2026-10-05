@@ -87,6 +87,19 @@ def _build_product_entrypoint():
             and canonical_ledger_init.__code__ is canonical_ledger_init_code
         )
 
+    def exact_instance_field(value: object, field: str, owner: str):
+        try:
+            state = object.__getattribute__(value, "__dict__")
+        except (AttributeError, TypeError) as exc:
+            raise BetfairStandardLimitPriceBoundError(
+                f"{owner} instance state is unavailable"
+            ) from exc
+        if type(state) is not dict or field not in state:
+            raise BetfairStandardLimitPriceBoundError(
+                f"{owner} instance state is incomplete"
+            )
+        return state[field]
+
     def require_runtime(
         runtime_profile: object,
         *,
@@ -158,7 +171,11 @@ def _build_product_entrypoint():
             raise BetfairStandardLimitPriceBoundError(
                 "product issuance store is not canonical"
             )
-        store_workspace_value = object.__getattribute__(issuance_store, "workspace")
+        store_workspace_value = exact_instance_field(
+            issuance_store,
+            "workspace",
+            "product issuance store",
+        )
         if type(store_workspace_value) is not canonical_path_type:
             raise BetfairStandardLimitPriceBoundError(
                 "product issuance store workspace handle is not canonical"
@@ -173,7 +190,11 @@ def _build_product_entrypoint():
             raise BetfairStandardLimitPriceBoundError(
                 "product issuance store is outside the active runtime workspace"
             )
-        if object.__getattribute__(issuance_store, "authority_root") is not None:
+        if exact_instance_field(
+            issuance_store,
+            "authority_root",
+            "product issuance store",
+        ) is not None:
             raise BetfairStandardLimitPriceBoundError(
                 "product issuance store must use the product-selected authority root"
             )
@@ -182,7 +203,11 @@ def _build_product_entrypoint():
             raise BetfairStandardLimitPriceBoundError(
                 "execution ledger is not canonical"
             )
-        ledger_path_value = object.__getattribute__(ledger, "path")
+        ledger_path_value = exact_instance_field(
+            ledger,
+            "path",
+            "execution ledger",
+        )
         if type(ledger_path_value) is not canonical_path_type:
             raise BetfairStandardLimitPriceBoundError(
                 "execution ledger path handle is not canonical"
@@ -214,13 +239,40 @@ def _build_product_entrypoint():
                 "canonical Betfair product verifier reopen authority changed"
             )
         if (
-            type(object.__getattribute__(canonical_store, "workspace"))
+            type(
+                exact_instance_field(
+                    canonical_store,
+                    "workspace",
+                    "canonical product issuance store",
+                )
+            )
             is not canonical_path_type
-            or object.__getattribute__(canonical_store, "workspace") != workspace
-            or object.__getattribute__(canonical_store, "authority_root") is not None
-            or type(object.__getattribute__(canonical_ledger, "path"))
+            or exact_instance_field(
+                canonical_store,
+                "workspace",
+                "canonical product issuance store",
+            )
+            != workspace
+            or exact_instance_field(
+                canonical_store,
+                "authority_root",
+                "canonical product issuance store",
+            )
+            is not None
+            or type(
+                exact_instance_field(
+                    canonical_ledger,
+                    "path",
+                    "canonical execution ledger",
+                )
+            )
             is not canonical_path_type
-            or object.__getattribute__(canonical_ledger, "path") != ledger_path
+            or exact_instance_field(
+                canonical_ledger,
+                "path",
+                "canonical execution ledger",
+            )
+            != ledger_path
         ):
             raise BetfairStandardLimitPriceBoundError(
                 "canonical Betfair product verifier reopen state changed"

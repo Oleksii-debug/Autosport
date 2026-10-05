@@ -115,6 +115,31 @@ class ForecastTruthTests(unittest.TestCase):
             self.assertEqual(envelope["record"]["forecast_id"], "f-1")
             self.assertNotIn("outcome", envelope["record"])
 
+
+    def test_outcome_and_evaluation_windows_reject_lossy_submicrosecond_times(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "precision finer than microseconds is unsupported",
+        ):
+            ForecastOutcomeFact(
+                "f-1",
+                1,
+                "2026-02-10T14:00:00.0000001+00:00",
+            )
+
+        for field, value in (
+            ("training_end", "2026-01-31T23:59:59.0000001+00:00"),
+            ("start", "2026-02-01T00:00:00.0000001+00:00"),
+            ("end", "2026-02-28T23:59:59.0000001+00:00"),
+        ):
+            with self.subTest(field=field):
+                kwargs = {field: value}
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "precision finer than microseconds is unsupported",
+                ):
+                    self._window(**kwargs)
+
     def test_holdout_metrics_and_calibration_are_evaluated_post_outcome(self):
         records = [
             self._record("f-1", probability="0.8"),

@@ -1627,6 +1627,101 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertEqual(committed, Decimal("40.00"))
         self.assertEqual(book.balance, Decimal("60.00"))
 
+    def test_lay_loaded_state_class_finite_override_cannot_replace_validation_authority(self):
+        book = PaperBook(Decimal("100"))
+        book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        def hostile(*_args, **_kwargs):
+            nonlocal hostile_calls
+            hostile_calls += 1
+
+        with patch.object(PaperBook, "_require_finite", staticmethod(hostile)):
+            committed = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(committed, Decimal("40.00"))
+
+    def test_lay_loaded_state_class_text_override_cannot_replace_validation_authority(self):
+        book = PaperBook(Decimal("100"))
+        book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        def hostile(*_args, **_kwargs):
+            nonlocal hostile_calls
+            hostile_calls += 1
+
+        with patch.object(PaperBook, "_require_canonical_text", staticmethod(hostile)):
+            committed = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(committed, Decimal("40.00"))
+
+    def test_lay_loaded_state_class_placed_at_override_cannot_replace_validation_authority(self):
+        book = PaperBook(Decimal("100"))
+        book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        def hostile(*_args, **_kwargs):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return QUOTE_AT
+
+        with patch.object(PaperBook, "_validate_placed_at", classmethod(hostile)):
+            committed = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(committed, Decimal("40.00"))
+
+    def test_lay_loaded_state_class_utf8_override_cannot_replace_validation_authority(self):
+        book = PaperBook(Decimal("100"))
+        book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        def hostile(*_args, **_kwargs):
+            nonlocal hostile_calls
+            hostile_calls += 1
+
+        with patch.object(PaperBook, "_require_utf8_string", staticmethod(hostile)):
+            committed = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(committed, Decimal("40.00"))
+
+    def test_lay_loaded_state_class_provenance_override_cannot_replace_validation_authority(self):
+        book = PaperBook(Decimal("100"))
+        book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        def hostile(*_args, **_kwargs):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return (), (), None, None
+
+        with patch.object(PaperBook, "_validate_ticket_provenance", classmethod(hostile)):
+            committed = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(committed, Decimal("40.00"))
+
+    def test_lay_loaded_state_class_settled_at_override_cannot_replace_validation_authority(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        book.settle(ticket.ticket_id, set())
+        hostile_calls = 0
+
+        def hostile(*_args, **_kwargs):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return QUOTE_AT
+
+        with patch.object(PaperBook, "_validate_settled_at", classmethod(hostile)):
+            committed = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(committed, Decimal("0"))
+        self.assertEqual(book.balance, Decimal("110.00"))
+
     def test_open_lay_snapshot_round_trip_preserves_liability_and_side(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-book.json"

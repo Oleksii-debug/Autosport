@@ -909,6 +909,29 @@ class IngestionHealthTests(unittest.TestCase):
             self.assertEqual(state.latest_source_ts, "2026-09-12T11:59:50+00:00")
             store.close()
 
+    def test_provider_base_exception_is_persisted_and_rethrown(self):
+        class InterruptingProvider:
+            source_id = "interrupting-source"
+
+            def read_batch(self, max_items: int = 1000):
+                raise SystemExit("provider-stop")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, health = self._engine(tmp)
+            try:
+                with self.assertRaisesRegex(SystemExit, "provider-stop"):
+                    engine.poll_once(InterruptingProvider(), max_items=10)
+
+                state = health.get("interrupting-source")
+                self.assertEqual(state.status, "failed")
+                self.assertEqual(state.total_failures, 1)
+                self.assertEqual(state.consecutive_failures, 1)
+                self.assertEqual(state.last_failure_kind, "provider_or_validation")
+                self.assertIn("SystemExit", state.last_error or "")
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
     def test_provider_failure_is_persisted_and_rethrown(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine, store, health = self._engine(tmp)

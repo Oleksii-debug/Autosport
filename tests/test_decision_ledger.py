@@ -119,8 +119,8 @@ class DecisionLedgerTests(unittest.TestCase):
 
             self.assertTrue(path.exists())
             self.assertEqual(path.read_bytes(), b"")
-            lock_path = path.absolute().with_name(path.name + ".writer.lock")
-            self.assertFalse(lock_path.exists())
+            lock_path = path.resolve(strict=False).with_name(path.name + ".writer.lock")
+            self.assertTrue(lock_path.exists())
 
             ledger.append(self._record(decision_id="published-after-retry"))
             self.assertEqual(ledger.verify_integrity(), 1)
@@ -354,28 +354,40 @@ class DecisionLedgerTests(unittest.TestCase):
                 first._writer_lock_path_authority,
                 second._writer_lock_path_authority,
             )
-            first._writer_lock_path_authority.write_text("owned", encoding="utf-8")
+            with first._writer_guard():
+                with self.assertRaisesRegex(
+                    DecisionLedgerIntegrityError,
+                    "transaction authority is unavailable",
+                ):
+                    second.assert_transaction_authority()
 
-            with self.assertRaisesRegex(
-                DecisionLedgerIntegrityError,
-                "transaction authority is unavailable",
-            ):
-                second.assert_transaction_authority()
-
-    def test_append_fails_closed_when_writer_lock_is_owned(self):
+    def test_transaction_authority_fails_closed_while_writer_lock_is_owned(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"
-            ledger = JsonlDecisionLedger(path)
-            lock_path = path.absolute().with_name(path.name + ".writer.lock")
-            lock_path.write_text("owned", encoding="utf-8")
+            first = JsonlDecisionLedger(path)
+            second = JsonlDecisionLedger(path)
 
-            with self.assertRaisesRegex(
-                DecisionLedgerIntegrityError,
-                "writer lock exists",
-            ):
-                ledger.append(self._record(decision_id="blocked"))
+            with first._writer_guard():
+                with self.assertRaisesRegex(
+                    DecisionLedgerIntegrityError,
+                    "transaction authority is unavailable",
+                ):
+                    second.assert_transaction_authority()
 
-            self.assertFalse(path.exists())
+            second.assert_transaction_authority()
+
+    def test_abandoned_persistent_sidecar_does_not_brick_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            first = JsonlDecisionLedger(path)
+            first.append(self._record(decision_id="first"))
+            self.assertTrue(first._writer_lock_path_authority.exists())
+
+            restarted = JsonlDecisionLedger(path)
+            restarted.assert_transaction_authority()
+            restarted.append(self._record(decision_id="second"))
+
+            self.assertEqual(restarted.verify_integrity(), 2)
 
     def test_two_ledger_instances_cannot_append_same_decision_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -426,19 +438,16 @@ class DecisionLedgerTests(unittest.TestCase):
             restarted = JsonlDecisionLedger(path)
             self.assertEqual(restarted.verify_integrity(), 1)
 
-    def test_verified_snapshot_fails_closed_while_writer_lock_exists(self):
+    def test_persistent_unowned_writer_sidecar_does_not_block_verified_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"
             ledger = JsonlDecisionLedger(path)
             ledger.append(self._record(decision_id="stable"))
-            lock_path = path.absolute().with_name(path.name + ".writer.lock")
-            lock_path.write_text("owned", encoding="utf-8")
+            self.assertTrue(ledger._writer_lock_path_authority.exists())
 
-            with self.assertRaisesRegex(
-                DecisionLedgerIntegrityError,
-                "verified snapshot is unavailable",
-            ):
-                ledger.verified_snapshot()
+            snapshot = ledger.verified_snapshot()
+
+            self.assertEqual(snapshot.record_count, 1)
 
     def test_integrity_rejects_malformed_material_action_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -480,8 +489,9 @@ class DecisionLedgerTests(unittest.TestCase):
             with self.assertRaises(DecisionLedgerIntegrityError):
                 ledger.append(record)
 
-            lock_path = path.absolute().with_name(path.name + ".writer.lock")
-            self.assertFalse(lock_path.exists())
+            lock_path = path.resolve(strict=False).with_name(path.name + ".writer.lock")
+            self.assertTrue(lock_path.exists())
+            ledger.assert_transaction_authority()
             ledger.append(self._record(decision_id="next"))
             self.assertEqual(ledger.verify_integrity(), 2)
 

@@ -1570,3 +1570,42 @@ def test_sealed_json_decode_still_rejects_duplicate_keys_and_nonfinite_constants
         PaperBook.load_bytes(duplicate)
     with pytest.raises(ValueError, match="non-finite JSON constant: NaN"):
         PaperBook.load_bytes(nonfinite)
+
+
+
+def test_save_never_executes_rebound_json_serializer(monkeypatch, tmp_path) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound JSON serializer executed")
+
+    monkeypatch.setattr(paper_module.json, "dump", hostile)
+
+    destination = tmp_path / "sealed-json-serializer.json"
+    book.save(destination)
+
+    assert destination.exists()
+    assert attacker_calls == 0
+    loaded = PaperBook.load(destination)
+    assert loaded.committed_stake == Decimal("10")
+
+
+def test_save_rejects_in_place_json_serializer_code_mutation(tmp_path) -> None:
+    book = PaperBook("100")
+    authority = paper_module.json.dump
+    original_code = authority.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+    destination = tmp_path / "mutated-json-serializer.json"
+
+    try:
+        authority.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="JSON serializer authority changed"):
+            book.save(destination)
+    finally:
+        authority.__code__ = original_code
+
+    assert not destination.exists()

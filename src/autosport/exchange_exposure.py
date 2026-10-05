@@ -72,56 +72,65 @@ _EXACT_HELPER_WITNESSES = tuple(
 )
 
 
-def locked_capital_for_exchange_side(
+def _build_locked_capital_calculator(
     *,
-    stake: Decimal,
-    odds: Decimal,
-    exchange_side: str,
-    _decimal_type=Decimal,
-    _supported_sides=_SUPPORTED_EXCHANGE_SIDES,
-    _subtract=_subtract_exact,
-    _multiply=_multiply_exact,
-    _helper_witnesses=_EXACT_HELPER_WITNESSES,
-    _function_type=FunctionType,
-) -> Decimal:
-    """Return exact capital at risk for one exchange order.
+    decimal_type,
+    supported_sides,
+    subtract,
+    multiply,
+    helper_witnesses,
+    function_type,
+):
+    """Seal the money-moving arithmetic graph outside caller-controlled kwargs."""
 
-    BACK locks the matched/order stake. LAY locks liability: stake * (odds - 1).
-    Arithmetic is coefficient/exponent based so ambient Decimal precision cannot
-    round the liability before the caller's explicit accounting boundary.
+    def calculate(
+        *,
+        stake: Decimal,
+        odds: Decimal,
+        exchange_side: str,
+    ) -> Decimal:
+        for function, code, defaults, kwdefaults, closure in helper_witnesses:
+            if (
+                type(function) is not function_type
+                or function.__code__ is not code
+                or function.__defaults__ is not defaults
+                or function.__kwdefaults__ is not kwdefaults
+                or function.__closure__ is not closure
+            ):
+                raise ValueError("exchange exposure arithmetic authority drifted")
 
-    The exact arithmetic helpers are captured and witnessed because this value is
-    consumed as a money-moving exposure boundary. Runtime helper drift therefore
-    fails closed instead of silently reducing required LAY liability.
-    """
-    for function, code, defaults, kwdefaults, closure in _helper_witnesses:
-        if (
-            type(function) is not _function_type
-            or function.__code__ is not code
-            or function.__defaults__ is not defaults
-            or function.__kwdefaults__ is not kwdefaults
-            or function.__closure__ is not closure
-        ):
-            raise ValueError("exchange exposure arithmetic authority drifted")
+        if type(stake) is not decimal_type:
+            raise TypeError("stake must be Decimal")
+        if type(odds) is not decimal_type:
+            raise TypeError("odds must be Decimal")
+        if type(exchange_side) is not str:
+            raise TypeError("exchange_side must be str")
+        if not stake.is_finite() or stake <= 0:
+            raise ValueError("stake must be a finite Decimal > 0")
+        if not odds.is_finite() or odds <= 1:
+            raise ValueError("odds must be a finite Decimal > 1")
 
-    if type(stake) is not _decimal_type:
-        raise TypeError("stake must be Decimal")
-    if type(odds) is not _decimal_type:
-        raise TypeError("odds must be Decimal")
-    if type(exchange_side) is not str:
-        raise TypeError("exchange_side must be str")
-    if not stake.is_finite() or stake <= 0:
-        raise ValueError("stake must be a finite Decimal > 0")
-    if not odds.is_finite() or odds <= 1:
-        raise ValueError("odds must be a finite Decimal > 1")
+        if exchange_side not in supported_sides:
+            raise ValueError(
+                "exchange_side must be an exact canonical BACK/LAY or back/lay token"
+            )
+        if exchange_side in {"BACK", "back"}:
+            return stake
+        return multiply(stake, subtract(odds, decimal_type("1")))
 
-    if exchange_side not in _supported_sides:
-        raise ValueError(
-            "exchange_side must be an exact canonical BACK/LAY or back/lay token"
-        )
-    if exchange_side in {"BACK", "back"}:
-        return stake
-    return _multiply(stake, _subtract(odds, _decimal_type("1")))
+    return calculate
+
+
+locked_capital_for_exchange_side = _build_locked_capital_calculator(
+    decimal_type=Decimal,
+    supported_sides=_SUPPORTED_EXCHANGE_SIDES,
+    subtract=_subtract_exact,
+    multiply=_multiply_exact,
+    helper_witnesses=_EXACT_HELPER_WITNESSES,
+    function_type=FunctionType,
+)
+locked_capital_for_exchange_side.__name__ = "locked_capital_for_exchange_side"
+locked_capital_for_exchange_side.__qualname__ = "locked_capital_for_exchange_side"
 
 
 __all__ = ["locked_capital_for_exchange_side"]

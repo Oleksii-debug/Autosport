@@ -171,6 +171,46 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(book.tickets, {})
             self.assertEqual(book.balance, Decimal("100.00"))
 
+    def test_paper_value_lay_executes_through_empirical_attempt_into_paperbook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            prepared_lay = runtime.prepare_paper_value_action(
+                event=market_event("lay"),
+                stake=Decimal("10.00"),
+                decision_id="decision-lay-e2e",
+                account_id="paper-account",
+                bankroll_id="paper-bankroll",
+                currency="EUR",
+            )
+            current = prepared_lay.execution_plan.actions[0]
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds=str(current.requested_odds),
+                stake=str(current.requested_stake),
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+
+            result = runtime.execute(
+                prepared=prepared_lay,
+                trigger_id="trigger-lay-e2e",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(result.run.attempts[0].side, "LAY")
+            self.assertEqual(len(result.ticket_ids), 1)
+            ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.legs[0].exchange_side, "lay")
+            self.assertEqual(ticket.legs[0].locked_odds, Decimal("2.50"))
+            self.assertEqual(ticket.stake, Decimal("10.00"))
+            self.assertEqual(book.balance, Decimal("85.00"))
+            self.assertEqual(book.committed_capital, Decimal("15.00"))
+
     def test_empirical_accepted_lay_materializes_liability_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)
@@ -212,6 +252,41 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(ticket.stake, Decimal("10.00"))
             self.assertEqual(book.balance, Decimal("60.00"))
             self.assertEqual(book.committed_capital, Decimal("40.00"))
+
+    def test_empirical_accepted_lay_liability_uses_accepted_odds_not_requested_odds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action(
+                "lay-accepted-odds-move",
+                odds="5.00",
+                stake="10.00",
+                side="LAY",
+            )
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="4.00",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+
+            result = runtime.execute(
+                prepared=prepared(runtime, current),
+                trigger_id="trigger-lay-accepted-odds-move",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={current.action_id: registered.as_observation()},
+                evidence_registry=registry,
+            )
+
+            self.assertEqual(result.run.worst_case_exposure, Decimal("30.00"))
+            ticket = next(iter(book.tickets.values()))
+            self.assertEqual(ticket.legs[0].locked_odds, Decimal("4.00"))
+            self.assertEqual(ticket.stake, Decimal("10.00"))
+            self.assertEqual(book.balance, Decimal("70.00"))
+            self.assertEqual(book.committed_capital, Decimal("30.00"))
 
     def test_empirical_accepted_lay_restart_reuses_same_durable_exposure(self):
         with tempfile.TemporaryDirectory() as tmp:

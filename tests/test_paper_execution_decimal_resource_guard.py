@@ -82,6 +82,23 @@ def test_evidence_serializer_preserves_noninjectable_public_call_shape() -> None
         record.to_dict(lambda _: {})  # type: ignore[call-arg]
 
 
+def test_boundary_sized_fixed_point_value_remains_serializable() -> None:
+    record = _record(odds=Decimal("1E+8191"), stake=Decimal("1"))
+
+    rendered = record.to_dict()["accepted_odds"]
+
+    assert isinstance(rendered, str)
+    assert len(rendered) == 8192
+
+
+def test_reload_rejects_oversized_evidence_under_same_resource_law() -> None:
+    raw = _record(odds=Decimal("5"), stake=Decimal("10")).to_dict()
+    raw["accepted_stake"] = "1E-100000000"
+
+    with pytest.raises(legacy.PaperExecutionIntegrityError, match="invalid evidence record"):
+        legacy.PaperExecutionEvidenceRecord.from_dict(raw)
+
+
 def test_bounded_empirical_evidence_is_context_independent() -> None:
     record = _record(
         odds=Decimal("9.87654321987654321"),

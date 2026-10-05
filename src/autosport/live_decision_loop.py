@@ -1965,6 +1965,15 @@ class PersistentLiveDecisionLoop:
             "max_quote_age_seconds": str(
                 _timedelta_decimal_seconds(self.max_quote_age)
             ),
+            "max_health_age_seconds": (
+                None
+                if self._health_gate is None
+                else str(
+                    _timedelta_decimal_seconds(
+                        self._health_gate._max_health_age
+                    )
+                )
+            ),
         }
         if self.paper_execution is not None:
             context_payload["paper_execution_model_fingerprint"] = (
@@ -3114,9 +3123,8 @@ class PersistentLiveDecisionLoop:
             MATERIAL_ACTION_ID_PAYLOAD_KEY: decision_id,
         }
         if expected_execution_payload is not None:
-            # Keep the established top-level live-decision schema/version so the
-            # decision identity remains stable; execution adoption is additive,
-            # separately versioned evidence.
+            # Execution adoption remains separately versioned evidence inside the
+            # health-aware live-decision schema.
             record_payload["paper_execution"] = expected_execution_payload
 
         record = DecisionRecord(

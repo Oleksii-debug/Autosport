@@ -382,7 +382,7 @@ def _expected_run_id(
     # Adoption publishes the exposure-scope event immediately after deriving this
     # identity. Revalidate mutable frozen surfaces before any fingerprint/run-id
     # calculation can influence that durable key.
-    self._require_minted(prepared)
+    _require_minted(self, prepared)
     _reality._require_canonical_execution_plan_surface(prepared.execution_plan)
     _reality._require_canonical_execution_config_surface(self.config)
     return _ORIGINAL_EXPECTED_RUN_ID(self, prepared, trigger_id)
@@ -399,7 +399,7 @@ def _preflight_adoption_inputs(
     suspended_action_ids: frozenset[str],
 ) -> dict[str, _reality.ObservedPaperExecution]:
     """Validate/snapshot execution inputs before EXPOSURE_SCOPE becomes durable."""
-    self._require_minted(prepared)
+    _require_minted(self, prepared)
     _reality._require_canonical_execution_plan_surface(prepared.execution_plan)
     _reality._require_canonical_execution_config_surface(self.config)
     _exact_text(trigger_id, "trigger_id")
@@ -419,7 +419,7 @@ def _preflight_adoption_inputs(
         raise TypeError("observation keys must be exact str action ids")
     # Mapping iteration is caller code. Revalidate the minted authority after
     # that callback boundary before reading any prepared execution fields.
-    self._require_minted(prepared)
+    _require_minted(self, prepared)
     if type(suspended_action_ids) is not frozenset or any(
         type(item) is not str for item in suspended_action_ids
     ):
@@ -458,14 +458,14 @@ def _preflight_adoption_inputs(
         # Registry resolution is another callback boundary. Reject any mutation
         # of the minted plan/bindings before those values can affect durable
         # exposure scope or materialization.
-        self._require_minted(prepared)
+        _require_minted(self, prepared)
     _reality._validate_lay_execution_surface(
         plan=prepared.execution_plan,
         observations=observation_snapshot,
         suspended_action_ids=suspended_action_ids,
     )
     if observation_snapshot:
-        self._require_minted(prepared)
+        _require_minted(self, prepared)
         run_id = _reality._impl._run_id(
             prepared.execution_plan,
             trigger_id,
@@ -652,9 +652,10 @@ def _execute_unlocked(
         evidence_registry=evidence_registry,
         suspended_action_ids=suspended_action_ids,
     )
-    self._require_minted(prepared)
-    expected_run_id = self.expected_run_id(prepared, trigger_id)
-    self._publish_exposure_scope(
+    _require_minted(self, prepared)
+    expected_run_id = _expected_run_id(self, prepared, trigger_id)
+    _adoption.PaperExecutionAdoptionRuntime._publish_exposure_scope(
+        self,
         prepared=prepared,
         run_id=expected_run_id,
     )
@@ -672,7 +673,7 @@ def _execute_unlocked(
         evidence_registry=evidence_registry,
         suspended_action_ids=suspended_action_ids,
     )
-    self._require_minted(prepared)
+    _require_minted(self, prepared)
     if (
         type(returned_run) is not _reality.PaperExecutionRun
         or type(returned_run.run_id) is not str
@@ -702,7 +703,7 @@ def _execute_unlocked(
         observation_evidence_ids=observation_evidence_ids,
         suspended_action_ids=suspended_action_ids,
     )
-    self._require_minted(prepared)
+    _require_minted(self, prepared)
     if run is None or type(run) is not _reality.PaperExecutionRun:
         raise PaperExecutionAdoptionError(
             "canonical durable execution run is unavailable after execution"
@@ -745,7 +746,7 @@ def _execute_unlocked(
     # Detached preflight executes domain callbacks. Re-prove the complete minted
     # authority before the first live economic mutation and retain the pinned
     # post-run decision identity for all ticket provenance.
-    self._require_minted(prepared)
+    _require_minted(self, prepared)
 
     ticket_ids: list[str] = []
     materialization_book = self.book
@@ -766,7 +767,7 @@ def _execute_unlocked(
             # A materialization callback can mutate a later action/binding after
             # the detached preflight. Re-prove the whole minted batch before any
             # partially-mutated live book is allowed to approach publication.
-            self._require_minted(prepared)
+            _require_minted(self, prepared)
             for _attempt, action, binding in accepted_attempts:
                 _require_materialization_authority(action, binding)
             try:
@@ -786,7 +787,7 @@ def _execute_unlocked(
     if accepted_attempts:
         # Materialization/domain code is another mutation boundary. Validate the
         # complete economic snapshot and pin exact persistence authority before I/O.
-        self._require_minted(prepared)
+        _require_minted(self, prepared)
         try:
             type(self.book)._validate_loaded_state(self.book)
         except (TypeError, ValueError) as exc:
@@ -810,7 +811,7 @@ def _execute_unlocked(
 
         # Save is an external durability boundary. Re-prove both runtime/prepared
         # authority and the in-memory economic snapshot before selecting reload path.
-        self._require_minted(prepared)
+        _require_minted(self, prepared)
         if self.book is not book or self.paper_book_path is not paper_book_path:
             raise PaperExecutionAdoptionError(
                 "PAPER adoption persistence authority changed during save"
@@ -826,7 +827,7 @@ def _execute_unlocked(
 
         # Load is another callback/I/O boundary. Do not compare or accept the
         # reloaded state using pre-load runtime or prepared assumptions.
-        self._require_minted(prepared)
+        _require_minted(self, prepared)
         if self.book is not book or self.paper_book_path is not paper_book_path:
             raise PaperExecutionAdoptionError(
                 "PAPER adoption persistence authority changed during load"
@@ -842,7 +843,7 @@ def _execute_unlocked(
             raise PaperExecutionAdoptionError(
                 "PaperBook changed or became invalid across durable publication"
             ) from exc
-        self._assert_same_book_state(
+        _adoption.PaperExecutionAdoptionRuntime._assert_same_book_state(
             durable_book,
             book,
             "PaperBook changed across atomic durable publication",
@@ -1193,7 +1194,7 @@ def _assert_recoverable_book_state(
 ) -> None:
     if not isinstance(prepared, PreparedPaperExecution):
         raise TypeError("prepared must be PreparedPaperExecution")
-    self._require_minted(prepared)
+    _require_minted(self, prepared)
     canonical_sides = tuple(
         _require_action_side(action)
         for action in prepared.execution_plan.actions
@@ -1225,14 +1226,14 @@ def _assert_recoverable_book_state(
             "PAPER recovery requires canonical validated PaperBook state"
         ) from exc
 
-    if self._same_book_state(self.book, pre_action_book):
+    if _adoption.PaperExecutionAdoptionRuntime._same_book_state(self.book, pre_action_book):
         return
     if not materialize_exposure:
         raise PaperExecutionAdoptionError(
             "SHADOW recovery PaperBook differs from exact pre-action state"
         )
 
-    run_id = self.expected_run_id(prepared, trigger_id)
+    run_id = _expected_run_id(self, prepared, trigger_id)
     action_ids = tuple(
         action.action_id for action in prepared.execution_plan.actions
     )
@@ -1252,7 +1253,7 @@ def _assert_recoverable_book_state(
     )
     # Durable ledger reads are callback boundaries. Re-prove the runtime and
     # minted plan/bindings before re-reading them to reconstruct economic state.
-    self._require_minted(prepared)
+    _require_minted(self, prepared)
     _reality._require_canonical_execution_plan_surface(prepared.execution_plan)
     _reality._require_canonical_execution_config_surface(self.config)
     if run is None:
@@ -1315,7 +1316,7 @@ def _assert_recoverable_book_state(
     # live and reconstructed economic states immediately before the final
     # equality decision so a callback/concurrent mutation cannot be laundered
     # into a successful restart reconciliation.
-    self._require_minted(prepared)
+    _require_minted(self, prepared)
     try:
         type(self.book)._validate_loaded_state(self.book)
         type(expected)._validate_loaded_state(expected)
@@ -1323,7 +1324,7 @@ def _assert_recoverable_book_state(
         raise PaperExecutionAdoptionError(
             "PAPER recovery state changed or became invalid during reconstruction"
         ) from exc
-    if not self._same_book_state(self.book, expected):
+    if not _adoption.PaperExecutionAdoptionRuntime._same_book_state(self.book, expected):
         raise PaperExecutionAdoptionError(
             "PaperBook restart state is not the exact pre-action or "
             "#623-authorized post-action state"

@@ -263,7 +263,12 @@ class PaperValueAgent:
         forecast = self.forecasts.get(event.quote_key)
         if forecast is None:
             return
-        if parse_iso_timestamp(forecast.as_of_ts) > parse_iso_timestamp(event.observed_ts):
+        event_time = parse_iso_timestamp(event.observed_ts)
+        if parse_iso_timestamp(forecast.as_of_ts) > event_time:
+            return
+        if isinstance(forecast, ForecastRecord) and (
+            parse_iso_timestamp(forecast.generated_at) > event_time
+        ):
             return
         estimate = paper_value(event.quote_key, forecast.probability, event.decimal_odds)
         expected_profit_per_unit = estimate.expected_profit_per_unit

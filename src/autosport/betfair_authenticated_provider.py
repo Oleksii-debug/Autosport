@@ -374,12 +374,6 @@ class BetfairAuthenticatedMarketProvider:
                 "reconnect and rebuild the authenticated provider from SQLite"
             )
 
-    def _next_sequence(self) -> int:
-        if self._sequence >= _MAX_SQLITE_SEQUENCE:
-            raise OverflowError("Betfair bridge exhausted signed 64-bit provider sequence")
-        self._sequence += 1
-        return self._sequence
-
     def _open_quote(
         self,
         evidence: BetfairStreamPublicationEvidence,

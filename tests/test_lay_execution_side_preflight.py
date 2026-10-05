@@ -203,6 +203,51 @@ def test_suspended_lay_is_durable_no_exposure_without_empirical_fill_evidence() 
         ]
 
 
+
+
+def test_suspension_state_is_bound_to_durable_run_identity() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        back = _action(
+            "back-suspension-identity",
+            side="BACK",
+            odds="2.00",
+            stake="5.00",
+        )
+
+        first = execute_paper_plan(
+            plan=_plan(back),
+            trigger_id="back-suspension-identity",
+            config=_config(),
+            ledger=ledger,
+            started_at=STARTED_AT,
+            suspended_action_ids=frozenset({back.action_id}),
+        )
+        assert first.attempts[0].suspended is True
+        assert first.attempts[0].outcome is PaperAttemptOutcome.REJECTED
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="execution-control state conflicts with durable reservation",
+        ):
+            execute_paper_plan(
+                plan=_plan(back),
+                trigger_id="back-suspension-identity",
+                config=_config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+
+        events = ledger.events()
+        assert [event["event_type"] for event in events] == [
+            "RUN_RESERVED",
+            "ATTEMPT_RECORDED",
+            "RUN_COMPLETED",
+        ]
+        reserve = events[0]
+        assert reserve["payload"]["suspended_action_ids"] == [back.action_id]
+
+
 @pytest.mark.parametrize("side", ("SIDEWAYS", "back", " BACK "))
 def test_unsupported_or_noncanonical_nonlay_side_fails_before_reservation(side: str) -> None:
     with tempfile.TemporaryDirectory() as tmp:

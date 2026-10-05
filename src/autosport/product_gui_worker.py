@@ -14,6 +14,7 @@ from typing import Callable
 from .continuous_session import (
     ContinuousSessionStatus,
     ContinuousTickResult,
+    SessionState,
     SessionStoppedError,
 )
 from .domain import TicketStatus
@@ -177,6 +178,18 @@ def _capture_profiled_runtime_builder(
                 "profiled runtime composition cannot prove exact source origin"
             ) from exc
         if (
+            type(runtime_source_id) is not str
+            or not runtime_source_id
+            or runtime_source_id.strip() != runtime_source_id
+        ):
+            try:
+                runtime.close()
+            except BaseException:
+                pass
+            raise ProductEntrypointError(
+                "profiled runtime manifest has invalid source identity"
+            )
+        if (
             runtime_workspace != expected_workspace
             or runtime_source_id != expected_source_id
             or runtime_source is not source
@@ -250,6 +263,88 @@ def _runtime_builder(
 # Compatibility/debug alias only. Trust eligibility never compares against this
 # mutable module-global binding.
 _CANONICAL_RUNTIME_BUILDER = _PROFILED_RUNTIME_BUILDER
+
+
+def _require_profiled_status_identity(
+    status: object,
+    *,
+    expected_source_id: str,
+    expected_session_id: str | None = None,
+    expected_state: SessionState | None = None,
+) -> ContinuousSessionStatus:
+    if type(status) is not ContinuousSessionStatus:
+        raise ProductEntrypointError(
+            "profiled runtime returned a non-canonical session status"
+        )
+    for field_name, value in (
+        ("source_id", status.source_id),
+        ("session_id", status.session_id),
+    ):
+        if (
+            type(value) is not str
+            or not value
+            or value.strip() != value
+        ):
+            raise ProductEntrypointError(
+                f"profiled runtime status has invalid {field_name}"
+            )
+    if status.source_id != expected_source_id:
+        raise ProductEntrypointError(
+            "profiled runtime status changed configured source identity"
+        )
+    if (
+        expected_session_id is not None
+        and status.session_id != expected_session_id
+    ):
+        raise ProductEntrypointError(
+            "profiled runtime status changed lifecycle session identity"
+        )
+    if expected_state is not None and status.state is not expected_state:
+        raise ProductEntrypointError(
+            "profiled runtime status has unexpected lifecycle state"
+        )
+    if type(status.cycles_completed) is not int or status.cycles_completed < 0:
+        raise ProductEntrypointError(
+            "profiled runtime status has invalid cycle count"
+        )
+    return status
+
+
+def _require_profiled_tick_identity(
+    tick: object,
+    *,
+    expected_source_id: str,
+    expected_session_id: str,
+) -> ContinuousTickResult:
+    if type(tick) is not ContinuousTickResult:
+        raise ProductEntrypointError(
+            "profiled runtime returned a non-canonical tick result"
+        )
+    for field_name, value in (
+        ("source_id", tick.source_id),
+        ("session_id", tick.session_id),
+    ):
+        if (
+            type(value) is not str
+            or not value
+            or value.strip() != value
+        ):
+            raise ProductEntrypointError(
+                f"profiled runtime tick has invalid {field_name}"
+            )
+    if tick.source_id != expected_source_id:
+        raise ProductEntrypointError(
+            "profiled runtime tick changed configured source identity"
+        )
+    if tick.session_id != expected_session_id:
+        raise ProductEntrypointError(
+            "profiled runtime tick changed lifecycle session identity"
+        )
+    if type(tick.cycle_index) is not int or tick.cycle_index < 1:
+        raise ProductEntrypointError(
+            "profiled runtime tick has invalid cycle index"
+        )
+    return tick
 
 
 def _safe_error_type(exc: BaseException) -> str:
@@ -799,15 +894,40 @@ class ProductGuiWorker:
             or expected_source_id.strip() != expected_source_id
         ):
             raise ValueError("expected_source_id must be a non-empty trimmed string")
-        if (
-            isinstance(poll_seconds, bool)
-            or not isinstance(poll_seconds, (int, float))
-            or not math.isfinite(float(poll_seconds))
-            or poll_seconds <= 0
-        ):
-            raise ValueError("poll_seconds must be a finite positive number")
-
-        root = Path(workspace)
+        if expected_source_id is not None:
+            if (
+                type(initial_bankroll) is not str
+                or not initial_bankroll
+                or initial_bankroll.strip() != initial_bankroll
+                or len(initial_bankroll) > 128
+            ):
+                raise ValueError(
+                    "profiled initial_bankroll must be bounded exact text"
+                )
+            if (
+                type(poll_seconds) not in {int, float}
+                or not math.isfinite(float(poll_seconds))
+                or poll_seconds <= 0
+            ):
+                raise ValueError(
+                    "profiled poll_seconds must be an exact finite positive number"
+                )
+            if type(workspace) not in {str, type(Path("."))}:
+                raise ValueError(
+                    "profiled runtime workspace must be exact str or exact Path"
+                )
+            root = Path(workspace)
+            if not root.is_absolute():
+                raise ValueError("profiled runtime workspace must be absolute")
+        else:
+            if (
+                isinstance(poll_seconds, bool)
+                or not isinstance(poll_seconds, (int, float))
+                or not math.isfinite(float(poll_seconds))
+                or poll_seconds <= 0
+            ):
+                raise ValueError("poll_seconds must be a finite positive number")
+            root = Path(workspace)
         with self._lock:
             if self._busy:
                 return False
@@ -957,6 +1077,7 @@ class ProductGuiWorker:
         terminal_error: BaseException | None = None
         stopped_status: ContinuousSessionStatus | None = None
         stop_reason: str | None = None
+        profiled_session_id: str | None = None
         try:
             if expected_source_id is not None:
                 if self._runtime_builder is not None:
@@ -992,9 +1113,21 @@ class ProductGuiWorker:
             if self._stop_event.is_set():
                 stop_reason = self._stop_reason
                 stopped_status = runtime.stop(stop_reason)
+                if expected_source_id is not None:
+                    stopped_status = _require_profiled_status_identity(
+                        stopped_status,
+                        expected_source_id=expected_source_id,
+                        expected_state=SessionState.STOPPED,
+                    )
             else:
                 started_status = runtime.start()
                 if expected_source_id is not None:
+                    started_status = _require_profiled_status_identity(
+                        started_status,
+                        expected_source_id=expected_source_id,
+                        expected_state=SessionState.RUNNING,
+                    )
+                    profiled_session_id = started_status.session_id
                     # Serialize STOP acceptance and trusted-profile issuance through the
                     # worker lifecycle lock. This gives the two operations one ordering:
                     # STOP first => no profile; issuance first => request_stop() revokes
@@ -1046,6 +1179,18 @@ class ProductGuiWorker:
                                 tick = runtime.tick()
                                 if self._stop_event.is_set():
                                     break
+                                if (
+                                    expected_source_id is None
+                                    or profiled_session_id is None
+                                ):
+                                    raise ProductEntrypointError(
+                                        "profiled runtime lifecycle identity is unavailable"
+                                    )
+                                tick = _require_profiled_tick_identity(
+                                    tick,
+                                    expected_source_id=expected_source_id,
+                                    expected_session_id=profiled_session_id,
+                                )
                                 try:
                                     require_authoritative_trusted_runtime_code_profile(
                                         runtime_profile,
@@ -1085,6 +1230,17 @@ class ProductGuiWorker:
 
                 stop_reason = self._stop_reason
                 stopped_status = runtime.stop(stop_reason)
+                if expected_source_id is not None:
+                    if profiled_session_id is None:
+                        raise ProductEntrypointError(
+                            "profiled runtime lifecycle session identity is unavailable"
+                        )
+                    stopped_status = _require_profiled_status_identity(
+                        stopped_status,
+                        expected_source_id=expected_source_id,
+                        expected_session_id=profiled_session_id,
+                        expected_state=SessionState.STOPPED,
+                    )
         except BaseException as exc:
             terminal_error = exc
             # Compensation is based on possession of a canonical runtime, not on

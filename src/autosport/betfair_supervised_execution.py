@@ -675,6 +675,55 @@ class BetfairSupervisedPlaceOrdersClient:
         )
 
 
+def _build_canonical_place_action_dispatch():
+    """Capture the exact provider-write method before callers can shadow dispatch."""
+
+    client_type = BetfairSupervisedPlaceOrdersClient
+    place_action = client_type.__dict__.get("place_action")
+    if not callable(place_action) or getattr(place_action, "__code__", None) is None:
+        raise RuntimeError("canonical Betfair place_action dispatch is unavailable")
+    place_action_code = place_action.__code__
+
+    def dispatch(
+        client: BetfairSupervisedPlaceOrdersClient,
+        action: ExecutionAction,
+        *,
+        profile: BookmakerCapabilityProfile,
+        bound: BoundSupervisedExecutionPlan,
+        provider_order_ref: str,
+        execution_workspace: Path,
+        _before_transport: Callable[[str], None] | None,
+    ) -> BetfairPlaceExecutionReport:
+        if (
+            type(client) is not client_type
+            or client_type.__dict__.get("place_action") is not place_action
+            or place_action.__code__ is not place_action_code
+        ):
+            raise BetfairSupervisedExecutionError(
+                "canonical Betfair place_action dispatch changed"
+            )
+        namespace = object.__getattribute__(client, "__dict__")
+        if type(namespace) is not dict or "place_action" in namespace:
+            raise BetfairSupervisedExecutionError(
+                "Betfair client shadows canonical place_action dispatch"
+            )
+        return place_action(
+            client,
+            action,
+            profile=profile,
+            bound=bound,
+            provider_order_ref=provider_order_ref,
+            execution_workspace=execution_workspace,
+            _before_transport=_before_transport,
+        )
+
+    return dispatch
+
+
+_canonical_place_action_dispatch = _build_canonical_place_action_dispatch()
+del _build_canonical_place_action_dispatch
+
+
 def _mapping(
     value: object,
     field: str,
@@ -1043,7 +1092,8 @@ def _place_action_with_final_durable_authority(
             submitted = True
 
         try:
-            report = client.place_action(
+            report = _canonical_place_action_dispatch(
+                client,
                 action,
                 profile=profile,
                 bound=bound,
@@ -1086,12 +1136,9 @@ def execute_betfair_supervised_action(
 
     if not isinstance(ledger, RealExecutionLedger):
         raise TypeError("ledger must be RealExecutionLedger")
-    if not isinstance(
-        client,
-        BetfairSupervisedPlaceOrdersClient,
-    ):
+    if type(client) is not BetfairSupervisedPlaceOrdersClient:
         raise TypeError(
-            "client must be BetfairSupervisedPlaceOrdersClient"
+            "client must be exact BetfairSupervisedPlaceOrdersClient"
         )
     action = bound.action_for(action_id)
     _validate_betfair_place_action(action)

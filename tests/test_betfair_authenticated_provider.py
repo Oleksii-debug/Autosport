@@ -8,6 +8,7 @@ import pytest
 
 from autosport.betfair_authenticated_provider import (
     BetfairAuthenticatedMarketProvider,
+    _MAX_SQLITE_SEQUENCE,
     _SCHEMA,
     _event_token,
     _identity_token,
@@ -644,3 +645,59 @@ def test_durable_reproof_succeeds_between_truncated_bridge_pages(
     assert second.quality_flags == ()
     assert provider._sequence == 2
     assert set(provider._open_by_identity) == set(identities)
+
+
+def test_transition_planning_overflow_leaves_bridge_state_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identities = tuple(
+        BetfairQuoteIdentity(
+            BETFAIR_STREAM_SOURCE_ID,
+            "1.23456789",
+            601 + index,
+            Decimal("0"),
+            BetfairQuoteSide.BACK,
+            Decimal("2"),
+        )
+        for index in range(2)
+    )
+    evidence = tuple(
+        SimpleNamespace(
+            quote=SimpleNamespace(
+                identity=identity,
+                price=Decimal("2"),
+                size=Decimal("1"),
+            ),
+            evidence_id=f"overflow-{index}",
+            subscription_id="subscription-1",
+            frame_sha256="c" * 64,
+            provider_health=BetfairProviderStreamHealth.UP_TO_DATE,
+            publish_time_ms=1_700_000_000_000 + index,
+            received_time_ms=1_700_000_000_001 + index,
+            ingested_time_ms=1_700_000_000_001 + index,
+        )
+        for index, identity in enumerate(identities)
+    )
+    provider = BetfairAuthenticatedMarketProvider(
+        _runtime(),
+        freshness_policy=BetfairStreamFreshnessPolicy(max_age_ms=5_000),
+    )
+    provider.bind_durable_current({})
+    provider._sequence = _MAX_SQLITE_SEQUENCE - 1
+    monkeypatch.setattr(
+        BetfairAuthenticatedStreamFreshnessRuntime,
+        "read_and_ingest",
+        lambda self: evidence,
+    )
+    monkeypatch.setattr(
+        BetfairAuthenticatedStreamFreshnessRuntime,
+        "evaluate",
+        lambda self, identity, *, policy: SimpleNamespace(decision_eligible=True),
+    )
+
+    with pytest.raises(OverflowError, match="exhausted signed 64-bit"):
+        provider._build_transition()
+
+    assert provider._sequence == _MAX_SQLITE_SEQUENCE - 1
+    assert provider._open_by_identity == {}
+    assert provider._pending == ()

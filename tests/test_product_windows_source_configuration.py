@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from autosport.continuous_session import ContinuousSessionStatus, SessionState
 from autosport.operator_source_configuration import (
     OperatorSourceConfiguration,
@@ -419,3 +421,31 @@ def test_failed_prior_session_teardown_does_not_relabel_or_quarantine_product_ro
     assert surface._active_workspace == prior_workspace
     assert blocked == []
     assert "не вдалося безпечно закрити" in surface.product_status.value
+
+
+def test_worker_start_interrupt_restores_session_before_unwind(
+    tmp_path: Path,
+) -> None:
+    surface = _start_surface(tmp_path)
+    events: list[str] = []
+
+    def interrupt(**_kwargs: object) -> bool:
+        events.append("start")
+        raise KeyboardInterrupt()
+
+    surface.product_worker.start = interrupt
+    surface._restore_base_session_after_product = lambda: (
+        events.append("restore") or True
+    )
+
+    with (
+        patch(
+            "autosport.product_windows_gui.load_operator_source_configuration",
+            return_value=_configured(),
+        ),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        ProductWindowsAutosportApp.start_product_runtime(surface)
+
+    assert events == ["start", "restore"]
+    assert surface._product_expected_provider_source_id is None

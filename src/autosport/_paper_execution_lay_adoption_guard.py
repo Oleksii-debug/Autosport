@@ -46,6 +46,19 @@ _ORIGINAL_EXPOSURE_SCOPE_PAYLOAD = PaperExecutionAdoptionRuntime._exposure_scope
 _ORIGINAL_REQUIRE_ATTEMPT_ACTION_IDENTITY = PaperExecutionAdoptionRuntime._require_attempt_action_identity
 _ORIGINAL_SAME_BOOK_STATE = PaperExecutionAdoptionRuntime._same_book_state
 _ORIGINAL_ASSERT_SAME_BOOK_STATE = PaperExecutionAdoptionRuntime._assert_same_book_state
+_ORIGINAL_EXECUTE_PAPER_PLAN = _adoption.execute_paper_plan
+_ORIGINAL_DEEPCOPY = _adoption.copy.deepcopy
+_ORIGINAL_INSTALL_TICKET_OPENING_AUTHORITY = _paper._install_validated_ticket_opening_authority
+_ORIGINAL_INSTALL_CAUSAL_HISTORY_AUTHORITY = _paper._install_validated_paperbook_causal_history_authority
+_ORIGINAL_REQUIRE_EXECUTION_CONFIG = _reality._require_canonical_execution_config_surface
+_ORIGINAL_REQUIRE_EXECUTION_PLAN = _reality._require_canonical_execution_plan_surface
+_ORIGINAL_VALIDATE_LAY_EXECUTION_SURFACE = _reality._validate_lay_execution_surface
+_ORIGINAL_RUN_ID = _reality._impl._run_id
+_ORIGINAL_VERIFY_OBSERVATION_AUTHORITY = _reality._impl._verify_observation_authority
+_ORIGINAL_OBSERVED_ATTEMPT = _reality._impl._observed_attempt
+_ORIGINAL_REQUIRE_ACTION_SURFACE = _reality._impl._require_canonical_action_surface
+_ORIGINAL_ADOPTION_DIGEST = _adoption._digest
+_ORIGINAL_ADOPTION_UTC_TIMESTAMP = _adoption._utc_timestamp
 _PREPARED_WITNESSES: dict[int, tuple[PreparedPaperExecution, str]] = {}
 _ACTION_WITNESSES: dict[int, tuple[ExecutionAction, str, str]] = {}
 _BINDING_WITNESSES: dict[int, tuple[PaperExposureBinding, tuple[str, str | None, str | None, str | None]]] = {}
@@ -57,7 +70,7 @@ _RUNTIME_WITNESSES: dict[int, tuple[object, ...]] = {}
 
 def _init(self: PaperExecutionAdoptionRuntime, *args, **kwargs) -> None:
     _ORIGINAL_INIT(self, *args, **kwargs)
-    _reality._require_canonical_execution_config_surface(self.config)
+    _ORIGINAL_REQUIRE_EXECUTION_CONFIG(self.config)
     _RUNTIME_WITNESSES[id(self)] = (
         self,
         self.book,
@@ -117,7 +130,7 @@ def _require_runtime_authority(self: PaperExecutionAdoptionRuntime) -> None:
         raise PaperExecutionAdoptionError(
             "PAPER adoption runtime configuration changed after construction"
         )
-    _reality._require_canonical_execution_config_surface(self.config)
+    _ORIGINAL_REQUIRE_EXECUTION_CONFIG(self.config)
     if self.config.fingerprint != config_fingerprint:
         raise PaperExecutionAdoptionError(
             "PAPER adoption execution config changed after construction"
@@ -269,7 +282,7 @@ def _prepared_authority_payload(
 
 
 def _prepared_authority_witness(prepared: PreparedPaperExecution) -> str:
-    return _adoption._digest(_prepared_authority_payload(prepared))
+    return _ORIGINAL_ADOPTION_DIGEST(_prepared_authority_payload(prepared))
 
 
 def _action_authority_witness(action: ExecutionAction) -> str:
@@ -277,8 +290,8 @@ def _action_authority_witness(action: ExecutionAction) -> str:
         raise PaperExecutionAdoptionError(
             "materialization action must retain exact ExecutionAction authority"
         )
-    _reality._impl._require_canonical_action_surface(action)
-    return _adoption._digest(action.to_dict())
+    _ORIGINAL_REQUIRE_ACTION_SURFACE(action)
+    return _ORIGINAL_ADOPTION_DIGEST(action.to_dict())
 
 
 def _binding_authority_witness(
@@ -392,9 +405,9 @@ def _expected_run_id(
     # identity. Revalidate mutable frozen surfaces before any fingerprint/run-id
     # calculation can influence that durable key.
     _require_minted(self, prepared)
-    _reality._require_canonical_execution_plan_surface(prepared.execution_plan)
-    _reality._require_canonical_execution_config_surface(self.config)
-    return _reality._impl._run_id(
+    _ORIGINAL_REQUIRE_EXECUTION_PLAN(prepared.execution_plan)
+    _ORIGINAL_REQUIRE_EXECUTION_CONFIG(self.config)
+    return _ORIGINAL_RUN_ID(
         prepared.execution_plan,
         _exact_text(trigger_id, "trigger_id"),
         self.config,
@@ -413,10 +426,10 @@ def _preflight_adoption_inputs(
 ) -> dict[str, _reality.ObservedPaperExecution]:
     """Validate/snapshot execution inputs before EXPOSURE_SCOPE becomes durable."""
     _require_minted(self, prepared)
-    _reality._require_canonical_execution_plan_surface(prepared.execution_plan)
-    _reality._require_canonical_execution_config_surface(self.config)
+    _ORIGINAL_REQUIRE_EXECUTION_PLAN(prepared.execution_plan)
+    _ORIGINAL_REQUIRE_EXECUTION_CONFIG(self.config)
     _exact_text(trigger_id, "trigger_id")
-    _adoption._utc_timestamp(started_at, "started_at")
+    _ORIGINAL_ADOPTION_UTC_TIMESTAMP(started_at, "started_at")
     if type(materialize_exposure) is not bool:
         raise TypeError("materialize_exposure must be bool")
     if observations is None:
@@ -461,7 +474,7 @@ def _preflight_adoption_inputs(
         }
         canonical_observations: dict[str, _reality.ObservedPaperExecution] = {}
         for action_id, observation in observation_snapshot.items():
-            record = _reality._impl._verify_observation_authority(
+            record = _ORIGINAL_VERIFY_OBSERVATION_AUTHORITY(
                 action=action_by_id[action_id],
                 observation=observation,
                 registry=evidence_registry,
@@ -472,14 +485,14 @@ def _preflight_adoption_inputs(
         # of the minted plan/bindings before those values can affect durable
         # exposure scope or materialization.
         _require_minted(self, prepared)
-    _reality._validate_lay_execution_surface(
+    _ORIGINAL_VALIDATE_LAY_EXECUTION_SURFACE(
         plan=prepared.execution_plan,
         observations=observation_snapshot,
         suspended_action_ids=suspended_action_ids,
     )
     if observation_snapshot:
         _require_minted(self, prepared)
-        run_id = _reality._impl._run_id(
+        run_id = _ORIGINAL_RUN_ID(
             prepared.execution_plan,
             trigger_id,
             self.config,
@@ -488,7 +501,7 @@ def _preflight_adoption_inputs(
             observation = observation_snapshot.get(action.action_id)
             if observation is None:
                 continue
-            _reality._impl._observed_attempt(
+            _ORIGINAL_OBSERVED_ATTEMPT(
                 run_id=run_id,
                 plan=prepared.execution_plan,
                 action=action,
@@ -510,15 +523,15 @@ def _authorized_paperbook_copy(book: _adoption.PaperBook) -> _adoption.PaperBook
         raise PaperExecutionAdoptionError(
             "PaperBook copy source is not canonical"
         ) from exc
-    shadow = _adoption.copy.deepcopy(book)
+    shadow = _ORIGINAL_DEEPCOPY(book)
     if type(shadow) is not _adoption.PaperBook:
         raise PaperExecutionAdoptionError(
             "PaperBook copy must retain exact PaperBook authority"
         )
     try:
         _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(shadow)
-        _paper._install_validated_ticket_opening_authority(shadow)
-        _paper._install_validated_paperbook_causal_history_authority(shadow)
+        _ORIGINAL_INSTALL_TICKET_OPENING_AUTHORITY(shadow)
+        _ORIGINAL_INSTALL_CAUSAL_HISTORY_AUTHORITY(shadow)
     except (TypeError, ValueError) as exc:
         raise PaperExecutionAdoptionError(
             "PaperBook copy could not acquire validated product authority"
@@ -631,12 +644,12 @@ def _restore_paperbook_from_snapshot(
 
     target.initial_bankroll = snapshot.initial_bankroll
     target.balance = snapshot.balance
-    target.tickets = _adoption.copy.deepcopy(snapshot.tickets)
+    target.tickets = _ORIGINAL_DEEPCOPY(snapshot.tickets)
     target._lifecycle = list(snapshot._lifecycle)
     target._settlement_times = dict(snapshot._settlement_times)
     try:
-        _paper._install_validated_ticket_opening_authority(target)
-        _paper._install_validated_paperbook_causal_history_authority(target)
+        _ORIGINAL_INSTALL_TICKET_OPENING_AUTHORITY(target)
+        _ORIGINAL_INSTALL_CAUSAL_HISTORY_AUTHORITY(target)
         _ORIGINAL_PAPERBOOK_VALIDATE_LOADED_STATE(target)
     except (TypeError, ValueError) as exc:
         raise PaperExecutionAdoptionError(
@@ -725,7 +738,7 @@ def _execute_unlocked(
     # Durable ledger execution can cross filesystem and registry boundaries.
     # Re-prove runtime/prepared authority before any post-run materialization
     # reads the caller-visible prepared value again.
-    returned_run = _adoption.execute_paper_plan(
+    returned_run = _ORIGINAL_EXECUTE_PAPER_PLAN(
         plan=prepared.execution_plan,
         trigger_id=trigger_id,
         config=self.config,
@@ -988,7 +1001,7 @@ def _replace_prepared_actions(
         execution_plan = replace(
             execution_plan,
             plan_id="paper-value-plan-v1-"
-            + _adoption._digest(
+            + _ORIGINAL_ADOPTION_DIGEST(
                 {
                     "decision_id": paper_value_decision_id,
                     "action": replaced_actions[0].to_dict(),
@@ -1316,8 +1329,8 @@ def _assert_recoverable_book_state(
     # Durable ledger reads are callback boundaries. Re-prove the runtime and
     # minted plan/bindings before re-reading them to reconstruct economic state.
     _require_minted(self, prepared)
-    _reality._require_canonical_execution_plan_surface(prepared.execution_plan)
-    _reality._require_canonical_execution_config_surface(self.config)
+    _ORIGINAL_REQUIRE_EXECUTION_PLAN(prepared.execution_plan)
+    _ORIGINAL_REQUIRE_EXECUTION_CONFIG(self.config)
     if run is None:
         raise PaperExecutionAdoptionError(
             "PaperBook changed before any durable #623 run evidence"

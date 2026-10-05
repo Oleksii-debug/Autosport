@@ -153,6 +153,7 @@ class FocusedMirrorDependencyIndex:
         self._mirror = mirror
         self._dependencies: dict[str, FocusedMirrorDependency] = {}
         self._matched_keys: dict[str, set[MirrorQuoteKey]] = {}
+        self._matched_revisions: dict[str, int] = {}
         self._registry_revision = 0
         self._lock = RLock()
 
@@ -203,6 +204,7 @@ class FocusedMirrorDependencyIndex:
                 raise ValueError(f"input_id {normalized_id!r} is already registered")
             self._dependencies[normalized_id] = dependency
             self._matched_keys[normalized_id] = initial_keys
+            self._matched_revisions[normalized_id] = initial_view.revision
             self._registry_revision += 1
 
         # Close the mirror-view -> registry-publication race without making this
@@ -220,6 +222,7 @@ class FocusedMirrorDependencyIndex:
             with self._lock:
                 if self._dependencies.get(normalized_id) == dependency:
                     self._matched_keys[normalized_id].update(catch_up_keys)
+                    self._matched_revisions[normalized_id] = catch_up.revision
         return dependency
 
     def unregister(self, input_id: str) -> bool:
@@ -227,6 +230,7 @@ class FocusedMirrorDependencyIndex:
         with self._lock:
             removed = self._dependencies.pop(normalized_id, None)
             self._matched_keys.pop(normalized_id, None)
+            self._matched_revisions.pop(normalized_id, None)
             if removed is not None:
                 self._registry_revision += 1
             return removed is not None
@@ -253,11 +257,11 @@ class FocusedMirrorDependencyIndex:
             dependencies = tuple(self._dependencies.values())
 
         if batch.full_refresh_required:
-            snapshot = self._mirror.snapshot()
+            captured = self._mirror.view()
             rebuilt = {
                 dependency.input_id: {
                     (event.source_id, event.quote_key)
-                    for event in snapshot
+                    for event in captured.events
                     if dependency.matches(event)
                 }
                 for dependency in dependencies
@@ -269,6 +273,7 @@ class FocusedMirrorDependencyIndex:
                         self._matched_keys[dependency.input_id] = rebuilt[
                             dependency.input_id
                         ]
+                        self._matched_revisions[dependency.input_id] = captured.revision
             # Return the live registry, not the pre-snapshot registry. A dependency
             # removed while the fail-safe snapshot was captured must not escape as
             # stale pending work; a newly registered dependency is conservatively
@@ -312,6 +317,10 @@ class FocusedMirrorDependencyIndex:
                         dependency_affected = True
                 if dependency_affected:
                     affected.append(dependency.input_id)
+            if not batch.has_more:
+                for dependency in dependencies:
+                    if self._dependencies.get(dependency.input_id) == dependency:
+                        self._matched_revisions[dependency.input_id] = captured.revision
         return tuple(affected)
 
     def semantic_refresh_only_inputs(
@@ -597,11 +606,33 @@ class FocusedMirrorDependencyIndex:
         path. General consumers must use decision_view so correctness does not depend
         on participating in this index invalidation protocol.
         """
-        keys = self.matching_keys(input_id)
-        return self._mirror.active_view_for_keys(
+        normalized_id = self._input_id(input_id)
+        with self._lock:
+            try:
+                dependency = self._dependencies[normalized_id]
+            except KeyError as exc:
+                raise KeyError(
+                    f"unknown focused mirror input {normalized_id!r}"
+                ) from exc
+            keys = tuple(sorted(self._matched_keys.get(normalized_id, set())))
+            index_revision = self._matched_revisions.get(normalized_id)
+
+        bounded = self._mirror.active_view_for_keys(
             keys,
             as_of=as_of,
             max_age=max_age,
+        )
+        if index_revision is not None and bounded.revision == index_revision:
+            return bounded
+
+        # The bounded identity index is only an optimization. If mirror truth has
+        # advanced beyond the revision proven by routed invalidations, fall back to
+        # the canonical selector-based focused view so a newly matching quote cannot
+        # disappear from a live decision merely because routing raced this read.
+        return self._mirror.active_view(
+            as_of=as_of,
+            max_age=max_age,
+            **self._selectors(dependency),
         )
 
     def replay_view(

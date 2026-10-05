@@ -510,9 +510,9 @@ class ProductEconomicSessionStore:
             self._require_configuration_authority()
             goal = _ECONOMIC_GOAL_LOAD(self._goal_store_witness)
             provenance = provenance_for(goal)
-            if os.path.lexists(self.state_path):
+            if os.path.lexists(self._state_path_witness):
                 raw = _read_regular_bytes(
-                    self.state_path, limit=_MAX_STATE_BYTES, label="economic-session state"
+                    self._state_path_witness, limit=_MAX_STATE_BYTES, label="economic-session state"
                 )
                 payload = _decode_state(
                     raw,
@@ -558,7 +558,7 @@ class ProductEconomicSessionStore:
                 raise MonotonicAuthorityRollbackError(
                     "economic-session state is missing after authority establishment"
                 )
-            if not self.paperbook_path.exists():
+            if not self._paperbook_path_witness.exists():
                 raise EconomicSessionIntegrityError(
                     "canonical paper_book.json is required before economic-session issuance"
                 )
@@ -608,9 +608,9 @@ class ProductEconomicSessionStore:
             intended_state_sha256=intended,
             semantic_binding_sha256=binding,
         )
-        atomic_write_json(self.state_path, payload)
+        atomic_write_json(self._state_path_witness, payload)
         raw = _read_regular_bytes(
-            self.state_path, limit=_MAX_STATE_BYTES, label="economic-session state"
+            self._state_path_witness, limit=_MAX_STATE_BYTES, label="economic-session state"
         )
         observed = hashlib.sha256(raw).hexdigest()
         if observed != intended:

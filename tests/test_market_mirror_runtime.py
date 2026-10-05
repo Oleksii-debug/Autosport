@@ -1011,6 +1011,38 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertFalse(peer.is_alive())
         self.assertEqual(index.input_ids, ("input-a",))
 
+    def test_registry_state_guard_uses_mutation_lock_order(self) -> None:
+        mirror = MarketMirror()
+        index = FocusedMirrorDependencyIndex(mirror)
+        index.register("input-a", selection_ids="selection-1")
+        started = Event()
+        finished = Event()
+
+        def replace_in_peer() -> None:
+            started.set()
+            self.assertTrue(index.unregister("input-a"))
+            index.register("input-a", selection_ids="selection-2")
+            finished.set()
+
+        with index.registry_state_guard() as guarded:
+            self.assertEqual(len(guarded), 1)
+            peer = Thread(target=replace_in_peer)
+            peer.start()
+            self.assertTrue(started.wait(1))
+            self.assertFalse(finished.wait(0.05))
+            self.assertEqual(
+                guarded[0][0].selection_ids,
+                frozenset({"selection-1"}),
+            )
+
+        self.assertTrue(finished.wait(1))
+        peer.join(timeout=1)
+        self.assertFalse(peer.is_alive())
+        self.assertEqual(
+            index.registry_snapshot()[0].selection_ids,
+            frozenset({"selection-2"}),
+        )
+
     def test_dependency_revision_changes_across_same_selector_reregistration(self) -> None:
         mirror = MarketMirror()
         dependencies = FocusedMirrorDependencyIndex(mirror)

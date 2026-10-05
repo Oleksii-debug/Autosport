@@ -5615,6 +5615,51 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertFalse((workspace / "decisions.jsonl").exists())
             loop.close()
 
+    def test_provider_gap_rejects_same_selector_reincarnation_after_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [ProviderUnavailableError("provider unavailable")],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            original_market_sha = loop._market_state_sha256
+            mutated = [False]
+
+            def reincarnate_index_after_gap_capture():
+                value = original_market_sha()
+                if not mutated[0]:
+                    mutated[0] = True
+                    self.assertTrue(loop.dependencies.unregister("input-a"))
+                    loop.dependencies.register(
+                        "input-a",
+                        selection_ids="selection-a",
+                    )
+                return value
+
+            with (
+                patch.object(
+                    loop,
+                    "_market_state_sha256",
+                    side_effect=reincarnate_index_after_gap_capture,
+                ),
+                self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "focused dependency registry changed after snapshot capture",
+                ),
+            ):
+                loop.run_cycle()
+
+            self.assertTrue(mutated[0])
+            self.assertFalse(loop.progress_path.exists())
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            loop.close()
+
     def test_provider_gap_persists_zero_and_forces_rebuild_on_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -5838,6 +5883,56 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 self.assertRaisesRegex(
                     LiveDecisionProgressError,
                     "focused dependency registry changed concurrently before pending publication",
+                ),
+            ):
+                loop.run_cycle()
+
+            self.assertTrue(mutated[0])
+            self.assertFalse(loop.progress_path.exists())
+            self.assertEqual(
+                JsonlDecisionLedger(
+                    workspace / "decisions.jsonl"
+                ).verified_records(),
+                (),
+            )
+            loop.close()
+
+    def test_same_selector_reincarnation_after_capture_blocks_pending_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            original_market_sha = loop._market_state_sha256
+            mutated = [False]
+
+            def reincarnate_index_after_capture():
+                value = original_market_sha()
+                if not mutated[0]:
+                    mutated[0] = True
+                    self.assertTrue(loop.dependencies.unregister("input-a"))
+                    loop.dependencies.register(
+                        "input-a",
+                        selection_ids="selection-a",
+                    )
+                return value
+
+            with (
+                patch.object(
+                    loop,
+                    "_market_state_sha256",
+                    side_effect=reincarnate_index_after_capture,
+                ),
+                self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "focused dependency registry changed after snapshot capture",
                 ),
             ):
                 loop.run_cycle()

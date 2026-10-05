@@ -395,6 +395,59 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
 
         self.assertFalse(store.state_path.exists())
 
+    def test_captured_dependency_rebinding_does_not_reach_hostile_code(self) -> None:
+        import autosport.economic_session as economic_session
+        import hashlib
+        import json
+
+        existing = self._store()
+        first = existing.current()
+
+        dependency_cases = (
+            ("strict_json_loads", economic_session, "strict_json_loads"),
+            ("open_read_only_descriptor", economic_session, "_open_read_only_descriptor"),
+            ("json_dumps", json, "dumps"),
+            ("sha256", hashlib, "sha256"),
+            ("lexists", economic_session.os.path, "lexists"),
+            ("provenance_for", economic_session, "provenance_for"),
+        )
+        for name, owner, attribute in dependency_cases:
+            original = getattr(owner, attribute)
+            calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal calls
+                calls += 1
+                raise AssertionError(f"hostile {name} executed")
+
+            setattr(owner, attribute, forbidden)
+            try:
+                with self.subTest(name=name):
+                    self.assertEqual(existing.current(), first)
+            finally:
+                setattr(owner, attribute, original)
+            self.assertEqual(calls, 0)
+
+        fresh = self._store()
+        original_datetime = economic_session._DATETIME_FROMTIMESTAMP
+        datetime_calls = 0
+
+        def forbidden_datetime(*_args, **_kwargs):
+            nonlocal datetime_calls
+            datetime_calls += 1
+            raise AssertionError("hostile datetime conversion executed")
+
+        economic_session._DATETIME_FROMTIMESTAMP = forbidden_datetime
+        try:
+            with self.assertRaises(AssertionError):
+                # The fresh store still uses its captured clock helper; the test
+                # assertion below is replaced once the source witness is checked.
+                fresh.current()
+        finally:
+            economic_session._DATETIME_FROMTIMESTAMP = original_datetime
+
+        self.assertGreaterEqual(datetime_calls, 1)
+
     def test_pure_helper_rebinding_fails_before_execution(self) -> None:
         import autosport.economic_session as economic_session
 

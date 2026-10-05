@@ -19,6 +19,7 @@ from autosport.risk_policy_ruin_estimate_authority import (
     ProductFixedNRiskPolicyEstimate,
     ProductFixedNRiskPolicyEstimateError,
     _derive_policy_estimate_material,
+    _estimate_fields_differ,
 )
 
 
@@ -250,6 +251,39 @@ def test_policy_estimate_derivation_rejects_internal_helper_rebinding(
         match="dispatch changed",
     ):
         _derive_policy_estimate_material(_precommit(), _observations())
+
+
+def test_estimate_field_comparison_rejects_hostile_member_without_equality() -> None:
+    class HostileMember:
+        def __eq__(self, _other: object) -> bool:
+            raise AssertionError("hostile member equality must not execute")
+
+    candidate = object.__new__(ProductFixedNRiskPolicyEstimate)
+    canonical = object.__new__(ProductFixedNRiskPolicyEstimate)
+    object.__setattr__(candidate, "planned_member_ids", (HostileMember(),))
+    object.__setattr__(canonical, "planned_member_ids", ("run-001",))
+
+    assert _estimate_fields_differ(
+        candidate,
+        canonical,
+        ("planned_member_ids",),
+    ) is True
+
+
+def test_policy_estimate_dispatch_rejects_field_comparison_helper_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        policy_module,
+        "_estimate_fields_differ",
+        lambda *_args, **_kwargs: False,
+    )
+
+    with pytest.raises(
+        ProductFixedNRiskPolicyEstimateError,
+        match="dispatch changed",
+    ):
+        policy_module._require_dispatch()
 
 
 def test_policy_estimate_dispatch_rejects_derivation_helper_rebinding(

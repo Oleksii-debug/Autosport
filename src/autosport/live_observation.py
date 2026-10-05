@@ -339,10 +339,13 @@ def _poll_acknowledged(
             if attempt + 1 >= _MAX_BATCH_ATTEMPTS:
                 try:
                     provider.abandon_uncommitted()
-                except Exception as reset_error:
+                except BaseException as reset_error:
+                    # Cleanup must never replace the primary storage failure. Reset
+                    # hooks are provider-controlled and can themselves raise
+                    # BaseException or even fail during stringification.
                     exc.add_note(
                         "provider pending-snapshot reset also failed: "
-                        f"{type(reset_error).__name__}: {reset_error}"
+                        f"{_exception_text(reset_error)}"
                     )
                 raise
             continue

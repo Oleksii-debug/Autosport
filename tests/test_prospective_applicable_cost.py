@@ -277,6 +277,31 @@ def test_schema_v3_known_zero_slippage_requires_product_source_identity():
         subject._SEALED_RESOLUTION_VALIDATOR(source_less)
 
 
+def test_schema_v3_known_zero_slippage_rejects_hostile_source_family_equality():
+    result = _resolve_real()
+    source_backed = _known_zero_slippage_assertion(result)
+    slippage = next(
+        item
+        for item in source_backed.components
+        if item.cost_class is CostClass.EXECUTION_SLIPPAGE
+    )
+
+    class HostileSourceFamily:
+        def __eq__(self, _other):
+            return True
+
+        def __ne__(self, _other):
+            return False
+
+    object.__setattr__(slippage, "source_family", HostileSourceFamily())
+
+    with pytest.raises(
+        subject.ProspectiveApplicableCostError,
+        match="source_family must be a non-empty canonical string",
+    ):
+        subject._SEALED_RESOLUTION_VALIDATOR(source_backed)
+
+
 def test_product_slippage_resolver_rejects_verified_source_from_different_intent_and_plan(
     monkeypatch,
     tmp_path,

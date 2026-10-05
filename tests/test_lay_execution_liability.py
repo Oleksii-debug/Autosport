@@ -320,6 +320,90 @@ class LayExecutionLiabilityTests(unittest.TestCase):
             self.assertEqual(HostileDecimal.calls, 0)
             self.assertEqual(ledger.events(), [])
 
+    def test_observation_digest_subclass_fails_before_equality_hooks_or_reservation(self):
+        class HostileDigest(str):
+            calls = 0
+
+            def __eq__(self, other: object) -> bool:
+                type(self).calls += 1
+                return super().__eq__(other)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            source_action = _action()
+            observation, registry = _registered_observation(
+                ledger,
+                source_action,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="5.00",
+                stake="10.00",
+            )
+            before = len(ledger.events())
+            object.__setattr__(
+                observation,
+                "evidence_sha256",
+                HostileDigest(observation.evidence_sha256),
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "evidence_sha256 must retain exact canonical text authority",
+            ):
+                execute_paper_plan(
+                    plan=_plan(source_action),
+                    trigger_id="hostile-observation-digest",
+                    config=_config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                    observations={source_action.action_id: observation},
+                    evidence_registry=registry,
+                )
+
+            self.assertEqual(HostileDigest.calls, 0)
+            self.assertEqual(len(ledger.events()), before)
+
+    def test_action_identity_subclass_fails_before_equality_hooks_or_reservation(self):
+        class HostileIdentity(str):
+            calls = 0
+
+            def __eq__(self, other: object) -> bool:
+                type(self).calls += 1
+                return super().__eq__(other)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            source_action = _action()
+            observation, registry = _registered_observation(
+                ledger,
+                source_action,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="5.00",
+                stake="10.00",
+            )
+            before = len(ledger.events())
+            object.__setattr__(
+                source_action,
+                "bookmaker_id",
+                HostileIdentity(source_action.bookmaker_id),
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "bookmaker_id must retain exact canonical text authority",
+            ):
+                execute_paper_plan(
+                    plan=_plan(source_action),
+                    trigger_id="hostile-action-identity",
+                    config=_config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                    observations={source_action.action_id: observation},
+                    evidence_registry=registry,
+                )
+
+            self.assertEqual(HostileIdentity.calls, 0)
+            self.assertEqual(len(ledger.events()), before)
+
     def test_empirical_decimal_ingress_rejects_oversized_exponent(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")

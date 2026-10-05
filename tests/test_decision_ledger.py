@@ -196,19 +196,55 @@ class DecisionLedgerTests(unittest.TestCase):
             ):
                 ledger.verify_integrity()
 
-    def test_verify_integrity_rejects_duplicate_decision_identity(self):
+    def test_append_rejects_duplicate_decision_identity_without_corruption(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"
             ledger = JsonlDecisionLedger(path)
             record = self._record(decision_id="duplicate-id")
             ledger.append(record)
-            ledger.append(record)
 
             with self.assertRaisesRegex(
                 DecisionLedgerIntegrityError,
-                "duplicate decision_id at line 2",
+                "decision_id already exists",
             ):
-                ledger.verify_integrity()
+                ledger.append(record)
+
+            self.assertEqual(ledger.verify_integrity(), 1)
+            self.assertEqual(
+                [item.decision_id for item in ledger.verified_records()],
+                ["duplicate-id"],
+            )
+
+    def test_append_fails_closed_when_writer_lock_is_owned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            lock_path = path.absolute().with_name(path.name + ".writer.lock")
+            lock_path.write_text("owned", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "writer lock exists",
+            ):
+                ledger.append(self._record(decision_id="blocked"))
+
+            self.assertFalse(path.exists())
+
+    def test_two_ledger_instances_cannot_append_same_decision_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            first = JsonlDecisionLedger(path)
+            second = JsonlDecisionLedger(path)
+            record = self._record(decision_id="shared-id")
+            first.append(record)
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "decision_id already exists",
+            ):
+                second.append(record)
+
+            self.assertEqual(first.verify_integrity(), 1)
 
     def test_verify_integrity_rejects_unterminated_tail(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -31,6 +31,45 @@ class IngestionStats:
     quality_flags: tuple[str, ...] = ()
     health_status: str = "unknown"
 
+    def __post_init__(self) -> None:
+        if (
+            type(self.source_id) is not str
+            or not self.source_id
+            or self.source_id.strip() != self.source_id
+            or "|" in self.source_id
+        ):
+            raise ValueError("source_id must be a canonical exact string")
+        for name in ("received", "accepted", "rejected"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.accepted + self.rejected > self.received:
+            raise ValueError("accepted and rejected cannot exceed received")
+        if (
+            type(self.elapsed_seconds) not in {int, float}
+            or not isfinite(self.elapsed_seconds)
+            or self.elapsed_seconds < 0
+        ):
+            raise ValueError("elapsed_seconds must be a finite non-negative number")
+        if self.cursor is not None and type(self.cursor) is not str:
+            raise TypeError("cursor must be an exact string or None")
+        if type(self.quality_flags) is not tuple:
+            raise TypeError("quality_flags must be an exact tuple")
+        seen_flags: set[str] = set()
+        for flag in self.quality_flags:
+            if type(flag) is not str or not flag or flag.strip() != flag:
+                raise ValueError(
+                    "quality_flags must contain exact non-empty trimmed strings"
+                )
+            if flag in seen_flags:
+                raise ValueError("quality_flags must not contain duplicates")
+            seen_flags.add(flag)
+        if (
+            type(self.health_status) is not str
+            or self.health_status not in {"unknown", "healthy", "degraded", "failed"}
+        ):
+            raise ValueError("health_status must be a canonical health state")
+
     @property
     def accepted_per_second(self) -> float:
         elapsed = self.elapsed_seconds

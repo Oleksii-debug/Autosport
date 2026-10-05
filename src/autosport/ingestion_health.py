@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
+from types import FunctionType
 from typing import BinaryIO
 
 from .monotonic_workspace_authority import (
@@ -18,6 +19,7 @@ from .monotonic_workspace_authority import (
     MonotonicAuthorityRollbackError,
     MonotonicWorkspaceAuthority,
 )
+from . import secret_redaction as _secret_redaction
 
 
 _ALLOWED_HEALTH_STATUSES = frozenset({"unknown", "healthy", "degraded", "failed"})
@@ -45,6 +47,72 @@ _SCHEMA_V4 = 4
 _HISTORY_ENTRY_V2_FIELDS = frozenset({"recorded_at", "state"})
 _HISTORY_ENTRY_V3_FIELDS = frozenset({"recorded_at", "transition_order", "state"})
 _SOURCE_HEALTH_AUTHORITY_DOMAIN = "autosport.source-health-store.v1"
+_DURABLE_FAILURE_FALLBACK = "BaseException: exception details unavailable"
+
+
+def _build_durable_failure_renderer():
+    secret_module = _secret_redaction
+    canonical_renderer = secret_module.safe_exception_text
+    canonical_globals = canonical_renderer.__globals__
+    fallback = _DURABLE_FAILURE_FALLBACK
+
+    function_witness = tuple(
+        (name, value, value.__code__)
+        for name, value in canonical_globals.items()
+        if type(value) is FunctionType
+        and getattr(value, "__module__", None) == secret_module.__name__
+    )
+    referenced_names = frozenset(
+        name
+        for _function_name, function, _code in function_witness
+        for name in function.__code__.co_names
+        if name in canonical_globals
+    )
+    binding_witness = tuple(
+        (name, canonical_globals[name])
+        for name in sorted(referenced_names)
+    )
+    mutable_binding_witness = tuple(
+        (name, tuple(sorted(value.items())))
+        for name, value in binding_witness
+        if type(value) is dict
+    )
+
+    def authority_current() -> bool:
+        if secret_module.safe_exception_text is not canonical_renderer:
+            return False
+        for name, function, code in function_witness:
+            if canonical_globals.get(name) is not function:
+                return False
+            if function.__code__ is not code:
+                return False
+        for name, value in binding_witness:
+            if canonical_globals.get(name) is not value:
+                return False
+        for name, expected_items in mutable_binding_witness:
+            value = canonical_globals.get(name)
+            if type(value) is not dict:
+                return False
+            if tuple(sorted(value.items())) != expected_items:
+                return False
+        return True
+
+    def render(exc: BaseException) -> str:
+        if not authority_current():
+            return fallback
+        try:
+            rendered = canonical_renderer(exc)
+        except BaseException:
+            return fallback
+        if not authority_current() or type(rendered) is not str or not rendered:
+            return fallback
+        return rendered
+
+    return render
+
+
+_DURABLE_FAILURE_RENDERER = _build_durable_failure_renderer()
+del _build_durable_failure_renderer
 
 
 def _source_health_authority_key(
@@ -835,10 +903,11 @@ class SourceHealthStore:
         failure_kind: str | None = None,
     ) -> SourceHealthState:
         if failure_kind is not None and (
-            not isinstance(failure_kind, str)
+            type(failure_kind) is not str
             or failure_kind not in _ALLOWED_FAILURE_KINDS
         ):
             raise ValueError("invalid source health failure kind")
+        renderer = _DURABLE_FAILURE_RENDERER
         with self._writer_guard():
             self._recover_current_for_write()
             state = self.get(source_id)
@@ -846,7 +915,7 @@ class SourceHealthStore:
             state.total_failures += 1
             state.consecutive_failures += 1
             state.last_error_at = now
-            state.last_error = f"{type(error).__name__}: {error}"
+            state.last_error = renderer(error)
             if failure_kind is None:
                 state.last_failure_kind = None
                 state.consecutive_failure_kind_count = 0

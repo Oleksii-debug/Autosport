@@ -123,6 +123,10 @@ def _derive_run_economics(
     for index, attempt in enumerate(attempts):
         if attempt.sequence != index or attempt.action_id != action_ids[index]:
             raise PaperExecutionIntegrityError("durable attempts are not a reserved plan prefix")
+        if attempt.side not in {"BACK", "LAY"}:
+            raise PaperExecutionIntegrityError(
+                "durable attempt has noncanonical exchange side"
+            )
         if terminal_seen:
             raise PaperExecutionIntegrityError(
                 "durable attempts continue after a non-ACCEPTED terminal outcome"

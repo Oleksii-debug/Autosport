@@ -376,3 +376,30 @@ def test_packaged_html_exposes_closed_keyboard_source_configuration() -> None:
     assert "productSource.can_configure" in app
     assert "_product_runtime_source_configuration_error" not in emergency
     assert "AUTOSPORT_PRODUCT_SOURCE_FACTORY" not in emergency
+
+
+def test_runtime_start_validation_failure_is_bounded_ukrainian_and_secret_safe(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AUTOSPORT_PRODUCT_SOURCE_FACTORY", raising=False)
+    controller = _controller(tmp_path)
+    assert (
+        controller._action_product_source_configure({"source_id": _SOURCE_ID})[
+            "status"
+        ]
+        == "completed"
+    )
+    secret = "provider-token-must-not-reach-operator-status"
+
+    def reject_start(**_kwargs: object) -> bool:
+        raise RuntimeError(secret)
+
+    controller.product_worker.start = reject_start
+
+    result = controller._action_product_runtime_start({})
+
+    assert result["status"] == "rejected"
+    assert "внутрішня перевірка конфігурації" in result["message"]
+    assert "RuntimeError" not in result["message"]
+    assert secret not in result["message"]

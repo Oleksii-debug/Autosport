@@ -212,6 +212,45 @@ def test_source_resolver_type_validator_and_semantic_globals_are_non_authoritati
     assert len(accepted.components) == 5
 
 
+def test_source_backed_known_zero_assertion_is_not_authority_by_possession():
+    with canonical_applicable_cost_case() as case:
+        canonical = _canonical(case)
+        components = list(canonical.components)
+        index = next(
+            i for i, item in enumerate(components)
+            if item.cost_class is CostClass.EXECUTION_SLIPPAGE
+        )
+        forged = _copy_component(components[index])
+        object.__setattr__(
+            forged,
+            "status",
+            cost.ProspectiveCostResolutionStatus.KNOWN_ZERO,
+        )
+        object.__setattr__(
+            forged,
+            "reason",
+            cost.ProspectiveApplicableCostReason.BETFAIR_STANDARD_LIMIT_ZERO_ADVERSE_PRICE,
+        )
+        object.__setattr__(forged, "dependency_axes", ())
+        object.__setattr__(
+            forged,
+            "source_family",
+            "autosport.betfair_standard_limit_price_bound",
+        )
+        object.__setattr__(forged, "source_evidence_id", "a" * 64)
+        object.__setattr__(forged, "source_sha256", "a" * 64)
+        components[index] = forged
+        asserted = _copy_resolution(canonical, components=tuple(components))
+
+        # Shape/provenance syntax alone is intentionally insufficient.
+        cost._SEALED_RESOLUTION_VALIDATOR(asserted)
+        with pytest.raises(
+            cost.ProspectiveApplicableCostError,
+            match="status|reason|source_evidence_id|source_family",
+        ):
+            _require(asserted, case)
+
+
 def test_noncanonical_resolution_subclass_rejected_before_rebound_resolver_executes(
     monkeypatch,
 ):

@@ -523,6 +523,50 @@ class LiveObservationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_sqlite_retry_revalidates_provider_source_identity_before_cached_batch_reuse(self):
+        batch = ProviderBatch(
+            source_id="live-fixture",
+            quotes=(),
+            cursor="cursor-1",
+        )
+
+        class Provider:
+            def __init__(self) -> None:
+                self.source_id = "live-fixture"
+                self.read_count = 0
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                self.read_count += 1
+                return batch
+
+        provider = Provider()
+
+        class Engine:
+            def __init__(self) -> None:
+                self.attempt = 0
+
+            def poll_once(self, wrapped, max_items: int = 1000):
+                self.attempt += 1
+                wrapped.read_batch(max_items=max_items)
+                if self.attempt == 1:
+                    provider.source_id = "mutated-source"
+                    raise sqlite3.OperationalError("database-locked")
+                raise AssertionError("cached batch was reused after authority drift")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(provider)
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "source identity changed before live batch retry",
+        ):
+            live_observation_module._poll_acknowledged(
+                Engine(),
+                wrapped,
+                max_items=1,
+            )
+
+        self.assertEqual(provider.read_count, 1)
+        self.assertTrue(wrapped.has_inflight)
+
     def test_sqlite_retry_preserves_primary_failure_when_provider_reset_fails(self):
         batch = ProviderBatch(
             source_id="live-fixture",

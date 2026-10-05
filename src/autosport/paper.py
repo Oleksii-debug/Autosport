@@ -593,15 +593,13 @@ class PaperBook:
 
     @staticmethod
     def _normalize_resolution_keys(values: object, label: str) -> set[str]:
-        if type(values) is str or values is None:
-            raise ValueError(f"PaperBook {label} must be a collection of quote keys")
-        try:
-            candidate = tuple(values)
-        except TypeError as exc:
-            raise ValueError(f"PaperBook {label} must be a collection of quote keys") from exc
-        if any(type(value) is not str or not value for value in candidate):
+        if type(values) not in {set, frozenset, list, tuple}:
+            raise ValueError(
+                f"PaperBook {label} must be an exact built-in collection of quote keys"
+            )
+        if any(type(value) is not str or not value for value in values):
             raise ValueError(f"PaperBook {label} must contain non-empty string quote keys")
-        return set(candidate)
+        return set(values)
 
     @classmethod
     def _settlement_result(
@@ -724,13 +722,44 @@ class PaperBook:
                 )
         return payload
 
+    @staticmethod
+    def _canonical_snapshot_path(path: object) -> Path:
+        if type(path) not in {str, type(Path("."))}:
+            raise TypeError("PaperBook snapshot path must be exact str or exact Path")
+        return Path(path)
+
+    @staticmethod
+    def _fsync_snapshot_directory(directory: Path) -> None:
+        directory_flag = getattr(os, "O_DIRECTORY", None)
+        if directory_flag is None:
+            return
+        descriptor = os.open(directory, os.O_RDONLY | directory_flag)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _ensure_snapshot_parent_durable(cls, directory: Path) -> None:
+        missing: list[Path] = []
+        cursor = directory
+        while not cursor.exists():
+            missing.append(cursor)
+            parent = cursor.parent
+            if parent == cursor:
+                break
+            cursor = parent
+
+        directory.mkdir(parents=True, exist_ok=True)
+        for created in reversed(missing):
+            cls._fsync_snapshot_directory(created.parent)
+
     @_serialized_paperbook_operation
     @_guard_paperbook_runtime_authority
     def save(self, path: str | Path) -> None:
         # Runtime visible-state + hidden-authority validation is performed once
         # by the closure-captured guard before this body executes.
-        destination = Path(path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination = self._canonical_snapshot_path(path)
         raw = {
             "schema_version": _PAPER_SNAPSHOT_SCHEMA_VERSION,
             "initial_bankroll": str(self.initial_bankroll),
@@ -775,6 +804,9 @@ class PaperBook:
         _require_snapshot_candidate_opening_authority(self, candidate)
         _require_snapshot_candidate_causal_history_authority(self, candidate)
 
+        # Rejected candidates must not publish filesystem state.
+        self._ensure_snapshot_parent_durable(destination.parent)
+
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -791,6 +823,8 @@ class PaperBook:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, destination)
+            temporary = None
+            self._fsync_snapshot_directory(destination.parent)
         finally:
             if temporary is not None:
                 try:
@@ -1494,7 +1528,7 @@ class PaperBook:
 
     @classmethod
     def load(cls, path: str | Path) -> "PaperBook":
-        book = cls.load_bytes(Path(path).read_bytes())
+        book = cls.load_bytes(cls._canonical_snapshot_path(path).read_bytes())
         _install_validated_ticket_opening_authority(book)
         _install_validated_paperbook_causal_history_authority(book)
         return book

@@ -377,6 +377,13 @@ def _build_product_verifier():
             raise error_cls(
                 "issuance_store must be the exact canonical SupervisedPlanIssuanceStore type"
             )
+        if hasattr(issuance_store, "__dict__") and any(
+            name in vars(issuance_store)
+            for name in ("load", "_load_locked", "_authority", "_path")
+        ):
+            raise error_cls(
+                "issuance_store method shadow is not allowed"
+            )
 
         # Fail before durable issuance reload can re-resolve provider-request
         # identity through the shared canonical resolver object. The verifier's

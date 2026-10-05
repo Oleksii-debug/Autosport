@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from collections.abc import Mapping
 from decimal import Decimal
+from unittest.mock import patch
 from pathlib import Path
 
+import autosport._paper_execution_lay_adoption_guard as lay_guard
 from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
@@ -27,6 +30,32 @@ from autosport.real_execution_ledger import ExecutionAction, ExecutionPlan
 QUOTE_AT = "2026-09-20T06:00:00+00:00"
 STARTED_AT = "2026-09-20T06:00:00.100000+00:00"
 EXPIRES_AT = "2026-09-20T06:01:00+00:00"
+
+
+class _MutatingObservationMapping(Mapping):
+    def __init__(self, key: str, value, prepared_value: PreparedPaperExecution) -> None:
+        self.key = key
+        self.value = value
+        self.prepared_value = prepared_value
+        self.mutations = 0
+
+    def __iter__(self):
+        if self.mutations == 0:
+            self.mutations += 1
+            object.__setattr__(
+                self.prepared_value.exposure_bindings[0],
+                "bankroll_id",
+                "mutated-during-mapping",
+            )
+        return iter((self.key,))
+
+    def __len__(self) -> int:
+        return 1
+
+    def __getitem__(self, key):
+        if key != self.key:
+            raise KeyError(key)
+        return self.value
 
 
 class _HostileExchangeSide(str):
@@ -388,6 +417,91 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(ledger.events(), events_before)
             self.assertEqual(book.tickets, {})
             self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_observation_mapping_callback_cannot_mutate_minted_binding_before_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("mapping-callback-mutation", side="BACK")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.50",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            events_before = list(ledger.events())
+            observations = _MutatingObservationMapping(
+                current.action_id,
+                registered.as_observation(),
+                current_prepared,
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "authority changed after mint",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="mapping-callback-mutation",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                    observations=observations,
+                    evidence_registry=registry,
+                )
+
+            self.assertEqual(observations.mutations, 1)
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_adoption_uses_durable_observation_snapshot_after_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("adoption-observation-snapshot", side="BACK")
+            current_prepared = prepared(runtime, current)
+            registered = evidence(
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.50",
+                stake="10.00",
+                grade=EvidenceGrade.EMPIRICAL,
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            observation = registered.as_observation()
+            original_verify = lay_guard._reality._impl._verify_observation_authority
+
+            def verify_then_mutate(*, action, observation: object, registry):
+                record = original_verify(
+                    action=action,
+                    observation=observation,
+                    registry=registry,
+                )
+                object.__setattr__(observation, "accepted_odds", Decimal("99.00"))
+                object.__setattr__(observation, "accepted_stake", Decimal("1.00"))
+                return record
+
+            with patch.object(
+                lay_guard._reality._impl,
+                "_verify_observation_authority",
+                verify_then_mutate,
+            ):
+                result = runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="adoption-observation-snapshot",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                    observations={current.action_id: observation},
+                    evidence_registry=registry,
+                )
+
+            self.assertEqual(result.run.attempts[0].execution_odds, Decimal("2.50"))
+            self.assertEqual(result.run.attempts[0].execution_stake, Decimal("10.00"))
+            self.assertEqual(book.balance, Decimal("90.00"))
+            self.assertEqual(len(book.tickets), 1)
 
     def test_unknown_observation_key_fails_before_durable_scope_publication(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -493,6 +493,8 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             restore_workspace is not None
             and self._workspace_requires_recovery(Path(restore_workspace))
         ):
+            self._active_workspace = Path(restore_workspace)
+            self._recovery_view = None
             self.bank.set(self._bank_text())
             self._refresh_tickets()
             message = product_text(
@@ -522,9 +524,12 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
         except Exception:
             self.session = None
             if restore_workspace is not None:
+                self._active_workspace = Path(restore_workspace)
                 self._block_workspace_for_recovery(Path(restore_workspace))
             else:
+                self._active_workspace = Path(self.workspace)
                 self._block_workspace_for_recovery(Path(self.workspace))
+            self._recovery_view = None
             self.bank.set(self._bank_text())
             self._refresh_tickets()
             message = product_text(

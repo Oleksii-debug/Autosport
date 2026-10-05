@@ -140,6 +140,69 @@ def test_noncanonical_single_leg_lay_fails_before_run_reservation(side: str) -> 
         assert len(ledger.events()) == before
 
 
+
+
+def test_unsuspended_lay_without_empirical_observation_fails_before_reservation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        lay = _action("lay-no-evidence", side="LAY")
+        before = len(ledger.events())
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="requires explicit empirical execution evidence",
+        ):
+            execute_paper_plan(
+                plan=_plan(lay),
+                trigger_id="lay-no-evidence",
+                config=_config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+
+        assert len(ledger.events()) == before
+
+
+def test_suspended_lay_is_durable_no_exposure_without_empirical_fill_evidence() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        lay = _action("lay-suspended", side="LAY")
+
+        first = execute_paper_plan(
+            plan=_plan(lay),
+            trigger_id="lay-suspended",
+            config=_config(),
+            ledger=ledger,
+            started_at=STARTED_AT,
+            suspended_action_ids=frozenset({lay.action_id}),
+        )
+        second = execute_paper_plan(
+            plan=_plan(lay),
+            trigger_id="lay-suspended",
+            config=_config(),
+            ledger=ledger,
+            started_at=STARTED_AT,
+            suspended_action_ids=frozenset({lay.action_id}),
+        )
+
+        assert first == second
+        assert first.completed is True
+        assert len(first.attempts) == 1
+        assert first.attempts[0].side == "LAY"
+        assert first.attempts[0].outcome is PaperAttemptOutcome.REJECTED
+        assert first.attempts[0].suspended is True
+        assert first.attempts[0].execution_odds is None
+        assert first.attempts[0].execution_stake is None
+        assert first.worst_case_exposure == 0
+        assert first.recovery_decision.value == "NO_EXPOSURE"
+        assert first.pending_action_ids == ()
+        assert [event["event_type"] for event in ledger.events()] == [
+            "RUN_RESERVED",
+            "ATTEMPT_RECORDED",
+            "RUN_COMPLETED",
+        ]
+
+
 @pytest.mark.parametrize("side", ("SIDEWAYS", "back", " BACK "))
 def test_unsupported_or_noncanonical_nonlay_side_fails_before_reservation(side: str) -> None:
     with tempfile.TemporaryDirectory() as tmp:

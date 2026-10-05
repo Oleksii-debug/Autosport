@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from threading import RLock
@@ -296,6 +297,17 @@ class FocusedMirrorDependencyIndex:
         """Return dependencies and their incarnation tokens from one registry lock."""
         with self._lock:
             return tuple(
+                (dependency, self._dependency_revisions[input_id])
+                for input_id, dependency in self._dependencies.items()
+            )
+
+    @contextmanager
+    def registry_state_guard(
+        self,
+    ) -> Iterator[tuple[tuple[FocusedMirrorDependency, int], ...]]:
+        """Hold the registry lock while a caller validates and publishes bound state."""
+        with self._lock:
+            yield tuple(
                 (dependency, self._dependency_revisions[input_id])
                 for input_id, dependency in self._dependencies.items()
             )

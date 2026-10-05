@@ -1290,6 +1290,10 @@ class PersistentLiveDecisionLoop:
         self._needs_cache_rebuild = True
 
     def unregister_input(self, input_id: str) -> bool:
+        normalized_id = FocusedMirrorDependencyIndex._input_id(input_id)
+        existing = self._input_specs.get(normalized_id)
+        if existing is None:
+            return False
         if (
             self._progress is not None
             and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
@@ -1297,10 +1301,6 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "cannot mutate live dependency registry while a decision is unfinished"
             )
-        normalized_id = FocusedMirrorDependencyIndex._input_id(input_id)
-        existing = self._input_specs.get(normalized_id)
-        if existing is None:
-            return False
         previous_specs = tuple(self._input_specs.values())
         if not self.dependencies.unregister(normalized_id):
             raise LiveDecisionProgressError(

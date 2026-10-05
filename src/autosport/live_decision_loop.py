@@ -1253,26 +1253,27 @@ class PersistentLiveDecisionLoop:
         specs: tuple[_InputSpec, ...],
     ) -> None:
         """Restore exact pre-mutation focused/durable-process registry ordering."""
-        for current_id in self.dependencies.input_ids:
-            if not self.dependencies.unregister(current_id):
-                raise LiveDecisionProgressError(
-                    "live dependency rollback could not clear current registry"
+        with self.dependencies.registry_mutation_guard():
+            for current_id in self.dependencies.input_ids:
+                if not self.dependencies.unregister(current_id):
+                    raise LiveDecisionProgressError(
+                        "live dependency rollback could not clear current registry"
+                    )
+            self._input_specs.clear()
+            for spec in specs:
+                restored_dependency = self.dependencies.register(
+                    spec.input_id,
+                    source_ids=spec.source_ids,
+                    sports=spec.sports,
+                    event_ids=spec.event_ids,
+                    market_ids=spec.market_ids,
+                    selection_ids=spec.selection_ids,
                 )
-        self._input_specs.clear()
-        for spec in specs:
-            restored_dependency = self.dependencies.register(
-                spec.input_id,
-                source_ids=spec.source_ids,
-                sports=spec.sports,
-                event_ids=spec.event_ids,
-                market_ids=spec.market_ids,
-                selection_ids=spec.selection_ids,
-            )
-            if _InputSpec.from_dependency(restored_dependency) != spec:
-                raise LiveDecisionProgressError(
-                    "live dependency rollback changed canonical selectors"
-                )
-            self._input_specs[spec.input_id] = spec
+                if _InputSpec.from_dependency(restored_dependency) != spec:
+                    raise LiveDecisionProgressError(
+                        "live dependency rollback changed canonical selectors"
+                    )
+                self._input_specs[spec.input_id] = spec
         # Rebuilding the focused registry creates fresh incarnation tokens. Any
         # process-local intent/freshness cache was derived from the pre-failure
         # incarnations and must be re-established before another economic decision.

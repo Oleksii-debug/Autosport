@@ -81,6 +81,16 @@ The later generic contract must preserve equivalent auditability while binding s
 
 ## Replay market truth
 
+Generic `ReplayEngine` delivery follows the same three-clock boundary: a replay event
+cannot become strategy-visible before the latest of provider/source time (falling back
+to observation time when source time is absent), local `observed_ts`, and local
+`ingest_ts`. Provider-local sequence is then applied in that causal delivery order.
+This preserves live/replay parity when a newer sequence is observed early but received
+late, or when provider time is later than the local clocks. Canonical `MarketEvent`
+construction rejects non-zero timestamp precision finer than microseconds rather than
+allowing `datetime` parsing to round a future instant backward.
+
+
 Research replay uses the same causal market boundary as the canonical Market Mirror.
 A quote is decision-visible only when its provider/source clock (or local observation
 fallback), local `observed_ts`, and local `ingest_ts` are all no later than the

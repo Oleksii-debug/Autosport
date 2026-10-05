@@ -1065,6 +1065,145 @@ class PaperRiskReportingTests(unittest.TestCase):
                     workspace=str(workspace),
                 )
 
+    def test_deleting_old_loss_from_canonical_history_fails_closed(self) -> None:
+        book = PaperBook("100")
+        loser = book.open_ticket(
+            (self._leg(77),),
+            Decimal("25"),
+            placed_at="2026-09-21T15:30:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T15:35:00+00:00",
+        )
+        self.assertEqual(
+            build_product_issued_paper_equity_path(book, self._goal()).minimum_equity,
+            Decimal("75"),
+        )
+
+        book._lifecycle.pop()
+
+        with self.assertRaises(ValueError):
+            build_product_issued_paper_equity_path(book, self._goal())
+
+    def test_same_opening_and_closing_equity_different_causal_paths_do_not_alias(self) -> None:
+        loss_then_recovery = PaperBook("100")
+        loser = loss_then_recovery.open_ticket(
+            (self._leg(78),),
+            Decimal("50"),
+            placed_at="2026-09-21T15:40:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        loss_then_recovery.settle(
+            loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T15:45:00+00:00",
+        )
+        recovery = loss_then_recovery.open_ticket(
+            (self._leg(79, odds="6"),),
+            Decimal("10"),
+            placed_at="2026-09-21T15:50:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        loss_then_recovery.settle(
+            recovery.ticket_id,
+            {recovery.legs[0].quote_key},
+            settled_at="2026-09-21T15:55:00+00:00",
+        )
+
+        gain_then_loss = PaperBook("100")
+        winner = gain_then_loss.open_ticket(
+            (self._leg(80, odds="6"),),
+            Decimal("10"),
+            placed_at="2026-09-21T15:40:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        gain_then_loss.settle(
+            winner.ticket_id,
+            {winner.legs[0].quote_key},
+            settled_at="2026-09-21T15:45:00+00:00",
+        )
+        second_loser = gain_then_loss.open_ticket(
+            (self._leg(81),),
+            Decimal("50"),
+            placed_at="2026-09-21T15:50:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        gain_then_loss.settle(
+            second_loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T15:55:00+00:00",
+        )
+
+        goal = self._goal()
+        first_path = build_product_issued_paper_equity_path(loss_then_recovery, goal)
+        second_path = build_product_issued_paper_equity_path(gain_then_loss, goal)
+        first_drawdown = build_product_issued_paper_drawdown_evidence(
+            loss_then_recovery,
+            goal,
+        )
+        second_drawdown = build_product_issued_paper_drawdown_evidence(
+            gain_then_loss,
+            goal,
+        )
+
+        self.assertEqual(first_path.current_equity, Decimal("100"))
+        self.assertEqual(second_path.current_equity, Decimal("100"))
+        self.assertNotEqual(first_path.path_sha256, second_path.path_sha256)
+        self.assertEqual(first_drawdown.max_drawdown_amount, Decimal("50"))
+        self.assertEqual(second_drawdown.max_drawdown_amount, Decimal("50"))
+        self.assertNotEqual(
+            first_drawdown.max_drawdown_peak_id,
+            second_drawdown.max_drawdown_peak_id,
+        )
+
+    def test_recovery_keeps_historical_loss_bound_to_drawdown_evidence_digest(self) -> None:
+        book = PaperBook("100")
+        loser = book.open_ticket(
+            (self._leg(82),),
+            Decimal("40"),
+            placed_at="2026-09-21T16:00:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T16:05:00+00:00",
+        )
+        winner = book.open_ticket(
+            (self._leg(83, odds="5"),),
+            Decimal("10"),
+            placed_at="2026-09-21T16:10:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            winner.ticket_id,
+            {winner.legs[0].quote_key},
+            settled_at="2026-09-21T16:15:00+00:00",
+        )
+        goal = self._goal()
+
+        path = build_product_issued_paper_equity_path(book, goal)
+        evidence = build_product_issued_paper_drawdown_evidence(book, goal)
+
+        self.assertEqual(path.current_equity, Decimal("100"))
+        self.assertEqual(evidence.max_drawdown_amount, Decimal("40"))
+        self.assertEqual(
+            evidence.max_drawdown_peak_id,
+            "paper-initial-bankroll",
+        )
+        self.assertEqual(evidence.equity_path_sha256, path.path_sha256)
+        self.assertEqual(len(evidence.evidence_sha256), 64)
+
     def test_restart_preserves_exact_report_identity_and_values(self) -> None:
         book = PaperBook("100")
         ticket = book.open_ticket(

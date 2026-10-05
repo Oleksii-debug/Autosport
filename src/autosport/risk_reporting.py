@@ -23,7 +23,11 @@ from .economic_goal_store import (
     economic_goal_from_payload,
     economic_goal_to_payload,
 )
-from .paper import PaperBook
+from .paper import (
+    PaperBook,
+    _require_paperbook_causal_history_authority,
+    _require_ticket_opening_authority,
+)
 from .risk import PaperRiskPolicy
 
 
@@ -214,6 +218,16 @@ def _equity_path_payload(
     }
 
 
+def _require_product_issued_paper_state(book: PaperBook) -> None:
+    """Require the detached authorities that make mutable PAPER state product-issued."""
+
+    try:
+        _require_ticket_opening_authority(book)
+        _require_paperbook_causal_history_authority(book)
+    except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("canonical PAPER product-issued authority is unavailable") from exc
+
+
 def build_product_issued_paper_equity_path(
     book: PaperBook,
     goal: EconomicGoalContract,
@@ -230,6 +244,8 @@ def build_product_issued_paper_equity_path(
         raise TypeError("book must be canonical PaperBook")
     if type(goal) is not EconomicGoalContract:
         raise TypeError("goal must be canonical EconomicGoalContract")
+
+    _require_product_issued_paper_state(book)
 
     goal_provenance_before = provenance_for(goal)
     goal_snapshot = economic_goal_from_payload(economic_goal_to_payload(goal))

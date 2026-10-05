@@ -5,7 +5,9 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
+from autosport.domain import TicketLeg, TicketStatus
 from autosport.exchange_exposure import locked_capital_for_exchange_side
+from autosport.paper import PaperBook
 from autosport.paper_execution_reality import (
     EvidenceGrade,
     PaperAttemptOutcome,
@@ -306,6 +308,81 @@ class LayExecutionLiabilityTests(unittest.TestCase):
                 started_at=STARTED_AT,
             )
             self.assertEqual(result.worst_case_exposure, Decimal("10.00"))
+
+
+class PaperBookLayEconomicsTests(unittest.TestCase):
+    @staticmethod
+    def _lay_leg() -> TicketLeg:
+        return TicketLeg(
+            event_id="event-lay",
+            market_id="market-lay",
+            selection_id="selection-lay",
+            locked_odds=Decimal("5.00"),
+            sport="football",
+            exchange_side="lay",
+        )
+
+    def test_open_lay_reserves_liability_and_reports_committed_capital(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket(
+            [self._lay_leg()],
+            Decimal("10"),
+            placed_at=QUOTE_AT,
+        )
+
+        self.assertEqual(ticket.stake, Decimal("10"))
+        self.assertEqual(book.balance, Decimal("60.00"))
+        self.assertEqual(book.committed_capital, Decimal("40.00"))
+        self.assertEqual(ticket.status, TicketStatus.OPEN)
+
+    def test_lay_selection_loses_returns_liability_plus_lay_stake(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket(
+            [self._lay_leg()],
+            Decimal("10"),
+            placed_at=QUOTE_AT,
+        )
+
+        settled = book.settle(ticket.ticket_id, set())
+
+        self.assertEqual(settled.status, TicketStatus.WON)
+        self.assertEqual(settled.payout, Decimal("50.00"))
+        self.assertEqual(book.balance, Decimal("110.00"))
+        self.assertEqual(book.committed_capital, Decimal("0"))
+
+    def test_lay_selection_wins_consumes_locked_liability(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket(
+            [self._lay_leg()],
+            Decimal("10"),
+            placed_at=QUOTE_AT,
+        )
+
+        settled = book.settle(ticket.ticket_id, {ticket.legs[0].quote_key})
+
+        self.assertEqual(settled.status, TicketStatus.LOST)
+        self.assertEqual(settled.payout, Decimal("0"))
+        self.assertEqual(book.balance, Decimal("60.00"))
+        self.assertEqual(book.committed_capital, Decimal("0"))
+
+    def test_lay_void_releases_exact_locked_liability(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket(
+            [self._lay_leg()],
+            Decimal("10"),
+            placed_at=QUOTE_AT,
+        )
+
+        settled = book.settle(
+            ticket.ticket_id,
+            set(),
+            {ticket.legs[0].quote_key},
+        )
+
+        self.assertEqual(settled.status, TicketStatus.VOID)
+        self.assertEqual(settled.payout, Decimal("40.00"))
+        self.assertEqual(book.balance, Decimal("100.00"))
+        self.assertEqual(book.committed_capital, Decimal("0"))
 
 
 if __name__ == "__main__":

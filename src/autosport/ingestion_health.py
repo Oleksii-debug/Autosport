@@ -313,14 +313,40 @@ class SourceHealthStore:
     """
 
     def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
+        requested_path = Path(path)
+        requested_path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = requested_path.resolve(strict=False)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._path_authority = self.path
         self._lock_path = self.path.with_name(self.path.name + ".lock")
+        self._lock_path_authority = self._lock_path
+        self._temporary_path_authority = self.path.with_suffix(self.path.suffix + ".tmp")
         with self._writer_guard():
             if not self.path.exists():
                 self._write({"schema_version": _SCHEMA_V4, "sources": {}, "history": {}})
             else:
                 self._read()
+
+    def _assert_persistence_authority(self) -> None:
+        if (
+            self.path != self._path_authority
+            or self._lock_path != self._lock_path_authority
+            or self._temporary_path_authority
+            != self._path_authority.with_suffix(self._path_authority.suffix + ".tmp")
+        ):
+            raise RuntimeError(
+                "source health persistence authority changed after construction"
+            )
+
+    def _sync_parent_directory(self) -> None:
+        if os.name == "nt":
+            return
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_fd = os.open(self._path_authority.parent, flags)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
     @staticmethod
     def _state_from_payload(payload: dict, *, normalize_failed_flags: bool = True) -> SourceHealthState:
@@ -563,7 +589,8 @@ class SourceHealthStore:
             return state
 
     def _writer_guard(self) -> _SourceHealthWriterLock:
-        return _SourceHealthWriterLock(self._lock_path)
+        self._assert_persistence_authority()
+        return _SourceHealthWriterLock(self._lock_path_authority)
 
     def _upgrade_to_v4(self, raw: dict) -> dict:
         if raw["schema_version"] == _SCHEMA_V4:
@@ -664,9 +691,10 @@ class SourceHealthStore:
         SourceHealthState(**value)
 
     def _read(self) -> dict:
+        self._assert_persistence_authority()
         try:
             raw = json.loads(
-                self.path.read_text(encoding="utf-8"),
+                self._path_authority.read_text(encoding="utf-8"),
                 object_pairs_hook=_reject_duplicate_json_keys,
                 parse_constant=_reject_nonfinite_json_constant,
             )
@@ -756,10 +784,20 @@ class SourceHealthStore:
         return raw
 
     def _write(self, raw: dict) -> None:
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(raw, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, self.path)
+        self._assert_persistence_authority()
+        temporary = self._temporary_path_authority
+        try:
+            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+                json.dump(raw, handle, ensure_ascii=False, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._assert_persistence_authority()
+            os.replace(temporary, self._path_authority)
+            self._sync_parent_directory()
+            self._assert_persistence_authority()
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass

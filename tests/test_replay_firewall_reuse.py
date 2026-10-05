@@ -20,6 +20,35 @@ class ReplayFirewallReuseTests(unittest.TestCase):
             }
         )
 
+    def test_replay_engine_rejects_firewall_subclasses_before_event_iteration(self) -> None:
+        class Firewall(ReplayLeakageFirewall):
+            pass
+
+        class ExplosiveEvents:
+            def __iter__(self):
+                raise AssertionError("event iteration executed")
+
+        with self.assertRaisesRegex(TypeError, "exact ReplayLeakageFirewall"):
+            ReplayEngine(ExplosiveEvents(), Firewall())
+
+    def test_completion_capability_rejects_bytes_subclasses(self) -> None:
+        class Capability(bytes):
+            pass
+
+        firewall = ReplayLeakageFirewall({"event-1": "alice"})
+        capability = firewall._claim_for_replay()
+
+        with self.assertRaisesRegex(
+            FutureLeakageError,
+            "invalid replay completion capability",
+        ):
+            firewall._complete_replay(Capability(capability))
+        with self.assertRaisesRegex(FutureLeakageError, "sealed"):
+            firewall.result_for("event-1")
+
+        firewall._complete_replay(capability)
+        self.assertEqual(firewall.result_for("event-1"), "alice")
+
     def test_completed_engine_rejects_second_run_before_callback(self) -> None:
         firewall = ReplayLeakageFirewall({"event-1": "alice"})
         engine = ReplayEngine([self._event()], firewall)

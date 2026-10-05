@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, tzinfo
 
 from decimal import Decimal
@@ -920,3 +921,42 @@ def test_slippage_source_digest_rejects_non_boolean_proof_flags(
             sealed_digest(evidence)
     finally:
         object.__setattr__(evidence, "matchme_applicability_proven", original)
+
+
+
+def test_aggregate_rereads_durable_router_request_after_child_method_substitution(
+    monkeypatch,
+) -> None:
+    with canonical_applicable_cost_case() as (
+        intent,
+        plan,
+        router_store,
+        request,
+        decision_at,
+    ):
+        forged = replace(
+            request,
+            required_capability=request.required_capability + "-forged",
+        )
+
+        def substituted_get_request(_store, request_id):
+            assert request_id == request.request_id
+            return forged
+
+        monkeypatch.setattr(
+            subject.ModelComputeRouterStore,
+            "get_request",
+            substituted_get_request,
+        )
+
+        with pytest.raises(
+            subject.ProspectiveApplicableCostError,
+            match="request digest disagrees with durable router state",
+        ):
+            subject.resolve_prospective_applicable_costs(
+                intent=intent,
+                plan=plan,
+                router_store=router_store,
+                model_request_id=request.request_id,
+                decision_at=decision_at,
+            )

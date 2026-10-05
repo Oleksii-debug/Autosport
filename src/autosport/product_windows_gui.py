@@ -65,17 +65,25 @@ def _bind_product_workspace_environment(workspace: Path) -> None:
     os.environ[_PRODUCT_WORKSPACE_ENV] = str(workspace)
 
 
-def _product_source_display_bindings() -> tuple[tuple[str, str], ...]:
+def _product_source_display_bindings() -> tuple[tuple[str, str, str], ...]:
     bindings = tuple(
         (
             product_text(f"ui.product_runtime.source.option.{entry.source_id}"),
             entry.source_id,
+            entry.expected_provider_source_id,
         )
         for entry in list_product_source_entries()
     )
-    displays = tuple(display for display, _source_id in bindings)
-    source_ids = tuple(source_id for _display, source_id in bindings)
-    if len(set(displays)) != len(displays) or len(set(source_ids)) != len(source_ids):
+    displays = tuple(display for display, _source_id, _provider_id in bindings)
+    source_ids = tuple(source_id for _display, source_id, _provider_id in bindings)
+    provider_ids = tuple(
+        provider_id for _display, _source_id, provider_id in bindings
+    )
+    if (
+        len(set(displays)) != len(displays)
+        or len(set(source_ids)) != len(source_ids)
+        or len(set(provider_ids)) != len(provider_ids)
+    ):
         raise RuntimeError("product source presentation identities are ambiguous")
     return bindings
 
@@ -101,10 +109,17 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
         )
         self.product_source = tk.StringVar(value="")
         bindings = _product_source_display_bindings()
-        self._product_source_display_to_id = dict(bindings)
+        self._product_source_display_to_id = {
+            display: source_id
+            for display, source_id, _provider_id in bindings
+        }
         self._product_source_id_to_display = {
             source_id: display
-            for display, source_id in self._product_source_display_to_id.items()
+            for display, source_id, _provider_id in bindings
+        }
+        self._product_provider_id_to_display = {
+            provider_id: display
+            for display, _source_id, provider_id in bindings
         }
 
         live_controls = self.live_refresh_button.master
@@ -263,7 +278,7 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
         self.product_source.set(configured_display)
         message = product_text(
             "ui.product_runtime.status.configuration_saved",
-            source_id=configured.source_id,
+            source_label=configured_display,
         )
         self.product_status.set(message)
         self.status.set(message)
@@ -486,9 +501,22 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
 
     def _apply_product_message(self, message: ProductGuiMessage) -> None:
         if message.kind == "STARTED" and message.status is not None:
+            source_label = self._product_provider_id_to_display.get(
+                message.status.source_id
+            )
+            if source_label is None:
+                self.product_worker.request_stop("source_identity_mismatch")
+                self._block_workspace_for_recovery(Path(self.workspace))
+                status_text = product_text(
+                    "ui.product_runtime.status.configuration_invalid"
+                )
+                self.product_status.set(status_text)
+                self.status.set(status_text)
+                self._append_log(status_text)
+                return
             status_text = product_text(
                 "ui.product_runtime.status.running",
-                source_id=message.status.source_id,
+                source_label=source_label,
                 cycles=message.status.cycles_completed,
                 last_success_at=self._display_instant(
                     message.status.last_success_at

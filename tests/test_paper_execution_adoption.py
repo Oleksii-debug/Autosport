@@ -1475,6 +1475,46 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(len(committed_book.tickets), 1)
             self.assertEqual(PaperBook.load(book_path).tickets, committed_book.tickets)
 
+    def test_live_batch_runtime_book_swap_restores_pinned_economic_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            first = action("batch-book-swap-a1", stake="10.00")
+            second = action("batch-book-swap-a2", stake="10.00")
+            current_prepared = prepared(runtime, first, second)
+            original_open_ticket = PaperBook.open_ticket
+            replacement = PaperBook("999.00")
+            live_calls = 0
+
+            def open_then_swap_runtime_book(target, *args, **kwargs):
+                nonlocal live_calls
+                ticket = original_open_ticket(target, *args, **kwargs)
+                if target is book:
+                    live_calls += 1
+                    if live_calls == 1:
+                        runtime.book = replacement
+                return ticket
+
+            with patch.object(
+                PaperBook,
+                "open_ticket",
+                open_then_swap_runtime_book,
+            ):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "runtime authority object changed",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="trigger-batch-book-swap",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertEqual(live_calls, 1)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+            self.assertEqual(book.committed_capital, Decimal("0"))
+
     def test_live_batch_callback_mutation_rolls_back_prior_materialization(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, _ledger, runtime = self.runtime(tmp)

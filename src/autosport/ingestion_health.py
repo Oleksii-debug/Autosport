@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from math import isfinite
@@ -251,8 +252,21 @@ class _SourceHealthWriterLock:
 
     def __enter__(self) -> "_SourceHealthWriterLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+b")
+        flags = os.O_CREAT | os.O_RDWR
+        flags |= getattr(os, "O_NOFOLLOW", 0)
         try:
+            fd = os.open(self.path, flags, 0o600)
+        except OSError as exc:
+            raise RuntimeError(
+                "source health writer-lock path is unavailable"
+            ) from exc
+        handle = os.fdopen(fd, "a+b", closefd=True)
+        try:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise RuntimeError(
+                    "source health writer-lock path must be a regular file"
+                )
             handle.seek(0, os.SEEK_END)
             if handle.tell() == 0:
                 handle.write(b"\0")
@@ -321,6 +335,8 @@ class SourceHealthStore:
         self._lock_path = self.path.with_name(self.path.name + ".lock")
         self._lock_path_authority = self._lock_path
         self._temporary_path_authority = self.path.with_suffix(self.path.suffix + ".tmp")
+        parent_info = os.stat(self.path.parent)
+        self._parent_identity_authority = (parent_info.st_dev, parent_info.st_ino)
         with self._writer_guard():
             if not self.path.exists():
                 self._write({"schema_version": _SCHEMA_V4, "sources": {}, "history": {}})
@@ -336,6 +352,16 @@ class SourceHealthStore:
         ):
             raise RuntimeError(
                 "source health persistence authority changed after construction"
+            )
+        try:
+            parent_info = os.stat(self._path_authority.parent)
+        except OSError as exc:
+            raise RuntimeError(
+                "source health persistence directory authority is unavailable"
+            ) from exc
+        if (parent_info.st_dev, parent_info.st_ino) != self._parent_identity_authority:
+            raise RuntimeError(
+                "source health persistence directory authority changed after construction"
             )
 
     def _sync_parent_directory(self) -> None:
@@ -790,7 +816,19 @@ class SourceHealthStore:
         self._assert_persistence_authority()
         temporary = self._temporary_path_authority
         try:
-            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            if temporary.exists() or temporary.is_symlink():
+                raise RuntimeError(
+                    "source health temporary persistence path already exists"
+                )
+            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(temporary, flags, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n", closefd=True) as handle:
+                info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    raise RuntimeError(
+                        "source health temporary persistence path must be a regular file"
+                    )
                 json.dump(raw, handle, ensure_ascii=False, indent=2, sort_keys=True)
                 handle.write("\n")
                 handle.flush()

@@ -345,6 +345,39 @@ class DecisionLedgerTests(unittest.TestCase):
 
             self.assertEqual(first.verify_integrity(), 1)
 
+    def test_verified_snapshot_rejects_pathname_replacement_after_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            ledger.append(self._record(decision_id="original"))
+            original_bytes = path.read_bytes()
+            path.unlink()
+            path.write_bytes(original_bytes)
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "file identity changed",
+            ):
+                ledger.verified_snapshot()
+
+    def test_append_rejects_pathname_replacement_after_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            ledger.append(self._record(decision_id="original"))
+            original_bytes = path.read_bytes()
+            path.unlink()
+            path.write_bytes(original_bytes)
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "file identity changed",
+            ):
+                ledger.append(self._record(decision_id="must-not-append"))
+
+            restarted = JsonlDecisionLedger(path)
+            self.assertEqual(restarted.verify_integrity(), 1)
+
     def test_verified_snapshot_fails_closed_while_writer_lock_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"

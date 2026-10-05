@@ -828,8 +828,8 @@ class PaperExecutionAdoptionRuntime:
             )
             execute = runtime_type.execute.__get__(self, runtime_type)
             now = clock()
-            if not isinstance(now, datetime):
-                raise TypeError("PAPER execution clock must return datetime")
+            if type(now) is not datetime:
+                raise TypeError("PAPER execution clock must return exact datetime")
             if now.tzinfo is None or now.utcoffset() is None:
                 raise ValueError(
                     "PAPER execution clock must return a timezone-aware datetime"

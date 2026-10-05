@@ -129,7 +129,10 @@ class _LoopState:
 
 
 def _redacted_error(exc: BaseException, secrets: Sequence[str]) -> str:
-    message = f"{type(exc).__name__}: {exc}"
+    try:
+        message = f"{type(exc).__name__}: {exc}"
+    except BaseException:
+        message = f"{type(exc).__name__}: exception details unavailable"
     for secret in secrets:
         if isinstance(secret, str) and secret:
             message = message.replace(secret, "[REDACTED]")

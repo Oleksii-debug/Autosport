@@ -48,6 +48,17 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             value=product_text("ui.product_runtime.status.idle")
         )
         self.product_source = tk.StringVar(value="")
+        entries = list_product_source_entries()
+        self._product_source_display_to_id = {
+            product_text(
+                f"ui.product_runtime.source.option.{entry.source_id}"
+            ): entry.source_id
+            for entry in entries
+        }
+        self._product_source_id_to_display = {
+            source_id: display
+            for display, source_id in self._product_source_display_to_id.items()
+        }
 
         live_controls = self.live_refresh_button.master
         self.product_source_label = ttk.Label(
@@ -58,9 +69,7 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
         self.product_source_choice = ttk.Combobox(
             live_controls,
             textvariable=self.product_source,
-            values=tuple(
-                entry.source_id for entry in list_product_source_entries()
-            ),
+            values=tuple(self._product_source_display_to_id),
             state="readonly",
             width=24,
             takefocus=True,
@@ -152,7 +161,14 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
                 product_text("ui.product_runtime.status.configuration_required")
             )
             return
-        self.product_source.set(configured.source_id)
+        display = self._product_source_id_to_display.get(configured.source_id)
+        if display is None:
+            self.product_source.set("")
+            self.product_status.set(
+                product_text("ui.product_runtime.status.configuration_invalid")
+            )
+            return
+        self.product_source.set(display)
 
     def save_product_source_configuration(self) -> None:
         if self.__dict__.get("_closing", False):
@@ -163,7 +179,16 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             self.status.set(message)
             self.bell()
             return
-        source_id = self.product_source.get()
+        display = self.product_source.get()
+        source_id = self._product_source_display_to_id.get(display)
+        if source_id is None:
+            message = product_text(
+                "ui.product_runtime.status.configuration_invalid"
+            )
+            self.product_status.set(message)
+            self.status.set(message)
+            self.bell()
+            return
         try:
             configured = save_operator_source_configuration(
                 Path(self.workspace),
@@ -177,7 +202,18 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             self.status.set(message)
             self.bell()
             return
-        self.product_source.set(configured.source_id)
+        configured_display = self._product_source_id_to_display.get(
+            configured.source_id
+        )
+        if configured_display is None:
+            message = product_text(
+                "ui.product_runtime.status.configuration_invalid"
+            )
+            self.product_status.set(message)
+            self.status.set(message)
+            self.bell()
+            return
+        self.product_source.set(configured_display)
         message = product_text(
             "ui.product_runtime.status.configuration_saved",
             source_id=configured.source_id,
@@ -288,7 +324,13 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             self.status.set(message)
             self.bell()
             return
-        if self.product_source.get() != configured.source_id:
+        configured_display = self._product_source_id_to_display.get(
+            configured.source_id
+        )
+        if (
+            configured_display is None
+            or self.product_source.get() != configured_display
+        ):
             message = product_text(
                 "ui.product_runtime.status.configuration_unsaved"
             )

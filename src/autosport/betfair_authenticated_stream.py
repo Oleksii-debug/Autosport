@@ -496,6 +496,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                         raise BetfairAuthenticatedStreamError(
                             "authenticated market freshness runtime accepts only mcm frames after subscription acknowledgement"
                         )
+                    raw = _normalize_known_duplicate_market_images(raw)
                     accepted_ms = _wall_time_ms()
                     market_status_updates = _market_status_updates(raw)
                     market_betting_type_updates = _market_betting_type_updates(raw)
@@ -888,6 +889,66 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             raise BetfairAuthenticatedStreamError(
                 "authenticated subscription is no longer bound to the live transport connection"
             )
+
+
+def _normalize_known_duplicate_market_images(
+    raw_message: dict[str, Any],
+) -> dict[str, Any]:
+    market_changes = raw_message.get("mc")
+    if market_changes is None:
+        return raw_message
+    if type(market_changes) is not list:
+        raise BetfairAuthenticatedStreamError(
+            "authenticated market-change mc must be a list"
+        )
+    ids: list[str] = []
+    for change in market_changes:
+        if type(change) is not dict:
+            raise BetfairAuthenticatedStreamError(
+                "authenticated market change must be an object"
+            )
+        market_id = change.get("id")
+        if type(market_id) is not str or not market_id or market_id.strip() != market_id:
+            raise BetfairAuthenticatedStreamError(
+                "authenticated market change requires canonical market id"
+            )
+        ids.append(market_id)
+    if len(ids) == len(set(ids)):
+        return raw_message
+    if raw_message.get("ct") != "SUB_IMAGE":
+        raise BetfairAuthenticatedStreamError(
+            "duplicate market ids are only recoverable in SUB_IMAGE"
+        )
+
+    selected: dict[str, tuple[int, dict[str, Any]]] = {}
+    order: list[str] = []
+    for change, market_id in zip(market_changes, ids, strict=True):
+        definition = change.get("marketDefinition")
+        if type(definition) is not dict:
+            raise BetfairAuthenticatedStreamError(
+                "duplicate SUB_IMAGE market requires full marketDefinition"
+            )
+        version = definition.get("version")
+        if type(version) is not int or version < 0:
+            raise BetfairAuthenticatedStreamError(
+                "duplicate SUB_IMAGE market requires non-negative version"
+            )
+        prior = selected.get(market_id)
+        if prior is None:
+            order.append(market_id)
+            selected[market_id] = (version, change)
+            continue
+        prior_version, _prior_change = prior
+        if version == prior_version:
+            raise BetfairAuthenticatedStreamError(
+                "duplicate SUB_IMAGE market has ambiguous equal version"
+            )
+        if version > prior_version:
+            selected[market_id] = (version, change)
+
+    normalized = dict(raw_message)
+    normalized["mc"] = [selected[market_id][1] for market_id in order]
+    return normalized
 
 
 def _market_status_updates(raw_message: dict[str, Any]) -> dict[str, str]:

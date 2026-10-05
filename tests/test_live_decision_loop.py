@@ -8233,5 +8233,50 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             loop.close()
 
 
+    def test_snapshot_capture_fails_closed_on_continuous_dependency_churn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            loop._observe(loop.mirror_updates)
+            original_deadline = loop._next_availability_deadline
+            reads = [0]
+
+            def reincarnate_after_deadline(input_id, as_of):
+                deadline = original_deadline(input_id, as_of)
+                reads[0] += 1
+                self.assertTrue(loop.dependencies.unregister(input_id))
+                loop.dependencies.register(
+                    input_id,
+                    selection_ids="selection-a",
+                )
+                return deadline
+
+            with patch.object(
+                loop,
+                "_next_availability_deadline",
+                side_effect=reincarnate_after_deadline,
+            ):
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "changed continuously during snapshot capture",
+                ):
+                    loop._capture_input_views(
+                        ("input-a",),
+                        self.START + timedelta(seconds=1),
+                    )
+
+            self.assertEqual(reads[0], 8)
+            loop.close()
+
+
 if __name__ == "__main__":
     unittest.main()

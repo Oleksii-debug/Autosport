@@ -716,6 +716,14 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
         frame_sequence: int,
     ) -> None:
         for market_id, status in updates.items():
+            if status != "OPEN":
+                self._market_status_by_id.pop(market_id, None)
+                self._market_open_sequence.pop(market_id, None)
+                for runner_key in tuple(self._runner_status_by_key):
+                    if runner_key[0] == market_id:
+                        self._runner_status_by_key.pop(runner_key, None)
+                        self._runner_active_sequence.pop(runner_key, None)
+                continue
             if (
                 market_id not in self._market_status_by_id
                 and len(self._market_status_by_id) >= _MAX_TRACKED_MARKET_AUTHORITY
@@ -725,11 +733,8 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 )
             prior = self._market_status_by_id.get(market_id)
             self._market_status_by_id[market_id] = status
-            if status == "OPEN":
-                if prior != "OPEN":
-                    self._market_open_sequence[market_id] = frame_sequence
-                continue
-            self._market_open_sequence.pop(market_id, None)
+            if prior != "OPEN":
+                self._market_open_sequence[market_id] = frame_sequence
 
     def _commit_runner_status_updates(
         self,
@@ -737,6 +742,10 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
         frame_sequence: int,
     ) -> None:
         for runner_key, status in updates.items():
+            if status != "ACTIVE":
+                self._runner_status_by_key.pop(runner_key, None)
+                self._runner_active_sequence.pop(runner_key, None)
+                continue
             if (
                 runner_key not in self._runner_status_by_key
                 and len(self._runner_status_by_key) >= _MAX_TRACKED_RUNNER_AUTHORITY
@@ -746,11 +755,8 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 )
             prior = self._runner_status_by_key.get(runner_key)
             self._runner_status_by_key[runner_key] = status
-            if status == "ACTIVE":
-                if prior != "ACTIVE":
-                    self._runner_active_sequence[runner_key] = frame_sequence
-                continue
-            self._runner_active_sequence.pop(runner_key, None)
+            if prior != "ACTIVE":
+                self._runner_active_sequence[runner_key] = frame_sequence
 
     def _bound_frame_binding(
         self,

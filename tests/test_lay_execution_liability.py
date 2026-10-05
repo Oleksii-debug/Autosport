@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import contextmanager
+from unittest.mock import patch
 from decimal import Decimal
 from pathlib import Path
 
+import autosport.paper as paper_module
 from autosport.domain import TicketLeg, TicketStatus
 from autosport.exchange_exposure import locked_capital_for_exchange_side
 from autosport.paper import PaperBook
@@ -321,6 +324,92 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
             sport="football",
             exchange_side="lay",
         )
+
+    def test_lay_open_reuses_canonical_paperbook_operation_lock_when_available(self):
+        book = PaperBook(Decimal("100"))
+        entered = 0
+        exited = 0
+
+        @contextmanager
+        def operation_lock(current):
+            nonlocal entered, exited
+            self.assertIs(current, book)
+            entered += 1
+            try:
+                yield
+            finally:
+                exited += 1
+
+        with patch.object(
+            paper_module,
+            "_require_paperbook_operation_lock",
+            operation_lock,
+            create=True,
+        ):
+            ticket = book.open_ticket(
+                [self._lay_leg()],
+                Decimal("10"),
+                placed_at=QUOTE_AT,
+            )
+
+        self.assertEqual(ticket.legs[0].exchange_side, "lay")
+        self.assertEqual(entered, 1)
+        self.assertEqual(exited, 1)
+        self.assertEqual(book.balance, Decimal("60.00"))
+
+    def test_lay_committed_capital_reuses_canonical_operation_lock_when_available(self):
+        book = PaperBook(Decimal("100"))
+        book.open_ticket(
+            [self._lay_leg()],
+            Decimal("10"),
+            placed_at=QUOTE_AT,
+        )
+        entered = 0
+        exited = 0
+
+        @contextmanager
+        def operation_lock(current):
+            nonlocal entered, exited
+            self.assertIs(current, book)
+            entered += 1
+            try:
+                yield
+            finally:
+                exited += 1
+
+        with patch.object(
+            paper_module,
+            "_require_paperbook_operation_lock",
+            operation_lock,
+            create=True,
+        ):
+            committed = book.committed_capital
+
+        self.assertEqual(committed, Decimal("40.00"))
+        self.assertEqual(entered, 1)
+        self.assertEqual(exited, 1)
+
+    def test_invalid_canonical_operation_lock_authority_fails_closed(self):
+        book = PaperBook(Decimal("100"))
+
+        with patch.object(
+            paper_module,
+            "_require_paperbook_operation_lock",
+            object(),
+            create=True,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "operation lock authority is invalid",
+            ):
+                book.open_ticket(
+                    [self._lay_leg()],
+                    Decimal("10"),
+                    placed_at=QUOTE_AT,
+                )
+
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
 
     def test_open_lay_reserves_liability_and_reports_committed_capital(self):
         book = PaperBook(Decimal("100"))

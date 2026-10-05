@@ -138,7 +138,7 @@ class LiveObservationTests(unittest.TestCase):
                         clock=lambda: _RECEIVE_TIME,
                     )
                 self.assertEqual(store.events(), ())
-                self.assertEqual(updates.mirror.events, ())
+                self.assertEqual(updates.mirror.view().events, ())
             finally:
                 store.close()
 
@@ -183,7 +183,7 @@ class LiveObservationTests(unittest.TestCase):
                         clock=lambda: _RECEIVE_TIME,
                     )
                 self.assertEqual(store.events(), ())
-                self.assertEqual(updates.mirror.events, ())
+                self.assertEqual(updates.mirror.view().events, ())
             finally:
                 store.close()
 

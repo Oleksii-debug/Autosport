@@ -313,3 +313,49 @@ def test_hidden_registries_reject_rebound_paperbook_key_methods_before_execution
 
     assert attacker_calls == 0
     assert book.balance == Decimal("90")
+
+
+def test_hidden_registries_ignore_rebound_registry_key_validator(monkeypatch) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    attacker_calls = 0
+
+    def hostile_validator(_book):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound registry key validator executed")
+
+    monkeypatch.setattr(
+        paper_module,
+        "_require_registry_book_key_authority",
+        hostile_validator,
+    )
+
+    assert book.committed_stake == Decimal("10")
+    assert attacker_calls == 0
+
+
+def test_hidden_registries_reject_in_place_registry_key_validator_code_mutation() -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    validator = paper_module._require_registry_book_key_authority
+    original_code = validator.__code__
+    attacker_calls = 0
+
+    def hostile_validator(_book):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        return None
+
+    try:
+        validator.__code__ = hostile_validator.__code__
+        with pytest.raises(
+            ValueError,
+            match="registry key validator authority changed",
+        ):
+            _ = book.committed_stake
+    finally:
+        validator.__code__ = original_code
+
+    assert attacker_calls == 0
+    assert book.balance == Decimal("90")

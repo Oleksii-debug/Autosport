@@ -1355,6 +1355,89 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("100"))
         self.assertEqual(book.tickets, {})
 
+    def test_lay_open_class_debit_override_cannot_replace_liability_reserve_authority(self):
+        book = PaperBook(Decimal("100"))
+        hostile_calls = 0
+
+        def hostile_debit(_cls, _balance, _amount):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return Decimal("100")
+
+        with patch.object(
+            PaperBook,
+            "_debit_balance",
+            classmethod(hostile_debit),
+        ):
+            ticket = book.open_ticket(
+                [self._lay_leg()],
+                Decimal("10"),
+                placed_at=QUOTE_AT,
+            )
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(ticket.stake, Decimal("10"))
+        self.assertEqual(book.balance, Decimal("60.00"))
+        self.assertEqual(book.committed_capital, Decimal("40.00"))
+
+    def test_lay_open_class_placed_at_override_cannot_replace_time_validation_authority(self):
+        book = PaperBook(Decimal("100"))
+        hostile_calls = 0
+
+        def hostile_placed_at(_cls, _value, **_kwargs):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return "2099-01-01T00:00:00+00:00"
+
+        with patch.object(
+            PaperBook,
+            "_validate_placed_at",
+            classmethod(hostile_placed_at),
+        ):
+            ticket = book.open_ticket(
+                [self._lay_leg()],
+                Decimal("10"),
+                placed_at=QUOTE_AT,
+            )
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(ticket.placed_at, QUOTE_AT)
+        self.assertEqual(book.balance, Decimal("60.00"))
+
+    def test_lay_open_class_provenance_override_cannot_replace_binding_authority(self):
+        book = PaperBook(Decimal("100"))
+        hostile_calls = 0
+
+        def hostile_provenance(_cls, *_args, **_kwargs):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return (("forged-source",), (), "forged-bankroll", "XXX")
+
+        with patch.object(
+            PaperBook,
+            "_validate_ticket_provenance",
+            classmethod(hostile_provenance),
+        ):
+            ticket = book.open_ticket(
+                [self._lay_leg()],
+                Decimal("10"),
+                placed_at=QUOTE_AT,
+                provider_source_ids=("paper-source",),
+                provider_accounts=(("paper-source", "paper-account"),),
+                bankroll_id="paper-bankroll",
+                currency="EUR",
+            )
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(ticket.provider_source_ids, ("paper-source",))
+        self.assertEqual(
+            ticket.provider_accounts,
+            (("paper-source", "paper-account"),),
+        )
+        self.assertEqual(ticket.bankroll_id, "paper-bankroll")
+        self.assertEqual(ticket.currency, "EUR")
+        self.assertEqual(book.balance, Decimal("60.00"))
+
     def test_open_lay_reserves_liability_and_reports_committed_capital(self):
         book = PaperBook(Decimal("100"))
         ticket = book.open_ticket(

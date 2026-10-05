@@ -479,9 +479,6 @@ class PaperBook:
     @_serialized_paperbook_operation
     @_guard_paperbook_runtime_authority
     def committed_stake(self) -> Decimal:
-        self._validate_loaded_state(self)
-        _require_ticket_opening_authority(self)
-        _require_paperbook_causal_history_authority(self)
         try:
             with localcontext(_paper_decimal_context()) as context:
                 total = Decimal("0")
@@ -548,9 +545,6 @@ class PaperBook:
         bankroll_id: str | None = None,
         currency: str | None = None,
     ) -> PaperTicket:
-        self._validate_loaded_state(self)
-        _require_ticket_opening_authority(self)
-        _require_paperbook_causal_history_authority(self)
         amount = self._canonical_decimal_input(stake, "stake")
         new_balance = self._debit_balance(self.balance, amount)
 
@@ -668,9 +662,6 @@ class PaperBook:
         *,
         settled_at: str | None = None,
     ) -> PaperTicket:
-        self._validate_loaded_state(self)
-        _require_ticket_opening_authority(self)
-        _require_paperbook_causal_history_authority(self)
         ticket_id = self._require_canonical_text(ticket_id, "settlement ticket_id")
         ticket = self.tickets[ticket_id]
         if ticket.status is not TicketStatus.OPEN:
@@ -736,13 +727,8 @@ class PaperBook:
     @_serialized_paperbook_operation
     @_guard_paperbook_runtime_authority
     def save(self, path: str | Path) -> None:
-        # PaperBook and PaperTicket are intentionally mutable during a paper run.
-        # Validate caller-visible state before hidden authority comparison so
-        # hostile mutated subclasses cannot execute equality/hash hooks at the
-        # opening-authority boundary.
-        self._validate_loaded_state(self)
-        _require_ticket_opening_authority(self)
-        _require_paperbook_causal_history_authority(self)
+        # Runtime visible-state + hidden-authority validation is performed once
+        # by the closure-captured guard before this body executes.
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         raw = {

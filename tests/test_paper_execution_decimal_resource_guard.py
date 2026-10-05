@@ -73,6 +73,15 @@ def test_oversized_second_member_fails_before_any_sibling_formatting(
     assert serialized == []
 
 
+def test_evidence_serializer_preserves_noninjectable_public_call_shape() -> None:
+    record = _record(odds=Decimal("5"), stake=Decimal("10"))
+
+    assert legacy.PaperExecutionEvidenceRecord.to_dict.__defaults__ is None
+    assert legacy.PaperExecutionEvidenceRecord.to_dict.__kwdefaults__ is None
+    with pytest.raises(TypeError):
+        record.to_dict(lambda _: {})  # type: ignore[call-arg]
+
+
 def test_bounded_empirical_evidence_is_context_independent() -> None:
     record = _record(
         odds=Decimal("9.87654321987654321"),

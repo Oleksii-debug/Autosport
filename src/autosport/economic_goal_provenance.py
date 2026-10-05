@@ -66,9 +66,9 @@ class EconomicGoalProvenance:
         return f"{self.goal_id}@{self.revision}:{self.contract_sha256}"
 
 
-def _canonical_json(payload: object) -> bytes:
+def _canonical_json(payload: object, *, _dumps=_JSON_DUMPS) -> bytes:
     try:
-        return json.dumps(
+        return _dumps(
             payload,
             ensure_ascii=False,
             sort_keys=True,
@@ -78,14 +78,20 @@ def _canonical_json(payload: object) -> bytes:
         raise EconomicGoalProvenanceError("economic-goal payload is not canonically serializable") from exc
 
 
-def contract_sha256(contract: EconomicGoalContract) -> str:
+def contract_sha256(
+    contract: EconomicGoalContract,
+    *,
+    _goal_type=_ECONOMIC_GOAL_TYPE,
+    _goal_error=_ECONOMIC_GOAL_ERROR,
+    _to_payload=_GOAL_TO_PAYLOAD,
+    _canonical=_canonical_json,
+    _sha256=_SHA256,
+) -> str:
     """Hash the exact canonical persisted representation of ``contract``."""
 
-    if not isinstance(contract, EconomicGoalContract):
-        raise EconomicGoalContractError("provenance hashing requires an EconomicGoalContract")
-    return hashlib.sha256(_canonical_json(economic_goal_to_payload(contract))).hexdigest()
-
-
+    if not isinstance(contract, _goal_type):
+        raise _goal_error("provenance hashing requires an EconomicGoalContract")
+    return _sha256(_canonical(_to_payload(contract))).hexdigest()
 def provenance_for(contract: EconomicGoalContract) -> EconomicGoalProvenance:
     """Derive immutable provenance identity without introducing another authority."""
 

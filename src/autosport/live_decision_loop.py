@@ -3141,7 +3141,7 @@ class PersistentLiveDecisionLoop:
                 None
                 if decision_health_boundaries is None
                 else [
-                    boundary.to_dict()
+                    ProviderHealthReplayBoundary.to_dict(boundary)
                     for boundary in decision_health_boundaries
                 ]
             ),
@@ -5180,7 +5180,7 @@ class PersistentLiveDecisionLoop:
                     None
                     if progress.health_boundaries is None
                     else [
-                        boundary.to_dict()
+                        ProviderHealthReplayBoundary.to_dict(boundary)
                         for boundary in progress.health_boundaries
                     ]
                 )
@@ -5426,7 +5426,15 @@ class PersistentLiveDecisionLoop:
     ) -> tuple[ProviderHealthReplayBoundary, ...]:
         by_source: dict[str, ProviderHealthReplayBoundary] = {}
         for boundaries in self._input_health_boundaries.values():
+            if type(boundaries) is not tuple:
+                raise LiveDecisionProgressError(
+                    "focused provider-health horizons must be exact tuples"
+                )
             for boundary in boundaries:
+                if type(boundary) is not ProviderHealthReplayBoundary:
+                    raise LiveDecisionProgressError(
+                        "focused provider-health horizon must be an exact replay boundary"
+                    )
                 previous = by_source.get(boundary.source_id)
                 if previous is not None and previous != boundary:
                     raise LiveDecisionProgressError(

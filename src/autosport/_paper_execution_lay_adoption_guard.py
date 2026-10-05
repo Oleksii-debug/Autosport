@@ -49,6 +49,8 @@ def _init(self: PaperExecutionAdoptionRuntime, *args, **kwargs) -> None:
             "config_fingerprint": self.config.fingerprint,
             "paper_book_path": self.paper_book_path,
             "max_quote_age": self.max_quote_age,
+            "execution_lock": self._execution_lock,
+            "prepared_authorities": self._prepared_authorities,
         },
     )
 
@@ -68,8 +70,10 @@ def _require_runtime_authority(self: PaperExecutionAdoptionRuntime) -> None:
             "PAPER adoption runtime authority object changed after construction"
         )
     if (
-        self.paper_book_path != witness.get("paper_book_path")
-        or self.max_quote_age != witness.get("max_quote_age")
+        self.paper_book_path is not witness.get("paper_book_path")
+        or self.max_quote_age is not witness.get("max_quote_age")
+        or self._execution_lock is not witness.get("execution_lock")
+        or self._prepared_authorities is not witness.get("prepared_authorities")
     ):
         raise PaperExecutionAdoptionError(
             "PAPER adoption runtime configuration changed after construction"

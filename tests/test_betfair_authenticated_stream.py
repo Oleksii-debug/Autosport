@@ -4,6 +4,7 @@ import json
 import time
 from dataclasses import replace
 from decimal import Decimal
+from threading import Event, Thread
 
 import pytest
 
@@ -891,3 +892,76 @@ def test_post_subscription_non_market_frame_closes_generation(
     assert not transport.is_authenticated
     with pytest.raises(BetfairAuthenticatedStreamError, match="not issued|no longer bound"):
         runtime.read_and_ingest()
+
+
+def test_semantic_breach_revocation_blocks_concurrent_stale_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autosport import betfair_authenticated_stream as auth
+
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, fake = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(pt=publish_time_ms)
+        + _subscription_status(request_id=99),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+
+    decode_entered = Event()
+    release_decode = Event()
+    evaluation_done = Event()
+    read_errors: list[BaseException] = []
+    evaluation_results: list[object] = []
+    original_decode = auth._decode_exact_transport_frame
+
+    def blocking_decode(frame):
+        decode_entered.set()
+        assert release_decode.wait(2.0)
+        return original_decode(frame)
+
+    monkeypatch.setattr(auth, "_decode_exact_transport_frame", blocking_decode)
+
+    def read_invalid_frame() -> None:
+        try:
+            runtime.read_and_ingest()
+        except BaseException as exc:
+            read_errors.append(exc)
+
+    def evaluate_old_evidence() -> None:
+        try:
+            evaluation_results.append(
+                runtime.evaluate(
+                    _identity(),
+                    policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+                )
+            )
+        except BaseException as exc:
+            evaluation_results.append(exc)
+        finally:
+            evaluation_done.set()
+
+    reader = Thread(target=read_invalid_frame)
+    reader.start()
+    assert decode_entered.wait(2.0)
+
+    evaluator = Thread(target=evaluate_old_evidence)
+    evaluator.start()
+    assert not evaluation_done.wait(0.05)
+
+    release_decode.set()
+    reader.join(2.0)
+    evaluator.join(2.0)
+
+    assert not reader.is_alive()
+    assert not evaluator.is_alive()
+    assert len(read_errors) == 1
+    assert isinstance(read_errors[0], BetfairAuthenticatedStreamError)
+    assert "accepts only mcm frames" in str(read_errors[0])
+    assert fake.closed
+    assert not transport.is_authenticated
+    assert len(evaluation_results) == 1
+    assert isinstance(evaluation_results[0], BetfairAuthenticatedStreamError)
+    assert "no longer bound" in str(evaluation_results[0])

@@ -652,8 +652,9 @@ def _execute_unlocked(
     binding_by_id = {
         binding.action_id: binding for binding in prepared.exposure_bindings
     }
-    ticket_ids: list[str] = []
-    accepted_attempts = []
+    accepted_attempts: list[
+        tuple[object, ExecutionAction, PaperExposureBinding]
+    ] = []
     for attempt in run.attempts:
         if attempt.outcome not in {
             _adoption.PaperAttemptOutcome.ACCEPTED,
@@ -666,6 +667,16 @@ def _execute_unlocked(
             raise PaperExecutionAdoptionError(
                 "durable attempt is not bound to prepared execution action"
             )
+        accepted_attempts.append((attempt, action, binding))
+
+    _preflight_materialization_batch(
+        self,
+        accepted_attempts,
+        decision_id=prepared.execution_plan.decision_id,
+    )
+
+    ticket_ids: list[str] = []
+    for attempt, action, binding in accepted_attempts:
         ticket = self._materialize_attempt(
             attempt=attempt,
             action=action,
@@ -673,24 +684,44 @@ def _execute_unlocked(
             decision_id=prepared.execution_plan.decision_id,
         )
         ticket_ids.append(ticket.ticket_id)
-        accepted_attempts.append((attempt, action, binding))
 
     if accepted_attempts:
-        # Pin the exact persistence objects/path before invoking domain I/O.
-        # A save/load callback must not be able to redirect the verification
-        # target or replace runtime authority between publication and proof.
+        # Materialization/domain code is another mutation boundary. Validate the
+        # complete economic snapshot and pin exact persistence authority before I/O.
         self._require_minted(prepared)
+        try:
+            type(self.book)._validate_loaded_state(self.book)
+        except (TypeError, ValueError) as exc:
+            raise PaperExecutionAdoptionError(
+                "PaperBook state is invalid before durable publication"
+            ) from exc
         book = self.book
         paper_book_path = self.paper_book_path
         book.save(paper_book_path)
+
+        # Save is an external durability boundary. Re-prove both runtime/prepared
+        # authority and the in-memory economic snapshot before selecting reload path.
         self._require_minted(prepared)
         if self.book is not book or self.paper_book_path is not paper_book_path:
             raise PaperExecutionAdoptionError(
                 "PAPER adoption persistence authority changed during save"
             )
+        try:
+            type(book)._validate_loaded_state(book)
+        except (TypeError, ValueError) as exc:
+            raise PaperExecutionAdoptionError(
+                "PaperBook state changed or became invalid during durable publication"
+            ) from exc
 
         durable_book = _adoption.PaperBook.load(paper_book_path)
+
+        # Load is another callback/I/O boundary. Do not compare or accept the
+        # reloaded state using pre-load runtime or prepared assumptions.
         self._require_minted(prepared)
+        if self.book is not book or self.paper_book_path is not paper_book_path:
+            raise PaperExecutionAdoptionError(
+                "PAPER adoption persistence authority changed during load"
+            )
         if type(durable_book) is not _adoption.PaperBook:
             raise PaperExecutionAdoptionError(
                 "durable PaperBook must retain exact PaperBook authority"
@@ -708,6 +739,7 @@ def _execute_unlocked(
             "PaperBook changed across atomic durable publication",
         )
         for attempt, action, binding in accepted_attempts:
+            _require_materialization_authority(action, binding)
             marker = f"{self._TICKET_MARKER}{attempt.attempt_id}"
             matches = [
                 ticket

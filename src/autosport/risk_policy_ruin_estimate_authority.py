@@ -194,6 +194,23 @@ class ProductFixedNRiskPolicyEstimate:
 
 
 _ESTIMATE_TYPE = ProductFixedNRiskPolicyEstimate
+_ESTIMATE_AUTHORITY_PROPERTY_NAMES = (
+    "product_preoutcome_policy_proven",
+    "frozen_policy_execution_proven",
+    "iid_qualified",
+    "proposal_target_execution_proven",
+    "risk_upper_bound_computed",
+    "grants_ticket_authority",
+    "grants_real_money_authority",
+)
+_ESTIMATE_AUTHORITY_PROPERTY_SURFACE = tuple(
+    (
+        name,
+        vars(_ESTIMATE_TYPE)[name],
+        getattr(vars(_ESTIMATE_TYPE)[name].fget, "__code__", None),
+    )
+    for name in _ESTIMATE_AUTHORITY_PROPERTY_NAMES
+)
 _SHA_HELPER = _sha
 _SHA_HELPER_CODE = getattr(_SHA_HELPER, "__code__", None)
 _DECIMAL_TEXT_HELPER = _decimal_text
@@ -222,6 +239,17 @@ def _require_dispatch() -> None:
         or evaluator_source_sha256 is not _SOURCE_DIGEST
         or getattr(_SOURCE_DIGEST, "__code__", None) is not _SOURCE_DIGEST_CODE
         or ProductFixedNRiskPolicyEstimate is not _ESTIMATE_TYPE
+        or any(
+            vars(_ESTIMATE_TYPE).get(name) is not expected_descriptor
+            or getattr(
+                getattr(vars(_ESTIMATE_TYPE).get(name), "fget", None),
+                "__code__",
+                None,
+            )
+            is not expected_code
+            for name, expected_descriptor, expected_code
+            in _ESTIMATE_AUTHORITY_PROPERTY_SURFACE
+        )
         or _sha is not _SHA_HELPER
         or getattr(_SHA_HELPER, "__code__", None) is not _SHA_HELPER_CODE
         or _decimal_text is not _DECIMAL_TEXT_HELPER

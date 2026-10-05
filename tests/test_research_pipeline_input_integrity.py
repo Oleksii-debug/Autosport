@@ -230,6 +230,33 @@ class ResearchPipelineInputIntegrityTests(unittest.TestCase):
                 self.assertEqual(book.tickets, {})
                 self.assertFalse(ledger.path.exists())
 
+
+    def test_pipeline_rejects_lossy_submicrosecond_decision_time_before_economic_work(self):
+        pipeline = ResearchDecisionPipeline()
+        book = PaperBook("100")
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = JsonlDecisionLedger(Path(tmp) / "decisions.jsonl")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "precision finer than microseconds is unsupported",
+            ):
+                pipeline.decide_and_open(
+                    book=book,
+                    candidate=None,
+                    groups=[],
+                    forecasts={},
+                    evidence=(),
+                    stake="1",
+                    decision_ts="2026-09-14T10:00:00.0000001+00:00",
+                    decision_ledger=ledger,
+                    replay_run_id="research-run",
+                )
+
+            self.assertEqual(book.balance, Decimal("100"))
+            self.assertEqual(book.tickets, {})
+            self.assertFalse(ledger.path.exists())
+
     def test_pipeline_rejects_noncanonical_audit_identity_before_economic_work(self):
         pipeline = ResearchDecisionPipeline()
         book = PaperBook("100")

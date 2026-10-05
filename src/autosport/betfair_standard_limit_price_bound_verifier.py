@@ -402,6 +402,26 @@ def _build_product_verifier():
     strict_json_integer_limit = _json_integrity_module._JSON_INTEGER_MAX_DIGITS
     ledger_saga = ledger_cls.saga
     ledger_saga_code = ledger_saga.__code__
+    ledger_plan_event = ledger_cls._plan_event
+    ledger_plan_event_code = ledger_plan_event.__code__
+    ledger_attempt_events = ledger_cls._attempt_events
+    ledger_attempt_events_code = ledger_attempt_events.__code__
+    ledger_state = ledger_cls._state.__func__
+    ledger_state_code = ledger_state.__code__
+    ledger_receipt_identity = ledger_cls._receipt_identity.__func__
+    ledger_receipt_identity_code = ledger_receipt_identity.__code__
+    ledger_receipt_owners = ledger_cls._receipt_owners.__func__
+    ledger_receipt_owners_code = ledger_receipt_owners.__code__
+    ledger_stale = ledger_cls._stale.__func__
+    ledger_stale_code = ledger_stale.__code__
+    ledger_saga_cls = _ledger_module.ExecutionSaga
+    ledger_saga_init = ledger_saga_cls.__init__
+    ledger_saga_init_code = ledger_saga_init.__code__
+    ledger_event_type_cls = _ledger_module.EventType
+    ledger_attempt_state_cls = _ledger_module.AttemptState
+    ledger_receipt_identity_cls = _ledger_module.ExternalReceiptIdentity
+    ledger_receipt_identity_init = ledger_receipt_identity_cls.__init__
+    ledger_receipt_identity_init_code = ledger_receipt_identity_init.__code__
     ledger_approval_active = ledger_cls.supervised_approval_is_active
     ledger_approval_active_code = ledger_approval_active.__code__
     ledger_events = ledger_cls._events
@@ -654,6 +674,26 @@ def _build_product_verifier():
             or _json_integrity_module._JSON_INTEGER_MAX_DIGITS != strict_json_integer_limit
             or ledger_cls.saga is not ledger_saga
             or ledger_saga.__code__ is not ledger_saga_code
+            or ledger_cls._plan_event is not ledger_plan_event
+            or ledger_plan_event.__code__ is not ledger_plan_event_code
+            or ledger_cls._attempt_events is not ledger_attempt_events
+            or ledger_attempt_events.__code__ is not ledger_attempt_events_code
+            or ledger_cls._state.__func__ is not ledger_state
+            or ledger_state.__code__ is not ledger_state_code
+            or ledger_cls._receipt_identity.__func__ is not ledger_receipt_identity
+            or ledger_receipt_identity.__code__ is not ledger_receipt_identity_code
+            or ledger_cls._receipt_owners.__func__ is not ledger_receipt_owners
+            or ledger_receipt_owners.__code__ is not ledger_receipt_owners_code
+            or ledger_cls._stale.__func__ is not ledger_stale
+            or ledger_stale.__code__ is not ledger_stale_code
+            or _ledger_module.ExecutionSaga is not ledger_saga_cls
+            or ledger_saga_cls.__init__ is not ledger_saga_init
+            or ledger_saga_init.__code__ is not ledger_saga_init_code
+            or _ledger_module.EventType is not ledger_event_type_cls
+            or _ledger_module.AttemptState is not ledger_attempt_state_cls
+            or _ledger_module.ExternalReceiptIdentity is not ledger_receipt_identity_cls
+            or ledger_receipt_identity_cls.__init__ is not ledger_receipt_identity_init
+            or ledger_receipt_identity_init.__code__ is not ledger_receipt_identity_init_code
             or ledger_cls.supervised_approval_is_active is not ledger_approval_active
             or ledger_approval_active.__code__ is not ledger_approval_active_code
             or ledger_cls._events is not ledger_events
@@ -717,6 +757,12 @@ def _build_product_verifier():
                 "_events",
                 "_ensure_existing_path_durable",
                 "_parse",
+                "_plan_event",
+                "_attempt_events",
+                "_state",
+                "_receipt_identity",
+                "_receipt_owners",
+                "_stale",
             )
         ):
             raise error_cls("ledger authority method shadow is not allowed")

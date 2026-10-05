@@ -161,8 +161,8 @@ class FocusedMirrorDependencyIndex:
     """
 
     def __init__(self, mirror: MarketMirror) -> None:
-        if not isinstance(mirror, MarketMirror):
-            raise TypeError("mirror must be a MarketMirror")
+        if type(mirror) is not MarketMirror:
+            raise TypeError("mirror must be an exact MarketMirror")
         self._mirror = mirror
         self._dependencies: dict[str, FocusedMirrorDependency] = {}
         self._matched_keys: dict[str, set[MirrorQuoteKey]] = {}
@@ -910,8 +910,8 @@ class BoundedMirrorInvalidationBuffer:
         *,
         max_dirty_keys: int = 4096,
     ) -> None:
-        if not isinstance(mirror, MarketMirror):
-            raise TypeError("mirror must be a MarketMirror")
+        if type(mirror) is not MarketMirror:
+            raise TypeError("mirror must be an exact MarketMirror")
         if (
             isinstance(max_dirty_keys, bool)
             or not isinstance(max_dirty_keys, int)

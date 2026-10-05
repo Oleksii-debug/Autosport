@@ -13,6 +13,7 @@ from autosport.paper_execution_reality import (
     PaperExecutionIntegrityError,
     PaperExecutionLedger,
     PaperExecutionRun,
+    PaperLegAttempt,
     RecoveryDecision,
 )
 
@@ -82,6 +83,61 @@ class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
                 "decimal fixed-point representation exceeds resource limit",
             ):
                 record.to_dict()
+        finally:
+            if previous is sentinel:
+                del legacy.format
+            else:
+                legacy.format = previous
+
+        self.assertEqual(formatted, [])
+
+    def test_all_attempt_decimal_siblings_preflight_before_any_formatting(self) -> None:
+        attempt = PaperLegAttempt(
+            attempt_id="attempt-resource",
+            run_id="run-resource",
+            plan_id="plan-resource",
+            action_id="resource-action",
+            sequence=0,
+            bookmaker_id="paper-venue",
+            account_id="paper-account",
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            side="BACK",
+            decision_quote_id="quote-1",
+            decision_odds=Decimal("2.50"),
+            requested_stake=Decimal("10.00"),
+            decision_observed_at="2026-10-05T00:00:00.100000+00:00",
+            execution_observed_at="2026-10-05T00:00:00.200000+00:00",
+            delay_ms=100,
+            quote_age_ms=100,
+            outcome=PaperAttemptOutcome.ACCEPTED,
+            execution_odds=Decimal("2.40"),
+            execution_stake=Decimal("10.00"),
+            suspended=False,
+            evidence_grade=EvidenceGrade.EMPIRICAL,
+            evidence_source="captured-paper-observation-v1",
+            evidence_id="paper-evidence-1",
+            evidence_sha256="a" * 64,
+            model_fingerprint="b" * 64,
+            reason="attempt resource-bound regression",
+        )
+        object.__setattr__(attempt, "execution_stake", Decimal("1E+8192"))
+        formatted: list[Decimal] = []
+
+        def tracking_format(value: Decimal, spec: str) -> str:
+            formatted.append(value)
+            return value.__format__(spec)
+
+        sentinel = object()
+        previous = legacy.__dict__.get("format", sentinel)
+        legacy.format = tracking_format
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal fixed-point representation exceeds resource limit",
+            ):
+                attempt.to_dict()
         finally:
             if previous is sentinel:
                 del legacy.format

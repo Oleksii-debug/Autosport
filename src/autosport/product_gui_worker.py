@@ -5,14 +5,23 @@ import queue
 import re
 import threading
 from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 from typing import Callable
 
 from .continuous_session import (
     ContinuousSessionStatus,
     ContinuousTickResult,
+    SessionState,
     SessionStoppedError,
 )
+from .domain import TicketStatus
+from .economic_goal_store import EconomicGoalStore
+from .paper import PaperBook
+from .portfolio import PortfolioEngine
+from .risk_reporting import build_paper_risk_report
 from .operator_source_registry import (
     list_product_source_entries,
     resolve_product_source_runtime_binding,
@@ -25,9 +34,11 @@ from .trusted_runtime_code_profile import (
     _clear_started_product_runtime_origin,
     _register_started_product_runtime_origin,
     issue_trusted_runtime_code_profile,
+    require_authoritative_trusted_runtime_code_profile,
     require_product_owned_source_factory_identity,
     revoke_trusted_runtime_code_profile,
 )
+from .workspace_lock import WorkspaceEconomicLock
 
 
 RuntimeBuilder = Callable[[Path, str, str], AutonomousProductRuntime]
@@ -167,6 +178,18 @@ def _capture_profiled_runtime_builder(
                 "profiled runtime composition cannot prove exact source origin"
             ) from exc
         if (
+            type(runtime_source_id) is not str
+            or not runtime_source_id
+            or runtime_source_id.strip() != runtime_source_id
+        ):
+            try:
+                runtime.close()
+            except BaseException:
+                pass
+            raise ProductEntrypointError(
+                "profiled runtime manifest has invalid source identity"
+            )
+        if (
             runtime_workspace != expected_workspace
             or runtime_source_id != expected_source_id
             or runtime_source is not source
@@ -242,6 +265,88 @@ def _runtime_builder(
 _CANONICAL_RUNTIME_BUILDER = _PROFILED_RUNTIME_BUILDER
 
 
+def _require_profiled_status_identity(
+    status: object,
+    *,
+    expected_source_id: str,
+    expected_session_id: str | None = None,
+    expected_state: SessionState | None = None,
+) -> ContinuousSessionStatus:
+    if type(status) is not ContinuousSessionStatus:
+        raise ProductEntrypointError(
+            "profiled runtime returned a non-canonical session status"
+        )
+    for field_name, value in (
+        ("source_id", status.source_id),
+        ("session_id", status.session_id),
+    ):
+        if (
+            type(value) is not str
+            or not value
+            or value.strip() != value
+        ):
+            raise ProductEntrypointError(
+                f"profiled runtime status has invalid {field_name}"
+            )
+    if status.source_id != expected_source_id:
+        raise ProductEntrypointError(
+            "profiled runtime status changed configured source identity"
+        )
+    if (
+        expected_session_id is not None
+        and status.session_id != expected_session_id
+    ):
+        raise ProductEntrypointError(
+            "profiled runtime status changed lifecycle session identity"
+        )
+    if expected_state is not None and status.state is not expected_state:
+        raise ProductEntrypointError(
+            "profiled runtime status has unexpected lifecycle state"
+        )
+    if type(status.cycles_completed) is not int or status.cycles_completed < 0:
+        raise ProductEntrypointError(
+            "profiled runtime status has invalid cycle count"
+        )
+    return status
+
+
+def _require_profiled_tick_identity(
+    tick: object,
+    *,
+    expected_source_id: str,
+    expected_session_id: str,
+) -> ContinuousTickResult:
+    if type(tick) is not ContinuousTickResult:
+        raise ProductEntrypointError(
+            "profiled runtime returned a non-canonical tick result"
+        )
+    for field_name, value in (
+        ("source_id", tick.source_id),
+        ("session_id", tick.session_id),
+    ):
+        if (
+            type(value) is not str
+            or not value
+            or value.strip() != value
+        ):
+            raise ProductEntrypointError(
+                f"profiled runtime tick has invalid {field_name}"
+            )
+    if tick.source_id != expected_source_id:
+        raise ProductEntrypointError(
+            "profiled runtime tick changed configured source identity"
+        )
+    if tick.session_id != expected_session_id:
+        raise ProductEntrypointError(
+            "profiled runtime tick changed lifecycle session identity"
+        )
+    if type(tick.cycle_index) is not int or tick.cycle_index < 1:
+        raise ProductEntrypointError(
+            "profiled runtime tick has invalid cycle index"
+        )
+    return tick
+
+
 def _safe_error_type(exc: BaseException) -> str:
     """Return a bounded identifier only; exception detail never crosses to the UI."""
 
@@ -258,6 +363,435 @@ def _safe_error_type(exc: BaseException) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class ProductGuiEconomicTicket:
+    """Immutable presentation copy of one canonical durable PAPER ticket."""
+
+    ticket_id: str
+    status: str
+    stake: Decimal
+    combined_odds: Decimal
+    payout: Decimal
+    legs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.ticket_id) is not str
+            or not self.ticket_id
+            or self.ticket_id.strip() != self.ticket_id
+        ):
+            raise ValueError("economic ticket id must be non-empty trimmed text")
+        if self.status not in {"open", "won", "lost", "void"}:
+            raise ValueError("economic ticket status is not canonical")
+        for field_name, value in (
+            ("stake", self.stake),
+            ("combined_odds", self.combined_odds),
+            ("payout", self.payout),
+        ):
+            if type(value) is not Decimal or not value.is_finite():
+                raise ValueError(f"economic ticket {field_name} must be finite Decimal")
+        if self.stake <= 0 or self.combined_odds <= 0 or self.payout < 0:
+            raise ValueError("economic ticket monetary values are outside canonical range")
+        if (
+            type(self.legs) is not tuple
+            or not self.legs
+            or any(
+                type(leg) is not str or not leg or leg.strip() != leg
+                for leg in self.legs
+            )
+        ):
+            raise ValueError("economic ticket legs must be non-empty canonical tuple")
+
+
+@dataclass(frozen=True, slots=True)
+class ProductGuiPaperRiskSnapshot:
+    """Read-only PAPER risk report projected from canonical goal + PaperBook."""
+
+    scope: str
+    goal_id: str
+    goal_revision: int
+    goal_contract_sha256: str
+    portfolio_risk_state_sha256: str
+    bankroll_id: str
+    currency: str
+    current_equity: Decimal
+    peak_equity: Decimal
+    committed_stake: Decimal
+    realized_gross_loss: Decimal
+    turnover: Decimal
+    current_drawdown_amount: Decimal
+    historical_max_drawdown_amount: Decimal
+    historical_max_drawdown_fraction: Decimal | None
+    drawdown_loss_room: Decimal
+    max_drawdown_fraction: Decimal
+    risk_of_ruin_limit: Decimal
+    risk_of_ruin_status: str
+    includes_live_execution_exposure: bool = False
+    live_execution_headroom_authoritative: bool = False
+    risk_of_ruin_upper_bound: None = None
+
+    def __post_init__(self) -> None:
+        if self.scope != "PAPER_ONLY":
+            raise ValueError("runtime risk snapshot must be PAPER_ONLY")
+        for field_name, value in (
+            ("goal_id", self.goal_id),
+            ("bankroll_id", self.bankroll_id),
+            ("currency", self.currency),
+            ("risk_of_ruin_status", self.risk_of_ruin_status),
+        ):
+            if type(value) is not str or not value or value.strip() != value:
+                raise ValueError(
+                    f"runtime risk snapshot {field_name} must be canonical text"
+                )
+        if (
+            type(self.goal_revision) is not int
+            or isinstance(self.goal_revision, bool)
+            or self.goal_revision < 1
+        ):
+            raise ValueError("runtime risk snapshot goal revision must be positive")
+        for field_name, value in (
+            ("goal_contract_sha256", self.goal_contract_sha256),
+            ("portfolio_risk_state_sha256", self.portfolio_risk_state_sha256),
+        ):
+            if (
+                type(value) is not str
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(
+                    f"runtime risk snapshot {field_name} must be lowercase SHA-256"
+                )
+        nonnegative_fields = (
+            ("current_equity", self.current_equity),
+            ("peak_equity", self.peak_equity),
+            ("committed_stake", self.committed_stake),
+            ("realized_gross_loss", self.realized_gross_loss),
+            ("turnover", self.turnover),
+            ("current_drawdown_amount", self.current_drawdown_amount),
+            ("historical_max_drawdown_amount", self.historical_max_drawdown_amount),
+        )
+        for field_name, value in nonnegative_fields:
+            if type(value) is not Decimal or not value.is_finite() or value < 0:
+                raise ValueError(
+                    f"runtime risk snapshot {field_name} must be nonnegative Decimal"
+                )
+        if self.current_equity > self.peak_equity:
+            raise ValueError("runtime risk snapshot current equity exceeds peak")
+        if type(self.drawdown_loss_room) is not Decimal or not self.drawdown_loss_room.is_finite():
+            raise ValueError("runtime risk snapshot drawdown room must be finite Decimal")
+        for field_name, value in (
+            ("max_drawdown_fraction", self.max_drawdown_fraction),
+            ("risk_of_ruin_limit", self.risk_of_ruin_limit),
+        ):
+            if (
+                type(value) is not Decimal
+                or not value.is_finite()
+                or value < 0
+                or value > 1
+            ):
+                raise ValueError(
+                    f"runtime risk snapshot {field_name} must be Decimal fraction"
+                )
+        if self.historical_max_drawdown_fraction is not None and (
+            type(self.historical_max_drawdown_fraction) is not Decimal
+            or not self.historical_max_drawdown_fraction.is_finite()
+            or self.historical_max_drawdown_fraction < 0
+            or self.historical_max_drawdown_fraction > 1
+        ):
+            raise ValueError(
+                "runtime risk snapshot historical drawdown fraction is invalid"
+            )
+        if (
+            type(self.includes_live_execution_exposure) is not bool
+            or self.includes_live_execution_exposure
+            or type(self.live_execution_headroom_authoritative) is not bool
+            or self.live_execution_headroom_authoritative
+            or self.risk_of_ruin_upper_bound is not None
+        ):
+            raise ValueError(
+                "runtime risk snapshot cannot claim live execution or ruin authority"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ProductGuiEconomicSnapshot:
+    """Read-only economic truth captured after one canonical runtime tick."""
+
+    workspace: Path
+    session_id: str
+    source_id: str
+    cycle_index: int
+    cycle_last_success_at: str | None
+    paper_book_sha256: str | None
+    balance: Decimal
+    committed_stake: Decimal
+    tickets: tuple[ProductGuiEconomicTicket, ...]
+    portfolio_mode: str
+    portfolio_scenario_count: int
+    portfolio_worst_case: Decimal
+    portfolio_best_case: Decimal
+    portfolio_mean_case: Decimal
+    paper_risk: ProductGuiPaperRiskSnapshot | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.workspace, Path) or not self.workspace.is_absolute():
+            raise ValueError("economic snapshot workspace must be an absolute Path")
+        for field_name, value in (
+            ("session_id", self.session_id),
+            ("source_id", self.source_id),
+        ):
+            if type(value) is not str or not value or value.strip() != value:
+                raise ValueError(
+                    f"economic snapshot {field_name} must be non-empty trimmed text"
+                )
+        if (
+            type(self.cycle_index) is not int
+            or isinstance(self.cycle_index, bool)
+            or self.cycle_index < 0
+        ):
+            raise ValueError("economic snapshot cycle_index must be a nonnegative int")
+        if self.cycle_last_success_at is not None:
+            value = self.cycle_last_success_at
+            if (
+                type(value) is not str
+                or not value
+                or value.strip() != value
+            ):
+                raise ValueError(
+                    "economic snapshot cycle_last_success_at must be canonical timestamp or None"
+                )
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(
+                    "economic snapshot cycle_last_success_at must be valid ISO-8601"
+                ) from exc
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError(
+                    "economic snapshot cycle_last_success_at must be timezone-aware"
+                )
+        if self.paper_book_sha256 is not None and (
+            type(self.paper_book_sha256) is not str
+            or len(self.paper_book_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.paper_book_sha256
+            )
+        ):
+            raise ValueError("economic snapshot PaperBook SHA must be lowercase SHA-256")
+        for field_name, value in (
+            ("balance", self.balance),
+            ("committed_stake", self.committed_stake),
+            ("portfolio_worst_case", self.portfolio_worst_case),
+            ("portfolio_best_case", self.portfolio_best_case),
+            ("portfolio_mean_case", self.portfolio_mean_case),
+        ):
+            if type(value) is not Decimal or not value.is_finite():
+                raise ValueError(f"economic snapshot {field_name} must be finite Decimal")
+        if self.balance < 0:
+            raise ValueError("economic snapshot balance cannot be negative")
+        if self.committed_stake < 0:
+            raise ValueError("economic snapshot committed_stake cannot be negative")
+        if type(self.tickets) is not tuple or any(
+            type(ticket) is not ProductGuiEconomicTicket for ticket in self.tickets
+        ):
+            raise ValueError("economic snapshot tickets must be canonical tuple")
+        ticket_ids = tuple(ticket.ticket_id for ticket in self.tickets)
+        if len(ticket_ids) != len(set(ticket_ids)):
+            raise ValueError("economic snapshot ticket ids must be unique")
+        expected_committed = sum(
+            (
+                ticket.stake
+                for ticket in self.tickets
+                if ticket.status == "open"
+            ),
+            Decimal("0"),
+        )
+        if self.committed_stake != expected_committed:
+            raise ValueError(
+                "economic snapshot committed stake conflicts with open tickets"
+            )
+        if self.portfolio_mode not in {
+            "exact",
+            "approximate",
+            "conservative-enumeration",
+            "conservative-approximate",
+        }:
+            raise ValueError("economic snapshot portfolio mode is not canonical")
+        if (
+            type(self.portfolio_scenario_count) is not int
+            or isinstance(self.portfolio_scenario_count, bool)
+            or self.portfolio_scenario_count < 1
+        ):
+            raise ValueError(
+                "economic snapshot portfolio_scenario_count must be positive int"
+            )
+        if not (
+            self.portfolio_worst_case
+            <= self.portfolio_mean_case
+            <= self.portfolio_best_case
+        ):
+            raise ValueError(
+                "economic snapshot portfolio bounds are internally inconsistent"
+            )
+        if not any(ticket.status == "open" for ticket in self.tickets):
+            if (
+                self.portfolio_mode != "exact"
+                or self.portfolio_scenario_count != 1
+                or self.portfolio_worst_case != Decimal("0")
+                or self.portfolio_best_case != Decimal("0")
+                or self.portfolio_mean_case != Decimal("0")
+            ):
+                raise ValueError(
+                    "economic snapshot empty-open portfolio must be exact zero state"
+                )
+        if self.paper_risk is not None:
+            if type(self.paper_risk) is not ProductGuiPaperRiskSnapshot:
+                raise ValueError("economic snapshot PAPER risk must be canonical")
+            if self.paper_risk.committed_stake != self.committed_stake:
+                raise ValueError(
+                    "economic snapshot PAPER risk committed stake conflicts with tickets"
+                )
+            if self.paper_risk.current_equity != self.balance + self.committed_stake:
+                raise ValueError(
+                    "economic snapshot PAPER risk equity conflicts with PaperBook"
+                )
+
+
+def _capture_runtime_economic_snapshot(
+    runtime: AutonomousProductRuntime,
+    tick: ContinuousTickResult,
+    _runtime_type: type[AutonomousProductRuntime] = AutonomousProductRuntime,
+    _tick_type: type[ContinuousTickResult] = ContinuousTickResult,
+    _paper_book_type: type[PaperBook] = PaperBook,
+    _portfolio_engine_type: type[PortfolioEngine] = PortfolioEngine,
+    _economic_lock_type: type[WorkspaceEconomicLock] = WorkspaceEconomicLock,
+    _snapshot_type: type[ProductGuiEconomicSnapshot] = ProductGuiEconomicSnapshot,
+    _ticket_type: type[ProductGuiEconomicTicket] = ProductGuiEconomicTicket,
+    _ticket_status_type: type[TicketStatus] = TicketStatus,
+    _decimal_type: type[Decimal] = Decimal,
+    _path_type: type[Path] = Path,
+    _goal_store_type: type[EconomicGoalStore] = EconomicGoalStore,
+    _risk_report_builder=build_paper_risk_report,
+    _risk_snapshot_type: type[ProductGuiPaperRiskSnapshot] = ProductGuiPaperRiskSnapshot,
+    _sha256=sha256,
+) -> ProductGuiEconomicSnapshot:
+    """Capture economic presentation truth without reopening AutosportSession.
+
+    The caller keeps the canonical runtime operation fence held across the completed
+    tick and this read. The existing workspace economic lock serializes the exact
+    PaperBook byte snapshot against canonical economic writers.
+    """
+
+    if type(runtime) is not _runtime_type or type(tick) is not _tick_type:
+        raise RuntimeError("economic snapshot requires exact canonical runtime tick")
+    workspace = _path_type(runtime.workspace).resolve(strict=False)
+    coordinator = runtime.coordinator
+    if (
+        _path_type(coordinator.workspace).resolve(strict=False) != workspace
+        or tick.session_id != coordinator.session_id
+        or tick.source_id != runtime.manifest.source_id
+        or tick.cycle_index < 0
+    ):
+        raise RuntimeError("economic snapshot runtime identity mismatch")
+
+    with _economic_lock_type(workspace):
+        book_path = _path_type(coordinator.paper_book_path).resolve(strict=False)
+        if book_path != workspace / "paper_book.json":
+            raise RuntimeError(
+                "economic snapshot PaperBook path is not canonical for runtime workspace"
+            )
+        if book_path.exists():
+            payload = book_path.read_bytes()
+            paper_book_sha256 = _sha256(payload).hexdigest()
+            book = _paper_book_type.load_bytes(payload)
+        else:
+            paper_book_sha256 = None
+            book = _paper_book_type(runtime.manifest.initial_bankroll)
+
+        tickets = tuple(
+            _ticket_type(
+                ticket_id=ticket.ticket_id,
+                status=ticket.status.value,
+                stake=ticket.stake,
+                combined_odds=ticket.combined_odds,
+                payout=ticket.payout,
+                legs=tuple(
+                    f"{leg.event_id}/{leg.market_id}/{leg.selection_id}@{leg.locked_odds}"
+                    for leg in ticket.legs
+                ),
+            )
+            for ticket in book.tickets.values()
+        )
+        committed_stake = sum(
+            (
+                ticket.stake
+                for ticket in book.tickets.values()
+                if ticket.status is _ticket_status_type.OPEN
+            ),
+            _decimal_type("0"),
+        )
+        portfolio = _portfolio_engine_type().analyse(list(book.tickets.values()))
+
+        paper_risk = None
+        goal = _goal_store_type(workspace).load_optional()
+        if goal is not None:
+            report = _risk_report_builder(book, goal)
+            if (
+                report.committed_stake != committed_stake
+                or report.current_equity != book.balance + committed_stake
+                or report.scope != "PAPER_ONLY"
+                or report.includes_live_execution_exposure is not False
+                or report.live_execution_headroom_authoritative is not False
+                or report.risk_of_ruin_upper_bound is not None
+            ):
+                raise RuntimeError(
+                    "canonical PAPER risk report conflicts with economic snapshot"
+                )
+            paper_risk = _risk_snapshot_type(
+                scope=report.scope,
+                goal_id=report.goal_id,
+                goal_revision=report.goal_revision,
+                goal_contract_sha256=report.goal_contract_sha256,
+                portfolio_risk_state_sha256=report.portfolio_risk_state_sha256,
+                bankroll_id=report.bankroll_id,
+                currency=report.currency,
+                current_equity=report.current_equity,
+                peak_equity=report.peak_equity,
+                committed_stake=report.committed_stake,
+                realized_gross_loss=report.realized_gross_loss,
+                turnover=report.turnover,
+                current_drawdown_amount=report.current_drawdown_amount,
+                historical_max_drawdown_amount=report.historical_max_drawdown_amount,
+                historical_max_drawdown_fraction=report.historical_max_drawdown_fraction,
+                drawdown_loss_room=report.drawdown_loss_room,
+                max_drawdown_fraction=report.max_drawdown_fraction,
+                risk_of_ruin_limit=report.risk_of_ruin_limit,
+                risk_of_ruin_status=report.risk_of_ruin_status,
+                includes_live_execution_exposure=report.includes_live_execution_exposure,
+                live_execution_headroom_authoritative=report.live_execution_headroom_authoritative,
+                risk_of_ruin_upper_bound=report.risk_of_ruin_upper_bound,
+            )
+
+    return _snapshot_type(
+        workspace=workspace,
+        session_id=tick.session_id,
+        source_id=tick.source_id,
+        cycle_index=tick.cycle_index,
+        cycle_last_success_at=tick.last_success_at,
+        paper_book_sha256=paper_book_sha256,
+        balance=book.balance,
+        committed_stake=committed_stake,
+        tickets=tickets,
+        portfolio_mode=portfolio.mode,
+        portfolio_scenario_count=portfolio.scenario_count,
+        portfolio_worst_case=portfolio.worst_case,
+        portfolio_best_case=portfolio.best_case,
+        portfolio_mean_case=portfolio.mean_case,
+        paper_risk=paper_risk,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ProductGuiMessage:
     """One secret-safe projection from the canonical background product runtime."""
 
@@ -266,6 +800,7 @@ class ProductGuiMessage:
     tick: ContinuousTickResult | None = None
     error_type: str | None = None
     stop_reason: str | None = None
+    economic: ProductGuiEconomicSnapshot | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in {"STARTED", "TICK", "STOPPED", "ERROR"}:
@@ -280,6 +815,17 @@ class ProductGuiMessage:
             raise ValueError("status message requires ContinuousSessionStatus")
         if self.kind == "TICK" and self.tick is None:
             raise ValueError("tick message requires ContinuousTickResult")
+        if self.economic is not None:
+            if self.kind != "TICK" or self.tick is None:
+                raise ValueError("economic snapshot is valid only for TICK messages")
+            if type(self.economic) is not ProductGuiEconomicSnapshot:
+                raise ValueError("economic snapshot must be canonical")
+            if (
+                self.economic.session_id != self.tick.session_id
+                or self.economic.source_id != self.tick.source_id
+                or self.economic.cycle_index != self.tick.cycle_index
+            ):
+                raise ValueError("economic snapshot does not match runtime tick identity")
         if self.kind == "ERROR" and self.error_type is None:
             raise ValueError("error message requires error_type")
         if self.kind != "STOPPED" and self.stop_reason is not None:
@@ -314,6 +860,13 @@ class ProductGuiWorker:
             return self._busy
 
     @property
+    def stop_requested(self) -> bool:
+        """Expose only canonical in-process STOP acceptance for presentation."""
+
+        with self._lock:
+            return bool(self._busy and self._stop_event.is_set())
+
+    @property
     def trusted_runtime_profile(self) -> TrustedRuntimeCodeProfile | None:
         """Return the current process-issued profile, never a persisted authority."""
 
@@ -341,15 +894,40 @@ class ProductGuiWorker:
             or expected_source_id.strip() != expected_source_id
         ):
             raise ValueError("expected_source_id must be a non-empty trimmed string")
-        if (
-            isinstance(poll_seconds, bool)
-            or not isinstance(poll_seconds, (int, float))
-            or not math.isfinite(float(poll_seconds))
-            or poll_seconds <= 0
-        ):
-            raise ValueError("poll_seconds must be a finite positive number")
-
-        root = Path(workspace)
+        if expected_source_id is not None:
+            if (
+                type(initial_bankroll) is not str
+                or not initial_bankroll
+                or initial_bankroll.strip() != initial_bankroll
+                or len(initial_bankroll) > 128
+            ):
+                raise ValueError(
+                    "profiled initial_bankroll must be bounded exact text"
+                )
+            if (
+                type(poll_seconds) not in {int, float}
+                or not math.isfinite(float(poll_seconds))
+                or poll_seconds <= 0
+            ):
+                raise ValueError(
+                    "profiled poll_seconds must be an exact finite positive number"
+                )
+            if type(workspace) not in {str, type(Path("."))}:
+                raise ValueError(
+                    "profiled runtime workspace must be exact str or exact Path"
+                )
+            root = Path(workspace)
+            if not root.is_absolute():
+                raise ValueError("profiled runtime workspace must be absolute")
+        else:
+            if (
+                isinstance(poll_seconds, bool)
+                or not isinstance(poll_seconds, (int, float))
+                or not math.isfinite(float(poll_seconds))
+                or poll_seconds <= 0
+            ):
+                raise ValueError("poll_seconds must be a finite positive number")
+            root = Path(workspace)
         with self._lock:
             if self._busy:
                 return False
@@ -486,12 +1064,20 @@ class ProductGuiWorker:
         initial_bankroll: str,
         poll_seconds: float,
         _profiled_runtime_builder: ProfiledRuntimeBuilder = _PROFILED_RUNTIME_BUILDER,
+        _economic_snapshot_builder: Callable[
+            [AutonomousProductRuntime, ContinuousTickResult],
+            ProductGuiEconomicSnapshot,
+        ] = _capture_runtime_economic_snapshot,
+        _economic_snapshot_builder_code=_capture_runtime_economic_snapshot.__code__,
+        _economic_snapshot_builder_defaults=_capture_runtime_economic_snapshot.__defaults__,
+        _runtime_type: type[AutonomousProductRuntime] = AutonomousProductRuntime,
     ) -> None:
         runtime: AutonomousProductRuntime | None = None
         runtime_profile: TrustedRuntimeCodeProfile | None = None
         terminal_error: BaseException | None = None
         stopped_status: ContinuousSessionStatus | None = None
         stop_reason: str | None = None
+        profiled_session_id: str | None = None
         try:
             if expected_source_id is not None:
                 if self._runtime_builder is not None:
@@ -527,9 +1113,21 @@ class ProductGuiWorker:
             if self._stop_event.is_set():
                 stop_reason = self._stop_reason
                 stopped_status = runtime.stop(stop_reason)
+                if expected_source_id is not None:
+                    stopped_status = _require_profiled_status_identity(
+                        stopped_status,
+                        expected_source_id=expected_source_id,
+                        expected_state=SessionState.STOPPED,
+                    )
             else:
                 started_status = runtime.start()
                 if expected_source_id is not None:
+                    started_status = _require_profiled_status_identity(
+                        started_status,
+                        expected_source_id=expected_source_id,
+                        expected_state=SessionState.RUNNING,
+                    )
+                    profiled_session_id = started_status.session_id
                     # Serialize STOP acceptance and trusted-profile issuance through the
                     # worker lifecycle lock. This gives the two operations one ordering:
                     # STOP first => no profile; issuance first => request_stop() revokes
@@ -549,19 +1147,100 @@ class ProductGuiWorker:
 
                 while not self._stop_event.is_set():
                     try:
-                        tick = runtime.tick()
+                        economic = None
+                        if (
+                            _economic_snapshot_builder.__code__
+                            is not _economic_snapshot_builder_code
+                            or _economic_snapshot_builder.__defaults__
+                            is not _economic_snapshot_builder_defaults
+                            or _economic_snapshot_builder.__kwdefaults__ is not None
+                        ):
+                            raise RuntimeError(
+                                "runtime economic snapshot authority implementation changed"
+                            )
+                        if type(runtime) is _runtime_type and runtime_profile is not None:
+                            # Economic presentation truth is issued only for the same
+                            # currently-authoritative profiled runtime already used by
+                            # the packaged product path. Compatibility/dynamic-source
+                            # runtimes may tick, but cannot mint this projection.
+                            try:
+                                require_authoritative_trusted_runtime_code_profile(
+                                    runtime_profile,
+                                    workspace=runtime.workspace,
+                                )
+                            except TrustedRuntimeCodeProfileError:
+                                if self._stop_event.is_set():
+                                    break
+                                raise
+                            # Keep one outer canonical runtime-operation fence across
+                            # tick completion and economic readback. runtime.tick()
+                            # re-enters the same RLock through its existing decorator.
+                            with runtime._operation_fence:
+                                tick = runtime.tick()
+                                if self._stop_event.is_set():
+                                    break
+                                if (
+                                    expected_source_id is None
+                                    or profiled_session_id is None
+                                ):
+                                    raise ProductEntrypointError(
+                                        "profiled runtime lifecycle identity is unavailable"
+                                    )
+                                tick = _require_profiled_tick_identity(
+                                    tick,
+                                    expected_source_id=expected_source_id,
+                                    expected_session_id=profiled_session_id,
+                                )
+                                try:
+                                    require_authoritative_trusted_runtime_code_profile(
+                                        runtime_profile,
+                                        workspace=runtime.workspace,
+                                    )
+                                except TrustedRuntimeCodeProfileError:
+                                    if self._stop_event.is_set():
+                                        break
+                                    raise
+                                economic = _economic_snapshot_builder(runtime, tick)
+                                if self._stop_event.is_set():
+                                    break
+                                try:
+                                    require_authoritative_trusted_runtime_code_profile(
+                                        runtime_profile,
+                                        workspace=runtime.workspace,
+                                    )
+                                except TrustedRuntimeCodeProfileError:
+                                    if self._stop_event.is_set():
+                                        break
+                                    raise
+                        else:
+                            # Compatibility-only injected runtimes are never product
+                            # economic authority and therefore cannot mint a snapshot.
+                            tick = runtime.tick()
                     except SessionStoppedError:
                         if not self._stop_event.is_set():
                             raise
                         break
                     if self._stop_event.is_set():
                         break
-                    self._messages.put(ProductGuiMessage(kind="TICK", tick=tick))
+                    self._messages.put(
+                        ProductGuiMessage(kind="TICK", tick=tick, economic=economic)
+                    )
                     if self._stop_event.wait(poll_seconds):
                         break
 
                 stop_reason = self._stop_reason
                 stopped_status = runtime.stop(stop_reason)
+                if expected_source_id is not None:
+                    if profiled_session_id is None:
+                        raise ProductEntrypointError(
+                            "profiled runtime lifecycle session identity is unavailable"
+                        )
+                    stopped_status = _require_profiled_status_identity(
+                        stopped_status,
+                        expected_source_id=expected_source_id,
+                        expected_session_id=profiled_session_id,
+                        expected_state=SessionState.STOPPED,
+                    )
         except BaseException as exc:
             terminal_error = exc
             # Compensation is based on possession of a canonical runtime, not on

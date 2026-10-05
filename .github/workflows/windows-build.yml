@@ -274,18 +274,129 @@ jobs:
       - name: External UIA fresh-extraction gate
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $evidence = Join-Path $PWD 'dist/fresh-extraction-external-uia-audit.json'
-          ./scripts/external_uia_audit.ps1 `
-            -Exe (Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport.exe') `
-            -Output $evidence
-          $external = Get-Content $evidence -Raw | ConvertFrom-Json
-          if ($external.status -ne 'PASS') { throw 'External UIA fresh-extraction audit did not PASS' }
+          $packageRoot = (Resolve-Path -LiteralPath (Join-Path $PWD '.build-fresh-extraction/Autosport-V1')).Path
+          $hostileCwd = (Resolve-Path -LiteralPath (Join-Path $env:SystemRoot 'System32')).Path
+          $checkoutCwd = (Resolve-Path -LiteralPath $PWD.Path).Path
+          if ([string]::Equals($hostileCwd, $checkoutCwd, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'External UIA hostile CWD unexpectedly aliases the repository checkout'
+          }
+
+          $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          if ([string]::IsNullOrWhiteSpace($currentSid) -or $currentSid -notmatch '^S-') {
+            throw 'External UIA package write fence could not resolve the runner SID'
+          }
+          $packageWriteFenceApplied = $false
+          $external = $null
+          $hadLocalAppData = Test-Path Env:LOCALAPPDATA
+          $hadWorkspaceOverride = Test-Path Env:AUTOSPORT_WORKSPACE
+          $originalLocalAppData = $env:LOCALAPPDATA
+          $originalWorkspaceOverride = $env:AUTOSPORT_WORKSPACE
+          $isolatedRoot = Join-Path $env:RUNNER_TEMP 'Autosport-external-uia'
+          if (Test-Path -LiteralPath $isolatedRoot) {
+            Remove-Item -LiteralPath $isolatedRoot -Recurse -Force
+          }
+          $isolatedLocalAppData = Join-Path $isolatedRoot 'localappdata'
+          $expectedWorkspace = Join-Path $isolatedRoot 'workspace'
+          New-Item -ItemType Directory -Path $isolatedLocalAppData -Force | Out-Null
+          New-Item -ItemType Directory -Path $expectedWorkspace -Force | Out-Null
+
+          try {
+            & icacls $packageRoot /deny "*${currentSid}:(OI)(CI)(WD,AD,WEA,WA,DE,DC)" /T /C | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "External UIA package write fence exited $LASTEXITCODE" }
+            $packageWriteFenceApplied = $true
+
+            # Launch the exact extracted artifact against clean per-gate state.
+            # Prior runner workspace/operator configuration or WebView profile data
+            # must not make this accessibility/product-stage gate pass or fail.
+            $env:LOCALAPPDATA = $isolatedLocalAppData
+            $env:AUTOSPORT_WORKSPACE = $expectedWorkspace
+            ./scripts/external_uia_audit.ps1 `
+              -Exe (Join-Path $packageRoot 'Autosport.exe') `
+              -Output $evidence `
+              -WorkingDirectory $hostileCwd `
+              -Workspace $expectedWorkspace
+            $external = Get-Content $evidence -Raw | ConvertFrom-Json
+          } finally {
+            if ($hadLocalAppData) {
+              $env:LOCALAPPDATA = $originalLocalAppData
+            } else {
+              Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue
+            }
+            if ($hadWorkspaceOverride) {
+              $env:AUTOSPORT_WORKSPACE = $originalWorkspaceOverride
+            } else {
+              Remove-Item Env:AUTOSPORT_WORKSPACE -ErrorAction SilentlyContinue
+            }
+            if ($packageWriteFenceApplied) {
+              & icacls $packageRoot /remove:d "*${currentSid}" /T /C | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw "External UIA package write-fence cleanup exited $LASTEXITCODE" }
+            }
+          }
+
+          if ($null -eq $external -or $external.status -ne 'PASS') { throw 'External UIA fresh-extraction audit did not PASS' }
+          if (-not [string]::Equals([string]$external.launch_working_directory, $hostileCwd, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'External UIA evidence did not preserve the hostile child working directory'
+          }
+          if ($external.duplicate_launch_status -ne 'PASS' -or [int]$external.duplicate_launch_exit_code -ne 2) {
+            throw 'External UIA evidence did not prove packaged duplicate-launch rejection'
+          }
+          if ([string]$external.duplicate_launch_dialog_title -ne 'Автоспорт — помилка запуску') {
+            throw 'External UIA duplicate-launch dialog title mismatch'
+          }
+          if ($external.normal_close_status -ne 'PASS' -or [int]$external.normal_close_exit_code -ne 0) {
+            throw 'External UIA evidence did not prove ordinary packaged close/teardown'
+          }
+          if (
+            $external.emergency_stop_activation_status -ne 'PASS' -or
+            [string]::IsNullOrWhiteSpace([string]$external.emergency_stop_status_text) -or
+            -not [string]::Equals(
+              [string]$external.emergency_stop_journal_path,
+              (Join-Path $expectedWorkspace 'execution-stop.jsonl'),
+              [System.StringComparison]::OrdinalIgnoreCase
+            ) -or
+            -not (Test-Path -LiteralPath (Join-Path $expectedWorkspace 'execution-stop.jsonl') -PathType Leaf)
+          ) {
+            throw 'External UIA evidence did not prove packaged durable emergency STOP activation'
+          }
+          if (
+            $external.keyboard_shortcuts_status -ne 'PASS' -or
+            [string]$external.f2_focus_automation_id -ne '301' -or
+            [string]$external.f8_focus_automation_id -ne '204'
+          ) {
+            throw 'External UIA evidence did not prove packaged F2/F8 keyboard focus navigation'
+          }
+          if (
+            $external.runtime_witness_status -ne 'PASS' -or
+            [string]::IsNullOrWhiteSpace([string]$external.runtime_browser_version) -or
+            -not [string]::Equals(
+              [string]$external.runtime_witness_path,
+              (Join-Path $expectedWorkspace 'webview2-runtime-witness.json'),
+              [System.StringComparison]::OrdinalIgnoreCase
+            )
+          ) {
+            throw 'External UIA evidence did not bind the packaged session to the actual WebView2 runtime witness'
+          }
           if ($external.real_money_execution -ne $false -or $external.human_tested -ne $false -or $external.nvda_verified -ne $false) {
             throw 'External UIA audit violated release truth labels'
           }
           $verificationPath = Join-Path $PWD 'dist/fresh-extraction-verification.json'
           $verification = Get-Content $verificationPath -Raw | ConvertFrom-Json
           $verification | Add-Member -NotePropertyName extracted_external_uia_status -NotePropertyValue $external.status -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_hostile_cwd_status -NotePropertyValue 'PASS' -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_read_only_package_status -NotePropertyValue 'PASS' -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_duplicate_launch_status -NotePropertyValue $external.duplicate_launch_status -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_normal_close_status -NotePropertyValue $external.normal_close_status -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_emergency_stop_activation_status -NotePropertyValue $external.emergency_stop_activation_status -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_emergency_stop_status_text -NotePropertyValue $external.emergency_stop_status_text -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_keyboard_shortcuts_status -NotePropertyValue $external.keyboard_shortcuts_status -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_f2_focus_automation_id -NotePropertyValue $external.f2_focus_automation_id -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_f8_focus_automation_id -NotePropertyValue $external.f8_focus_automation_id -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_runtime_witness_status -NotePropertyValue $external.runtime_witness_status -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_runtime_browser_version -NotePropertyValue $external.runtime_browser_version -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_isolated_workspace -NotePropertyValue $expectedWorkspace -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_isolated_localappdata -NotePropertyValue $isolatedLocalAppData -Force
           $verification | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $verificationPath -Encoding utf8
       - name: Upload external UIA failure evidence
         if: failure()

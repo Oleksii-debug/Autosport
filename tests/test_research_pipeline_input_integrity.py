@@ -94,6 +94,30 @@ class ResearchPipelineInputIntegrityTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, field):
                     ResearchEvidence(**kwargs)
 
+
+    def test_research_evidence_rejects_nonzero_submicrosecond_causal_timestamps(self):
+        for field in ("observed_at", "available_at"):
+            with self.subTest(field=field):
+                kwargs = self._evidence_kwargs()
+                kwargs[field] = "2026-09-14T10:00:00.0000001+00:00"
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "precision finer than microseconds is unsupported",
+                ):
+                    ResearchEvidence(**kwargs)
+
+    def test_research_evidence_accepts_zero_only_excess_fractional_precision(self):
+        kwargs = self._evidence_kwargs()
+        kwargs["observed_at"] = "2026-09-14T10:00:00.123456000+00:00"
+        kwargs["available_at"] = "2026-09-14T10:00:01.123456000+00:00"
+
+        evidence = ResearchEvidence(**kwargs)
+
+        self.assertEqual(
+            evidence.available_at,
+            "2026-09-14T10:00:01.123456000+00:00",
+        )
+
     def test_research_evidence_rejects_non_utf8_hash_relevant_text(self):
         for field in ("evidence_id", "quote_key", "source_id"):
             with self.subTest(field=field):

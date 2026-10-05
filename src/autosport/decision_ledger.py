@@ -422,6 +422,22 @@ class JsonlDecisionLedger:
                 "Decision Ledger path durability barrier failed"
             ) from exc
 
+    def assert_transaction_authority(self) -> None:
+        """Fail closed before external I/O if durable decision publication is unavailable."""
+
+        self._assert_persistence_authority()
+        if self._writer_lock_path_authority.exists():
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger writer lock exists; transaction authority is unavailable"
+            )
+        if self._file_identity_authority is not None:
+            self._assert_file_identity()
+        elif self._absolute_path_authority.exists():
+            # A peer may have created the ledger after this instance was constructed.
+            # Validate the pathname shape here without silently adopting its inode;
+            # append will bind it only while holding the canonical writer lock.
+            self._read_file_identity()
+
     @staticmethod
     def _require_utf8_text(value: str, *, path: str) -> None:
         try:

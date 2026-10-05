@@ -1143,6 +1143,56 @@ class LiveObservationTests(unittest.TestCase):
                 list(canonical.current_quotes),
             )
 
+    def test_observation_result_revalidates_tampered_exact_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        stats_type = type(canonical.stats)
+        tampered = stats_type(
+            canonical.stats.source_id,
+            canonical.stats.received,
+            canonical.stats.accepted,
+            canonical.stats.rejected,
+            canonical.stats.elapsed_seconds,
+            canonical.stats.cursor,
+            canonical.stats.quality_flags,
+            canonical.stats.health_status,
+        )
+        object.__setattr__(tampered, "received", -1)
+
+        with self.assertRaisesRegex(ValueError, "received must be a non-negative integer"):
+            ObservationResult(
+                tampered,
+                canonical.health,
+                canonical.current_quotes,
+            )
+
+    def test_observation_result_owns_stats_snapshot_after_construction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        stats_type = type(canonical.stats)
+        caller_stats = stats_type(
+            canonical.stats.source_id,
+            canonical.stats.received,
+            canonical.stats.accepted,
+            canonical.stats.rejected,
+            canonical.stats.elapsed_seconds,
+            canonical.stats.cursor,
+            canonical.stats.quality_flags,
+            canonical.stats.health_status,
+        )
+        result = ObservationResult(
+            caller_stats,
+            canonical.health,
+            canonical.current_quotes,
+        )
+
+        object.__setattr__(caller_stats, "received", -1)
+
+        self.assertEqual(result.stats.received, canonical.stats.received)
+        result.validate()
+
     def test_observation_result_rejects_noncanonical_snapshot_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
             canonical = self._observe(tmp)

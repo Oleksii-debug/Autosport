@@ -3011,7 +3011,7 @@ class PersistentLiveDecisionLoop:
 
         try:
             if market_append_generation is None:
-                pending, pending_dependency_revisions = publish_pending()
+                publish_pending()
             else:
                 assert store is not None
                 # The guard spans both the complete current-tail proof and durable
@@ -3046,11 +3046,12 @@ class PersistentLiveDecisionLoop:
                             "decision-visible market state is not durable at "
                             "sampled append frontier"
                         )
-                    pending, pending_dependency_revisions = publish_pending()
+                    publish_pending()
         finally:
             if owns_store:
                 assert store is not None
                 store.close()
+
     def _load_input_registry(self) -> tuple[_InputSpec, ...] | None:
         if not self.inputs_path.exists():
             return None

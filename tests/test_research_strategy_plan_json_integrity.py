@@ -252,5 +252,43 @@ class ResearchStrategyPlanJsonIntegrityTests(unittest.TestCase):
                     ResearchStrategyPlan.from_dict(mutated)
 
 
+    def test_plan_normalizes_missing_forecast_fields_to_value_error(self):
+        raw = json.loads(_PACKAGED_PLAN.read_text(encoding="utf-8"))
+        del raw["decisions"][0]["forecasts"][0]["forecast_id"]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "ForecastRecord is missing required field\(s\): forecast_id",
+        ):
+            ResearchStrategyPlan.from_dict(raw)
+
+    def test_plan_normalizes_missing_evidence_fields_to_value_error(self):
+        raw = json.loads(_PACKAGED_PLAN.read_text(encoding="utf-8"))
+        del raw["decisions"][0]["evidence"][0]["content_sha256"]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "ResearchEvidence is missing required field\(s\): content_sha256",
+        ):
+            ResearchStrategyPlan.from_dict(raw)
+
+    def test_plan_rejects_nonobject_and_missing_key_scenario_outcomes(self):
+        raw = json.loads(_PACKAGED_PLAN.read_text(encoding="utf-8"))
+        raw["decisions"][0]["scenario_groups"][0]["outcomes"][0] = 123
+        with self.assertRaisesRegex(
+            ValueError,
+            "research scenario outcome must be an object",
+        ):
+            ResearchStrategyPlan.from_dict(raw)
+
+        raw = json.loads(_PACKAGED_PLAN.read_text(encoding="utf-8"))
+        del raw["decisions"][0]["scenario_groups"][0]["outcomes"][0]["quote_key"]
+        with self.assertRaisesRegex(
+            ValueError,
+            "research scenario outcome is missing required field quote_key",
+        ):
+            ResearchStrategyPlan.from_dict(raw)
+
+
 if __name__ == "__main__":
     unittest.main()

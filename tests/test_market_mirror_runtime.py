@@ -692,6 +692,26 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
                 semantic_refresh_keys=(duplicate, duplicate),
             )
 
+    def test_invalidation_batch_validates_optional_mirror_revision(self) -> None:
+        accepted = MirrorInvalidationBatch(
+            changed_keys=(),
+            full_refresh_required=False,
+            has_more=False,
+            mirror_revision=0,
+        )
+        self.assertEqual(accepted.mirror_revision, 0)
+        for value in (True, -1, 1.5, "1"):
+            with self.subTest(mirror_revision=value):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "mirror_revision must be a non-negative int or None",
+                ):
+                    MirrorInvalidationBatch(
+                        changed_keys=(),
+                        full_refresh_required=False,
+                        has_more=False,
+                        mirror_revision=value,
+                    )
     def test_invalidation_batch_rejects_non_boolean_flags(self) -> None:
         with self.assertRaisesRegex(
             TypeError,
@@ -1114,6 +1134,33 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             dependencies.all_matching_keys(),
         )
 
+    def test_batch_revision_does_not_certify_unrouted_later_update(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        first = self.event(selection="selection-a", sequence=1)
+        second = self.event(selection="selection-b", sequence=1)
+
+        runtime.accept_persisted(first)
+        first_batch = runtime.drain()
+        self.assertEqual(first_batch.mirror_revision, 1)
+
+        runtime.accept_persisted(second)
+        self.assertEqual(dependencies.affected_inputs(first_batch), ("decision",))
+
+        with patch.object(mirror, "active_view", wraps=mirror.active_view) as full_view:
+            snapshot = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(
+            tuple(sorted(event.quote_key for event in snapshot.events)),
+            tuple(sorted((first.quote_key, second.quote_key))),
+        )
+        full_view.assert_called_once()
     def test_incremental_view_falls_back_when_key_index_revision_is_stale(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror)

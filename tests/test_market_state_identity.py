@@ -63,6 +63,20 @@ def test_acquisition_only_fields_do_not_change_semantic_identity() -> None:
     assert same_semantic_market_state(first, second)
 
 
+def test_sequence_authority_rotation_is_acquisition_only() -> None:
+    first = _event(sequence=1)
+    second_payload = _event(sequence=2).to_dict()
+    second_payload["metadata"]["sequence_authority_id"] = (
+        "prophetx-rest-restarted-authority"
+    )
+    second = MarketEvent.from_dict(second_payload)
+
+    assert semantic_market_state_identity(first) == (
+        semantic_market_state_identity(second)
+    )
+    assert same_semantic_market_state(first, second)
+
+
 def test_economic_change_remains_semantic_transition() -> None:
     first = _event(sequence=1, odds="2.00")
     changed = _event(sequence=2, odds="2.10")

@@ -306,6 +306,38 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             )
 
 
+
+    def test_minimum_evidence_counts_unique_hashes_not_duplicate_rows(self):
+        duplicate_a = self._evidence(
+            evidence_id="evidence-b-1",
+            content_hash=EVIDENCE_HASH,
+        )
+        duplicate_b = self._evidence(
+            evidence_id="evidence-b-2",
+            content_hash=EVIDENCE_HASH,
+        )
+        pipeline = ResearchDecisionPipeline(
+            critic=DeterministicResearchCritic(
+                ResearchDecisionPolicy(minimum_evidence_per_leg=2)
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, decision = self._decide(
+                tmp,
+                pipeline=pipeline,
+                evidence=[duplicate_a, duplicate_b],
+            )
+
+            self.assertFalse(decision.approved)
+            self.assertTrue(
+                any(
+                    "insufficient unique causal evidence linked by forecast hash"
+                    in reason
+                    for reason in decision.reasons
+                )
+            )
+
     def test_forecast_rejects_unknown_declared_evidence_hash_even_with_valid_minimum(self):
         unknown_hash = "c" * 64
         forecast = self._forecast(

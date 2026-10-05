@@ -1460,7 +1460,8 @@ class PersistentLiveDecisionLoop:
     def _refresh_cycle_authorities(self) -> None:
         """Fence stale loop instances before catalog/provider observation."""
 
-        with WorkspaceEconomicLock(self.workspace):
+        self._assert_canonical_persistence_authority()
+        with WorkspaceEconomicLock(self._workspace_authority):
             durable_progress = self._load_progress()
             if durable_progress != self._progress:
                 raise LiveDecisionProgressError(

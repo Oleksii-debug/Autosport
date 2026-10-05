@@ -85,3 +85,73 @@ def test_unchanged_leg_remains_authorized_after_trusted_restart(tmp_path) -> Non
     restored = PaperBook.load(path)
 
     assert restored.committed_stake == Decimal("10")
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("event_id", "event-2"),
+        ("market_id", "market-2"),
+        ("selection_id", "selection-2"),
+        ("locked_odds", Decimal("3.00")),
+        ("sport", "tennis"),
+        ("exchange_side", None),
+    ],
+)
+def test_each_canonical_leg_identity_mutation_is_rejected(
+    field: str,
+    replacement: object,
+) -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+    object.__setattr__(ticket.legs[0], field, replacement)
+
+    with pytest.raises(
+        ValueError,
+        match="opening economic identity changed after admission",
+    ):
+        _ = book.committed_stake
+
+
+def test_leg_tuple_reordering_cannot_move_opening_authority() -> None:
+    book = PaperBook("100")
+    first = _leg()
+    second = TicketLeg(
+        "event-2",
+        "market-2",
+        "selection-2",
+        Decimal("2.50"),
+        sport="tennis",
+        exchange_side="back",
+    )
+    ticket = book.open_ticket([first, second], "10", placed_at=_TS)
+    ticket.legs = tuple(reversed(ticket.legs))
+
+    with pytest.raises(
+        ValueError,
+        match="opening economic identity changed after admission",
+    ):
+        _ = book.committed_stake
+
+
+def test_leg_tuple_replacement_with_equal_quote_but_changed_odds_is_rejected() -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+    original = ticket.legs[0]
+    ticket.legs = (
+        TicketLeg(
+            original.event_id,
+            original.market_id,
+            original.selection_id,
+            Decimal("2.25"),
+            sport=original.sport,
+            exchange_side=original.exchange_side,
+        ),
+    )
+
+    assert ticket.legs[0].quote_key == original.quote_key
+    with pytest.raises(
+        ValueError,
+        match="opening economic identity changed after admission",
+    ):
+        _ = book.committed_stake

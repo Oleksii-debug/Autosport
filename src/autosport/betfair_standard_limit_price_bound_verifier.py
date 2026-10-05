@@ -209,6 +209,10 @@ def _build_product_verifier():
     bound_action_for_code = bound_action_for.__code__
     issuance_load = issuance_store_cls.load
     issuance_load_code = issuance_load.__code__
+    issuance_load_locked = issuance_store_cls._load_locked
+    issuance_load_locked_code = issuance_load_locked.__code__
+    issuance_authority = issuance_store_cls._authority
+    issuance_authority_code = issuance_authority.__code__
     ledger_saga = ledger_cls.saga
     ledger_saga_code = ledger_saga.__code__
     ledger_approval_active = ledger_cls.supervised_approval_is_active
@@ -253,8 +257,15 @@ def _build_product_verifier():
 
     def require_verifier_dependency_authority() -> None:
         if (
-            issuance_load.__code__ is not issuance_load_code
+            issuance_store_cls.load is not issuance_load
+            or issuance_load.__code__ is not issuance_load_code
+            or issuance_store_cls._load_locked is not issuance_load_locked
+            or issuance_load_locked.__code__ is not issuance_load_locked_code
+            or issuance_store_cls._authority is not issuance_authority
+            or issuance_authority.__code__ is not issuance_authority_code
+            or ledger_cls.saga is not ledger_saga
             or ledger_saga.__code__ is not ledger_saga_code
+            or ledger_cls.supervised_approval_is_active is not ledger_approval_active
             or ledger_approval_active.__code__ is not ledger_approval_active_code
         ):
             raise error_cls(

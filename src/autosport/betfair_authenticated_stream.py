@@ -32,6 +32,7 @@ from .betfair_stream_publish_freshness import (
 )
 from .betfair_stream_transport import (
     BetfairStreamAuthenticatedFrame,
+    BetfairStreamAuthenticationError,
     BetfairStreamTlsTransport,
 )
 
@@ -456,7 +457,13 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             self._require_current_connection()
             frame = self._transport.read_authenticated_frame()
             frame.assert_transport_issued()
-            frame.assert_receive_clock_authority(_MONOTONIC_NS)
+            try:
+                frame.assert_receive_clock_authority(_MONOTONIC_NS)
+            except BetfairStreamAuthenticationError as exc:
+                self._transport.close()
+                raise BetfairAuthenticatedStreamError(
+                    "authenticated frame receive clock authority mismatch"
+                ) from exc
             _require_same_connection(
                 frame,
                 self._subscription.connection_id,

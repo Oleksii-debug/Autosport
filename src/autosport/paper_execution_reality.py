@@ -710,6 +710,32 @@ def _require_canonical_execution_config_surface(
         )
 
 
+    try:
+        canonical = PaperExecutionModelConfig(
+            model_id=config.model_id,
+            model_version=config.model_version,
+            evidence_grade=config.evidence_grade,
+            evidence_source=config.evidence_source,
+            seed=config.seed,
+            max_quote_age_ms=config.max_quote_age_ms,
+            min_delay_ms=config.min_delay_ms,
+            max_delay_ms=config.max_delay_ms,
+            rejected_bps=config.rejected_bps,
+            partial_bps=config.partial_bps,
+            unknown_bps=config.unknown_bps,
+            partial_fill_bps=config.partial_fill_bps,
+            max_slippage_bps=config.max_slippage_bps,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionStateError(
+            "execution config no longer satisfies canonical value invariants"
+        ) from exc
+    if canonical != config:
+        raise PaperExecutionStateError(
+            "execution config changed outside canonical construction authority"
+        )
+
+
 def _require_canonical_execution_plan_surface(plan: ExecutionPlan) -> None:
     if type(plan) is not ExecutionPlan:
         raise TypeError("plan must be exact ExecutionPlan")
@@ -734,6 +760,18 @@ def _require_canonical_execution_plan_surface(plan: ExecutionPlan) -> None:
         )
 
 
+    try:
+        _impl._text(plan.plan_id, "plan_id")
+        _impl._text(plan.bookmaker_profile_version, "bookmaker_profile_version")
+        _impl._text(plan.decision_id, "decision_id")
+        _impl._text(plan.approval_id, "approval_id")
+        _impl._timestamp(plan.created_at, "created_at")
+    except ValueError as exc:
+        raise PaperExecutionStateError(
+            "execution plan no longer satisfies canonical value invariants"
+        ) from exc
+
+
 def _validate_lay_execution_surface(
     *,
     plan: ExecutionPlan,
@@ -748,6 +786,25 @@ def _validate_lay_execution_surface(
                 "PAPER execution requires canonical BACK or LAY action side "
                 "before reservation"
             )
+    try:
+        canonical_plan = ExecutionPlan(
+            plan_id=plan.plan_id,
+            bookmaker_profile_version=plan.bookmaker_profile_version,
+            decision_id=plan.decision_id,
+            approval_id=plan.approval_id,
+            created_at=plan.created_at,
+            actions=plan.actions,
+            schema_version=plan.schema_version,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionStateError(
+            "execution plan no longer satisfies canonical aggregate invariants"
+        ) from exc
+    if canonical_plan != plan:
+        raise PaperExecutionStateError(
+            "execution plan changed outside canonical construction authority"
+        )
+
     lay_actions = tuple(
         action for action in plan.actions if action.side == "LAY"
     )

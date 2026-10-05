@@ -684,5 +684,104 @@ class IngestionHealthTests(unittest.TestCase):
             store.close()
 
 
+    def test_future_local_observation_is_rejected_before_market_persistence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:00+00:00",
+                )
+                provider = StaticProvider(
+                    "source",
+                    [
+                        ProviderBatch(
+                            "source",
+                            (
+                                ProviderQuote(
+                                    provider_event_id="event-1",
+                                    provider_market_id="winner",
+                                    provider_selection_id="future-local",
+                                    decimal_odds=Decimal("2.0"),
+                                    observed_ts="2026-09-12T12:00:01+00:00",
+                                    sequence=1,
+                                    source_ts="2026-09-12T11:59:59+00:00",
+                                ),
+                            ),
+                            cursor="future-local",
+                        )
+                    ],
+                )
+
+                stats = engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(stats.accepted, 0)
+                self.assertEqual(stats.rejected, 1)
+                self.assertEqual(
+                    stats.quality_flags,
+                    ("FUTURE_OBSERVATION_TIMESTAMP",),
+                )
+                self.assertEqual(store.events(), [])
+                state = health.get("source")
+                self.assertEqual(state.status, "degraded")
+                self.assertEqual(state.total_received, 1)
+                self.assertEqual(state.total_accepted, 0)
+                self.assertEqual(state.total_rejected, 1)
+                self.assertEqual(
+                    state.quality_flags,
+                    ("FUTURE_OBSERVATION_TIMESTAMP",),
+                )
+            finally:
+                store.close()
+
+    def test_future_local_observation_does_not_reject_valid_sibling_quote(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:00+00:00",
+                )
+                valid = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="valid",
+                    decimal_odds=Decimal("2.0"),
+                    observed_ts="2026-09-12T12:00:00+00:00",
+                    sequence=1,
+                    source_ts="2026-09-12T11:59:59+00:00",
+                )
+                future = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="future",
+                    decimal_odds=Decimal("2.1"),
+                    observed_ts="2026-09-12T12:00:00.000001+00:00",
+                    sequence=2,
+                    source_ts="2026-09-12T11:59:59+00:00",
+                )
+                provider = StaticProvider(
+                    "source",
+                    [ProviderBatch("source", (valid, future), cursor="mixed")],
+                )
+
+                stats = engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(stats.accepted, 1)
+                self.assertEqual(stats.rejected, 1)
+                self.assertIn("FUTURE_OBSERVATION_TIMESTAMP", stats.quality_flags)
+                persisted = store.events()
+                self.assertEqual(len(persisted), 1)
+                self.assertEqual(persisted[0].selection_id, "source:valid")
+            finally:
+                store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -154,22 +154,19 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
         )
         return book, ledger, runtime
 
-    def test_paper_value_lay_fails_before_execution_or_book_mutation(self):
+    def test_paper_value_lay_prepares_canonical_lay_without_book_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, _ledger, runtime = self.runtime(tmp)
-            with self.assertRaisesRegex(
-                PaperExecutionAdoptionError,
-                "LAY PAPER adoption is unavailable",
-            ):
-                runtime.prepare_paper_value_action(
-                    event=market_event("lay"),
-                    stake=Decimal("10.00"),
-                    decision_id="decision-lay",
-                    account_id="paper-account",
-                    bankroll_id="paper-bankroll",
-                    currency="EUR",
-                )
+            prepared_lay = runtime.prepare_paper_value_action(
+                event=market_event("lay"),
+                stake=Decimal("10.00"),
+                decision_id="decision-lay",
+                account_id="paper-account",
+                bankroll_id="paper-bankroll",
+                currency="EUR",
+            )
 
+            self.assertEqual(prepared_lay.execution_plan.actions[0].side, "LAY")
             self.assertEqual(book.tickets, {})
             self.assertEqual(book.balance, Decimal("100.00"))
 
@@ -187,24 +184,24 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 )
                 self.assertEqual(current.execution_plan.actions[0].side, "BACK")
 
-    def test_materializer_rejects_non_back_action_before_attempt_adoption(self):
+    def test_materializer_rejects_noncanonical_action_side_before_attempt_adoption(self):
         with tempfile.TemporaryDirectory() as tmp:
             _book, _ledger, runtime = self.runtime(tmp)
             binding = PaperExposureBinding(
-                action_id="lay-action",
+                action_id="bad-side-action",
                 sport="soccer",
                 bankroll_id="paper-bankroll",
                 currency="EUR",
             )
             with self.assertRaisesRegex(
                 PaperExecutionAdoptionError,
-                "PaperBook materialization supports BACK execution only",
+                "canonical BACK or LAY",
             ):
                 runtime._materialize_attempt(
                     attempt=object(),
-                    action=action("lay-action", side="LAY"),
+                    action=action("bad-side-action", side="SIDEWAYS"),
                     binding=binding,
-                    decision_id="decision-lay",
+                    decision_id="decision-bad-side",
                 )
 
     def test_moved_accepted_quote_materializes_execution_truth_once(self):

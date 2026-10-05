@@ -905,6 +905,98 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
 ) = _make_paperbook_snapshot_entry_dispatch_authority()
 
 
+def _make_paperbook_economic_helper_dispatch_authority():
+    decimal_descriptor = None
+    decimal_function = None
+    decimal_code = None
+    debit_descriptor = None
+    debit_function = None
+    debit_code = None
+    settlement_descriptor = None
+    settlement_function = None
+    settlement_code = None
+
+    def install(canonical_type: type) -> None:
+        nonlocal decimal_descriptor, decimal_function, decimal_code
+        nonlocal debit_descriptor, debit_function, debit_code
+        nonlocal settlement_descriptor, settlement_function, settlement_code
+        if decimal_descriptor is not None:
+            raise RuntimeError("PaperBook economic helper dispatch authority already installed")
+        decimal_descriptor = canonical_type.__dict__["_canonical_decimal_input"]
+        debit_descriptor = canonical_type.__dict__["_debit_balance"]
+        settlement_descriptor = canonical_type.__dict__["_settlement_result"]
+        if type(decimal_descriptor) is not classmethod:
+            raise TypeError("PaperBook decimal helper must remain a classmethod")
+        if type(debit_descriptor) is not classmethod:
+            raise TypeError("PaperBook debit helper must remain a classmethod")
+        if type(settlement_descriptor) is not classmethod:
+            raise TypeError("PaperBook settlement helper must remain a classmethod")
+        decimal_function = decimal_descriptor.__func__
+        debit_function = debit_descriptor.__func__
+        settlement_function = settlement_descriptor.__func__
+        decimal_code = decimal_function.__code__
+        debit_code = debit_function.__code__
+        settlement_code = settlement_function.__code__
+
+    def canonical_decimal(canonical_type: type, value: object, label: str):
+        if decimal_descriptor is None or decimal_function is None or decimal_code is None:
+            raise RuntimeError("PaperBook decimal helper dispatch authority is unavailable")
+        if canonical_type.__dict__.get("_canonical_decimal_input") is not decimal_descriptor:
+            raise ValueError("PaperBook decimal helper dispatch changed")
+        if decimal_function.__code__ is not decimal_code:
+            raise ValueError("PaperBook decimal helper authority changed")
+        result = decimal_function(canonical_type, value, label)
+        if decimal_function.__code__ is not decimal_code:
+            raise ValueError("PaperBook decimal helper authority changed")
+        return result
+
+    def debit_balance(canonical_type: type, balance: Decimal, amount: Decimal):
+        if debit_descriptor is None or debit_function is None or debit_code is None:
+            raise RuntimeError("PaperBook debit helper dispatch authority is unavailable")
+        if canonical_type.__dict__.get("_debit_balance") is not debit_descriptor:
+            raise ValueError("PaperBook debit helper dispatch changed")
+        if debit_function.__code__ is not debit_code:
+            raise ValueError("PaperBook debit helper authority changed")
+        result = debit_function(canonical_type, balance, amount)
+        if debit_function.__code__ is not debit_code:
+            raise ValueError("PaperBook debit helper authority changed")
+        return result
+
+    def settlement_result(
+        canonical_type: type,
+        ticket: PaperTicket,
+        balance: Decimal,
+        winning_quote_keys: set[str],
+        void_quote_keys: set[str],
+    ):
+        if settlement_descriptor is None or settlement_function is None or settlement_code is None:
+            raise RuntimeError("PaperBook settlement helper dispatch authority is unavailable")
+        if canonical_type.__dict__.get("_settlement_result") is not settlement_descriptor:
+            raise ValueError("PaperBook settlement helper dispatch changed")
+        if settlement_function.__code__ is not settlement_code:
+            raise ValueError("PaperBook settlement helper authority changed")
+        result = settlement_function(
+            canonical_type,
+            ticket,
+            balance,
+            winning_quote_keys,
+            void_quote_keys,
+        )
+        if settlement_function.__code__ is not settlement_code:
+            raise ValueError("PaperBook settlement helper authority changed")
+        return result
+
+    return install, canonical_decimal, debit_balance, settlement_result
+
+
+(
+    _install_paperbook_economic_helper_dispatch_authority,
+    _canonical_paperbook_decimal_input,
+    _canonical_paperbook_debit_balance,
+    _canonical_paperbook_settlement_result,
+) = _make_paperbook_economic_helper_dispatch_authority()
+
+
 def _seal_paperbook_open_transition_authority(method):
     """Inject closure-captured write authorities into open_ticket."""
     method_code = method.__code__
@@ -919,6 +1011,10 @@ def _seal_paperbook_open_transition_authority(method):
     ticket_type = PaperTicket
     ticket_init = ticket_type.__init__
     ticket_init_code = ticket_init.__code__
+    canonical_decimal = _canonical_paperbook_decimal_input
+    canonical_decimal_code = canonical_decimal.__code__
+    debit_balance = _canonical_paperbook_debit_balance
+    debit_balance_code = debit_balance.__code__
 
     def issue_ticket_id() -> str:
         if ticket_id_factory.__code__ is not ticket_id_factory_code:
@@ -972,6 +1068,10 @@ def _seal_paperbook_open_transition_authority(method):
             raise ValueError("PaperBook placed_at clock authority changed")
         if ticket_type.__init__ is not ticket_init or ticket_init.__code__ is not ticket_init_code:
             raise ValueError("PaperBook ticket constructor authority changed")
+        if canonical_decimal.__code__ is not canonical_decimal_code:
+            raise ValueError("PaperBook decimal helper dispatch authority changed")
+        if debit_balance.__code__ is not debit_balance_code:
+            raise ValueError("PaperBook debit helper dispatch authority changed")
         result = method(
             self,
             *args,
@@ -980,6 +1080,8 @@ def _seal_paperbook_open_transition_authority(method):
             _ticket_id_factory=issue_ticket_id,
             _placed_at_now=current_timestamp,
             _ticket_factory=build_ticket,
+            _canonical_decimal=canonical_decimal,
+            _debit_balance=debit_balance,
             **kwargs,
         )
         if method.__code__ is not method_code:
@@ -1268,10 +1370,12 @@ def _seal_paperbook_snapshot_json_publish_authority(method):
 
 
 def _seal_paperbook_settle_transition_authority(method):
-    """Inject closure-captured write authority into settle."""
+    """Inject closure-captured write and economic authorities into settle."""
     method_code = method.__code__
     causal_advance = _advance_paperbook_causal_history_settle
     causal_advance_code = causal_advance.__code__
+    settlement_result = _canonical_paperbook_settlement_result
+    settlement_result_code = settlement_result.__code__
 
     def advance_settle(
         book: object,
@@ -1292,10 +1396,13 @@ def _seal_paperbook_settle_transition_authority(method):
             raise ValueError("PaperBook settle callable authority changed")
         if causal_advance.__code__ is not causal_advance_code:
             raise ValueError("PaperBook causal-history settle write authority changed")
+        if settlement_result.__code__ is not settlement_result_code:
+            raise ValueError("PaperBook settlement helper dispatch authority changed")
         result = method(
             self,
             *args,
             _causal_settle_advance=advance_settle,
+            _settlement_result=settlement_result,
             **kwargs,
         )
         if method.__code__ is not method_code:
@@ -1406,9 +1513,11 @@ class PaperBook:
         _ticket_id_factory=None,
         _placed_at_now=None,
         _ticket_factory=None,
+        _canonical_decimal=None,
+        _debit_balance=None,
     ) -> PaperTicket:
-        amount = self._canonical_decimal_input(stake, "stake")
-        new_balance = self._debit_balance(self.balance, amount)
+        amount = _canonical_decimal(type(self), stake, "stake")
+        new_balance = _debit_balance(type(self), self.balance, amount)
 
         ticket_placed_at = self._validate_placed_at(
             placed_at if placed_at is not None else _placed_at_now()
@@ -1523,6 +1632,7 @@ class PaperBook:
         *,
         settled_at: str | None = None,
         _causal_settle_advance=None,
+        _settlement_result=None,
     ) -> PaperTicket:
         ticket_id = self._require_canonical_text(ticket_id, "settlement ticket_id")
         ticket = self.tickets[ticket_id]
@@ -1540,7 +1650,8 @@ class PaperBook:
             if settled_at is None
             else self._validate_settled_at(settled_at, ticket.placed_at)
         )
-        status, payout, new_balance = self._settlement_result(
+        status, payout, new_balance = _settlement_result(
+            type(self),
             ticket,
             self.balance,
             winners,
@@ -2495,6 +2606,9 @@ del _install_paperbook_type_authority
 
 _install_paperbook_constructor_decimal_authority(PaperBook)
 del _install_paperbook_constructor_decimal_authority
+
+_install_paperbook_economic_helper_dispatch_authority(PaperBook)
+del _install_paperbook_economic_helper_dispatch_authority
 
 _install_paperbook_snapshot_entry_dispatch_authority(PaperBook)
 del _install_paperbook_snapshot_entry_dispatch_authority

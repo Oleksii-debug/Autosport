@@ -903,11 +903,53 @@ class ContinuousObservationTests(unittest.TestCase):
                 status_path=market_path,
             )
 
-            with self.assertRaisesRegex(ValueError, "status_path must not collide"):
+            with self.assertRaisesRegex(ValueError, "status_path must not overlap"):
                 self._run(provider, config)
 
             self.assertEqual(provider.calls, 0)
             self.assertEqual(market_path.read_bytes(), sentinel)
+
+    def test_status_path_cannot_descend_from_market_authority_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            status_path = workspace / "market.db" / "status.json"
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+            config = ContinuousObservationConfig(
+                workspace=workspace,
+                max_cycles=1,
+                max_runtime_seconds=120,
+                interval_seconds=1,
+                max_backoff_seconds=4,
+                max_items=10,
+                status_path=status_path,
+            )
+
+            with self.assertRaisesRegex(ValueError, "status_path must not overlap"):
+                self._run(provider, config)
+
+            self.assertEqual(provider.calls, 0)
+            self.assertFalse((workspace / "market.db").exists())
+            self.assertFalse(status_path.exists())
+
+    def test_status_path_cannot_be_workspace_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+            config = ContinuousObservationConfig(
+                workspace=workspace,
+                max_cycles=1,
+                max_runtime_seconds=120,
+                interval_seconds=1,
+                max_backoff_seconds=4,
+                max_items=10,
+                status_path=workspace,
+            )
+
+            with self.assertRaisesRegex(ValueError, "status_path must not overlap"):
+                self._run(provider, config)
+
+            self.assertEqual(provider.calls, 0)
+            self.assertFalse(workspace.exists())
 
     def test_status_path_symlink_alias_cannot_overwrite_health_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -931,7 +973,7 @@ class ContinuousObservationTests(unittest.TestCase):
                 status_path=alias,
             )
 
-            with self.assertRaisesRegex(ValueError, "status_path must not collide"):
+            with self.assertRaisesRegex(ValueError, "status_path must not overlap"):
                 self._run(provider, config)
 
             self.assertEqual(provider.calls, 0)
@@ -955,7 +997,7 @@ class ContinuousObservationTests(unittest.TestCase):
                 status_path=lock_path,
             )
 
-            with self.assertRaisesRegex(ValueError, "status_path must not collide"):
+            with self.assertRaisesRegex(ValueError, "status_path must not overlap"):
                 self._run(provider, config)
 
             self.assertEqual(provider.calls, 0)
@@ -976,7 +1018,7 @@ class ContinuousObservationTests(unittest.TestCase):
                 status_path=wal_path,
             )
 
-            with self.assertRaisesRegex(ValueError, "status_path must not collide"):
+            with self.assertRaisesRegex(ValueError, "status_path must not overlap"):
                 self._run(provider, config)
 
             self.assertEqual(provider.calls, 0)

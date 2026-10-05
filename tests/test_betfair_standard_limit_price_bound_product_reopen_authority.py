@@ -98,9 +98,9 @@ def test_product_verifier_rejects_rebound_store_constructor_after_reopen(
     assert attacker_called is False
 
 def test_product_verifier_rejects_in_place_ledger_constructor_code_mutation_before_execution(
-    tmp_path: Path,
+    monkeypatch, tmp_path: Path,
 ) -> None:
-    bound, action, store, ledger, evidence = _case(None, tmp_path)
+    bound, action, store, ledger, evidence = _case(monkeypatch, tmp_path)
     constructor = RealExecutionLedger.__init__
     original_code = constructor.__code__
     attacker_called = False
@@ -132,9 +132,9 @@ def test_product_verifier_rejects_in_place_ledger_constructor_code_mutation_befo
 
 
 def test_product_verifier_rejects_in_place_store_constructor_code_mutation_before_execution(
-    tmp_path: Path,
+    monkeypatch, tmp_path: Path,
 ) -> None:
-    bound, action, store, ledger, evidence = _case(None, tmp_path)
+    bound, action, store, ledger, evidence = _case(monkeypatch, tmp_path)
     constructor = SupervisedPlanIssuanceStore.__init__
     original_code = constructor.__code__
     attacker_called = False

@@ -256,6 +256,26 @@ class MarketMirror:
 
             if event.sequence == previous.sequence:
                 if self._same_sequence_payload(event, previous):
+                    previous_decision_causal = key in self._decision_causal_keys
+                    if previous_decision_causal != decision_causal:
+                        # Provenance is part of decision truth even when provider
+                        # payload identity did not change. Reconciliation must be
+                        # able to revoke a falsely causal generation-zero value or
+                        # restore product-issued authority without inventing a new
+                        # provider sequence.
+                        self._latest[key] = self._snapshot_event(event)
+                        if decision_causal:
+                            self._decision_causal_keys.add(key)
+                        else:
+                            self._decision_causal_keys.discard(key)
+                        self._revision += 1
+                        return MirrorApplyResult(
+                            MirrorUpdate.APPLIED,
+                            event.source_id,
+                            event.quote_key,
+                            previous.sequence,
+                            previous.sequence,
+                        )
                     return MirrorApplyResult(
                         MirrorUpdate.DUPLICATE,
                         event.source_id,

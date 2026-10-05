@@ -4,7 +4,26 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from autosport.ingestion import IngestionStats
+from autosport.ingestion_health import SourceHealthState
 from autosport.live_observation import OneShotObservationWorker
+from autosport.session import ObservationResult
+
+
+def _observation_result() -> ObservationResult:
+    return ObservationResult(
+        IngestionStats(
+            source_id="worker-fixture",
+            received=0,
+            accepted=0,
+            rejected=0,
+            elapsed_seconds=0.0,
+            cursor=None,
+            health_status="unknown",
+        ),
+        SourceHealthState("worker-fixture"),
+        (),
+    )
 
 
 def _live_observation_helpers() -> tuple[threading.Thread, ...]:
@@ -42,7 +61,7 @@ class LiveObservationWorkerStartupAtomicityTests(unittest.TestCase):
         self.assertFalse(worker.busy)
         self.assertIsNone(worker.poll())
 
-        sentinel = object()
+        sentinel = _observation_result()
         self.assertTrue(worker.start(lambda: sentinel))
         launched_retry = worker._thread
         self.assertIsNotNone(launched_retry)
@@ -51,7 +70,8 @@ class LiveObservationWorkerStartupAtomicityTests(unittest.TestCase):
         completed = worker.poll()
         self.assertIsNotNone(completed)
         assert completed is not None
-        self.assertIs(completed.result, sentinel)
+        self.assertEqual(completed.result, sentinel)
+        self.assertIsNot(completed.result, sentinel)
         self.assertIsNone(completed.error)
         self.assertFalse(worker.busy)
 
@@ -74,7 +94,7 @@ class LiveObservationWorkerStartupAtomicityTests(unittest.TestCase):
         self.assertIsNone(worker._thread)
         self.assertIsNone(worker.poll())
 
-        sentinel = object()
+        sentinel = _observation_result()
         self.assertTrue(worker.start(lambda: sentinel))
         retry = worker._thread
         self.assertIsNotNone(retry)
@@ -83,7 +103,8 @@ class LiveObservationWorkerStartupAtomicityTests(unittest.TestCase):
         completed = worker.poll()
         self.assertIsNotNone(completed)
         assert completed is not None
-        self.assertIs(completed.result, sentinel)
+        self.assertEqual(completed.result, sentinel)
+        self.assertIsNot(completed.result, sentinel)
         self.assertIsNone(completed.error)
         self.assertFalse(worker.busy)
 
@@ -108,7 +129,7 @@ class LiveObservationWorkerStartupAtomicityTests(unittest.TestCase):
 
     def test_poll_reaps_normal_helper_before_clearing_busy(self):
         worker = OneShotObservationWorker()
-        task_result = object()
+        task_result = _observation_result()
         message_published = threading.Event()
         release_worker = threading.Event()
         join_entered = threading.Event()
@@ -151,13 +172,15 @@ class LiveObservationWorkerStartupAtomicityTests(unittest.TestCase):
         self.assertEqual(len(polled), 1)
         self.assertIsNotNone(polled[0])
         assert polled[0] is not None
-        self.assertIs(polled[0].result, task_result)
+        self.assertEqual(polled[0].result, task_result)
+        self.assertIsNot(polled[0].result, task_result)
         self.assertIsNone(polled[0].error)
         self.assertFalse(worker.busy)
         self.assertIsNone(worker._thread)
         self.assertEqual(_live_observation_helpers(), ())
 
-        self.assertTrue(worker.start(lambda: "retry"))
+        retry_result = _observation_result()
+        self.assertTrue(worker.start(lambda: retry_result))
         retry = worker._thread
         self.assertIsNotNone(retry)
         assert retry is not None
@@ -165,7 +188,8 @@ class LiveObservationWorkerStartupAtomicityTests(unittest.TestCase):
         completed = worker.poll()
         self.assertIsNotNone(completed)
         assert completed is not None
-        self.assertEqual(completed.result, "retry")
+        self.assertEqual(completed.result, retry_result)
+        self.assertIsNot(completed.result, retry_result)
         self.assertFalse(worker.busy)
         self.assertIsNone(worker._thread)
 
@@ -185,7 +209,7 @@ class LiveObservationWorkerStartupAtomicityTests(unittest.TestCase):
         self.assertIsNone(worker._thread)
         self.assertIsNone(worker.poll())
 
-        sentinel = object()
+        sentinel = _observation_result()
         self.assertTrue(worker.start(lambda: sentinel))
         retry = worker._thread
         self.assertIsNotNone(retry)
@@ -194,7 +218,8 @@ class LiveObservationWorkerStartupAtomicityTests(unittest.TestCase):
         completed = worker.poll()
         self.assertIsNotNone(completed)
         assert completed is not None
-        self.assertIs(completed.result, sentinel)
+        self.assertEqual(completed.result, sentinel)
+        self.assertIsNot(completed.result, sentinel)
         self.assertIsNone(completed.error)
         self.assertFalse(worker.busy)
 

@@ -489,6 +489,61 @@ class ContinuousObservationTests(unittest.TestCase):
 
             self.assertEqual(second_provider.calls, 0)
 
+    def test_restart_backoff_rejects_waiter_that_skips_durable_delay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            first_provider = SequenceProvider(
+                [ProviderUnavailableError("temporary outage")]
+            )
+            first = self._run(
+                first_provider,
+                self._config(workspace, max_cycles=1),
+                run_id="first-run",
+            )
+            self.assertEqual(first.exit_code, 4)
+
+            second_provider = SequenceProvider(
+                [_batch(_quote(), cursor="must-not-run")]
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "waiter returned before provider backoff elapsed",
+            ):
+                run_continuous_observation(
+                    second_provider,
+                    self._config(workspace, max_cycles=1),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    wall_clock=lambda: _NOW,
+                    waiter=lambda _seconds: False,
+                    reporter=None,
+                    run_id="second-run",
+                )
+
+            self.assertEqual(second_provider.calls, 0)
+
+    def test_provider_backoff_stop_signal_does_not_require_elapsed_delay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = SequenceProvider(
+                [
+                    ProviderUnavailableError("temporary outage"),
+                    _batch(_quote(), cursor="must-not-run"),
+                ]
+            )
+            result = run_continuous_observation(
+                provider,
+                self._config(Path(tmp), max_cycles=2),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                waiter=lambda _seconds: True,
+                reporter=None,
+            )
+
+            self.assertEqual(result.stop_reason, "operator_stop")
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.successful_cycles, 0)
+            self.assertEqual(provider.calls, 1)
+
     def test_provider_unavailable_uses_bounded_retry_and_can_recover(self):
         with tempfile.TemporaryDirectory() as tmp:
             provider = SequenceProvider(

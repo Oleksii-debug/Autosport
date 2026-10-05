@@ -148,15 +148,17 @@ class LiveObservationTests(unittest.TestCase):
                         ExplosiveProvider(),
                         mirror_updates=hostile_updates,
                     )
+                observer_root = root / "workspace-observer"
                 with self.assertRaisesRegex(
                     TypeError,
                     "exact BoundedMirrorInvalidationBuffer",
                 ):
                     observe_workspace_once(
-                        root / "workspace-observer",
+                        observer_root,
                         ExplosiveProvider(),
                         mirror_updates=hostile_updates,
                     )
+                self.assertFalse(observer_root.exists())
             finally:
                 hostile_store.close()
                 store.close()

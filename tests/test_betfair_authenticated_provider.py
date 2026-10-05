@@ -317,3 +317,65 @@ def test_durable_assertion_rejects_noncanonical_current_mapping_key() -> None:
         provider.assert_durable_current(
             {(event.source_id, "wrong-quote-key"): event}
         )
+
+
+def test_durable_binding_rejects_noncanonical_current_mapping_key() -> None:
+    _, event = _durable_open(sequence=7)
+    provider = BetfairAuthenticatedMarketProvider(
+        _runtime(),
+        freshness_policy=BetfairStreamFreshnessPolicy(max_age_ms=5_000),
+    )
+
+    with pytest.raises(ValueError, match="key does not match canonical MarketEvent key"):
+        provider.bind_durable_current({(event.source_id, "wrong-quote-key"): event})
+
+
+def test_durable_binding_rejects_non_string_identity_price_metadata() -> None:
+    _, event = _durable_open(sequence=7)
+    metadata = dict(event.metadata)
+    metadata["identity_price"] = 2
+    forged = replace(event, metadata=metadata)
+    provider = BetfairAuthenticatedMarketProvider(
+        _runtime(),
+        freshness_policy=BetfairStreamFreshnessPolicy(max_age_ms=5_000),
+    )
+
+    with pytest.raises(ValueError, match="identity price is invalid"):
+        provider.bind_durable_current({(forged.source_id, forged.quote_key): forged})
+
+
+def test_durable_binding_rejects_closed_exchange_side_drift() -> None:
+    _, event = _durable_open(sequence=7)
+    metadata = dict(event.metadata)
+    metadata["durable_disposition"] = "closed"
+    forged = replace(
+        event,
+        status="closed",
+        source_ts=None,
+        metadata=metadata,
+        exchange_side="lay",
+    )
+    provider = BetfairAuthenticatedMarketProvider(
+        _runtime(),
+        freshness_policy=BetfairStreamFreshnessPolicy(max_age_ms=5_000),
+    )
+
+    with pytest.raises(ValueError, match="closed exchange-side identity mismatch"):
+        provider.bind_durable_current({(forged.source_id, forged.quote_key): forged})
+
+
+def test_durable_assertion_rejects_same_sequence_open_metadata_rewrite() -> None:
+    _, event = _durable_open(sequence=7)
+    provider = BetfairAuthenticatedMarketProvider(
+        _runtime(),
+        freshness_policy=BetfairStreamFreshnessPolicy(max_age_ms=5_000),
+    )
+    provider.bind_durable_current({(event.source_id, event.quote_key): event})
+
+    metadata = dict(event.metadata)
+    metadata["evidence_id"] = "forged-evidence"
+    forged = replace(event, metadata=metadata)
+    with pytest.raises(RuntimeError, match="diverged"):
+        provider.assert_durable_current(
+            {(forged.source_id, forged.quote_key): forged}
+        )

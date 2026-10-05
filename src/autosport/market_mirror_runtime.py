@@ -170,6 +170,7 @@ class FocusedMirrorDependencyIndex:
         self._dependency_revisions: dict[str, int] = {}
         self._registry_revision = 0
         self._lock = RLock()
+        self._mutation_lock = RLock()
 
     @staticmethod
     def _input_id(value: str) -> str:
@@ -188,6 +189,26 @@ class FocusedMirrorDependencyIndex:
         return MarketMirror._selector(values, name=name)
 
     def register(
+        self,
+        input_id: str,
+        *,
+        source_ids: str | Iterable[str] | None = None,
+        sports: str | Iterable[str] | None = None,
+        event_ids: str | Iterable[str] | None = None,
+        market_ids: str | Iterable[str] | None = None,
+        selection_ids: str | Iterable[str] | None = None,
+    ) -> FocusedMirrorDependency:
+        with self._mutation_lock:
+            return self._register_mutation(
+                input_id,
+                source_ids=source_ids,
+                sports=sports,
+                event_ids=event_ids,
+                market_ids=market_ids,
+                selection_ids=selection_ids,
+            )
+
+    def _register_mutation(
         self,
         input_id: str,
         *,
@@ -263,6 +284,10 @@ class FocusedMirrorDependencyIndex:
         return dependency
 
     def unregister(self, input_id: str) -> bool:
+        with self._mutation_lock:
+            return self._unregister_mutation(input_id)
+
+    def _unregister_mutation(self, input_id: str) -> bool:
         normalized_id = self._input_id(input_id)
         with self._lock:
             removed = self._dependencies.pop(normalized_id, None)
@@ -300,6 +325,12 @@ class FocusedMirrorDependencyIndex:
                 (dependency, self._dependency_revisions[input_id])
                 for input_id, dependency in self._dependencies.items()
             )
+
+    @contextmanager
+    def registry_mutation_guard(self) -> Iterator[None]:
+        """Serialize focused-registry mutations without blocking ordinary reads."""
+        with self._mutation_lock:
+            yield
 
     @contextmanager
     def registry_state_guard(

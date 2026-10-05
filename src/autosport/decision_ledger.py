@@ -285,6 +285,106 @@ class VerifiedDecisionLedgerSnapshot:
     record_count: int
 
 
+class _DecisionLedgerPathLock:
+    """Persistent OS-backed lock whose ownership is released automatically on crash."""
+
+    def __init__(self, path: Path, *, blocking: bool) -> None:
+        self.path = path
+        self.blocking = blocking
+        self._handle = None
+
+    def __enter__(self) -> "_DecisionLedgerPathLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            existing = os.lstat(self.path)
+        except FileNotFoundError:
+            existing = None
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger writer-lock path is unavailable"
+            ) from exc
+        if existing is not None and (
+            stat.S_ISLNK(existing.st_mode)
+            or not stat.S_ISREG(existing.st_mode)
+            or getattr(existing, "st_nlink", 1) != 1
+        ):
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger writer-lock path must be one regular non-symlink file"
+            )
+
+        flags = os.O_CREAT | os.O_RDWR
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(self.path, flags, 0o600)
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger writer-lock path is unavailable"
+            ) from exc
+        handle = os.fdopen(fd, "a+b", closefd=True)
+        try:
+            info = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or getattr(info, "st_nlink", 1) != 1
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger writer-lock path must be one regular file"
+                )
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+                os.fsync(handle.fileno())
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                mode = msvcrt.LK_LOCK if self.blocking else msvcrt.LK_NBLCK
+                try:
+                    msvcrt.locking(handle.fileno(), mode, 1)
+                except OSError as exc:
+                    if not self.blocking:
+                        raise DecisionLedgerIntegrityError(
+                            "Decision Ledger writer is active"
+                        ) from exc
+                    raise
+            else:
+                import fcntl
+
+                flags = fcntl.LOCK_EX
+                if not self.blocking:
+                    flags |= fcntl.LOCK_NB
+                try:
+                    fcntl.flock(handle.fileno(), flags)
+                except BlockingIOError as exc:
+                    raise DecisionLedgerIntegrityError(
+                        "Decision Ledger writer is active"
+                    ) from exc
+        except BaseException:
+            handle.close()
+            raise
+        self._handle = handle
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        handle = self._handle
+        if handle is None:
+            return
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+            self._handle = None
+
+
 class JsonlDecisionLedger:
     """Append-only causal decision ledger. Result/outcome fields do not belong here."""
 
@@ -422,21 +522,31 @@ class JsonlDecisionLedger:
                 "Decision Ledger path durability barrier failed"
             ) from exc
 
+    def _writer_guard(self, *, blocking: bool = True) -> _DecisionLedgerPathLock:
+        self._assert_persistence_authority()
+        return _DecisionLedgerPathLock(
+            self._writer_lock_path_authority,
+            blocking=blocking,
+        )
+
     def assert_transaction_authority(self) -> None:
         """Fail closed before external I/O if durable decision publication is unavailable."""
 
         self._assert_persistence_authority()
-        if self._writer_lock_path_authority.exists():
-            raise DecisionLedgerIntegrityError(
-                "Decision Ledger writer lock exists; transaction authority is unavailable"
-            )
-        if self._file_identity_authority is not None:
-            self._assert_file_identity()
-        elif self._absolute_path_authority.exists():
-            # A peer may have created the ledger after this instance was constructed.
-            # Validate the pathname shape here without silently adopting its inode;
-            # append will bind it only while holding the canonical writer lock.
-            self._read_file_identity()
+        try:
+            with self._writer_guard(blocking=False):
+                if self._file_identity_authority is not None:
+                    self._assert_file_identity()
+                elif self._absolute_path_authority.exists():
+                    # A peer-created ledger is not silently adopted as this
+                    # instance's durable authority.
+                    self._read_file_identity()
+        except DecisionLedgerIntegrityError as exc:
+            if "writer is active" in str(exc):
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger transaction authority is unavailable"
+                ) from exc
+            raise
 
     @staticmethod
     def _require_utf8_text(value: str, *, path: str) -> None:
@@ -583,19 +693,7 @@ class JsonlDecisionLedger:
             allow_nan=False,
         )
 
-        try:
-            lock_fd = os.open(
-                self._writer_lock_path_authority,
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                0o600,
-            )
-        except FileExistsError as exc:
-            raise DecisionLedgerIntegrityError(
-                "Decision Ledger writer lock exists; fail closed until writer/crash "
-                "ownership is resolved"
-            ) from exc
-
-        try:
+        with self._writer_guard():
             self._assert_persistence_authority()
             try:
                 existing = self._absolute_path_authority.read_bytes()
@@ -647,12 +745,6 @@ class JsonlDecisionLedger:
             self._assert_persistence_authority()
             self._assert_file_identity()
             return digest
-        finally:
-            os.close(lock_fd)
-            try:
-                self._writer_lock_path_authority.unlink()
-            except FileNotFoundError:
-                pass
 
     def append(self, record: DecisionRecord) -> str:
         """Persist a non-economic decision only."""

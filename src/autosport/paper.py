@@ -475,15 +475,15 @@ class PaperBook:
 
     @staticmethod
     def _normalize_resolution_keys(values: object, label: str) -> set[str]:
-        if isinstance(values, str) or values is None:
+        if type(values) is str or values is None:
             raise ValueError(f"PaperBook {label} must be a collection of quote keys")
         try:
-            normalized = set(values)
+            candidate = tuple(values)
         except TypeError as exc:
             raise ValueError(f"PaperBook {label} must be a collection of quote keys") from exc
-        if any(not isinstance(value, str) or not value for value in normalized):
+        if any(type(value) is not str or not value for value in candidate):
             raise ValueError(f"PaperBook {label} must contain non-empty string quote keys")
-        return normalized
+        return set(candidate)
 
     @classmethod
     def _settlement_result(

@@ -45,9 +45,9 @@ def _locked_capital_for_ticket(ticket: PaperTicket) -> Decimal:
     _require_supported_ticket_shape(ticket)
     if len(ticket.legs) == 1 and _is_lay_leg(ticket.legs[0]):
         return locked_capital_for_exchange_side(
-            ticket.stake,
-            ticket.legs[0].locked_odds,
-            "LAY",
+            stake=ticket.stake,
+            odds=ticket.legs[0].locked_odds,
+            exchange_side="LAY",
         )
     return ticket.stake
 
@@ -124,9 +124,9 @@ def _open_ticket(
     if amount <= 0:
         raise ValueError("stake must be positive")
     locked_capital = locked_capital_for_exchange_side(
-        amount,
-        leg.locked_odds,
-        "LAY",
+        stake=amount,
+        odds=leg.locked_odds,
+        exchange_side="LAY",
     )
     new_balance = type(self)._debit_balance(self.balance, locked_capital)
 

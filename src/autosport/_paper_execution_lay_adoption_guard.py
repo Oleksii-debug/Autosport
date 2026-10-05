@@ -5,6 +5,7 @@ from dataclasses import replace
 from decimal import Decimal
 
 from . import paper_execution_adoption as _adoption
+from . import paper as _paper
 from . import paper_execution_reality as _reality
 from .domain import TicketLeg
 from .paper_execution_adoption import (
@@ -484,6 +485,32 @@ def _preflight_adoption_inputs(
     return observation_snapshot
 
 
+def _authorized_paperbook_copy(book: _adoption.PaperBook) -> _adoption.PaperBook:
+    """Clone validated economic state and mint authority for detached simulation."""
+    if type(book) is not _adoption.PaperBook:
+        raise TypeError("book must be exact PaperBook")
+    try:
+        type(book)._validate_loaded_state(book)
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionAdoptionError(
+            "PaperBook copy source is not canonical"
+        ) from exc
+    shadow = _adoption.copy.deepcopy(book)
+    if type(shadow) is not _adoption.PaperBook:
+        raise PaperExecutionAdoptionError(
+            "PaperBook copy must retain exact PaperBook authority"
+        )
+    try:
+        type(shadow)._validate_loaded_state(shadow)
+        _paper._install_validated_ticket_opening_authority(shadow)
+        _paper._install_validated_paperbook_causal_history_authority(shadow)
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionAdoptionError(
+            "PaperBook copy could not acquire validated product authority"
+        ) from exc
+    return shadow
+
+
 def _preflight_materialization_batch(
     self: PaperExecutionAdoptionRuntime,
     candidates: list[tuple[object, ExecutionAction, PaperExposureBinding]],
@@ -501,17 +528,7 @@ def _preflight_materialization_batch(
             "PaperBook state is invalid before batch materialization preflight"
         ) from exc
 
-    shadow = _adoption.copy.deepcopy(self.book)
-    if type(shadow) is not _adoption.PaperBook:
-        raise PaperExecutionAdoptionError(
-            "batch materialization preflight requires exact PaperBook authority"
-        )
-    try:
-        type(shadow)._validate_loaded_state(shadow)
-    except (TypeError, ValueError) as exc:
-        raise PaperExecutionAdoptionError(
-            "batch materialization preflight snapshot is invalid"
-        ) from exc
+    shadow = _authorized_paperbook_copy(self.book)
 
     for attempt, action, binding in candidates:
         _require_materialization_authority(action, binding)
@@ -1097,7 +1114,7 @@ def _assert_recoverable_book_state(
             "PaperBook changed before any durable #623 run evidence"
         )
 
-    expected = _adoption.copy.deepcopy(pre_action_book)
+    expected = _authorized_paperbook_copy(pre_action_book)
     action_by_id = {
         action.action_id: action for action in prepared.execution_plan.actions
     }

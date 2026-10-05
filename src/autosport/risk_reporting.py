@@ -245,6 +245,33 @@ def _decimal_text(value: Decimal, label: str) -> str:
     return str(value)
 
 
+def _paper_ticket_equity_locked_capital(ticket) -> Decimal:
+    """Use order stake only for the currently proven BACK/legacy PAPER shape.
+
+    TicketLeg already carries exchange-side identity while current main still
+    rejects LAY materialization. Keep equity evidence fail-closed across the
+    active #2183 LAY integration: once PaperBook accepts LAY, this path must
+    consume that lineage's canonical liability authority rather than silently
+    treating order stake as locked capital.
+    """
+
+    stake = object.__getattribute__(ticket, "stake")
+    if type(stake) is not Decimal or not stake.is_finite() or stake <= 0:
+        raise ValueError("ticket stake must be an exact finite positive Decimal")
+    legs = object.__getattribute__(ticket, "legs")
+    if type(legs) is not tuple or not legs:
+        raise ValueError("ticket legs must be a non-empty canonical tuple")
+    for leg in legs:
+        side = object.__getattribute__(leg, "exchange_side")
+        if side == "lay":
+            raise ValueError(
+                "PAPER equity path LAY locked capital requires canonical liability authority"
+            )
+        if side not in {None, "back"}:
+            raise ValueError("PAPER equity path exchange side is non-canonical")
+    return stake
+
+
 def _paper_equity_source_state_sha256(book: PaperBook) -> str:
     """Hash complete canonical PAPER source state used by equity evidence."""
 
@@ -455,12 +482,13 @@ def build_product_issued_paper_equity_path(
             if ticket is None:
                 raise ValueError("PAPER lifecycle references missing ticket")
             if action == "open":
+                locked_capital = _paper_ticket_equity_locked_capital(ticket)
                 replay_balance = _CANONICAL_PAPERBOOK_DEBIT_BALANCE(
                     replay_balance,
-                    ticket.stake,
+                    locked_capital,
                 )
                 replay_committed = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
-                    (replay_committed, ticket.stake)
+                    (replay_committed, locked_capital)
                 )
                 available_at = ticket.placed_at
             else:
@@ -471,7 +499,10 @@ def build_product_issued_paper_equity_path(
                     set(voids_raw),
                 )
                 with localcontext(_CANONICAL_RISK_DECIMAL_CONTEXT()):
-                    replay_committed = replay_committed - ticket.stake
+                    replay_committed = (
+                        replay_committed
+                        - _paper_ticket_equity_locked_capital(ticket)
+                    )
                 if replay_committed < 0:
                     raise ValueError("PAPER lifecycle committed stake became negative")
                 available_at = ticket.settled_at
@@ -497,7 +528,7 @@ def build_product_issued_paper_equity_path(
 
     current_committed = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
         tuple(
-            ticket.stake
+            _paper_ticket_equity_locked_capital(ticket)
             for ticket in book.tickets.values()
             if ticket.status is TicketStatus.OPEN
         )

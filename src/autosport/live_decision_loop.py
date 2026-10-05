@@ -1743,7 +1743,18 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "unfinished live decision recovery requires pending progress"
             )
-        if progress.registered_input_ids != self.dependencies.input_ids:
+        durable_input_specs = self._load_input_registry() or ()
+        current_input_specs = tuple(self._input_specs.values())
+        focused_input_specs = tuple(
+            _InputSpec.from_dependency(dependency)
+            for dependency in self.dependencies.registry_snapshot()
+        )
+        durable_input_ids = tuple(spec.input_id for spec in durable_input_specs)
+        if (
+            progress.registered_input_ids != durable_input_ids
+            or current_input_specs != durable_input_specs
+            or focused_input_specs != durable_input_specs
+        ):
             raise LiveDecisionProgressError(
                 "unfinished live decision requires exact durable dependency registry"
             )
@@ -2501,6 +2512,13 @@ class PersistentLiveDecisionLoop:
                     "PaperBook/runtime context changed before promotion lock"
                 )
             durable_progress = self._load_progress()
+            durable_input_specs = self._load_input_registry() or ()
+            current_input_specs = tuple(self._input_specs.values())
+            focused_input_specs = tuple(
+                _InputSpec.from_dependency(dependency)
+                for dependency in self.dependencies.registry_snapshot()
+            )
+            durable_input_ids = tuple(spec.input_id for spec in durable_input_specs)
             if (
                 durable_progress is None
                 or durable_progress.phase
@@ -2513,7 +2531,9 @@ class PersistentLiveDecisionLoop:
                 or durable_progress.decision_context_sha256
                 != decision_context_sha256
                 or durable_progress.affected_input_ids != affected_input_ids
-                or durable_progress.registered_input_ids != self.dependencies.input_ids
+                or durable_progress.registered_input_ids != durable_input_ids
+                or current_input_specs != durable_input_specs
+                or focused_input_specs != durable_input_specs
                 or durable_progress.gate != gate
             ):
                 raise LiveDecisionProgressError(
@@ -2565,7 +2585,7 @@ class PersistentLiveDecisionLoop:
                     market_append_generation=durable_progress.market_append_generation,
                     decision_context_sha256=decision_context_sha256,
                     affected_input_ids=affected_input_ids,
-                    registered_input_ids=self.dependencies.input_ids,
+                    registered_input_ids=durable_input_ids,
                     decision_id=decision_id,
                     plan_sha256=plan.plan_sha256,
                     ledger_offset=ledger_offset,
@@ -2585,7 +2605,7 @@ class PersistentLiveDecisionLoop:
                     market_append_generation=durable_progress.market_append_generation,
                     decision_context_sha256=decision_context_sha256,
                     affected_input_ids=affected_input_ids,
-                    registered_input_ids=self.dependencies.input_ids,
+                    registered_input_ids=durable_input_ids,
                     decision_id=decision_id,
                     plan_sha256=plan.plan_sha256,
                     ledger_offset=ledger_offset,
@@ -2656,7 +2676,7 @@ class PersistentLiveDecisionLoop:
                 market_append_generation=durable_progress.market_append_generation,
                 decision_context_sha256=decision_context_sha256,
                 affected_input_ids=affected_input_ids,
-                registered_input_ids=self.dependencies.input_ids,
+                registered_input_ids=durable_input_ids,
                 decision_id=decision_id,
                 plan_sha256=plan.plan_sha256,
                 ledger_offset=ledger_offset,

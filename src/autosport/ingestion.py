@@ -40,6 +40,7 @@ class IngestionStats:
             or not self.source_id
             or self.source_id.strip() != self.source_id
             or "|" in self.source_id
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in self.source_id)
         ):
             raise ValueError("source_id must be a canonical exact string")
         for name in ("received", "accepted", "rejected"):
@@ -54,15 +55,23 @@ class IngestionStats:
             or self.elapsed_seconds < 0
         ):
             raise ValueError("elapsed_seconds must be a finite non-negative number")
-        if self.cursor is not None and type(self.cursor) is not str:
-            raise TypeError("cursor must be an exact string or None")
+        if self.cursor is not None:
+            if type(self.cursor) is not str:
+                raise TypeError("cursor must be an exact string or None")
+            if any(ord(ch) < 32 or ord(ch) == 127 for ch in self.cursor):
+                raise ValueError("cursor must not contain control characters")
         if type(self.quality_flags) is not tuple:
             raise TypeError("quality_flags must be an exact tuple")
         seen_flags: set[str] = set()
         for flag in self.quality_flags:
-            if type(flag) is not str or not flag or flag.strip() != flag:
+            if (
+                type(flag) is not str
+                or not flag
+                or flag.strip() != flag
+                or any(ord(ch) < 32 or ord(ch) == 127 for ch in flag)
+            ):
                 raise ValueError(
-                    "quality_flags must contain exact non-empty trimmed strings"
+                    "quality_flags must contain canonical non-empty strings"
                 )
             if flag in seen_flags:
                 raise ValueError("quality_flags must not contain duplicates")

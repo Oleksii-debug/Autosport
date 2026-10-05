@@ -4292,7 +4292,36 @@ class PersistentLiveDecisionLoop:
                     "proven append prefix"
                 )
 
-            decision_visible_events = committed_snapshot.events
+            verified_snapshot: MirrorSnapshot = committed_snapshot
+            if (
+                self._health_gate is not None
+                and progress.health_boundaries is not None
+            ):
+                boundary_map = {
+                    item.source_id: item
+                    for item in progress.health_boundaries
+                }
+                source_ids = {
+                    event.source_id for event in committed_snapshot.events
+                }
+                if not source_ids.issubset(boundary_map):
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision lacks provider-health replay horizons"
+                    )
+                try:
+                    verified_snapshot = self._health_gate.gate_snapshot(
+                        committed_snapshot,
+                        as_of=evidence_decision_time,
+                        health_boundaries={
+                            source_id: boundary_map[source_id]
+                            for source_id in source_ids
+                        },
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision provider-health replay evidence is invalid"
+                    ) from exc
+            decision_visible_events = verified_snapshot.events
             for item, opportunity in zip(
                 intent_items,
                 canonical_opportunities,

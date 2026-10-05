@@ -366,6 +366,55 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     paper_execution=runtime,
                 )
 
+    def test_runtime_revalidation_rejects_post_init_subclass_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            book = PaperBook("1000")
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+                book=book,
+            )
+
+            class HostileRuntime(PaperExecutionAdoptionRuntime):
+                def __getattribute__(self, name):
+                    if name in {"book", "paper_book_path", "ledger", "config"}:
+                        raise AssertionError(
+                            "hostile runtime attributes must not be read"
+                        )
+                    return super().__getattribute__(name)
+
+            hostile = HostileRuntime(
+                book=book,
+                ledger=PaperExecutionLedger(workspace / "paper-execution.jsonl"),
+                config=PaperExecutionModelConfig(
+                    model_id="hostile-runtime-swap",
+                    model_version="1",
+                    evidence_grade=EvidenceGrade.SYNTHETIC,
+                    evidence_source="hostile-runtime-swap",
+                    seed="hostile-runtime-swap",
+                    max_quote_age_ms=5_000,
+                    min_delay_ms=0,
+                    max_delay_ms=0,
+                    rejected_bps=0,
+                    partial_bps=0,
+                    unknown_bps=0,
+                    partial_fill_bps=5_000,
+                    max_slippage_bps=0,
+                ),
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            loop.paper_execution = hostile
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "paper_execution runtime authority changed exact type",
+            ):
+                loop._paper_execution_model_fingerprint()
+
     def test_constructor_requires_durable_registered_intent_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from decimal import Decimal
 
@@ -12,7 +13,11 @@ from .paper_execution_adoption import (
     PaperExposureBinding,
     PreparedPaperExecution,
 )
-from .real_execution_ledger import ExecutionAction, ExecutionPlan
+from .real_execution_ledger import (
+    ExecutionAction,
+    ExecutionPlan,
+    _validate_decimal_text_resource_bound,
+)
 
 
 _ORIGINAL_INIT = PaperExecutionAdoptionRuntime.__init__
@@ -28,6 +33,7 @@ _ORIGINAL_TICKET_MATCHES_ATTEMPT = PaperExecutionAdoptionRuntime._ticket_matches
 _ORIGINAL_MINT_PREPARED = PaperExecutionAdoptionRuntime._mint_prepared
 _ORIGINAL_REQUIRE_MINTED = PaperExecutionAdoptionRuntime._require_minted
 _ORIGINAL_EXPECTED_RUN_ID = PaperExecutionAdoptionRuntime.expected_run_id
+_ORIGINAL_EXECUTE_UNLOCKED = PaperExecutionAdoptionRuntime._execute_unlocked
 _PREPARED_WITNESS_ATTR = "_autosport_lay_prepared_authority_witnesses"
 _RUNTIME_WITNESS_ATTR = "_autosport_lay_runtime_authority_witness"
 
@@ -167,6 +173,13 @@ def _prepared_authority_payload(
             raise PaperExecutionAdoptionError(
                 "prepared action economics left canonical positive finite authority"
             )
+        try:
+            _validate_decimal_text_resource_bound(action.requested_odds)
+            _validate_decimal_text_resource_bound(action.requested_stake)
+        except ValueError as exc:
+            raise PaperExecutionAdoptionError(
+                "prepared action economics exceed canonical Decimal resource bounds"
+            ) from exc
         action_payloads.append(action.to_dict())
     plan_payload["actions"] = action_payloads
 
@@ -278,6 +291,97 @@ def _expected_run_id(
     _reality._require_canonical_execution_plan_surface(prepared.execution_plan)
     _reality._require_canonical_execution_config_surface(self.config)
     return _ORIGINAL_EXPECTED_RUN_ID(self, prepared, trigger_id)
+
+def _preflight_adoption_inputs(
+    self: PaperExecutionAdoptionRuntime,
+    *,
+    prepared: PreparedPaperExecution,
+    trigger_id: str,
+    started_at: str,
+    materialize_exposure: bool,
+    observations: Mapping[str, _reality.ObservedPaperExecution] | None,
+    evidence_registry: _reality.PaperExecutionEvidenceRegistry | None,
+    suspended_action_ids: frozenset[str],
+) -> dict[str, _reality.ObservedPaperExecution]:
+    """Validate/snapshot execution inputs before EXPOSURE_SCOPE becomes durable."""
+    self._require_minted(prepared)
+    _reality._require_canonical_execution_plan_surface(prepared.execution_plan)
+    _reality._require_canonical_execution_config_surface(self.config)
+    _exact_text(trigger_id, "trigger_id")
+    _adoption._utc_timestamp(started_at, "started_at")
+    if type(materialize_exposure) is not bool:
+        raise TypeError("materialize_exposure must be bool")
+    if observations is None:
+        observation_snapshot: dict[str, _reality.ObservedPaperExecution] = {}
+    else:
+        if not isinstance(observations, Mapping):
+            raise TypeError("observations must be a mapping")
+        try:
+            observation_snapshot = dict(observations)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("observations must be a stable mapping") from exc
+    if any(type(action_id) is not str for action_id in observation_snapshot):
+        raise TypeError("observation keys must be exact str action ids")
+    if type(suspended_action_ids) is not frozenset or any(
+        type(item) is not str for item in suspended_action_ids
+    ):
+        raise TypeError("suspended_action_ids must be a frozenset[str]")
+    action_ids = {action.action_id for action in prepared.execution_plan.actions}
+    if set(observation_snapshot) - action_ids:
+        raise _reality.PaperExecutionStateError(
+            "observations contain action outside execution plan"
+        )
+    if set(suspended_action_ids) - action_ids:
+        raise _reality.PaperExecutionStateError(
+            "suspended_action_ids contain action outside execution plan"
+        )
+    if (
+        observation_snapshot
+        and type(evidence_registry) is not _reality.PaperExecutionEvidenceRegistry
+    ):
+        raise _reality.PaperExecutionStateError(
+            "configured/empirical observations require the exact durable evidence registry authority"
+        )
+    _reality._validate_lay_execution_surface(
+        plan=prepared.execution_plan,
+        observations=observation_snapshot,
+        suspended_action_ids=suspended_action_ids,
+    )
+    return observation_snapshot
+
+
+def _execute_unlocked(
+    self: PaperExecutionAdoptionRuntime,
+    *,
+    prepared: PreparedPaperExecution,
+    trigger_id: str,
+    started_at: str,
+    materialize_exposure: bool,
+    observations: Mapping[str, _reality.ObservedPaperExecution] | None = None,
+    evidence_registry: _reality.PaperExecutionEvidenceRegistry | None = None,
+    suspended_action_ids: frozenset[str] = frozenset(),
+):
+    observation_snapshot = _preflight_adoption_inputs(
+        self,
+        prepared=prepared,
+        trigger_id=trigger_id,
+        started_at=started_at,
+        materialize_exposure=materialize_exposure,
+        observations=observations,
+        evidence_registry=evidence_registry,
+        suspended_action_ids=suspended_action_ids,
+    )
+    return _ORIGINAL_EXECUTE_UNLOCKED(
+        self,
+        prepared=prepared,
+        trigger_id=trigger_id,
+        started_at=started_at,
+        materialize_exposure=materialize_exposure,
+        observations=observation_snapshot,
+        evidence_registry=evidence_registry,
+        suspended_action_ids=suspended_action_ids,
+    )
+
 
 def _normalized_action_side(exchange_side: str | None) -> str:
     if exchange_side is None:
@@ -639,6 +743,7 @@ def _install() -> None:
     PaperExecutionAdoptionRuntime._mint_prepared = _mint_prepared
     PaperExecutionAdoptionRuntime._require_minted = _require_minted
     PaperExecutionAdoptionRuntime.expected_run_id = _expected_run_id
+    PaperExecutionAdoptionRuntime._execute_unlocked = _execute_unlocked
     PaperExecutionAdoptionRuntime._require_back_compatible_exchange_side = staticmethod(
         _require_supported_exchange_side
     )

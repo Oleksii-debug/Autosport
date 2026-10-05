@@ -393,7 +393,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             )
 
     def _ensure_existing_path_durable(self) -> None:
-        self._require_storage_authority()
+        _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY(self)
         if not self.path.exists():
             self._path_durable = False
             return
@@ -415,7 +415,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
     ) -> None:
         if type(self) is not PaperExecutionLedger:
             raise TypeError("ledger must be exact PaperExecutionLedger")
-        self._require_storage_authority()
+        _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY(self)
         _impl._require_canonical_evidence_record_surface(record)
         try:
             canonical_record = PaperExecutionEvidenceRecord.from_dict(
@@ -439,7 +439,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
     ) -> PaperExecutionEvidenceRecord:
         if type(self) is not PaperExecutionLedger:
             raise TypeError("ledger must be exact PaperExecutionLedger")
-        self._require_storage_authority()
+        _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY(self)
         evidence_id = _impl._text(evidence_id, "evidence_id")
         return _LEGACY_LEDGER_RESOLVE_OBSERVATION_EVIDENCE(self, evidence_id)
 
@@ -456,7 +456,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
     ) -> None:
         if type(self) is not PaperExecutionLedger:
             raise TypeError("ledger must be exact PaperExecutionLedger")
-        self._require_storage_authority()
+        _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY(self)
         (
             run_id,
             trigger_id,
@@ -557,7 +557,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 )
             return
 
-        self._require_storage_authority()
+        _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY(self)
         encoded = _impl._canonical(event) + "\n"
         path_existed_before = self.path.exists()
         try:
@@ -577,7 +577,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
     def record_attempt(self, attempt: PaperLegAttempt) -> None:
         if type(self) is not PaperExecutionLedger:
             raise TypeError("ledger must be exact PaperExecutionLedger")
-        self._require_storage_authority()
+        _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY(self)
         _impl._require_canonical_attempt_surface(attempt)
         try:
             canonical_attempt = PaperLegAttempt.from_dict(attempt.to_dict())
@@ -707,7 +707,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 )
             return
 
-        self._require_storage_authority()
+        _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY(self)
         encoded = _impl._canonical(event) + "\n"
         path_existed_before = self.path.exists()
         try:
@@ -734,7 +734,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
     ) -> None:
         if type(self) is not PaperExecutionLedger:
             raise TypeError("ledger must be exact PaperExecutionLedger")
-        self._require_storage_authority()
+        _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY(self)
         run_id = _impl._text(run_id, "run_id")
         if (
             type(pending_action_ids) is not tuple
@@ -845,7 +845,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
     ) -> PaperExecutionRun | None:
         if type(self) is not PaperExecutionLedger:
             raise TypeError("ledger must be exact PaperExecutionLedger")
-        self._require_storage_authority()
+        _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY(self)
         (
             run_id,
             trigger_id,
@@ -1466,6 +1466,7 @@ def _validate_lay_execution_surface(
 
 
 
+_CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY = PaperExecutionLedger._require_storage_authority
 _CANONICAL_LEDGER_RESERVE_RUN = PaperExecutionLedger.reserve_run
 _CANONICAL_LEDGER_LOAD_RUN = PaperExecutionLedger.load_run
 _CANONICAL_LEDGER_RECORD_ATTEMPT = PaperExecutionLedger.record_attempt

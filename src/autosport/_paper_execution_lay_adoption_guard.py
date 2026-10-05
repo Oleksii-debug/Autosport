@@ -533,7 +533,7 @@ def _preflight_materialization_batch(
     for attempt, action, binding in candidates:
         _require_materialization_authority(action, binding)
         side = _require_action_side(action)
-        self._require_attempt_action_identity(attempt, action)
+        _adoption.PaperExecutionAdoptionRuntime._require_attempt_action_identity(self, attempt, action)
         if attempt.execution_odds is None or attempt.execution_stake is None:
             raise PaperExecutionAdoptionError(
                 "accepted-equivalent attempt lacks execution odds/stake"
@@ -550,7 +550,7 @@ def _preflight_materialization_batch(
                 "PaperBook contains duplicate exposure for one execution attempt"
             )
         if matches:
-            if not self._ticket_matches_attempt(
+            if not _ticket_matches_attempt(
                 ticket=matches[0],
                 attempt=attempt,
                 action=action,
@@ -562,7 +562,7 @@ def _preflight_materialization_batch(
             continue
 
         try:
-            shadow.open_ticket(
+            type(shadow).open_ticket(shadow,
                 [
                     TicketLeg(
                         event_id=attempt.event_id,
@@ -752,7 +752,7 @@ def _execute_unlocked(
     )
     try:
         for attempt, action, binding in accepted_attempts:
-            ticket = self._materialize_attempt(
+            ticket = _materialize_attempt(self,
                 attempt=attempt,
                 action=action,
                 binding=binding,
@@ -853,7 +853,7 @@ def _execute_unlocked(
                 for ticket in durable_book.tickets.values()
                 if marker in ticket.strategy_reason
             ]
-            if len(matches) != 1 or not self._ticket_matches_attempt(
+            if len(matches) != 1 or not _ticket_matches_attempt(
                 ticket=matches[0],
                 attempt=attempt,
                 action=action,
@@ -1072,7 +1072,7 @@ def _materialize_attempt(
         raise PaperExecutionAdoptionError(
             "materialization decision_id changed after prepared authority mint"
         )
-    self._require_attempt_action_identity(attempt, action)
+    _adoption.PaperExecutionAdoptionRuntime._require_attempt_action_identity(self, attempt, action)
     # Existing PaperBook state is durable economic authority. Revalidate the
     # complete canonical snapshot before searching marker strings or comparing
     # ticket fields so a mutated/faulty in-memory ticket cannot execute custom
@@ -1099,7 +1099,7 @@ def _materialize_attempt(
         )
     if matches:
         ticket = matches[0]
-        if not self._ticket_matches_attempt(
+        if not _ticket_matches_attempt(
             ticket=ticket,
             attempt=attempt,
             action=action,
@@ -1110,7 +1110,7 @@ def _materialize_attempt(
             )
         return ticket
 
-    return self.book.open_ticket(
+    return type(self.book).open_ticket(self.book,
         [
             TicketLeg(
                 event_id=attempt.event_id,
@@ -1278,12 +1278,12 @@ def _assert_recoverable_book_state(
             )
         _require_materialization_authority(action, binding)
         side = _require_action_side(action)
-        self._require_attempt_action_identity(attempt, action)
+        _adoption.PaperExecutionAdoptionRuntime._require_attempt_action_identity(self, attempt, action)
         if attempt.execution_odds is None or attempt.execution_stake is None:
             raise PaperExecutionAdoptionError(
                 "accepted-equivalent durable attempt lacks execution truth"
             )
-        expected.open_ticket(
+        type(expected).open_ticket(expected,
             [
                 TicketLeg(
                     event_id=attempt.event_id,

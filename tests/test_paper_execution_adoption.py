@@ -410,6 +410,41 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(book.balance, Decimal("100.00"))
             self.assertEqual(replacement.balance, Decimal("100.00"))
 
+    def test_post_run_ticket_marker_mutation_cannot_redirect_restart_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("post-run-ticket-marker", side="BACK")
+            current_prepared = prepared(runtime, current)
+            original_execute = adoption_module.execute_paper_plan
+            canonical_marker = PaperExecutionAdoptionRuntime._TICKET_MARKER
+
+            def execute_then_mutate_protocol(**kwargs):
+                run = original_execute(**kwargs)
+                PaperExecutionAdoptionRuntime._TICKET_MARKER = "forged_attempt_id="
+                return run
+
+            try:
+                with patch.object(
+                    adoption_module,
+                    "execute_paper_plan",
+                    execute_then_mutate_protocol,
+                ):
+                    with self.assertRaisesRegex(
+                        PaperExecutionAdoptionError,
+                        "runtime configuration changed after construction",
+                    ):
+                        runtime.execute(
+                            prepared=current_prepared,
+                            trigger_id="post-run-ticket-marker",
+                            started_at=STARTED_AT,
+                            materialize_exposure=True,
+                        )
+            finally:
+                PaperExecutionAdoptionRuntime._TICKET_MARKER = canonical_marker
+
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
     def test_post_mint_binding_mutation_fails_before_durable_scope_publication(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

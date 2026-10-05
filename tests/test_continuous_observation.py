@@ -420,6 +420,37 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertEqual(result.total_accepted, 2)
             self.assertEqual(provider.calls, 2)
 
+    def test_restart_backoff_rejects_regressing_monotonic_before_provider_io(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            first_provider = SequenceProvider(
+                [ProviderUnavailableError("temporary outage")]
+            )
+            first = self._run(
+                first_provider,
+                self._config(workspace, max_cycles=1),
+                run_id="first-run",
+            )
+            self.assertEqual(first.exit_code, 4)
+
+            second_provider = SequenceProvider(
+                [_batch(_quote(), cursor="must-not-run")]
+            )
+            samples = iter([0.0, -1.0])
+            with self.assertRaisesRegex(ValueError, "monotonic clock must not regress"):
+                run_continuous_observation(
+                    second_provider,
+                    self._config(workspace, max_cycles=1),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: next(samples),
+                    wall_clock=lambda: _NOW,
+                    waiter=lambda _seconds: False,
+                    reporter=None,
+                    run_id="second-run",
+                )
+
+            self.assertEqual(second_provider.calls, 0)
+
     def test_provider_unavailable_uses_bounded_retry_and_can_recover(self):
         with tempfile.TemporaryDirectory() as tmp:
             provider = SequenceProvider(

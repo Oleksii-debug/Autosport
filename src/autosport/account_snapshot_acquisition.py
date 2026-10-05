@@ -1187,7 +1187,6 @@ def _install_account_snapshot_acquisition_authority() -> None:
     canonical_snapshot_read = BetfairReadOnlyClient.read_account_snapshot
     immutable_mapping_type = MappingProxyType
     issued_snapshot = immutable_mapping_type({})
-    live_snapshot = immutable_mapping_type({})
     state_lock = RLock()
 
     class _AccountSnapshotAuthorityBoundary:
@@ -1294,7 +1293,6 @@ def _install_account_snapshot_acquisition_authority() -> None:
             *,
             acquisition_id: str,
         ) -> AuthoritativeAccountSnapshot:
-            nonlocal live_snapshot
             with state_lock:
                 state = issued_snapshot.get(id(acquirer))
                 if state is None or state[0]() is not acquirer:
@@ -1366,31 +1364,6 @@ def _install_account_snapshot_acquisition_authority() -> None:
                         "acquisition_id cannot be reused for another "
                         "provider/account/capability scope"
                     )
-                with state_lock:
-                    current = live_snapshot.get(existing.receipt.acquisition_id)
-                    if current is not None:
-                        value = current[0]()
-                        if value is None:
-                            updated = dict(live_snapshot)
-                            updated.pop(existing.receipt.acquisition_id, None)
-                            live_snapshot = immutable_mapping_type(updated)
-                        elif (
-                            type(value) is not AuthoritativeAccountSnapshot
-                            or current[1] != self._fingerprint(value)
-                        ):
-                            updated = dict(live_snapshot)
-                            updated.pop(existing.receipt.acquisition_id, None)
-                            live_snapshot = immutable_mapping_type(updated)
-                            raise AccountSnapshotAcquisitionError(
-                                "live account snapshot authority integrity changed"
-                            )
-                        elif current[2] != origin_credentials:
-                            raise AccountSnapshotAcquisitionError(
-                                "live account snapshot acquisition is bound to a different "
-                                "authenticated credential origin"
-                            )
-                        else:
-                            return value
                 raise AccountSnapshotAcquisitionError(
                     "durable acquisition cannot reissue provider-origin authority; "
                     "use a new acquisition_id for a new provider read"
@@ -1540,55 +1513,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 raise AccountSnapshotAcquisitionError(
                     "live account snapshot authority requires exact acquired evidence"
                 )
-            live_id = acquired.receipt.acquisition_id
-            fingerprint = self._fingerprint(acquired)
-            with state_lock:
-                current = live_snapshot.get(live_id)
-                if current is not None:
-                    value = current[0]()
-                    if value is None:
-                        updated = dict(live_snapshot)
-                        updated.pop(live_id, None)
-                        live_snapshot = immutable_mapping_type(updated)
-                    elif (
-                        type(value) is not AuthoritativeAccountSnapshot
-                        or current[1] != self._fingerprint(value)
-                    ):
-                        updated = dict(live_snapshot)
-                        updated.pop(live_id, None)
-                        live_snapshot = immutable_mapping_type(updated)
-                        raise AccountSnapshotAcquisitionError(
-                            "live account snapshot authority integrity changed"
-                        )
-                    elif current[2] != origin_credentials:
-                        raise AccountSnapshotAcquisitionError(
-                            "live account snapshot acquisition is bound to a different "
-                            "authenticated credential origin"
-                        )
-                    else:
-                        return value
-
-                def forget_live(
-                    current_ref: object,
-                    *,
-                    expected_id: str = live_id,
-                ) -> None:
-                    nonlocal live_snapshot
-                    with state_lock:
-                        registered = live_snapshot.get(expected_id)
-                        if registered is not None and registered[0] is current_ref:
-                            updated = dict(live_snapshot)
-                            updated.pop(expected_id, None)
-                            live_snapshot = immutable_mapping_type(updated)
-
-                updated = dict(live_snapshot)
-                updated[live_id] = (
-                    ref(acquired, forget_live),
-                    fingerprint,
-                    origin_credentials,
-                )
-                live_snapshot = immutable_mapping_type(updated)
-                return acquired
+            return acquired
 
         def resolve(
             self,
@@ -1639,26 +1564,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                     "snapshot does not match durable acquisition receipt"
                 )
 
-        def assert_live(self, acquired: AuthoritativeAccountSnapshot) -> None:
-            if type(acquired) is not AuthoritativeAccountSnapshot:
-                raise AccountSnapshotAcquisitionError(
-                    "provider-origin authority requires exact acquired snapshot evidence"
-                )
-            with state_lock:
-                current = live_snapshot.get(acquired.receipt.acquisition_id)
-                if (
-                    current is None
-                    or current[0]() is not acquired
-                    or current[1] != self._fingerprint(acquired)
-                ):
-                    raise AccountSnapshotAcquisitionError(
-                        "account snapshot was not issued by live canonical provider acquisition"
-                    )
-
     authority = _AccountSnapshotAuthorityBoundary()
-
-    def assert_live(acquired: AuthoritativeAccountSnapshot) -> None:
-        authority.assert_live(acquired)
 
     def __init__(
         self: BetfairAccountSnapshotAcquirer,
@@ -1701,7 +1607,6 @@ def _install_account_snapshot_acquisition_authority() -> None:
     ) -> None:
         authority.verify(self, snapshot, receipt)
 
-    globals()["assert_account_snapshot_acquisition_authoritative"] = assert_live
     BetfairAccountSnapshotAcquirer.__init__ = __init__
     BetfairAccountSnapshotAcquirer.acquire = acquire
     BetfairAccountSnapshotAcquirer.resolve = resolve

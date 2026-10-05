@@ -13,7 +13,6 @@ import autosport.betfair_account_readonly as betfair_readonly
 from autosport.account_snapshot_acquisition import (
     AccountSnapshotAcquisitionError,
     BetfairAccountSnapshotAcquirer,
-    assert_account_snapshot_acquisition_authoritative,
 )
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyError,
@@ -127,6 +126,10 @@ def test_raw_acquisition_minting_seams_are_not_exposed() -> None:
         acquisition_module,
         "_install_account_snapshot_acquisition_authority",
     )
+    assert not hasattr(
+        acquisition_module,
+        "assert_account_snapshot_acquisition_authoritative",
+    )
 
 
 def test_caller_cannot_swap_canonical_client_or_store_after_initialization(
@@ -209,11 +212,6 @@ def test_live_receipt_mutation_revokes_provider_origin_authority(
     )
 
     assert acquired.source_authority_proven is False
-    with pytest.raises(
-        AccountSnapshotAcquisitionError,
-        match="lacks live canonical provider-origin authority",
-    ):
-        assert_account_snapshot_acquisition_authoritative(acquired)
 
 
 def test_live_snapshot_content_mutation_revokes_provider_origin_authority(
@@ -242,11 +240,6 @@ def test_live_snapshot_content_mutation_revokes_provider_origin_authority(
     )
 
     assert acquired.source_authority_proven is False
-    with pytest.raises(
-        AccountSnapshotAcquisitionError,
-        match="lacks live canonical provider-origin authority",
-    ):
-        assert_account_snapshot_acquisition_authoritative(acquired)
 
 
 def test_product_owned_read_persists_restart_verifiable_receipt_without_secrets(
@@ -280,16 +273,6 @@ def test_product_owned_read_persists_restart_verifiable_receipt_without_secrets(
     assert resolved == acquired
     assert resolved.receipt.source_authority_proven is False
     assert resolved.source_authority_proven is False
-    with pytest.raises(
-        AccountSnapshotAcquisitionError,
-        match="lacks live canonical provider-origin authority",
-    ):
-        assert_account_snapshot_acquisition_authoritative(resolved)
-    with pytest.raises(
-        AccountSnapshotAcquisitionError,
-        match="lacks live canonical provider-origin authority",
-    ):
-        assert_account_snapshot_acquisition_authoritative(acquired)
     reopened.verify(resolved.snapshot, resolved.receipt)
 
     persisted = b"".join(

@@ -35,6 +35,9 @@ class IngestionStats:
         self.validate()
 
     def validate(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
         if (
             type(self.source_id) is not str
             or not self.source_id

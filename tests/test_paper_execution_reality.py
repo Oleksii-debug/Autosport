@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from threading import RLock
 
 from autosport.paper_execution_reality import (
     EvidenceGrade,
@@ -1537,6 +1538,69 @@ class PaperExecutionRealityTests(unittest.TestCase):
                     ledger=ledger, started_at=STARTED_AT,
                     observations={"a1": obs}, evidence_registry=registry,
                 )
+
+
+
+    def test_ledger_read_rejects_path_authority_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            ledger.path = Path(tmp) / "alternate-execution.jsonl"
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "persistence authority changed",
+            ):
+                ledger.events()
+
+    def test_ledger_read_rejects_lock_authority_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            ledger._lock = RLock()
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "persistence authority changed",
+            ):
+                ledger.events()
+
+    def test_ledger_write_rejects_writer_lock_path_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            ledger._lock_path = Path(tmp) / "alternate.writer.lock"
+            current = action("a1")
+            record = PaperExecutionEvidenceRecord(
+                action_id=current.action_id,
+                bookmaker_id=current.bookmaker_id,
+                account_id=current.account_id,
+                event_id=current.event_id,
+                market_id=current.market_id,
+                selection_id=current.selection_id,
+                side=current.side,
+                quote_id=current.quote_id,
+                outcome=PaperAttemptOutcome.ACCEPTED,
+                observed_at=STARTED_AT,
+                evidence_grade=EvidenceGrade.EMPIRICAL,
+                evidence_source="authority-drift-test",
+                accepted_odds="2.50",
+                accepted_stake="10.00",
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "persistence authority changed",
+            ):
+                ledger.register_observation_evidence(record)
+
+    def test_ledger_read_rejects_anchor_path_authority_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            ledger._anchor_path = Path(tmp) / "alternate.anchor.json"
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "persistence authority changed",
+            ):
+                ledger.events()
 
 
 if __name__ == "__main__":

@@ -59,6 +59,7 @@ _ORIGINAL_OBSERVED_ATTEMPT = _reality._impl._observed_attempt
 _ORIGINAL_REQUIRE_ACTION_SURFACE = _reality._impl._require_canonical_action_surface
 _ORIGINAL_ADOPTION_DIGEST = _adoption._digest
 _ORIGINAL_ADOPTION_UTC_TIMESTAMP = _adoption._utc_timestamp
+_ORIGINAL_ADOPTION_RESULT = _adoption.PaperExecutionAdoptionResult
 _PREPARED_WITNESSES: dict[int, tuple[PreparedPaperExecution, str]] = {}
 _ACTION_WITNESSES: dict[int, tuple[ExecutionAction, str, str]] = {}
 _BINDING_WITNESSES: dict[int, tuple[PaperExposureBinding, tuple[str, str | None, str | None, str | None]]] = {}
@@ -788,7 +789,7 @@ def _execute_unlocked(
         "prepared decision_id",
     )
     if not materialize_exposure:
-        return _adoption.PaperExecutionAdoptionResult(run=run, ticket_ids=())
+        return _ORIGINAL_ADOPTION_RESULT(run=run, ticket_ids=())
 
     action_by_id = {
         action.action_id: action for action in prepared.execution_plan.actions
@@ -941,7 +942,7 @@ def _execute_unlocked(
                     "durable PaperBook does not bind exact execution attempt"
                 )
 
-    return _adoption.PaperExecutionAdoptionResult(
+    return _ORIGINAL_ADOPTION_RESULT(
         run=run,
         ticket_ids=tuple(ticket_ids),
     )

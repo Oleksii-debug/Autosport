@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from dataclasses import replace
 from decimal import Decimal, getcontext, setcontext
 from pathlib import Path
 from unittest.mock import patch
@@ -11,13 +12,17 @@ from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy
 from autosport.risk_reporting import (
+    DRAWDOWN_EVIDENCE_SCHEMA,
     DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
     EQUITY_PATH_SCHEMA,
     RISK_OF_RUIN_STATUS_UNKNOWN,
     RISK_REPORT_SCHEMA,
     RISK_REPORT_SCOPE_PAPER_ONLY,
     build_paper_risk_report,
+    build_product_issued_paper_drawdown_evidence,
     build_product_issued_paper_equity_path,
+    verify_product_issued_paper_drawdown_evidence,
+    verify_product_issued_paper_equity_path,
 )
 
 
@@ -519,6 +524,136 @@ class PaperRiskReportingTests(unittest.TestCase):
 
         self.assertNotEqual(first.path_sha256, second.path_sha256)
         self.assertNotEqual(first.points, second.points)
+
+    def test_drawdown_evidence_is_bound_to_equity_path_and_re_resolves(self) -> None:
+        book = PaperBook("100")
+        loser = book.open_ticket(
+            (self._leg(59),),
+            Decimal("30"),
+            placed_at="2026-09-21T12:20:00+00:00",
+        )
+        book.settle(
+            loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T12:25:00+00:00",
+        )
+        goal = self._goal()
+
+        path = build_product_issued_paper_equity_path(book, goal)
+        evidence = build_product_issued_paper_drawdown_evidence(book, goal)
+
+        self.assertEqual(evidence.schema, DRAWDOWN_EVIDENCE_SCHEMA)
+        self.assertEqual(evidence.equity_path_sha256, path.path_sha256)
+        self.assertEqual(evidence.max_drawdown_amount, Decimal("30"))
+        self.assertEqual(evidence.minimum_equity, Decimal("70"))
+        self.assertEqual(
+            verify_product_issued_paper_drawdown_evidence(book, goal, evidence),
+            evidence,
+        )
+        self.assertEqual(
+            verify_product_issued_paper_equity_path(book, goal, path),
+            path,
+        )
+
+    def test_caller_replaced_drawdown_scalar_cannot_mint_product_authority(self) -> None:
+        book = PaperBook("100")
+        loser = book.open_ticket(
+            (self._leg(60),),
+            Decimal("20"),
+            placed_at="2026-09-21T12:30:00+00:00",
+        )
+        book.settle(
+            loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T12:35:00+00:00",
+        )
+        goal = self._goal()
+        evidence = build_product_issued_paper_drawdown_evidence(book, goal)
+        forged = replace(
+            evidence,
+            max_drawdown_amount=Decimal("0"),
+            max_drawdown_fraction=Decimal("0"),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "drawdown evidence does not match canonical product state",
+        ):
+            verify_product_issued_paper_drawdown_evidence(book, goal, forged)
+
+        self.assertEqual(evidence.max_drawdown_amount, Decimal("20"))
+
+    def test_caller_replaced_minimum_equity_cannot_mint_equity_path_authority(self) -> None:
+        book = PaperBook("100")
+        loser = book.open_ticket(
+            (self._leg(61),),
+            Decimal("25"),
+            placed_at="2026-09-21T12:40:00+00:00",
+        )
+        book.settle(
+            loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T12:45:00+00:00",
+        )
+        goal = self._goal()
+        evidence = build_product_issued_paper_equity_path(book, goal)
+        forged = replace(
+            evidence,
+            minimum_equity=Decimal("100"),
+            minimum_equity_point_id="paper-initial-bankroll",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "equity-path evidence does not match canonical product state",
+        ):
+            verify_product_issued_paper_equity_path(book, goal, forged)
+
+        self.assertEqual(evidence.minimum_equity, Decimal("75"))
+
+    def test_drawdown_evidence_restart_identity_is_stable(self) -> None:
+        book = PaperBook("100")
+        loser = book.open_ticket(
+            (self._leg(62),),
+            Decimal("10"),
+            placed_at="2026-09-21T12:50:00+00:00",
+        )
+        book.settle(
+            loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T12:55:00+00:00",
+        )
+        goal = self._goal()
+        expected = build_product_issued_paper_drawdown_evidence(book, goal)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paper_path = Path(tmp) / "paper-drawdown-evidence.json"
+            book.save(paper_path)
+            loaded = PaperBook.load(paper_path)
+            actual = build_product_issued_paper_drawdown_evidence(loaded, goal)
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual.evidence_sha256, expected.evidence_sha256)
+
+    def test_report_binds_drawdown_evidence_digest(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(63),),
+            Decimal("12"),
+            placed_at="2026-09-21T13:00:00+00:00",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T13:05:00+00:00",
+        )
+        goal = self._goal()
+
+        evidence = build_product_issued_paper_drawdown_evidence(book, goal)
+        report = build_paper_risk_report(book, goal)
+
+        self.assertEqual(report.drawdown_evidence_sha256, evidence.evidence_sha256)
+        self.assertEqual(report.equity_path_sha256, evidence.equity_path_sha256)
 
     def test_restart_preserves_exact_report_identity_and_values(self) -> None:
         book = PaperBook("100")

@@ -446,6 +446,58 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         restored = PaperBook.load(destination)
         self.assertEqual(restored.balance, Decimal("100"))
 
+    def test_save_fsyncs_each_new_parent_entry_before_snapshot_replace(self):
+        book = PaperBook("100")
+        root = Path(self._tmp.name)
+        destination = root / "new-parent" / "nested" / "snapshot.json"
+        events: list[tuple[str, Path | None]] = []
+
+        def record_directory_fsync(directory: Path) -> None:
+            events.append(("directory-fsync", directory))
+
+        def record_replace(source: object, target: object) -> None:
+            events.append(("replace", None))
+            os.replace(source, target)
+
+        with (
+            patch.object(
+                PaperBook,
+                "_fsync_snapshot_directory",
+                side_effect=record_directory_fsync,
+            ),
+            patch("autosport.paper.os.replace", side_effect=record_replace),
+        ):
+            book.save(destination)
+
+        replace_index = events.index(("replace", None))
+        pre_replace = events[:replace_index]
+        self.assertIn(("directory-fsync", root), pre_replace)
+        self.assertIn(("directory-fsync", root / "new-parent"), pre_replace)
+        self.assertTrue(destination.exists())
+
+    def test_save_aborts_before_snapshot_creation_when_parent_publication_fsync_fails(self):
+        book = PaperBook("100")
+        root = Path(self._tmp.name)
+        destination = root / "new-parent-failure" / "nested" / "snapshot.json"
+        calls: list[Path] = []
+
+        def fail_first_parent_fsync(directory: Path) -> None:
+            calls.append(directory)
+            raise OSError("parent directory fsync failed")
+
+        with patch.object(
+            PaperBook,
+            "_fsync_snapshot_directory",
+            side_effect=fail_first_parent_fsync,
+        ):
+            with self.assertRaisesRegex(OSError, "parent directory fsync failed"):
+                book.save(destination)
+
+        self.assertEqual(calls, [root])
+        self.assertFalse(destination.exists())
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+
     def test_save_rejects_snapshot_path_subclass_before_fspath(self):
         _HostilePathSubclass.fspath_calls = 0
         book = PaperBook("100")

@@ -648,3 +648,69 @@ def test_slippage_source_digest_ignores_mutable_evidence_id_property(
 
     assert sealed_digest(evidence) == canonical_evidence_id
     assert attacker_called is False
+
+
+def test_resolver_rejects_intent_digest_property_rebinding_before_getter_executes(
+    monkeypatch,
+):
+    attacker_called = False
+
+    def attacker_getter(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        return "f" * 64
+
+    with canonical_applicable_cost_case() as (
+        intent,
+        plan,
+        router_store,
+        request,
+        decision_at,
+    ):
+        monkeypatch.setattr(type(intent), "intent_sha256", property(attacker_getter))
+        with pytest.raises(
+            subject.ProspectiveApplicableCostError,
+            match="OpportunityIntent digest authority changed",
+        ):
+            subject.resolve_prospective_applicable_costs(
+                intent=intent,
+                plan=plan,
+                router_store=router_store,
+                model_request_id=request.request_id,
+                decision_at=decision_at,
+            )
+
+    assert attacker_called is False
+
+
+def test_resolver_rejects_plan_digest_property_rebinding_before_getter_executes(
+    monkeypatch,
+):
+    attacker_called = False
+
+    def attacker_getter(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        return "f" * 64
+
+    with canonical_applicable_cost_case() as (
+        intent,
+        plan,
+        router_store,
+        request,
+        decision_at,
+    ):
+        monkeypatch.setattr(type(plan), "plan_sha256", property(attacker_getter))
+        with pytest.raises(
+            subject.ProspectiveApplicableCostError,
+            match="PortfolioPlan digest authority changed",
+        ):
+            subject.resolve_prospective_applicable_costs(
+                intent=intent,
+                plan=plan,
+                router_store=router_store,
+                model_request_id=request.request_id,
+                decision_at=decision_at,
+            )
+
+    assert attacker_called is False

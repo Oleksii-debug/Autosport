@@ -248,6 +248,8 @@ class IngestionEngine:
         try:
             provider_source_id = provider.source_id
             batch = provider.read_batch(max_items=max_items)
+            if provider.source_id != provider_source_id:
+                raise ValueError("provider source_id changed during batch acquisition")
             if batch.source_id != provider_source_id:
                 raise ValueError("provider returned mismatched source_id")
             if len(batch.quotes) > max_items:

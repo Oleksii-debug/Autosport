@@ -269,6 +269,55 @@ def test_policy_estimate_dispatch_rejects_derivation_helper_rebinding(
 
 
 
+@pytest.mark.parametrize(
+    "property_name",
+    (
+        "product_preoutcome_policy_proven",
+        "frozen_policy_execution_proven",
+        "iid_qualified",
+        "proposal_target_execution_proven",
+        "risk_upper_bound_computed",
+        "grants_ticket_authority",
+        "grants_real_money_authority",
+    ),
+)
+def test_policy_estimate_dispatch_rejects_authority_property_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+    property_name: str,
+) -> None:
+    monkeypatch.setattr(
+        ProductFixedNRiskPolicyEstimate,
+        property_name,
+        property(lambda _self: True),
+    )
+
+    with pytest.raises(
+        ProductFixedNRiskPolicyEstimateError,
+        match="dispatch changed",
+    ):
+        policy_module._require_dispatch()
+
+
+def test_policy_estimate_dispatch_rejects_authority_property_code_replacement() -> None:
+    descriptor = vars(ProductFixedNRiskPolicyEstimate)["grants_ticket_authority"]
+    getter = descriptor.fget
+    assert getter is not None
+    original_code = getter.__code__
+
+    def forged(_self: object) -> bool:
+        return True
+
+    getter.__code__ = forged.__code__
+    try:
+        with pytest.raises(
+            ProductFixedNRiskPolicyEstimateError,
+            match="dispatch changed",
+        ):
+            policy_module._require_dispatch()
+    finally:
+        getter.__code__ = original_code
+
+
 def test_policy_estimate_dispatch_rejects_field_manifest_rebinding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

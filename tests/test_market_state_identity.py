@@ -288,3 +288,38 @@ def test_acquisition_sequence_requires_positive_signed_int64(
     ):
         semantic_market_state_identity(malformed)
 
+@pytest.mark.parametrize("bad_sequence", (True, 0, -1, (1 << 63)))
+def test_semantic_contract_rejects_noncanonical_event_sequence(
+    bad_sequence: object,
+) -> None:
+    base = _event(sequence=1)
+    malformed = MarketEvent(
+        event_id=base.event_id,
+        market_id=base.market_id,
+        selection_id=base.selection_id,
+        decimal_odds=base.decimal_odds,
+        observed_ts=base.observed_ts,
+        source_id=base.source_id,
+        sequence=bad_sequence,  # type: ignore[arg-type]
+        market_type=base.market_type,
+        status=base.status,
+        source_ts=base.source_ts,
+        ingest_ts=base.ingest_ts,
+        score_state=base.score_state,
+        metadata={
+            **base.metadata,
+            "product_acquisition_sequence": 1,
+        },
+        sport=base.sport,
+        competition_id=base.competition_id,
+        market_semantics_id=base.market_semantics_id,
+        provider_source_class=base.provider_source_class,
+        exchange_side=base.exchange_side,
+    )
+
+    with pytest.raises(
+        MarketStateIdentityError,
+        match="MarketEvent sequence is invalid",
+    ):
+        semantic_market_state_identity(malformed)
+

@@ -10,8 +10,8 @@ _RECEIVE_TIME = "2026-09-14T12:00:02+00:00"
 _SOURCE_ID = "source-once"
 
 
-class _SingleReadSourceProvider:
-    """Provider whose underlying source identity may only be captured once."""
+class _FencedSourceProvider:
+    """Provider allows only the reads required by ingress/acquisition identity fences."""
 
     def __init__(self) -> None:
         self.source_id_reads = 0
@@ -19,8 +19,8 @@ class _SingleReadSourceProvider:
     @property
     def source_id(self) -> str:
         self.source_id_reads += 1
-        if self.source_id_reads > 1:
-            raise AssertionError("underlying provider source_id was reread after capture")
+        if self.source_id_reads > 4:
+            raise AssertionError("underlying provider source_id was reread after commit")
         return _SOURCE_ID
 
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
@@ -43,7 +43,7 @@ class _SingleReadSourceProvider:
 
 class LiveObservationSourceIdentityTests(unittest.TestCase):
     def test_post_commit_readback_uses_committed_stats_source_identity(self):
-        provider = _SingleReadSourceProvider()
+        provider = _FencedSourceProvider()
 
         with tempfile.TemporaryDirectory() as workspace:
             result = observe_workspace_once(
@@ -53,7 +53,7 @@ class LiveObservationSourceIdentityTests(unittest.TestCase):
                 clock=lambda: _RECEIVE_TIME,
             )
 
-        self.assertEqual(provider.source_id_reads, 1)
+        self.assertEqual(provider.source_id_reads, 4)
         self.assertEqual(result.stats.source_id, _SOURCE_ID)
         self.assertEqual(result.stats.accepted, 1)
         self.assertEqual(result.health.status, "healthy")

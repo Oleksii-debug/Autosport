@@ -114,6 +114,64 @@ def _empirical_acceptance(
     return record.as_observation(), registry
 
 
+def test_direct_evidence_registration_revalidates_post_init_mutation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        current_action = _action("direct-evidence-mutation", side="BACK")
+        record = PaperExecutionEvidenceRecord(
+            action_id=current_action.action_id,
+            bookmaker_id=current_action.bookmaker_id,
+            account_id=current_action.account_id,
+            event_id=current_action.event_id,
+            market_id=current_action.market_id,
+            selection_id=current_action.selection_id,
+            side=current_action.side,
+            quote_id=current_action.quote_id,
+            outcome=PaperAttemptOutcome.ACCEPTED,
+            observed_at="2026-09-20T03:00:00.250000+00:00",
+            evidence_grade=EvidenceGrade.EMPIRICAL,
+            evidence_source="captured-paper-observation-v1",
+            accepted_odds="5.00",
+            accepted_stake="10.00",
+            reason="observed accepted",
+        )
+        object.__setattr__(record, "evidence_id", "")
+
+        with pytest.raises(
+            PaperExecutionIntegrityError,
+            match="evidence record no longer satisfies canonical value invariants",
+        ):
+            ledger.register_observation_evidence(record)
+
+        assert ledger.events() == []
+
+
+def test_direct_evidence_registration_rejects_ledger_subclass() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _LedgerSubclass(Path(tmp) / "paper-execution.jsonl")
+        current_action = _action("direct-evidence-ledger-subclass", side="BACK")
+        record = PaperExecutionEvidenceRecord(
+            action_id=current_action.action_id,
+            bookmaker_id=current_action.bookmaker_id,
+            account_id=current_action.account_id,
+            event_id=current_action.event_id,
+            market_id=current_action.market_id,
+            selection_id=current_action.selection_id,
+            side=current_action.side,
+            quote_id=current_action.quote_id,
+            outcome=PaperAttemptOutcome.REJECTED,
+            observed_at="2026-09-20T03:00:00.250000+00:00",
+            evidence_grade=EvidenceGrade.EMPIRICAL,
+            evidence_source="captured-paper-observation-v1",
+            reason="observed rejected",
+        )
+
+        with pytest.raises(TypeError, match="exact PaperExecutionLedger"):
+            ledger.register_observation_evidence(record)
+
+        assert ledger.events() == []
+
+
 def test_direct_reserve_rejects_noncanonical_run_id_before_durable_write() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")

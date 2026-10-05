@@ -844,7 +844,27 @@ def _safe_exception_args_detail(
     if type(args) is not tuple:
         return unavailable_detail
     if not args:
-        return unavailable_detail
+        # A custom __str__ with no canonical args is untrusted presentation input.
+        # Detect its presence through the exact class dictionaries without invoking
+        # the renderer. Plain subclasses with no custom renderer retain type-only
+        # diagnostics, while hostile/custom renderers fail closed to fixed detail.
+        try:
+            exception_type = type(exc)
+            mro = type.__getattribute__(exception_type, "__mro__")
+            builtin_types = tuple(
+                value
+                for value in vars(builtins).values()
+                if isinstance(value, type)
+            )
+            for candidate_type in mro:
+                if any(candidate_type is builtin_type for builtin_type in builtin_types):
+                    continue
+                class_dict = type.__getattribute__(candidate_type, "__dict__")
+                if "__str__" in class_dict:
+                    return unavailable_detail
+        except BaseException:
+            return unavailable_detail
+        return ""
 
     rendered = tuple(_safe_exception_scalar_text(value) for value in args)
     if any(value is None for value in rendered):

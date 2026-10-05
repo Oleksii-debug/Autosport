@@ -23,6 +23,7 @@ _PROPHETX_SEQUENCE_SOURCE_ID = "prophetx:sandbox:rest:v3-affiliate-get-markets"
 _LOCAL_ACQUISITION_METADATA_FIELDS = frozenset(
     {
         "product_acquisition_sequence",
+        "request_fingerprint_sha256",
         "response_sha256",
         "snapshot_fingerprint_sha256",
         "sequence_authority_id",

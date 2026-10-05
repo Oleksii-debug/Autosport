@@ -602,6 +602,54 @@ def test_resolver_rejects_datetime_subclass_before_timezone_hook_executes():
     assert attacker_called is False
 
 
+
+def test_resolver_rejects_custom_datetime_timezone_before_timezone_hook_executes():
+    attacker_called = False
+
+    class HostileTimezone(tzinfo):
+        def utcoffset(self, _dt):
+            nonlocal attacker_called
+            attacker_called = True
+            raise AssertionError("custom timezone hook must never execute")
+
+        def dst(self, _dt):
+            return timedelta(0)
+
+        def tzname(self, _dt):
+            return "HOSTILE"
+
+    with canonical_applicable_cost_case() as (
+        intent,
+        plan,
+        router_store,
+        request,
+        decision_at,
+    ):
+        hostile = datetime(
+            decision_at.year,
+            decision_at.month,
+            decision_at.day,
+            decision_at.hour,
+            decision_at.minute,
+            decision_at.second,
+            decision_at.microsecond,
+            tzinfo=HostileTimezone(),
+        )
+        with pytest.raises(
+            subject.ProspectiveApplicableCostError,
+            match="exact UTC timezone authority",
+        ):
+            subject.resolve_prospective_applicable_costs(
+                intent=intent,
+                plan=plan,
+                router_store=router_store,
+                model_request_id=request.request_id,
+                decision_at=hostile,
+            )
+
+    assert attacker_called is False
+
+
 def test_resolver_validates_plan_identity_elements_before_hostile_equality():
     attacker_called = False
 

@@ -9,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import autosport.paper as paper_module
+import autosport._paperbook_lay_economics_guard as lay_guard
 from autosport.domain import TicketLeg, TicketStatus
 from autosport.exchange_exposure import locked_capital_for_exchange_side
 from autosport.paper import PaperBook
@@ -2723,6 +2724,117 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
             self.assertEqual(loaded_ticket.stake, Decimal("10"))
             self.assertEqual(loaded.balance, Decimal("60.00"))
             self.assertEqual(loaded.committed_capital, Decimal("40.00"))
+
+
+    def test_lay_open_rejects_rebound_captured_uuid_generator_before_execution(self):
+        book = PaperBook(Decimal("100"))
+        attacker_calls = 0
+
+        def hostile_uuid4():
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("rebound UUID generator executed")
+
+        with patch.object(lay_guard, "_ORIGINAL_UUID4", hostile_uuid4):
+            with self.assertRaisesRegex(
+                ValueError,
+                "ticket-id generator authority changed",
+            ):
+                book.open_ticket(
+                    [self._lay_leg()],
+                    Decimal("10"),
+                    placed_at=QUOTE_AT,
+                )
+
+        self.assertEqual(attacker_calls, 0)
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+        self.assertEqual(book._lifecycle, [])
+
+    def test_lay_open_rejects_in_place_uuid_generator_code_mutation_before_execution(self):
+        book = PaperBook(Decimal("100"))
+        generator = lay_guard._CANONICAL_UUID4
+        original_code = generator.__code__
+        attacker_calls = 0
+
+        def hostile_uuid4():
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("mutated UUID generator executed")
+
+        try:
+            generator.__code__ = hostile_uuid4.__code__
+            with self.assertRaisesRegex(
+                ValueError,
+                "ticket-id generator authority changed",
+            ):
+                book.open_ticket(
+                    [self._lay_leg()],
+                    Decimal("10"),
+                    placed_at=QUOTE_AT,
+                )
+        finally:
+            generator.__code__ = original_code
+
+        self.assertEqual(attacker_calls, 0)
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+        self.assertEqual(book._lifecycle, [])
+
+    def test_lay_open_rejects_rebound_uuid_stringifier_before_execution(self):
+        book = PaperBook(Decimal("100"))
+        attacker_calls = 0
+
+        def hostile_uuid_str(_self):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("rebound UUID stringifier executed")
+
+        with patch.object(lay_guard._ORIGINAL_UUID_TYPE, "__str__", hostile_uuid_str):
+            with self.assertRaisesRegex(
+                ValueError,
+                "UUID string authority changed",
+            ):
+                book.open_ticket(
+                    [self._lay_leg()],
+                    Decimal("10"),
+                    placed_at=QUOTE_AT,
+                )
+
+        self.assertEqual(attacker_calls, 0)
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+        self.assertEqual(book._lifecycle, [])
+
+    def test_lay_open_rejects_in_place_uuid_stringifier_code_mutation_before_execution(self):
+        book = PaperBook(Decimal("100"))
+        stringifier = lay_guard._ORIGINAL_UUID_STR
+        original_code = stringifier.__code__
+        attacker_calls = 0
+
+        def hostile_uuid_str(_self):
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("mutated UUID stringifier executed")
+
+        try:
+            stringifier.__code__ = hostile_uuid_str.__code__
+            with self.assertRaisesRegex(
+                ValueError,
+                "UUID string authority changed",
+            ):
+                book.open_ticket(
+                    [self._lay_leg()],
+                    Decimal("10"),
+                    placed_at=QUOTE_AT,
+                )
+        finally:
+            stringifier.__code__ = original_code
+
+        self.assertEqual(attacker_calls, 0)
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+        self.assertEqual(book._lifecycle, [])
 
 
 if __name__ == "__main__":

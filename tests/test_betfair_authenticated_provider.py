@@ -231,8 +231,10 @@ def test_transition_is_bounded_and_marks_truncated_batches(
 
     assert len(first.quotes) == 2
     assert first.quality_flags == ("TRUNCATED_BATCH",)
+    assert first.cursor == "2"
     assert len(second.quotes) == 1
     assert second.quality_flags == ()
+    assert second.cursor == "3"
 
 
 def test_durable_drift_after_consumption_fails_closed() -> None:

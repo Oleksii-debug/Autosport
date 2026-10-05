@@ -3532,7 +3532,7 @@ def test_active_run_reader_rejects_provider_page_larger_than_requested_bound(
         method: str = "GET",
         allowed_http_errors: frozenset[int] = frozenset(),
     ) -> object:
-        assert "per_page=100&page=1" in path
+        assert path.endswith("per_page=100&page=1")
         assert method == "GET"
         assert not allowed_http_errors
         return {
@@ -3573,7 +3573,7 @@ def test_active_run_reader_rejects_total_count_smaller_than_page(
         method: str = "GET",
         allowed_http_errors: frozenset[int] = frozenset(),
     ) -> object:
-        assert "per_page=100&page=1" in path
+        assert path.endswith("per_page=100&page=1")
         assert method == "GET"
         assert not allowed_http_errors
         return {

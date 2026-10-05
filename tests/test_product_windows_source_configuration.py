@@ -305,7 +305,7 @@ def test_source_configuration_change_is_blocked_while_runtime_busy(
         _product_source_id_to_display={
             "parlayapi-table-tennis": "Parlay API — настільний теніс"
         },
-        workspace=restored_workspace,
+        workspace=tmp_path / "workspace",
         bell=lambda: None,
         _append_log=lambda _message: None,
     )

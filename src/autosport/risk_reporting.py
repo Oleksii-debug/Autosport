@@ -90,6 +90,8 @@ class ProductIssuedPaperEquityPath:
     opening_capital_authority_complete: bool
     applicable_costs_complete: bool
     net_equity_authoritative: bool
+    correction_lineage_complete: bool
+    restated_history_authoritative: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +122,8 @@ class ProductIssuedPaperDrawdownEvidence:
     opening_capital_authority_complete: bool
     applicable_costs_complete: bool
     net_equity_authoritative: bool
+    correction_lineage_complete: bool
+    restated_history_authoritative: bool
     evidence_sha256: str
 
 
@@ -153,6 +157,8 @@ class PaperRiskReport:
     opening_capital_authority_complete: bool
     applicable_costs_complete: bool
     net_equity_authoritative: bool
+    correction_lineage_complete: bool
+    restated_history_authoritative: bool
     history_view: str
     historical_as_known_supported: bool
     goal_id: str
@@ -285,6 +291,8 @@ def _equity_path_payload(
     opening_capital_authority_complete: bool,
     applicable_costs_complete: bool,
     net_equity_authoritative: bool,
+    correction_lineage_complete: bool,
+    restated_history_authoritative: bool,
 ) -> dict[str, object]:
     return {
         "schema": EQUITY_PATH_SCHEMA,
@@ -305,6 +313,8 @@ def _equity_path_payload(
         "opening_capital_authority_complete": opening_capital_authority_complete,
         "applicable_costs_complete": applicable_costs_complete,
         "net_equity_authoritative": net_equity_authoritative,
+        "correction_lineage_complete": correction_lineage_complete,
+        "restated_history_authoritative": restated_history_authoritative,
         "points": [
             {
                 "sequence": point.sequence,
@@ -477,6 +487,11 @@ def build_product_issued_paper_equity_path(
     # path does not yet compose and re-resolve them for the exact capital scope.
     applicable_costs_complete = False
     net_equity_authoritative = False
+    # Current PaperBook settlements are one-shot and expose no append-only
+    # correction/resettlement lineage. A current snapshot can be displayed, but
+    # cannot claim an authoritative corrected/restated historical view.
+    correction_lineage_complete = False
+    restated_history_authoritative = False
     payload = _equity_path_payload(
         goal_snapshot=goal_snapshot,
         goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
@@ -490,6 +505,8 @@ def build_product_issued_paper_equity_path(
         opening_capital_authority_complete=opening_capital_authority_complete,
         applicable_costs_complete=applicable_costs_complete,
         net_equity_authoritative=net_equity_authoritative,
+        correction_lineage_complete=correction_lineage_complete,
+        restated_history_authoritative=restated_history_authoritative,
     )
     path_sha256 = hashlib.sha256(
         json.dumps(
@@ -525,6 +542,8 @@ def build_product_issued_paper_equity_path(
         opening_capital_authority_complete=opening_capital_authority_complete,
         applicable_costs_complete=applicable_costs_complete,
         net_equity_authoritative=net_equity_authoritative,
+        correction_lineage_complete=correction_lineage_complete,
+        restated_history_authoritative=restated_history_authoritative,
     )
 
 
@@ -669,6 +688,8 @@ def _drawdown_evidence_payload(
         "opening_capital_authority_complete": path.opening_capital_authority_complete,
         "applicable_costs_complete": path.applicable_costs_complete,
         "net_equity_authoritative": path.net_equity_authoritative,
+        "correction_lineage_complete": path.correction_lineage_complete,
+        "restated_history_authoritative": path.restated_history_authoritative,
     }
 
 
@@ -714,6 +735,8 @@ def build_product_issued_paper_drawdown_evidence(
         opening_capital_authority_complete=path.opening_capital_authority_complete,
         applicable_costs_complete=path.applicable_costs_complete,
         net_equity_authoritative=path.net_equity_authoritative,
+        correction_lineage_complete=path.correction_lineage_complete,
+        restated_history_authoritative=path.restated_history_authoritative,
         evidence_sha256=evidence_sha256,
     )
 
@@ -1141,6 +1164,8 @@ def build_paper_risk_report(
         opening_capital_authority_complete=equity_path.opening_capital_authority_complete,
         applicable_costs_complete=equity_path.applicable_costs_complete,
         net_equity_authoritative=equity_path.net_equity_authoritative,
+        correction_lineage_complete=equity_path.correction_lineage_complete,
+        restated_history_authoritative=equity_path.restated_history_authoritative,
         history_view=equity_path.history_view,
         historical_as_known_supported=equity_path.historical_as_known_supported,
         goal_id=goal_snapshot.goal_id,

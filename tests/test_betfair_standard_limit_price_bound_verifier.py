@@ -12,6 +12,8 @@ import autosport.real_execution_ledger as ledger_module
 import autosport.supervised_plan_issuance as issuance_module
 import autosport.monotonic_workspace_authority as monotonic_module
 import autosport.json_integrity as json_integrity_module
+import autosport.integrity as integrity_module
+import autosport.workspace_lock as workspace_lock_module
 from autosport.betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundError,
     BetfairStandardLimitPriceBoundEvidence,
@@ -1265,6 +1267,65 @@ def test_in_place_durable_path_lock_body_mutation_is_rejected_before_execution()
             )
     finally:
         body.__code__ = original_code
+
+    assert attacker_called is False
+
+def test_in_place_integrity_lock_helper_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    helper = integrity_module._lock_handle
+    original_code = helper.__code__
+    attacker_called = False
+
+    def attacker_lock(_handle):
+        nonlocal attacker_called
+        attacker_called = True
+        return None
+
+    try:
+        helper.__code__ = attacker_lock.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        helper.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_rebound_workspace_lock_handle_validator_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_validate(self, _handle):
+        nonlocal attacker_called
+        attacker_called = True
+        return None
+
+    monkeypatch.setattr(
+        workspace_lock_module.WorkspaceEconomicLock,
+        "_validate_open_handle_identity",
+        attacker_validate,
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
 
     assert attacker_called is False
 

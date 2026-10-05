@@ -1422,6 +1422,19 @@ class _ForgedEconomicEvidence:
     evidence_id = "betdaq-economic:" + ("0" * 64)
 
 
+def test_postings_readback_rejects_method_subclass_before_hash_or_equality(
+    monkeypatch,
+):
+    client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    value = client.read_account_postings_by_id(9000)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="postings readback method must be exact text",
+    ):
+        replace(value, method=_AdversarialMethod("ListAccountPostingsById"))
+
+
 def test_economic_evidence_rejects_method_subclass_before_equality():
     with pytest.raises(
         BetdaqEconomicReadbackError,

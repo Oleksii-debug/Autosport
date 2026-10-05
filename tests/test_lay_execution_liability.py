@@ -539,6 +539,50 @@ class LayExecutionLiabilityTests(unittest.TestCase):
 
             self.assertEqual(len(ledger.events()), before)
 
+    def test_registry_bypasses_instance_authority_and_ledger_method_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            source_action = _action()
+            record = PaperExecutionEvidenceRecord(
+                action_id=source_action.action_id,
+                bookmaker_id=source_action.bookmaker_id,
+                account_id=source_action.account_id,
+                event_id=source_action.event_id,
+                market_id=source_action.market_id,
+                selection_id=source_action.selection_id,
+                side=source_action.side,
+                quote_id=source_action.quote_id,
+                outcome=PaperAttemptOutcome.ACCEPTED,
+                observed_at=STARTED_AT,
+                evidence_grade=EvidenceGrade.EMPIRICAL,
+                evidence_source="captured-paper-observation-v1",
+                accepted_odds="5.00",
+                accepted_stake="10.00",
+            )
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("instance evidence authority override executed")
+
+            registry._require_authority = forbidden
+            ledger.register_observation_evidence = forbidden
+            ledger.resolve_observation_evidence = forbidden
+            try:
+                evidence_id = registry.register(record)
+                resolved = registry.resolve(evidence_id)
+                authority = registry.authority_ledger
+            finally:
+                registry.__dict__.pop("_require_authority", None)
+                ledger.__dict__.pop("register_observation_evidence", None)
+                ledger.__dict__.pop("resolve_observation_evidence", None)
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertIs(authority, ledger)
+            self.assertEqual(resolved, record)
+
     def test_registry_revalidates_mutated_decimal_before_durable_write(self):
         class HostileDecimal(Decimal):
             pass

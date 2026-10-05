@@ -558,6 +558,43 @@ def _guard_paperbook_runtime_authority(method):
     return guarded
 
 
+def _make_paperbook_constructor_decimal_authority():
+    descriptor = None
+    function = None
+    function_code = None
+
+    def install(canonical_type: type) -> None:
+        nonlocal descriptor, function, function_code
+        if descriptor is not None:
+            raise RuntimeError("PaperBook constructor decimal authority already installed")
+        descriptor = canonical_type.__dict__["_canonical_decimal_input"]
+        if type(descriptor) is not classmethod:
+            raise TypeError("PaperBook canonical decimal helper must remain a classmethod")
+        function = descriptor.__func__
+        function_code = function.__code__
+
+    def canonicalize(book: object, value: object, label: str) -> Decimal:
+        if descriptor is None or function is None or function_code is None:
+            raise RuntimeError("PaperBook constructor decimal authority is unavailable")
+        canonical_type = type(book)
+        if canonical_type.__dict__.get("_canonical_decimal_input") is not descriptor:
+            raise ValueError("PaperBook constructor decimal dispatch changed")
+        if function.__code__ is not function_code:
+            raise ValueError("PaperBook constructor decimal authority changed")
+        result = function(canonical_type, value, label)
+        if function.__code__ is not function_code:
+            raise ValueError("PaperBook constructor decimal authority changed")
+        return result
+
+    return install, canonicalize
+
+
+(
+    _install_paperbook_constructor_decimal_authority,
+    _canonicalize_paperbook_constructor_decimal,
+) = _make_paperbook_constructor_decimal_authority()
+
+
 def _guard_paperbook_constructor_authority(method):
     """Seal PaperBook authority registration before instance state is accepted."""
     method_code = method.__code__
@@ -569,6 +606,8 @@ def _guard_paperbook_constructor_authority(method):
     causal_register_code = causal_register.__code__
     type_authority = _require_paperbook_type_authority
     type_authority_code = type_authority.__code__
+    canonical_decimal = _canonicalize_paperbook_constructor_decimal
+    canonical_decimal_code = canonical_decimal.__code__
 
     def require_type(book: object) -> None:
         if type_authority.__code__ is not type_authority_code:
@@ -609,7 +648,14 @@ def _guard_paperbook_constructor_authority(method):
         )
         if method.__code__ is not method_code:
             raise ValueError("PaperBook constructor callable authority changed")
-        result = method(self, *args, **kwargs)
+        if canonical_decimal.__code__ is not canonical_decimal_code:
+            raise ValueError("PaperBook constructor decimal dispatch authority changed")
+        result = method(
+            self,
+            *args,
+            _canonical_decimal=canonical_decimal,
+            **kwargs,
+        )
         if method.__code__ is not method_code:
             raise ValueError("PaperBook constructor callable authority changed")
         return result
@@ -1107,8 +1153,13 @@ class PaperBook:
     """Virtual bankroll and auditable paper tickets. No real-money execution path exists."""
 
     @_guard_paperbook_constructor_authority
-    def __init__(self, initial_bankroll: Decimal | str = Decimal("10000")) -> None:
-        initial = self._canonical_decimal_input(initial_bankroll, "initial_bankroll")
+    def __init__(
+        self,
+        initial_bankroll: Decimal | str = Decimal("10000"),
+        *,
+        _canonical_decimal=None,
+    ) -> None:
+        initial = _canonical_decimal(self, initial_bankroll, "initial_bankroll")
         if initial <= 0:
             raise ValueError("initial virtual bankroll must be positive")
         self.initial_bankroll = initial
@@ -2279,6 +2330,9 @@ class PaperBook:
 # cannot redirect cls/self helper dispatch into attacker-controlled validation.
 _install_paperbook_type_authority(PaperBook)
 del _install_paperbook_type_authority
+
+_install_paperbook_constructor_decimal_authority(PaperBook)
+del _install_paperbook_constructor_decimal_authority
 
 _install_paperbook_snapshot_entry_dispatch_authority(PaperBook)
 del _install_paperbook_snapshot_entry_dispatch_authority

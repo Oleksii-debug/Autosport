@@ -136,5 +136,80 @@ class MarketEventBusDeliverySnapshotIntegrityTests(unittest.TestCase):
                 store.close()
 
 
+    def test_inverted_receipt_chronology_never_reaches_subscribers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                bus = MarketEventBus(store)
+                delivered: list[MarketEvent] = []
+                bus.subscribe(delivered.append)
+                inverted = MarketEvent.from_dict(
+                    {
+                        "event_id": "event-1",
+                        "market_id": "winner",
+                        "selection_id": "alice",
+                        "decimal_odds": "2.0",
+                        "observed_ts": "2026-09-14T00:00:01+00:00",
+                        "ingest_ts": "2026-09-14T00:00:00+00:00",
+                        "source_id": "source-1",
+                        "sequence": 1,
+                    }
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "ingest_ts must not precede observed_ts",
+                ):
+                    bus.publish(inverted)
+
+                self.assertEqual(delivered, [])
+                self.assertEqual(store.events(), [])
+            finally:
+                store.close()
+
+    def test_batch_with_inverted_receipt_chronology_is_atomic_before_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                bus = MarketEventBus(store)
+                delivered: list[MarketEvent] = []
+                bus.subscribe(delivered.append)
+                valid = MarketEvent.from_dict(
+                    {
+                        "event_id": "event-1",
+                        "market_id": "winner",
+                        "selection_id": "alice",
+                        "decimal_odds": "2.0",
+                        "observed_ts": "2026-09-14T00:00:00+00:00",
+                        "ingest_ts": "2026-09-14T00:00:00+00:00",
+                        "source_id": "source-1",
+                        "sequence": 1,
+                    }
+                )
+                inverted = MarketEvent.from_dict(
+                    {
+                        "event_id": "event-1",
+                        "market_id": "winner",
+                        "selection_id": "bob",
+                        "decimal_odds": "2.5",
+                        "observed_ts": "2026-09-14T00:00:02+00:00",
+                        "ingest_ts": "2026-09-14T00:00:01+00:00",
+                        "source_id": "source-1",
+                        "sequence": 2,
+                    }
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "ingest_ts must not precede observed_ts",
+                ):
+                    bus.publish_many((valid, inverted))
+
+                self.assertEqual(delivered, [])
+                self.assertEqual(store.events(), [])
+            finally:
+                store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

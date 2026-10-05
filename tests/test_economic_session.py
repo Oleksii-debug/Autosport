@@ -273,6 +273,52 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
         self.assertEqual(calls, 0)
         self.assertFalse(store.state_path.exists())
 
+
+    def test_internal_authority_root_rebinding_fails_closed(self) -> None:
+        store = self._store()
+        store.current()
+        store._authority.authority_root = store._authority.authority_root.parent
+        with self.assertRaisesRegex(
+            EconomicSessionIntegrityError,
+            "authority composition changed after construction",
+        ):
+            store.current()
+
+    def test_internal_goal_store_path_rebinding_fails_closed(self) -> None:
+        store = self._store()
+        store.current()
+        store.goal_store.path = store.goal_store.path.parent / "redirected-goal.json"
+        with self.assertRaisesRegex(
+            EconomicSessionIntegrityError,
+            "authority composition changed after construction",
+        ):
+            store.current()
+
+    def test_module_helper_alias_rebinding_fails_before_execution(self) -> None:
+        import autosport.economic_session as economic_session
+
+        store = self._store()
+        store.current()
+        original = economic_session._ECONOMIC_GOAL_LOAD
+        calls = 0
+
+        def forbidden(_self):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("hostile helper alias executed")
+
+        economic_session._ECONOMIC_GOAL_LOAD = forbidden
+        try:
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.current()
+        finally:
+            economic_session._ECONOMIC_GOAL_LOAD = original
+
+        self.assertEqual(calls, 0)
+
     def test_default_clock_session_is_positive_boundary_authority(self) -> None:
         store = ProductEconomicSessionStore(
             self.workspace,

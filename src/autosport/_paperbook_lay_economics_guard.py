@@ -41,6 +41,8 @@ _ORIGINAL_UUID4 = _paper.uuid.uuid4
 _CANONICAL_UUID4 = _ORIGINAL_UUID4
 _ORIGINAL_UUID4_CODE = _ORIGINAL_UUID4.__code__
 _ORIGINAL_UUID_TYPE = _paper.uuid.UUID
+_ORIGINAL_UUID_STR = _ORIGINAL_UUID_TYPE.__str__
+_ORIGINAL_UUID_STR_CODE = _ORIGINAL_UUID_STR.__code__
 _ORIGINAL_PAPER_DECIMAL_CONTEXT = _paper._paper_decimal_context
 _ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY = _paper._require_ticket_opening_authority
 _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY = _paper._require_paperbook_causal_history_authority
@@ -419,7 +421,20 @@ def _open_ticket_unlocked(
         raise ValueError("PaperBook canonical ticket-id generator authority changed")
     if type(ticket_uuid) is not _ORIGINAL_UUID_TYPE:
         raise ValueError("PaperBook canonical ticket-id generator returned non-canonical UUID")
-    ticket_id = str(ticket_uuid)
+    if (
+        _ORIGINAL_UUID_TYPE.__str__ is not _ORIGINAL_UUID_STR
+        or _ORIGINAL_UUID_STR.__code__ is not _ORIGINAL_UUID_STR_CODE
+    ):
+        raise ValueError("PaperBook canonical UUID string authority changed")
+    ticket_id = _ORIGINAL_UUID_STR(ticket_uuid)
+    if (
+        _ORIGINAL_UUID_TYPE.__str__ is not _ORIGINAL_UUID_STR
+        or _ORIGINAL_UUID_STR.__code__ is not _ORIGINAL_UUID_STR_CODE
+    ):
+        raise ValueError("PaperBook canonical UUID string authority changed")
+    _require_exact_text(ticket_id, "ticket_id")
+    if ticket_id in self.tickets:
+        raise ValueError("PaperBook canonical ticket_id already exists")
 
     ticket = _PAPER_TICKET_TYPE(
         ticket_id=ticket_id,

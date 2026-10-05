@@ -48,7 +48,6 @@ from .real_execution_ledger import (
     ExternalAcknowledgement,
     RealExecutionLedger,
 )
-from . import supervised_execution as _supervised_execution_runtime
 from .supervised_execution import (
     BoundSupervisedExecutionPlan,
     SupervisedApproval,

@@ -299,7 +299,8 @@ class ProspectiveApplicableCostComponent:
                 )
             return
 
-        if self.source_family != expected_source_family:
+        canonical_source_family = _text(self.source_family, "source_family")
+        if canonical_source_family != expected_source_family:
             raise ProspectiveApplicableCostError(
                 "cost component source family does not match canonical authority"
             )

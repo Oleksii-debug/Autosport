@@ -1987,6 +1987,79 @@ class RealExecutionLedgerTests(unittest.TestCase):
             self.assertIsNone(view.attempts[0].submitted_request_sha256)
 
 
+
+    def test_provider_request_digest_binding_survives_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-provider-digest",
+                reserved_at=RESERVED_AT,
+            )
+            digest = "e" * 64
+            ledger.mark_submitted(
+                "try-provider-digest",
+                submitted_at=SUBMITTED_AT,
+                request_sha256=digest,
+            )
+            ledger.bind_provider_evidence(
+                attempt_id="try-provider-digest",
+                evidence_id="f" * 64,
+                observed_at=UNKNOWN_AT,
+                source="betfair:placeOrders:test-response",
+                request_sha256=digest,
+            )
+
+            view = RealExecutionLedger(path).verified_execution_view("p1")
+            attempt = view.attempts[0]
+
+            self.assertEqual(attempt.submitted_request_sha256, digest)
+            self.assertIsNotNone(attempt.provider_evidence)
+            self.assertEqual(
+                attempt.provider_evidence.request_sha256,
+                digest,
+            )
+
+    def test_provider_request_digest_mismatch_cannot_bind_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-provider-mismatch",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted(
+                "try-provider-mismatch",
+                submitted_at=SUBMITTED_AT,
+                request_sha256="1" * 64,
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionIdentityConflict,
+                "provider request evidence mismatches durable submission",
+            ):
+                ledger.bind_provider_evidence(
+                    attempt_id="try-provider-mismatch",
+                    evidence_id="2" * 64,
+                    observed_at=UNKNOWN_AT,
+                    source="betfair:placeOrders:test-response",
+                    request_sha256="3" * 64,
+                )
+
+            view = ledger.verified_execution_view("p1")
+            self.assertIsNone(view.attempts[0].provider_evidence)
+            self.assertEqual(
+                view.attempts[0].submitted_request_sha256,
+                "1" * 64,
+            )
+
+
     def test_conflicting_submitted_request_digest_replay_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"

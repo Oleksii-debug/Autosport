@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -526,3 +527,64 @@ def test_worker_rejects_noncanonical_initial_bankroll(
         )
 
     assert worker.busy is False
+
+
+def test_profiled_builder_closes_runtime_on_invalid_manifest_source_identity(
+    tmp_path: Path,
+) -> None:
+    from autosport.product_gui_worker import (
+        _ProfiledSourceBinding,
+        _capture_profiled_runtime_builder,
+    )
+
+    class Source:
+        source_id = "source-1"
+        stream_epoch = "epoch-1"
+        workspace = tmp_path
+
+        def fetch_catalog_page(self):
+            return None
+
+        def fetch_deltas(self):
+            return ()
+
+        def resolve_event(self):
+            return None
+
+    class HostileSourceId(str):
+        pass
+
+    class Runtime:
+        def __init__(self, source: Source) -> None:
+            self.workspace = tmp_path
+            self.manifest = SimpleNamespace(source_id=HostileSourceId("source-1"))
+            self.collector = SimpleNamespace(source=source)
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    source = Source()
+    runtime = Runtime(source)
+    builder = _capture_profiled_runtime_builder(
+        source_bindings=(
+            _ProfiledSourceBinding(
+                factory_spec="provider.module:factory",
+                provider_source_id="source-1",
+                factory=lambda: source,
+            ),
+        ),
+        runtime_factory=lambda **_kwargs: runtime,
+        runtime_type=Runtime,
+        path_type=Path,
+    )
+
+    with pytest.raises(ProductEntrypointError):
+        builder(
+            tmp_path,
+            "provider.module:factory",
+            "10000",
+            expected_source_id="source-1",
+        )
+
+    assert runtime.closed is True

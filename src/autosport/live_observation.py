@@ -256,6 +256,39 @@ class _ReplayableBatchProvider:
     def has_inflight(self) -> bool:
         return self._inflight is not None
 
+    def _reset_rejected_provider_read(self, primary_error: BaseException) -> None:
+        """Reset provider-local paging only while the original source authority remains exact."""
+
+        try:
+            current_source_id = getattr(self._provider, "source_id", None)
+        except BaseException as authority_error:
+            try:
+                primary_error.add_note(
+                    "provider pending-snapshot reset skipped because source authority "
+                    f"could not be re-read: {_exception_text(authority_error)}"
+                )
+            except BaseException:
+                pass
+            return
+        if type(current_source_id) is not str or current_source_id != self.source_id:
+            return
+
+        reset_snapshot = getattr(self._provider, "reset_pending_snapshot", None)
+        if not callable(reset_snapshot):
+            reset_snapshot = getattr(self._provider, "_clear_pending_snapshot", None)
+        if not callable(reset_snapshot):
+            return
+        try:
+            reset_snapshot()
+        except BaseException as cleanup_error:
+            try:
+                primary_error.add_note(
+                    "provider rejected-read snapshot reset also failed: "
+                    f"{_exception_text(cleanup_error)}"
+                )
+            except BaseException:
+                pass
+
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         if self._inflight is None:
             current_source_id = getattr(self._provider, "source_id", None)
@@ -267,20 +300,27 @@ class _ReplayableBatchProvider:
                     "provider source identity changed before live batch read"
                 )
             batch = self._provider.read_batch(max_items=max_items)
-            current_source_id = getattr(self._provider, "source_id", None)
-            if (
-                type(current_source_id) is not str
-                or current_source_id != self.source_id
-            ):
-                raise RuntimeError(
-                    "provider source identity changed during live batch read"
-                )
-            if type(batch) is not ProviderBatch:
-                raise TypeError("provider must return an exact ProviderBatch")
-            if batch.source_id != self.source_id:
-                raise RuntimeError(
-                    "provider batch source identity conflicts with live provider authority"
-                )
+            try:
+                current_source_id = getattr(self._provider, "source_id", None)
+                if (
+                    type(current_source_id) is not str
+                    or current_source_id != self.source_id
+                ):
+                    raise RuntimeError(
+                        "provider source identity changed during live batch read"
+                    )
+                if type(batch) is not ProviderBatch:
+                    raise TypeError("provider must return an exact ProviderBatch")
+                if batch.source_id != self.source_id:
+                    raise RuntimeError(
+                        "provider batch source identity conflicts with live provider authority"
+                    )
+            except BaseException as exc:
+                # The underlying read may already have advanced provider-local
+                # pagination even though no batch was admitted into this wrapper.
+                # Reset only while the exact original source authority still holds.
+                self._reset_rejected_provider_read(exc)
+                raise
             if self._carried_quality_flags:
                 batch = ProviderBatch(
                     source_id=batch.source_id,

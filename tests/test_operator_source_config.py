@@ -6,7 +6,9 @@ import pytest
 
 import autosport.operator_source_config as operator_source_config
 from autosport.operator_source_config import (
+    OperatorSourceConfig,
     OperatorSourceConfigError,
+    OperatorSourceSelection,
     OperatorSourceSelectionState,
     build_operator_source_config,
     parse_operator_source_config,
@@ -196,3 +198,45 @@ def test_invalid_override_is_invalid_not_configuration_required():
 def test_payload_size_is_bounded():
     with pytest.raises(OperatorSourceConfigError, match="size"):
         parse_operator_source_config(b"x" * 4097)
+
+
+def test_integrity_string_subclass_is_rejected_before_equality_dispatch():
+    valid = build_operator_source_config("betfair-exchange")
+
+    class HostileDigest(str):
+        def __eq__(self, _other: object) -> bool:
+            raise AssertionError("digest subtype equality must not execute")
+
+    with pytest.raises(OperatorSourceConfigError):
+        OperatorSourceConfig(
+            valid.source_id,
+            HostileDigest(valid.integrity_sha256),
+        )
+
+
+def test_frozen_config_is_revalidated_before_serialization():
+    config = build_operator_source_config("betfair-exchange")
+    object.__setattr__(config, "source_id", "paper-fixture")
+
+    with pytest.raises(OperatorSourceConfigError):
+        config.to_json_bytes()
+
+
+def test_selection_reason_code_requires_exact_bounded_text():
+    class HostileReason(str):
+        def __bool__(self) -> bool:
+            raise AssertionError("reason subtype truthiness must not execute")
+
+    with pytest.raises(TypeError):
+        OperatorSourceSelection(
+            OperatorSourceSelectionState.CONFIGURATION_REQUIRED,
+            None,
+            HostileReason("source_configuration_missing"),
+        )
+
+    with pytest.raises(TypeError):
+        OperatorSourceSelection(
+            OperatorSourceSelectionState.CONFIGURATION_REQUIRED,
+            None,
+            "x" * 129,
+        )

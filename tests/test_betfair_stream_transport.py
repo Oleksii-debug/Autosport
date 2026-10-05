@@ -885,6 +885,18 @@ def test_public_protocol_declares_fail_closed_boundaries() -> None:
     )
     assert (
         stream.PUBLIC_PROTOCOL[
+            "socket_ingress_monotonic_timestamp_authority"
+        ]
+        is True
+    )
+    assert (
+        stream.PUBLIC_PROTOCOL[
+            "buffered_frame_timestamp_refresh"
+        ]
+        is False
+    )
+    assert (
+        stream.PUBLIC_PROTOCOL[
             "requires_resubscription_after_reconnect"
         ]
         is True

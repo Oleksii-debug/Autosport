@@ -482,6 +482,14 @@ class _HostileComparableText(str):
         return super().__eq__(other)
 
 
+class _HostileExchangeSide(str):
+    comparisons = 0
+
+    def __eq__(self, other: object) -> bool:
+        type(self).comparisons += 1
+        return super().__eq__(other)
+
+
 class PaperBookLayEconomicsTests(unittest.TestCase):
     @staticmethod
     def _lay_leg() -> TicketLeg:
@@ -493,6 +501,23 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
             sport="football",
             exchange_side="lay",
         )
+
+    def test_mutated_exchange_side_subclass_is_rejected_before_equality_dispatch(self):
+        book = PaperBook(Decimal("100"))
+        leg = self._lay_leg()
+        object.__setattr__(leg, "exchange_side", _HostileExchangeSide("lay"))
+        _HostileExchangeSide.comparisons = 0
+
+        with self.assertRaisesRegex(ValueError, "exchange_side"):
+            book.open_ticket(
+                [leg],
+                Decimal("10"),
+                placed_at=QUOTE_AT,
+            )
+
+        self.assertEqual(_HostileExchangeSide.comparisons, 0)
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
 
     def test_lay_public_read_validates_visible_state_before_authority_comparison(self):
         book = PaperBook(Decimal("100"))

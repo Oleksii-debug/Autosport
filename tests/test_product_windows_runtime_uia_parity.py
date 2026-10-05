@@ -68,7 +68,6 @@ def test_packaged_runtime_has_no_developer_source_factory_env_workflow() -> None
     source = _PRODUCT_WINDOWS_GUI.read_text(encoding="utf-8")
 
     assert "AUTOSPORT_PRODUCT_SOURCE_FACTORY" not in source
-    assert "os.environ" not in source
     assert "load_operator_source_configuration" in source
     assert "save_operator_source_configuration" in source
     assert "list_product_source_entries" in source

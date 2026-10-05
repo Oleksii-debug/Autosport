@@ -21,7 +21,13 @@ from decimal import (
 )
 from pathlib import Path
 
-from .domain import PaperTicket, TicketLeg, TicketStatus, utc_now_iso
+from .domain import (
+    PaperTicket,
+    TicketLeg,
+    TicketStatus,
+    _canonical_semantic_identity,
+    utc_now_iso,
+)
 from .forecasting import parse_iso_timestamp
 
 
@@ -30,8 +36,8 @@ _CANONICAL_PAPER_DECIMAL_EMIN = -999999
 _CANONICAL_PAPER_DECIMAL_EMAX = 999999
 _CANONICAL_MAX_PAPER_DECIMAL_TEXT_CHARS = 512
 _CANONICAL_MAX_PAPER_SNAPSHOT_BYTES = 8 * 1024 * 1024
-_CANONICAL_PAPER_SNAPSHOT_SCHEMA_VERSION = 7
-_CANONICAL_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7})
+_CANONICAL_PAPER_SNAPSHOT_SCHEMA_VERSION = 8
+_CANONICAL_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7, 8})
 _CANONICAL_SCHEMA_MISSING = object()
 _CANONICAL_PAPER_DECIMAL_TYPE = Decimal
 _CANONICAL_DECIMAL_CONTEXT_TYPE = Context
@@ -59,6 +65,7 @@ _CANONICAL_TICKET_LEG_CONSTRUCTOR = TicketLeg
 _CANONICAL_UTC_NOW_ISO = utc_now_iso
 _CANONICAL_PARSE_ISO_TIMESTAMP = parse_iso_timestamp
 _CANONICAL_UUID4 = uuid.uuid4
+_CANONICAL_SEMANTIC_IDENTITY = _canonical_semantic_identity
 _CANONICAL_OS_OPEN = os.open
 _CANONICAL_OS_FSTAT = os.fstat
 _CANONICAL_OS_STAT = os.stat
@@ -83,6 +90,7 @@ def _ticket_opening_commitment(ticket: PaperTicket) -> tuple[object, ...]:
             leg.locked_odds,
             leg.sport,
             leg.exchange_side,
+            leg.market_semantics_id,
         )
         for leg in ticket.legs
     )
@@ -671,20 +679,20 @@ class PaperBook:
         _CANONICAL_REQUIRE_FINITE(balance, "balance")
         for leg in ticket.legs:
             _CANONICAL_VALIDATE_TICKET_LEG(leg, ticket_id=ticket.ticket_id)
-        leg_quote_keys = {leg.quote_key for leg in ticket.legs}
-        unknown_winners = winning_quote_keys - leg_quote_keys
-        unknown_voids = void_quote_keys - leg_quote_keys
+        leg_settlement_keys = {leg.settlement_key for leg in ticket.legs}
+        unknown_winners = winning_quote_keys - leg_settlement_keys
+        unknown_voids = void_quote_keys - leg_settlement_keys
         if unknown_winners:
-            raise ValueError("PaperBook settlement contains unknown winning quote_key")
+            raise ValueError("PaperBook settlement contains unknown winning settlement key")
         if unknown_voids:
-            raise ValueError("PaperBook settlement contains unknown void quote_key")
+            raise ValueError("PaperBook settlement contains unknown void settlement key")
         if winning_quote_keys & void_quote_keys:
-            raise ValueError("PaperBook settlement quote_key cannot be both winning and void")
+            raise ValueError("PaperBook settlement key cannot be both winning and void")
 
         effective_legs = tuple(
-            leg for leg in ticket.legs if leg.quote_key not in void_quote_keys
+            leg for leg in ticket.legs if leg.settlement_key not in void_quote_keys
         )
-        if any(leg.quote_key not in winning_quote_keys for leg in effective_legs):
+        if any(leg.settlement_key not in winning_quote_keys for leg in effective_legs):
             return _CANONICAL_TICKET_STATUS_LOST, _CANONICAL_PAPER_DECIMAL_TYPE("0"), balance
 
         status = _CANONICAL_TICKET_STATUS_VOID if not effective_legs else _CANONICAL_TICKET_STATUS_WON
@@ -839,6 +847,7 @@ class PaperBook:
                             "locked_odds": str(leg.locked_odds),
                             "sport": leg.sport,
                             "exchange_side": leg.exchange_side,
+                            "market_semantics_id": leg.market_semantics_id,
                         }
                         for leg in t.legs
                     ],
@@ -1106,6 +1115,16 @@ class PaperBook:
                 raise ValueError(
                     "PaperBook LAY economic materialization is not supported"
                 )
+        if leg.market_semantics_id is not None:
+            try:
+                _CANONICAL_SEMANTIC_IDENTITY(
+                    leg.market_semantics_id,
+                    f"market_semantics_id{suffix}",
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "PaperBook ticket market_semantics_id must be canonical"
+                ) from exc
         _CANONICAL_REQUIRE_FINITE(leg.locked_odds, f"locked_odds{suffix}")
         if leg.locked_odds <= 1:
             raise ValueError("PaperBook snapshot decimal odds must be greater than 1")
@@ -1401,6 +1420,22 @@ class PaperBook:
                 if schema_version is not None and schema_version >= 7
                 else None
             )
+            if (
+                (schema_version is None or schema_version < 8)
+                and "market_semantics_id" in raw_leg
+            ):
+                raise ValueError(
+                    "ticket leg market_semantics_id is unsupported before schema 8"
+                )
+            market_semantics_id = (
+                _CANONICAL_REQUIRED_SNAPSHOT_FIELD(
+                    raw_leg,
+                    "market_semantics_id",
+                    "ticket leg",
+                )
+                if schema_version is not None and schema_version >= 8
+                else None
+            )
             if sport is not None:
                 _CANONICAL_REQUIRE_CANONICAL_TEXT(
                     sport,
@@ -1418,6 +1453,7 @@ class PaperBook:
                     ),
                     sport=sport,
                     exchange_side=exchange_side,
+                    market_semantics_id=market_semantics_id,
                 )
             )
         return tuple(legs)
@@ -1497,7 +1533,7 @@ class PaperBook:
             if ticket_id in seen_ticket_ids:
                 raise ValueError("PaperBook snapshot contains duplicate ticket_id")
             seen_ticket_ids.add(ticket_id)
-            if schema_version in {3, 4, 5, 6, 7}:
+            if schema_version in {3, 4, 5, 6, 7, 8}:
                 provider_source_ids_raw = _CANONICAL_REQUIRED_SNAPSHOT_FIELD(
                     item, "provider_source_ids", f"ticket {ticket_id}"
                 )
@@ -1513,7 +1549,7 @@ class PaperBook:
                         ),
                         ticket_id,
                     )
-                    if schema_version in {4, 5, 6, 7}
+                    if schema_version in {4, 5, 6, 7, 8}
                     else ()
                 )
                 bankroll_id = _CANONICAL_REQUIRED_SNAPSHOT_FIELD(
@@ -1546,7 +1582,7 @@ class PaperBook:
                     _CANONICAL_REQUIRED_SNAPSHOT_FIELD(
                         item, "settled_at", f"ticket {ticket_id}"
                     )
-                    if schema_version in {5, 6, 7}
+                    if schema_version in {5, 6, 7, 8}
                     else None
                 ),
                 status=_CANONICAL_PARSE_SNAPSHOT_STATUS(

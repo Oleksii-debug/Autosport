@@ -14,6 +14,7 @@ from autosport.betfair_supervised_execution import (
     PlaceOrdersOutcome,
     execute_betfair_supervised_action,
 )
+from autosport.execution_quote_chain import build_execution_quote_chain_evidence
 from autosport.real_execution_ledger import (
     AttemptState,
     ExecutionLedgerBusyError,
@@ -398,6 +399,17 @@ def test_final_send_persists_exact_serialized_request_digest_across_restart() ->
         assert attempt.submitted_request_sha256 == expected_digest
         assert attempt.provider_evidence is not None
         assert attempt.provider_evidence.request_sha256 == expected_digest
+
+        chain = build_execution_quote_chain_evidence(
+            restarted,
+            plan_id=bound.execution_plan.plan_id,
+            attempt_id="attempt-durable-request-digest",
+        )
+        assert chain.submission_instruction_sha256 == expected_digest
+        assert chain.provider_request_sha256 == expected_digest
+        assert chain.submit_instruction_identity_bound is True
+        assert chain.provider_request_correlation_bound is True
+        assert chain.actual_submitted_instruction_bound is True
 
         reconstructed = dict(request)
         reconstructed["id"] = request["id"] + 1

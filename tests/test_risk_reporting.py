@@ -101,6 +101,8 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(report.risk_of_ruin_limit, Decimal("0.05"))
         self.assertIsNone(report.risk_of_ruin_upper_bound)
         self.assertEqual(report.risk_of_ruin_status, RISK_OF_RUIN_STATUS_UNKNOWN)
+        self.assertFalse(report.frozen_scope_complete)
+        self.assertFalse(report.historical_reresolution_complete)
 
     def test_paper_report_never_claims_live_execution_headroom(self) -> None:
         book = PaperBook("100")
@@ -404,6 +406,8 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(path.minimum_equity_point_id, path.points[2].point_id)
         self.assertFalse(path.availability_complete)
         self.assertTrue(path.settled_history_complete)
+        self.assertFalse(path.frozen_scope_complete)
+        self.assertFalse(path.historical_reresolution_complete)
         self.assertEqual(len(path.path_sha256), 64)
 
     def test_product_issued_equity_path_restart_reresolves_identically(self) -> None:

@@ -16,8 +16,12 @@ from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha256
 import hmac
+import http.client as _http_client
 import json
+import socket as _socket
+import ssl as _ssl
 import urllib.request as _urllib_request
+from sys import _getframe
 from secrets import token_bytes, token_hex
 from threading import RLock
 from weakref import ReferenceType, WeakKeyDictionary, ref
@@ -167,16 +171,287 @@ def _make_account_identity_authority():
     hmac_compare_digest = hmac.compare_digest
     token_hex_fn = token_hex
     weakref_fn = ref
+    getframe_fn = _getframe
+    object_id = id
+    exact_type = type
+    string_type = str
+    integer_type = int
+    tuple_type = tuple
+    missing_value = object()
 
     canonical_client_init = client_type.__init__
+    canonical_clock = readonly_module._canonical_utc_now
+    canonical_clock_code = getattr(canonical_clock, "__code__", None)
+    canonical_datetime = readonly_module.datetime
+    canonical_timezone = readonly_module.timezone
     canonical_read_account_details = client_type.read_account_details
     canonical_rpc = client_type._rpc
     canonical_next_request_id = client_type._next_request_id
     canonical_observed_at = client_type._observed_at
     canonical_network_post = transport_type.post
-    canonical_urlopen = _urllib_request.urlopen
+    canonical_network_post_code = getattr(canonical_network_post, "__code__", None)
+    canonical_build_opener = readonly_module.build_opener
+    canonical_build_opener_code = getattr(canonical_build_opener, "__code__", None)
+    canonical_redirect_handler_type = readonly_module._RejectBetfairRedirects
+    canonical_redirect_request = canonical_redirect_handler_type.redirect_request
+    canonical_redirect_request_code = getattr(
+        canonical_redirect_request,
+        "__code__",
+        None,
+    )
+    canonical_rpc_code = getattr(canonical_rpc, "__code__", None)
+    canonical_request_type = readonly_module.Request
+    canonical_request_init = getattr(canonical_request_type, "__init__", None)
+    canonical_request_init_code = getattr(canonical_request_init, "__code__", None)
+    canonical_read_method_endpoint = readonly_module._READ_METHOD_ENDPOINT
+    canonical_read_method_items = tuple(canonical_read_method_endpoint.items())
+    canonical_account_endpoint = readonly_module.ACCOUNT_JSON_RPC_ENDPOINT
+    canonical_betting_endpoint = readonly_module.BETTING_JSON_RPC_ENDPOINT
+    canonical_read_method_names = tuple(
+        getattr(readonly_module, name)
+        for name in (
+            "_GET_ACCOUNT_FUNDS",
+            "_GET_ACCOUNT_DETAILS",
+            "_LIST_CURRENT_ORDERS",
+            "_LIST_CLEARED_ORDERS",
+            "_LIST_MARKET_CATALOGUE",
+        )
+    )
+    canonical_http_client_ssl = getattr(_http_client, "ssl", None)
+    canonical_ssl_context_type = _ssl.SSLContext
+    canonical_ssl_socket_type = _ssl.SSLSocket
+    canonical_default_https_context = getattr(
+        _ssl,
+        "_create_default_https_context",
+        None,
+    )
+    canonical_default_https_context_code = getattr(
+        canonical_default_https_context,
+        "__code__",
+        None,
+    )
     canonical_identity_init = identity_type.__init__
     canonical_identity_post_init = identity_type.__post_init__
+
+    # Execution readback provider-origin authority is stricter than structural K07
+    # session identity.  Freeze the Python-visible HTTPS/TLS dispatch graph that a
+    # canonical urllib request traverses.  Deterministic tests may still replace
+    # these surfaces to exercise parsing, but such captures cannot mint live
+    # provider-origin proof.
+    network_dispatch_surfaces = tuple(
+        (
+            owner,
+            name,
+            expected,
+            getattr(expected, "__code__", None),
+        )
+        for owner, name, expected in (
+            (_urllib_request.OpenerDirector, "open", _urllib_request.OpenerDirector.open),
+            (_urllib_request.OpenerDirector, "error", _urllib_request.OpenerDirector.error),
+            (
+                _urllib_request.HTTPSHandler,
+                "__init__",
+                _urllib_request.HTTPSHandler.__init__,
+            ),
+            (
+                _urllib_request.HTTPSHandler,
+                "https_open",
+                _urllib_request.HTTPSHandler.https_open,
+            ),
+            (
+                _urllib_request.AbstractHTTPHandler,
+                "do_open",
+                _urllib_request.AbstractHTTPHandler.do_open,
+            ),
+            (
+                _urllib_request.HTTPErrorProcessor,
+                "http_response",
+                _urllib_request.HTTPErrorProcessor.http_response,
+            ),
+            (
+                _urllib_request.HTTPErrorProcessor,
+                "https_response",
+                _urllib_request.HTTPErrorProcessor.https_response,
+            ),
+            (
+                _urllib_request.HTTPRedirectHandler,
+                "http_error_301",
+                _urllib_request.HTTPRedirectHandler.http_error_301,
+            ),
+            (
+                _urllib_request.HTTPRedirectHandler,
+                "http_error_302",
+                _urllib_request.HTTPRedirectHandler.http_error_302,
+            ),
+            (
+                _urllib_request.HTTPRedirectHandler,
+                "http_error_303",
+                _urllib_request.HTTPRedirectHandler.http_error_303,
+            ),
+            (
+                _urllib_request.HTTPRedirectHandler,
+                "http_error_307",
+                _urllib_request.HTTPRedirectHandler.http_error_307,
+            ),
+            (
+                _urllib_request.HTTPRedirectHandler,
+                "http_error_308",
+                _urllib_request.HTTPRedirectHandler.http_error_308,
+            ),
+            (
+                _http_client,
+                "_create_https_context",
+                getattr(_http_client, "_create_https_context", None),
+            ),
+            (
+                _http_client.HTTPSConnection,
+                "__init__",
+                _http_client.HTTPSConnection.__init__,
+            ),
+            (
+                _http_client.HTTPSConnection,
+                "connect",
+                _http_client.HTTPSConnection.connect,
+            ),
+            (
+                _http_client.HTTPConnection,
+                "connect",
+                _http_client.HTTPConnection.connect,
+            ),
+            (
+                _http_client.HTTPConnection,
+                "request",
+                _http_client.HTTPConnection.request,
+            ),
+            (
+                _http_client.HTTPConnection,
+                "_send_request",
+                getattr(_http_client.HTTPConnection, "_send_request", None),
+            ),
+            (
+                _http_client.HTTPConnection,
+                "send",
+                _http_client.HTTPConnection.send,
+            ),
+            (
+                _http_client.HTTPConnection,
+                "getresponse",
+                _http_client.HTTPConnection.getresponse,
+            ),
+            (_ssl.SSLContext, "wrap_socket", _ssl.SSLContext.wrap_socket),
+            (_ssl.SSLSocket, "_create", getattr(_ssl.SSLSocket, "_create", None)),
+            (_socket, "create_connection", _socket.create_connection),
+            (_socket, "getaddrinfo", _socket.getaddrinfo),
+            (_socket.socket, "connect", _socket.socket.connect),
+            (_socket.socket, "sendall", _socket.socket.sendall),
+            (_socket.socket, "makefile", _socket.socket.makefile),
+        )
+    )
+
+    def execution_readback_network_dispatch_is_current(
+        _transport_type=transport_type,
+        _canonical_network_post=canonical_network_post,
+        _canonical_network_post_code=canonical_network_post_code,
+        _canonical_clock=canonical_clock,
+        _canonical_clock_code=canonical_clock_code,
+        _canonical_datetime=canonical_datetime,
+        _canonical_timezone=canonical_timezone,
+        _client_type=client_type,
+        _canonical_rpc=canonical_rpc,
+        _canonical_rpc_code=canonical_rpc_code,
+        _readonly_module=readonly_module,
+        _canonical_build_opener=canonical_build_opener,
+        _canonical_build_opener_code=canonical_build_opener_code,
+        _canonical_redirect_handler_type=canonical_redirect_handler_type,
+        _canonical_redirect_request=canonical_redirect_request,
+        _canonical_redirect_request_code=canonical_redirect_request_code,
+        _canonical_request_type=canonical_request_type,
+        _canonical_request_init=canonical_request_init,
+        _canonical_request_init_code=canonical_request_init_code,
+        _canonical_read_method_endpoint=canonical_read_method_endpoint,
+        _canonical_read_method_items=canonical_read_method_items,
+        _canonical_account_endpoint=canonical_account_endpoint,
+        _canonical_betting_endpoint=canonical_betting_endpoint,
+        _canonical_read_method_names=canonical_read_method_names,
+        _http_client_module=_http_client,
+        _canonical_http_client_ssl=canonical_http_client_ssl,
+        _ssl_module=_ssl,
+        _canonical_ssl_context_type=canonical_ssl_context_type,
+        _canonical_ssl_socket_type=canonical_ssl_socket_type,
+        _canonical_default_https_context=canonical_default_https_context,
+        _canonical_default_https_context_code=canonical_default_https_context_code,
+        _network_dispatch_surfaces=network_dispatch_surfaces,
+        _missing_value=missing_value,
+        _getattr=getattr,
+        _tuple=tuple,
+        _all=all,
+    ) -> bool:
+        try:
+            if (
+                _transport_type.post is not _canonical_network_post
+                or _getattr(_canonical_network_post, "__code__", None)
+                is not _canonical_network_post_code
+                or _readonly_module._canonical_utc_now is not _canonical_clock
+                or _getattr(_canonical_clock, "__code__", None)
+                is not _canonical_clock_code
+                or _readonly_module.datetime is not _canonical_datetime
+                or _readonly_module.timezone is not _canonical_timezone
+                or _client_type._rpc is not _canonical_rpc
+                or _getattr(_canonical_rpc, "__code__", None)
+                is not _canonical_rpc_code
+                or _readonly_module.build_opener is not _canonical_build_opener
+                or _getattr(_canonical_build_opener, "__code__", None)
+                is not _canonical_build_opener_code
+                or _readonly_module._RejectBetfairRedirects
+                is not _canonical_redirect_handler_type
+                or _canonical_redirect_handler_type.redirect_request
+                is not _canonical_redirect_request
+                or _getattr(_canonical_redirect_request, "__code__", None)
+                is not _canonical_redirect_request_code
+                or _readonly_module.Request is not _canonical_request_type
+                or _getattr(_canonical_request_type, "__init__", None)
+                is not _canonical_request_init
+                or _getattr(_canonical_request_init, "__code__", None)
+                is not _canonical_request_init_code
+                or _readonly_module._READ_METHOD_ENDPOINT
+                is not _canonical_read_method_endpoint
+                or _tuple(_canonical_read_method_endpoint.items())
+                != _canonical_read_method_items
+                or _readonly_module.ACCOUNT_JSON_RPC_ENDPOINT
+                != _canonical_account_endpoint
+                or _readonly_module.BETTING_JSON_RPC_ENDPOINT
+                != _canonical_betting_endpoint
+                or _getattr(_http_client_module, "ssl", None)
+                is not _canonical_http_client_ssl
+                or _ssl_module.SSLContext is not _canonical_ssl_context_type
+                or _ssl_module.SSLSocket is not _canonical_ssl_socket_type
+                or _getattr(_ssl_module, "_create_default_https_context", None)
+                is not _canonical_default_https_context
+                or _getattr(_canonical_default_https_context, "__code__", None)
+                is not _canonical_default_https_context_code
+                or _tuple(
+                    _getattr(_readonly_module, name, _missing_value)
+                    for name in (
+                        "_GET_ACCOUNT_FUNDS",
+                        "_GET_ACCOUNT_DETAILS",
+                        "_LIST_CURRENT_ORDERS",
+                        "_LIST_CLEARED_ORDERS",
+                        "_LIST_MARKET_CATALOGUE",
+                    )
+                )
+                != _canonical_read_method_names
+            ):
+                return False
+            return _all(
+                _getattr(owner, name, _missing_value) is expected
+                and (
+                    expected_code is None
+                    or _getattr(expected, "__code__", None) is expected_code
+                )
+                for owner, name, expected, expected_code in _network_dispatch_surfaces
+            )
+        except (AttributeError, TypeError):
+            return False
 
     lock = RLock()
     canonical_client_origins: WeakKeyDictionary = WeakKeyDictionary()
@@ -262,6 +537,10 @@ def _make_account_identity_authority():
     def client_class_dispatch_is_current() -> bool:
         return (
             client_type.__init__ is canonical_client_init
+            and readonly_module._canonical_utc_now is canonical_clock
+            and getattr(canonical_clock, "__code__", None) is canonical_clock_code
+            and readonly_module.datetime is canonical_datetime
+            and readonly_module.timezone is canonical_timezone
             and client_type.read_account_details
             is canonical_read_account_details
             and client_type._rpc is canonical_rpc
@@ -269,7 +548,13 @@ def _make_account_identity_authority():
             is canonical_next_request_id
             and client_type._observed_at is canonical_observed_at
             and transport_type.post is canonical_network_post
-            and readonly_module.urlopen is canonical_urlopen
+            and readonly_module.build_opener is canonical_build_opener
+            and readonly_module._RejectBetfairRedirects
+            is canonical_redirect_handler_type
+            and canonical_redirect_handler_type.redirect_request
+            is canonical_redirect_request
+            and getattr(canonical_redirect_request, "__code__", None)
+            is canonical_redirect_request_code
         )
 
     def client_dispatch_is_current(client: BetfairReadOnlyClient) -> bool:
@@ -311,6 +596,7 @@ def _make_account_identity_authority():
                 or not client_dispatch_is_current(client)
                 or not canonical_network_transport(client._transport)
                 or client._transport is not origin.transport
+                or client._clock is not canonical_clock
                 or client._clock is not origin.clock
                 or client._credentials is not origin.credentials
                 or client._venue_id != venue_id
@@ -428,6 +714,7 @@ def _make_account_identity_authority():
             type(client) is not client_type
             or not client_dispatch_is_current(client)
             or not canonical_network_transport(client._transport)
+            or client._clock is not canonical_clock
             or client._credentials is not credentials
         ):
             raise identity_error_type(
@@ -565,7 +852,158 @@ def _make_account_identity_authority():
         assert type(value) is identity_type
         return value
 
-    return build_client, resolve_identity, is_authoritative, require_authoritative
+    def bind_execution_readback_origin_authority(
+        caller_code: object,
+        caller_witnesses: tuple[tuple[str, object], ...],
+    ):
+        """Bind one readback-origin proof issuer to the canonical acquisition wrapper.
+
+        The returned issuer can mint a proof only while called from the exact code
+        object supplied by the readback composition layer.  The proof is keyed by
+        K07's existing process authority and binds the exact live client/session,
+        evidence object identity and immutable capture fingerprint.
+        """
+
+        if not hasattr(caller_code, "co_code"):
+            raise identity_error_type(
+                "execution readback origin requires canonical caller code"
+            )
+        if (
+            exact_type(caller_witnesses) is not tuple_type
+            or not caller_witnesses
+            or any(
+                exact_type(item) is not tuple_type
+                or len(item) != 2
+                or exact_type(item[0]) is not string_type
+                or not item[0]
+                for item in caller_witnesses
+            )
+        ):
+            raise identity_error_type(
+                "execution readback origin caller witnesses are invalid"
+            )
+
+        caller_marker = "__AUTOSPORT_BETFAIR_READBACK_ORIGIN_CALLER_CODE__"
+
+        def issue_origin(
+            client: BetfairReadOnlyClient,
+            identity: BetfairAuthenticatedAccountIdentity,
+            *,
+            capture_identity: int,
+            capture_fingerprint: str,
+        ) -> str:
+            expected_caller = "__AUTOSPORT_BETFAIR_READBACK_ORIGIN_CALLER_CODE__"
+            caller_frame = getframe_fn(1)
+            if caller_frame.f_code is not expected_caller:
+                raise identity_error_type(
+                    "execution readback origin proof may only be issued by canonical acquisition"
+                )
+            caller_locals = caller_frame.f_locals
+            for witness_name, witness_value in caller_witnesses:
+                if caller_locals.get(witness_name, missing_value) is not witness_value:
+                    raise identity_error_type(
+                        "execution readback origin caller composition changed"
+                    )
+            if not execution_readback_network_dispatch_is_current():
+                raise identity_error_type(
+                    "execution readback provider-network dispatch is not canonical"
+                )
+            require_authoritative(identity, client=client)
+            if (
+                exact_type(capture_identity) is not integer_type
+                or capture_identity <= 0
+                or exact_type(capture_fingerprint) is not string_type
+            ):
+                raise identity_error_type(
+                    "execution readback origin proof inputs are invalid"
+                )
+            validate_sha256(capture_fingerprint, "capture_fingerprint")
+            context = context_for(client)
+            if context.session_context_id != identity.session_context_id:
+                raise identity_error_type(
+                    "execution readback origin session context changed"
+                )
+            payload = json_dumps(
+                {
+                    "schema": "autosport.betfair_execution_readback_origin",
+                    "schema_version": 1,
+                    "client_identity": object_id(client),
+                    "session_context_id": context.session_context_id,
+                    "account_identity_id": identity.identity_id,
+                    "capture_identity": capture_identity,
+                    "capture_fingerprint": capture_fingerprint,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("utf-8")
+            return hmac_digest(process_hmac_key, payload, "sha256").hex()
+
+        constants = issue_origin.__code__.co_consts
+        if sum(item == caller_marker for item in constants) != 1:
+            raise identity_error_type(
+                "execution readback origin caller anchor is ambiguous"
+            )
+        issue_origin.__code__ = issue_origin.__code__.replace(
+            co_consts=tuple(
+                caller_code if item == caller_marker else item
+                for item in constants
+            )
+        )
+
+        def verify_origin(
+            proof: object,
+            client: BetfairReadOnlyClient,
+            identity: BetfairAuthenticatedAccountIdentity,
+            *,
+            capture_identity: int,
+            capture_fingerprint: str,
+        ) -> bool:
+            try:
+                if not execution_readback_network_dispatch_is_current():
+                    return False
+                require_authoritative(identity, client=client)
+                if (
+                    exact_type(proof) is not string_type
+                    or exact_type(capture_identity) is not integer_type
+                    or capture_identity <= 0
+                    or exact_type(capture_fingerprint) is not string_type
+                ):
+                    return False
+                validate_sha256(capture_fingerprint, "capture_fingerprint")
+                context = context_for(client)
+                if context.session_context_id != identity.session_context_id:
+                    return False
+                payload = json_dumps(
+                    {
+                        "schema": "autosport.betfair_execution_readback_origin",
+                        "schema_version": 1,
+                        "client_identity": object_id(client),
+                        "session_context_id": context.session_context_id,
+                        "account_identity_id": identity.identity_id,
+                        "capture_identity": capture_identity,
+                        "capture_fingerprint": capture_fingerprint,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                ).encode("utf-8")
+                expected = hmac_digest(process_hmac_key, payload, "sha256").hex()
+                return hmac_compare_digest(proof, expected)
+            except (AttributeError, TypeError, ValueError, identity_error_type):
+                return False
+
+        return issue_origin, verify_origin, execution_readback_network_dispatch_is_current
+
+    return (
+        build_client,
+        resolve_identity,
+        is_authoritative,
+        require_authoritative,
+        bind_execution_readback_origin_authority,
+    )
 
 
 def _canonical_json(value: object) -> bytes:
@@ -618,5 +1056,6 @@ def _canonical_timestamp(value: str) -> str:
     resolve_betfair_authenticated_account_identity,
     is_authoritative_betfair_account_identity,
     require_authoritative_betfair_account_identity,
+    _bind_betfair_execution_readback_origin_authority,
 ) = _make_account_identity_authority()
 del _make_account_identity_authority

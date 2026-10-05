@@ -1370,6 +1370,37 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertEqual(len(snapshot.events), 1)
         self.assertEqual(snapshot.events[0].source_id, "provider-b")
 
+    def test_decision_view_ignores_unrelated_registry_churn(self) -> None:
+        mirror = MarketMirror()
+        event = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        mirror.apply(event)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        dependencies.register("other", source_ids="provider-b")
+        original_full = mirror.active_view
+        reads = [0]
+
+        def mutate_unrelated_dependency(*args, **kwargs):
+            snapshot = original_full(*args, **kwargs)
+            reads[0] += 1
+            self.assertTrue(dependencies.unregister("other"))
+            dependencies.register("other", source_ids="provider-c")
+            return snapshot
+
+        with patch.object(
+            mirror,
+            "active_view",
+            side_effect=mutate_unrelated_dependency,
+        ):
+            snapshot = dependencies.decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(reads[0], 1)
+        self.assertEqual(snapshot.events, (event,))
+
     def test_decision_view_fails_closed_if_dependency_removed_during_read(self) -> None:
         mirror = MarketMirror()
         event = self.event(sequence=1)

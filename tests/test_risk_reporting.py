@@ -1846,5 +1846,44 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(actual, expected)
 
 
+    def test_equity_path_does_not_read_mutable_scope_after_final_source_digest(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(92),),
+            Decimal("10"),
+            placed_at="2026-09-21T18:00:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T18:05:00+00:00",
+        )
+        goal = self._goal()
+        original_source_digest = risk_reporting._paper_equity_source_state_sha256
+        calls = 0
+
+        def mutate_after_second_digest(current_book):
+            nonlocal calls
+            calls += 1
+            digest = original_source_digest(current_book)
+            if calls == 2:
+                ticket.bankroll_id = "rewritten-after-final-digest"
+            return digest
+
+        with patch.object(
+            risk_reporting,
+            "_paper_equity_source_state_sha256",
+            side_effect=mutate_after_second_digest,
+        ):
+            path = build_product_issued_paper_equity_path(book, goal)
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(ticket.bankroll_id, "rewritten-after-final-digest")
+        self.assertTrue(path.money_scope_complete)
+        self.assertEqual(path.bankroll_id, "paper-bankroll")
+
+
 if __name__ == "__main__":
     unittest.main()

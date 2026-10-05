@@ -56,11 +56,14 @@ class FakeSocket:
 
 
 class Secrets:
+    def __init__(self, *, key_class: str = "LIVE") -> None:
+        self.key_class = key_class
+
     def get_session_lease(self) -> stream.BetfairStreamCredentialLease:
         return stream.BetfairStreamCredentialLease(
             account_id="acct-1",
             app_identity_id="betfair-app-1",
-            app_key_class="LIVE",
+            app_key_class=self.key_class,
             session_epoch=1,
             credentials=BetfairSessionCredentials(
                 "TEST_APP_KEY_NOT_A_REAL_CREDENTIAL",
@@ -151,6 +154,8 @@ def _delta_mcm(
 def _transport(
     monkeypatch: pytest.MonkeyPatch,
     tail: bytes,
+    *,
+    key_class: str = "LIVE",
 ) -> tuple[stream.BetfairStreamTlsTransport, FakeSocket]:
     fake = FakeSocket([_connection(), _auth_status() + tail])
     monkeypatch.setattr(
@@ -162,10 +167,10 @@ def _transport(
         identity=stream.BetfairStreamSessionIdentity(
             account_id="acct-1",
             app_identity_id="betfair-app-1",
-            app_key_class="LIVE",
+            app_key_class=key_class,
             session_epoch=1,
         ),
-        secret_provider=Secrets(),
+        secret_provider=Secrets(key_class=key_class),
     )
     assert transport.connect() == "conn-1"
     return transport, fake
@@ -1090,3 +1095,28 @@ def test_concurrent_evaluation_waits_for_valid_inflight_frame_commit(
     assert not old_decision.decision_eligible
     assert transport.is_authenticated
     assert not fake.closed
+
+
+def test_delayed_app_key_never_becomes_live_decision_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status() + _mcm(pt=publish_time_ms),
+        key_class="DELAYED",
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+
+    assert decision.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    assert "app key class is not LIVE" in decision.reason
+    assert decision.evidence_id is not None
+    assert not decision.decision_eligible
+    assert transport.is_authenticated

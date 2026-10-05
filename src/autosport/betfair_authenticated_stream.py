@@ -453,6 +453,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
         ] = {}
         self._market_status_by_id: dict[str, str] = {}
         self._market_open_sequence: dict[str, int] = {}
+        self._market_betting_type_by_id: dict[str, str] = {}
         self._runner_status_by_key: dict[tuple[str, int, Decimal], str] = {}
         self._runner_active_sequence: dict[tuple[str, int, Decimal], int] = {}
         # The subscription acknowledgement is required to be authenticated frame 1.
@@ -497,12 +498,16 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                         )
                     accepted_ms = _wall_time_ms()
                     market_status_updates = _market_status_updates(raw)
+                    market_betting_type_updates = _market_betting_type_updates(raw)
                     runner_status_updates = _runner_status_updates(raw)
                     self._require_current_connection()
                     issued = self._freshness.ingest_raw(
                         raw,
                         received_time_ms=accepted_ms,
                         ingested_time_ms=accepted_ms,
+                    )
+                    self._commit_market_betting_type_updates(
+                        market_betting_type_updates,
                     )
                     self._commit_market_status_updates(
                         market_status_updates,
@@ -618,6 +623,22 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                     transport_frame_sha256=frame_sha,
                     evaluated_at_ms=evaluated_at_ms,
                 )
+            if self._market_betting_type_by_id.get(market_id) not in {
+                "ODDS",
+                "ASIAN_HANDICAP_SINGLE_LINE",
+                "ASIAN_HANDICAP_DOUBLE_LINE",
+            }:
+                return BetfairAuthenticatedFreshnessDecision(
+                    verdict=BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED,
+                    reason=(
+                        "Betfair market betting type is not supported by the "
+                        "canonical odds quote model"
+                    ),
+                    evidence_id=structural.evidence_id,
+                    subscription_id=self._subscription.subscription_id,
+                    transport_frame_sha256=frame_sha,
+                    evaluated_at_ms=evaluated_at_ms,
+                )
             open_sequence = self._market_open_sequence.get(market_id)
             if open_sequence is None or frame_sequence < open_sequence:
                 return BetfairAuthenticatedFreshnessDecision(
@@ -710,6 +731,13 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 )
             return decision
 
+    def _commit_market_betting_type_updates(
+        self,
+        updates: dict[str, str],
+    ) -> None:
+        for market_id, betting_type in updates.items():
+            self._market_betting_type_by_id[market_id] = betting_type
+
     def _commit_market_status_updates(
         self,
         updates: dict[str, str],
@@ -719,6 +747,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             if status != "OPEN":
                 self._market_status_by_id.pop(market_id, None)
                 self._market_open_sequence.pop(market_id, None)
+                self._market_betting_type_by_id.pop(market_id, None)
                 for runner_key in tuple(self._runner_status_by_key):
                     if runner_key[0] == market_id:
                         self._runner_status_by_key.pop(runner_key, None)
@@ -823,6 +852,12 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 return False
             if self._market_status_by_id.get(market_id) != "OPEN":
                 return False
+            if self._market_betting_type_by_id.get(market_id) not in {
+                "ODDS",
+                "ASIAN_HANDICAP_SINGLE_LINE",
+                "ASIAN_HANDICAP_DOUBLE_LINE",
+            }:
+                return False
             open_sequence = self._market_open_sequence.get(market_id)
             if open_sequence is None or frame_sequence < open_sequence:
                 return False
@@ -886,6 +921,47 @@ def _market_status_updates(raw_message: dict[str, Any]) -> dict[str, str]:
                 "Betfair marketDefinition status is unsupported"
             )
         updates[market_id] = status
+    return updates
+
+
+def _market_betting_type_updates(
+    raw_message: dict[str, Any],
+) -> dict[str, str]:
+    market_changes = raw_message.get("mc", [])
+    if type(market_changes) is not list:
+        raise BetfairAuthenticatedStreamError(
+            "authenticated market-change mc must be a list"
+        )
+    updates: dict[str, str] = {}
+    allowed = {
+        "ODDS",
+        "ASIAN_HANDICAP_SINGLE_LINE",
+        "ASIAN_HANDICAP_DOUBLE_LINE",
+        "LINE",
+    }
+    for change in market_changes:
+        if type(change) is not dict:
+            raise BetfairAuthenticatedStreamError(
+                "authenticated market change must be an object"
+            )
+        definition = change.get("marketDefinition")
+        if definition is None:
+            continue
+        if type(definition) is not dict:
+            raise BetfairAuthenticatedStreamError(
+                "Betfair marketDefinition must be an object"
+            )
+        market_id = change.get("id")
+        if type(market_id) is not str or not market_id or market_id.strip() != market_id:
+            raise BetfairAuthenticatedStreamError(
+                "Betfair marketDefinition requires canonical market id"
+            )
+        betting_type = definition.get("bettingType")
+        if type(betting_type) is not str or betting_type not in allowed:
+            raise BetfairAuthenticatedStreamError(
+                "Betfair marketDefinition bettingType is unsupported"
+            )
+        updates[market_id] = betting_type
     return updates
 
 

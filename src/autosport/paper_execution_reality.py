@@ -1107,6 +1107,79 @@ def _require_canonical_execution_plan_surface(plan: ExecutionPlan) -> None:
         ) from exc
 
 
+def _snapshot_execution_config(
+    config: PaperExecutionModelConfig,
+) -> PaperExecutionModelConfig:
+    _require_canonical_execution_config_surface(config)
+    try:
+        canonical = PaperExecutionModelConfig(
+            model_id=config.model_id,
+            model_version=config.model_version,
+            evidence_grade=config.evidence_grade,
+            evidence_source=config.evidence_source,
+            seed=config.seed,
+            max_quote_age_ms=config.max_quote_age_ms,
+            min_delay_ms=config.min_delay_ms,
+            max_delay_ms=config.max_delay_ms,
+            rejected_bps=config.rejected_bps,
+            partial_bps=config.partial_bps,
+            unknown_bps=config.unknown_bps,
+            partial_fill_bps=config.partial_fill_bps,
+            max_slippage_bps=config.max_slippage_bps,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionStateError(
+            "execution config changed during canonical snapshot"
+        ) from exc
+    if canonical != config:
+        raise PaperExecutionStateError(
+            "execution config changed during canonical snapshot"
+        )
+    return canonical
+
+
+def _snapshot_execution_plan(plan: ExecutionPlan) -> ExecutionPlan:
+    _require_canonical_execution_plan_surface(plan)
+    actions: list[ExecutionAction] = []
+    try:
+        for action in plan.actions:
+            _impl._require_canonical_action_surface(action)
+            actions.append(
+                ExecutionAction(
+                    action_id=action.action_id,
+                    bookmaker_id=action.bookmaker_id,
+                    account_id=action.account_id,
+                    event_id=action.event_id,
+                    market_id=action.market_id,
+                    selection_id=action.selection_id,
+                    side=action.side,
+                    requested_odds=action.requested_odds,
+                    requested_stake=action.requested_stake,
+                    quote_id=action.quote_id,
+                    quote_observed_at=action.quote_observed_at,
+                    expires_at=action.expires_at,
+                )
+            )
+        canonical = ExecutionPlan(
+            plan_id=plan.plan_id,
+            bookmaker_profile_version=plan.bookmaker_profile_version,
+            decision_id=plan.decision_id,
+            approval_id=plan.approval_id,
+            created_at=plan.created_at,
+            actions=tuple(actions),
+            schema_version=plan.schema_version,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionStateError(
+            "execution plan changed during canonical snapshot"
+        ) from exc
+    if canonical != plan:
+        raise PaperExecutionStateError(
+            "execution plan changed during canonical snapshot"
+        )
+    return canonical
+
+
 def _validate_lay_execution_surface(
     *,
     plan: ExecutionPlan,
@@ -1179,8 +1252,8 @@ def execute_paper_plan(
     suspended_action_ids: frozenset[str] = frozenset(),
 ) -> PaperExecutionRun:
     """Execute/resume one PAPER/SHADOW run without provider writes or real money."""
-    _require_canonical_execution_plan_surface(plan)
-    _require_canonical_execution_config_surface(config)
+    plan = _snapshot_execution_plan(plan)
+    config = _snapshot_execution_config(config)
     if type(ledger) is not PaperExecutionLedger:
         raise TypeError("ledger must be exact PaperExecutionLedger")
     trigger_id = _impl._text(trigger_id, "trigger_id")

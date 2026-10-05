@@ -9487,21 +9487,9 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.register_input("input-a", selection_ids="selection-a")
 
-            replacement_model = PaperExecutionModelConfig(
-                model_id=model.model_id,
-                model_version="2",
-                evidence_grade=EvidenceGrade.SYNTHETIC,
-                evidence_source=model.evidence_source,
-                seed=model.seed,
-                max_quote_age_ms=model.max_quote_age_ms,
-                min_delay_ms=model.min_delay_ms,
-                max_delay_ms=model.max_delay_ms,
-                rejected_bps=model.rejected_bps,
-                partial_bps=model.partial_bps,
-                unknown_bps=model.unknown_bps,
-                partial_fill_bps=model.partial_fill_bps,
-                max_slippage_bps=model.max_slippage_bps,
-            )
+            replacement_model = copy.deepcopy(model)
+            self.assertEqual(replacement_model.fingerprint, model.fingerprint)
+            self.assertIsNot(replacement_model, model)
 
             def mutate_model_after_decision_append() -> None:
                 execution.config = replacement_model

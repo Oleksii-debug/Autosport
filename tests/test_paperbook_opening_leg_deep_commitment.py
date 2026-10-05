@@ -2412,3 +2412,82 @@ def test_settle_rejects_rebound_settlement_helper_before_execution(
     assert ticket.payout == Decimal("0")
     assert book.balance == Decimal("90")
 
+
+
+_RUNTIME_HELPER_AUTHORITY_NAMES = (
+    "_require_finite",
+    "_require_utf8_string",
+    "_require_canonical_text",
+    "_validate_ticket_provenance",
+    "_validate_timestamp",
+    "_validate_placed_at",
+    "_validate_settled_at",
+    "_validate_ticket_leg",
+    "_validate_lifecycle_entry",
+    "_validate_lifecycle_reachability",
+    "_validate_loaded_state",
+    "_normalize_resolution_keys",
+    "_parse_lifecycle_key_list",
+    "_parse_lifecycle",
+    "_parse_snapshot_decimal",
+    "_required_snapshot_field",
+    "_parse_snapshot_legs",
+    "_parse_snapshot_provider_accounts",
+    "_parse_snapshot_status",
+)
+
+
+@pytest.mark.parametrize("helper_name", _RUNTIME_HELPER_AUTHORITY_NAMES)
+def test_public_operation_rejects_rebound_runtime_helper_before_execution(
+    monkeypatch,
+    helper_name: str,
+) -> None:
+    book = PaperBook("100")
+    descriptor = PaperBook.__dict__[helper_name]
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError(f"rebound runtime helper executed: {helper_name}")
+
+    if type(descriptor) is classmethod:
+        replacement = classmethod(hostile)
+    elif type(descriptor) is staticmethod:
+        replacement = staticmethod(hostile)
+    else:
+        replacement = hostile
+
+    monkeypatch.setattr(PaperBook, helper_name, replacement)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"runtime helper dispatch changed: {helper_name}",
+    ):
+        _ = book.committed_stake
+
+    assert attacker_calls == 0
+
+
+@pytest.mark.parametrize("helper_name", _RUNTIME_HELPER_AUTHORITY_NAMES)
+def test_public_operation_rejects_in_place_runtime_helper_code_mutation(
+    helper_name: str,
+) -> None:
+    book = PaperBook("100")
+    descriptor = PaperBook.__dict__[helper_name]
+    if type(descriptor) in {classmethod, staticmethod}:
+        authority = descriptor.__func__
+    else:
+        authority = descriptor
+    original_code = authority.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        authority.__code__ = hostile.__code__
+        with pytest.raises(
+            ValueError,
+            match=rf"runtime helper authority changed: {helper_name}",
+        ):
+            _ = book.committed_stake
+    finally:
+        authority.__code__ = original_code

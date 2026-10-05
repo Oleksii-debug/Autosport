@@ -468,41 +468,52 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 raise BetfairAuthenticatedStreamError(
                     "authenticated frame receive clock authority mismatch"
                 ) from exc
-            _require_same_connection(
-                frame,
-                self._subscription.connection_id,
-                self._subscription.connection_generation,
-            )
-            raw = _decode_exact_transport_frame(frame)
-            if raw.get("op") != "mcm":
-                raise BetfairAuthenticatedStreamError(
-                    "authenticated market freshness runtime accepts only mcm frames after subscription acknowledgement"
+            try:
+                _require_same_connection(
+                    frame,
+                    self._subscription.connection_id,
+                    self._subscription.connection_generation,
                 )
-            accepted_ms = _wall_time_ms()
-            with self._state_lock:
-                self._require_current_connection()
-                issued = self._freshness.ingest_raw(
-                    raw,
-                    received_time_ms=accepted_ms,
-                    ingested_time_ms=accepted_ms,
-                )
-                for evidence in issued:
-                    identity = evidence.quote.identity
-                    if (
-                        identity not in self._transport_by_identity
-                        and len(self._transport_by_identity)
-                        >= _MAX_TRACKED_AUTHORITATIVE_QUOTES
-                    ):
-                        self._transport_by_identity.clear()
-                        raise BetfairAuthenticatedStreamError(
-                            "authenticated freshness transport-origin map exceeded its bound"
-                        )
-                    self._transport_by_identity[identity] = (
-                        evidence.evidence_id,
-                        frame.payload_sha256,
-                        frame.received_monotonic_ns,
+                raw = _decode_exact_transport_frame(frame)
+                if raw.get("op") != "mcm":
+                    raise BetfairAuthenticatedStreamError(
+                        "authenticated market freshness runtime accepts only mcm frames after subscription acknowledgement"
                     )
-                return issued
+                accepted_ms = _wall_time_ms()
+                with self._state_lock:
+                    self._require_current_connection()
+                    issued = self._freshness.ingest_raw(
+                        raw,
+                        received_time_ms=accepted_ms,
+                        ingested_time_ms=accepted_ms,
+                    )
+                    for evidence in issued:
+                        identity = evidence.quote.identity
+                        if (
+                            identity not in self._transport_by_identity
+                            and len(self._transport_by_identity)
+                            >= _MAX_TRACKED_AUTHORITATIVE_QUOTES
+                        ):
+                            self._transport_by_identity.clear()
+                            raise BetfairAuthenticatedStreamError(
+                                "authenticated freshness transport-origin map exceeded its bound"
+                            )
+                        self._transport_by_identity[identity] = (
+                            evidence.evidence_id,
+                            frame.payload_sha256,
+                            frame.received_monotonic_ns,
+                        )
+                    return issued
+            except Exception:
+                # Once an authenticated post-subscription frame cannot be proved and
+                # ingested under the exact canonical protocol, continuing on the same
+                # socket would silently bridge an unknown stream-state gap.  Tear down
+                # the connection so recovery must establish a fresh authenticated
+                # generation and subscription capability before any later datum can
+                # become decision-eligible.
+                self._transport_by_identity.clear()
+                self._transport.close()
+                raise
 
     def evaluate(
         self,

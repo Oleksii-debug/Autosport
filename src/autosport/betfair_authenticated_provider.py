@@ -146,6 +146,10 @@ class BetfairAuthenticatedMarketProvider:
         self._pending: tuple[ProviderQuote, ...] = ()
         self._pending_offset = 0
 
+    @property
+    def durable_bound(self) -> bool:
+        return self._bound
+
     def bind_durable_current(
         self,
         current: Mapping[tuple[str, str], MarketEvent],

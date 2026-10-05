@@ -556,6 +556,45 @@ def _seal_paperbook_open_transition_authority(method):
     return sealed
 
 
+def _seal_paperbook_save_candidate_authority(method):
+    """Inject closure-captured snapshot candidate authorities into save."""
+    opening_candidate = _require_snapshot_candidate_opening_authority
+    opening_candidate_code = opening_candidate.__code__
+    causal_candidate = _require_snapshot_candidate_causal_history_authority
+    causal_candidate_code = causal_candidate.__code__
+
+    def require_opening(source_book: object, candidate_book: object) -> None:
+        if opening_candidate.__code__ is not opening_candidate_code:
+            raise ValueError("PaperBook snapshot opening candidate authority changed")
+        opening_candidate(source_book, candidate_book)
+        if opening_candidate.__code__ is not opening_candidate_code:
+            raise ValueError("PaperBook snapshot opening candidate authority changed")
+
+    def require_causal(source_book: object, candidate_book: object) -> None:
+        if causal_candidate.__code__ is not causal_candidate_code:
+            raise ValueError("PaperBook snapshot causal candidate authority changed")
+        causal_candidate(source_book, candidate_book)
+        if causal_candidate.__code__ is not causal_candidate_code:
+            raise ValueError("PaperBook snapshot causal candidate authority changed")
+
+    @wraps(method)
+    def sealed(self, *args, **kwargs):
+        if opening_candidate.__code__ is not opening_candidate_code:
+            raise ValueError("PaperBook snapshot opening candidate authority changed")
+        if causal_candidate.__code__ is not causal_candidate_code:
+            raise ValueError("PaperBook snapshot causal candidate authority changed")
+        return method(
+            self,
+            *args,
+            _opening_candidate_authority=require_opening,
+            _causal_candidate_authority=require_causal,
+            **kwargs,
+        )
+
+    del sealed.__wrapped__
+    return sealed
+
+
 def _seal_paperbook_settle_transition_authority(method):
     """Inject closure-captured write authority into settle."""
     causal_advance = _advance_paperbook_causal_history_settle
@@ -895,7 +934,14 @@ class PaperBook:
 
     @_serialized_paperbook_operation
     @_guard_paperbook_runtime_authority
-    def save(self, path: str | Path) -> None:
+    @_seal_paperbook_save_candidate_authority
+    def save(
+        self,
+        path: str | Path,
+        *,
+        _opening_candidate_authority=None,
+        _causal_candidate_authority=None,
+    ) -> None:
         # Runtime visible-state + hidden-authority validation is performed once
         # by the closure-captured guard before this body executes.
         destination = self._canonical_snapshot_path(path)
@@ -940,8 +986,8 @@ class PaperBook:
         # that exact candidate against product-issued opening commitments before
         # any durable replacement, closing coherent mutation during collection.
         candidate = self._from_raw_snapshot(raw)
-        _require_snapshot_candidate_opening_authority(self, candidate)
-        _require_snapshot_candidate_causal_history_authority(self, candidate)
+        _opening_candidate_authority(self, candidate)
+        _causal_candidate_authority(self, candidate)
 
         # Rejected candidates must not publish filesystem state.
         self._ensure_snapshot_parent_durable(destination.parent)

@@ -6151,6 +6151,61 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(result.status, LiveCycleStatus.DECIDED)
             self.assertEqual(factory.calls, [("input-a", ())])
 
+    def test_clean_restart_rejects_same_id_selector_swap_after_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+            first.close()
+
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            original_market_sha = resumed._market_state_sha256
+            mutated = [False]
+
+            def swap_selector_after_capture():
+                value = original_market_sha()
+                if not mutated[0]:
+                    mutated[0] = True
+                    self.assertTrue(resumed.unregister_input("input-a"))
+                    resumed.register_input(
+                        "input-a",
+                        selection_ids="selection-b",
+                    )
+                return value
+
+            with (
+                patch.object(
+                    resumed,
+                    "_market_state_sha256",
+                    side_effect=swap_selector_after_capture,
+                ),
+                self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "registry changed after snapshot capture",
+                ),
+            ):
+                resumed.run_cycle()
+
+            self.assertEqual(
+                resumed.dependencies.input_ids,
+                ("input-a",),
+            )
+            resumed.close()
+
     def test_future_successor_preserves_visible_predecessor_across_restart_until_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

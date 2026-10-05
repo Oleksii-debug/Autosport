@@ -158,14 +158,6 @@ def _capture_profiled_runtime_builder(
         try:
             runtime_workspace = canonical_workspace(runtime.workspace)
             runtime_source_id = runtime.manifest.source_id
-            if (
-                type(runtime_source_id) is not str
-                or not runtime_source_id
-                or runtime_source_id.strip() != runtime_source_id
-            ):
-                raise ProductEntrypointError(
-                    "profiled runtime manifest has invalid source identity"
-                )
             runtime_source = runtime.collector.source
         except (AttributeError, TypeError, ValueError) as exc:
             try:
@@ -175,6 +167,18 @@ def _capture_profiled_runtime_builder(
             raise ProductEntrypointError(
                 "profiled runtime composition cannot prove exact source origin"
             ) from exc
+        if (
+            type(runtime_source_id) is not str
+            or not runtime_source_id
+            or runtime_source_id.strip() != runtime_source_id
+        ):
+            try:
+                runtime.close()
+            except BaseException:
+                pass
+            raise ProductEntrypointError(
+                "profiled runtime manifest has invalid source identity"
+            )
         if (
             runtime_workspace != expected_workspace
             or runtime_source_id != expected_source_id

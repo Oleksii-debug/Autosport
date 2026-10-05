@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.live_observation as live_observation_module
 import autosport.storage as storage_module
 from autosport.domain import MarketEvent
 from autosport.ingestion_health import IngestionPolicy, SourceHealthStore
@@ -452,6 +453,45 @@ class LiveObservationTests(unittest.TestCase):
                 self.assertEqual(updates.mirror.view().events, ())
             finally:
                 store.close()
+
+    def test_sqlite_retry_preserves_primary_failure_when_provider_reset_fails(self):
+        batch = ProviderBatch(
+            source_id="live-fixture",
+            quotes=(),
+            cursor="cursor-1",
+            quality_flags=("TRUNCATED_BATCH",),
+        )
+
+        class Provider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                raise RuntimeError("reset-failed")
+
+        class Engine:
+            def poll_once(self, provider, max_items: int = 1000):
+                provider.read_batch(max_items=max_items)
+                raise sqlite3.OperationalError("database-locked")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(Provider())
+        with self.assertRaisesRegex(sqlite3.OperationalError, "database-locked") as raised:
+            live_observation_module._poll_acknowledged(
+                Engine(),
+                wrapped,
+                max_items=1,
+            )
+
+        self.assertFalse(wrapped.has_inflight)
+        self.assertTrue(
+            any(
+                "provider pending-snapshot reset also failed: RuntimeError: reset-failed"
+                in note
+                for note in getattr(raised.exception, "__notes__", ())
+            )
+        )
 
     def test_open_store_poll_does_not_rescan_append_only_history(self):
         with tempfile.TemporaryDirectory() as tmp:

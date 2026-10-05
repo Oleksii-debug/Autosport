@@ -208,6 +208,33 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
                 envelope["record"]["action"], "REJECT_PAPER_RESEARCH_CANDIDATE"
             )
 
+
+    def test_default_policy_blocks_causal_invalid_ingestion_evidence(self):
+        for flag in (
+            "FUTURE_OBSERVATION_TIMESTAMP",
+            "INVALID_SOURCE_TIMESTAMP",
+            "INVALID_QUOTE",
+        ):
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as tmp:
+                book = self._book()
+                before = set(book.tickets)
+                book, ledger, decision = self._decide(
+                    tmp,
+                    book=book,
+                    evidence=[self._evidence(quality_flags=(flag,))],
+                )
+
+                self.assertFalse(decision.approved)
+                self.assertEqual(set(book.tickets), before)
+                self.assertTrue(any(flag in reason for reason in decision.reasons))
+                envelope = json.loads(
+                    ledger.path.read_text(encoding="utf-8")
+                )
+                self.assertEqual(
+                    envelope["record"]["action"],
+                    "REJECT_PAPER_RESEARCH_CANDIDATE",
+                )
+
     def test_future_forecast_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             _book, _ledger, decision = self._decide(

@@ -893,8 +893,8 @@ def _build_canonical_authority():
         )
         if slippage_product_verifier.__code__ is not slippage_product_verifier_code:
             raise error_cls("canonical Betfair slippage verifier authority changed")
-        if type(verified) is not slippage_evidence_cls or verified is not slippage_evidence:
-            raise error_cls("canonical Betfair slippage verifier returned changed evidence")
+        if type(verified) is not slippage_evidence_cls:
+            raise error_cls("canonical Betfair slippage verifier returned non-canonical evidence")
         if (
             object.__getattribute__(verified, "status")
             is not slippage_status_cls.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION

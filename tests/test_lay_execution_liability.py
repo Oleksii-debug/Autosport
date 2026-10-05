@@ -318,6 +318,54 @@ class DurableSideIntegrityTests(unittest.TestCase):
 
 
 class LayExecutionLiabilityTests(unittest.TestCase):
+    def test_registry_revalidates_mutated_decimal_before_durable_write(self):
+        class HostileDecimal(Decimal):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            source_action = _action()
+            record = PaperExecutionEvidenceRecord(
+                action_id=source_action.action_id,
+                bookmaker_id=source_action.bookmaker_id,
+                account_id=source_action.account_id,
+                event_id=source_action.event_id,
+                market_id=source_action.market_id,
+                selection_id=source_action.selection_id,
+                side=source_action.side,
+                quote_id=source_action.quote_id,
+                outcome=PaperAttemptOutcome.ACCEPTED,
+                observed_at=STARTED_AT,
+                evidence_grade=EvidenceGrade.EMPIRICAL,
+                evidence_source="captured-paper-observation-v1",
+                accepted_odds="5.00",
+                accepted_stake="10.00",
+            )
+            object.__setattr__(record, "accepted_odds", HostileDecimal("5.00"))
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "accepted_odds must retain exact Decimal authority",
+            ):
+                registry.register(record)
+
+            self.assertEqual(ledger.events(), [])
+
+    def test_attempt_write_revalidates_mutated_exponent_before_serialization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            attempt = DurableSideIntegrityTests._attempt(
+                outcome=PaperAttemptOutcome.REJECTED,
+                side="BACK",
+            )
+            object.__setattr__(attempt, "requested_stake", Decimal("1E+9000"))
+
+            with self.assertRaisesRegex(ValueError, "resource limit"):
+                ledger.record_attempt(attempt)
+
+            self.assertEqual(ledger.events(), [])
+
     def test_empirical_decimal_ingress_rejects_arbitrary_str_conversion(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")

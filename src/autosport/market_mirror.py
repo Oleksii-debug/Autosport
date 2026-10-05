@@ -8,7 +8,11 @@ from threading import RLock
 
 from .domain import MarketEvent, _quote_identity
 from .market_state_identity import MarketStateIdentityError, same_semantic_market_state
-from .storage import SQLiteMarketStore, _timezone_aware_instant
+from .storage import (
+    SQLiteMarketStore,
+    _timezone_aware_instant,
+    _validate_local_receipt_order,
+)
 
 
 class MirrorUpdate(str, Enum):
@@ -207,6 +211,7 @@ class MarketMirror:
             raise TypeError("event must be a MarketEvent")
         if type(decision_causal) is not bool:
             raise TypeError("decision_causal must be a bool")
+        _validate_local_receipt_order(event)
 
         key = self._key(event)
         with self._lock:

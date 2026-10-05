@@ -204,6 +204,41 @@ def test_unsuspended_lay_without_empirical_observation_fails_before_reservation(
         assert len(ledger.events()) == before
 
 
+def test_suspended_lay_rejects_mutated_action_identity_before_reservation() -> None:
+    class HostileIdentity(str):
+        calls = 0
+
+        def __eq__(self, other: object) -> bool:
+            type(self).calls += 1
+            return super().__eq__(other)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        lay = _action("lay-hostile-identity", side="LAY")
+        HostileIdentity.calls = 0
+        object.__setattr__(
+            lay,
+            "bookmaker_id",
+            HostileIdentity(lay.bookmaker_id),
+        )
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="bookmaker_id must retain exact canonical text authority",
+        ):
+            execute_paper_plan(
+                plan=_plan(lay),
+                trigger_id="lay-hostile-identity",
+                config=_config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                suspended_action_ids=frozenset({lay.action_id}),
+            )
+
+        assert HostileIdentity.calls == 0
+        assert ledger.events() == []
+
+
 def test_suspended_lay_is_durable_no_exposure_without_empirical_fill_evidence() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")

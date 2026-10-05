@@ -857,7 +857,7 @@ def _safe_exception_args_detail(
                 if isinstance(value, type)
             )
             for candidate_type in mro:
-                if candidate_type in builtin_types:
+                if any(candidate_type is builtin_type for builtin_type in builtin_types):
                     continue
                 class_dict = type.__getattribute__(candidate_type, "__dict__")
                 if "__str__" in class_dict:

@@ -44,6 +44,7 @@ _IMPL_ATTEMPT_ID = _impl._attempt_id
 _IMPL_TIMESTAMP_TEXT = _impl._timestamp_text
 _IMPL_OBSERVED_ATTEMPT = _impl._observed_attempt
 _IMPL_MILLISECONDS = _impl._milliseconds
+_IMPL_TIMEDELTA = _impl.timedelta
 _LEGACY_LEDGER_INIT = _impl.PaperExecutionLedger.__init__
 _LEGACY_LEDGER_REGISTER_OBSERVATION_EVIDENCE = (
     _impl.PaperExecutionLedger.register_observation_evidence
@@ -1173,7 +1174,7 @@ def _synthetic_attempt(
             "delay",
             delay_span + 1,
         )
-    execution_time = start + _impl.timedelta(milliseconds=delay_ms)
+    execution_time = start + _IMPL_TIMEDELTA(milliseconds=delay_ms)
     decision_time = _IMPL_TIMESTAMP(action.quote_observed_at, "quote_observed_at")
     quote_age_ms = _IMPL_MILLISECONDS(execution_time - decision_time, "quote age")
     expires = _IMPL_TIMESTAMP(action.expires_at, "expires_at")

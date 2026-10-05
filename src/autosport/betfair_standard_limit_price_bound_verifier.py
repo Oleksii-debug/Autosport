@@ -19,6 +19,7 @@ verification and thereby turning common-mode agreement into provider authority.
 from decimal import Decimal
 
 from . import betfair_standard_limit_price_bound as _price_bound_module
+from . import real_execution_ledger as _ledger_module
 from .betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundError,
     BetfairStandardLimitPriceBoundEvidence,
@@ -229,6 +230,18 @@ def _build_product_verifier():
     ledger_validate_event_code = ledger_validate_event.__code__
     ledger_validate_semantics = ledger_cls._validate_semantics.__func__
     ledger_validate_semantics_code = ledger_validate_semantics.__code__
+    ledger_json_loads = _ledger_module.json.loads
+    ledger_json_loads_code = ledger_json_loads.__code__
+    ledger_pairs = _ledger_module._pairs
+    ledger_pairs_code = ledger_pairs.__code__
+    ledger_nonfinite = _ledger_module._nonfinite
+    ledger_nonfinite_code = ledger_nonfinite.__code__
+    ledger_digest = _ledger_module._digest
+    ledger_digest_code = ledger_digest.__code__
+    ledger_timestamp = _ledger_module._timestamp
+    ledger_timestamp_code = ledger_timestamp.__code__
+    ledger_validate_json = _ledger_module._validate_json
+    ledger_validate_json_code = ledger_validate_json.__code__
 
     def require_canonical_resolver_authority() -> None:
         if (
@@ -289,6 +302,18 @@ def _build_product_verifier():
             or ledger_validate_event.__code__ is not ledger_validate_event_code
             or ledger_cls._validate_semantics.__func__ is not ledger_validate_semantics
             or ledger_validate_semantics.__code__ is not ledger_validate_semantics_code
+            or _ledger_module.json.loads is not ledger_json_loads
+            or ledger_json_loads.__code__ is not ledger_json_loads_code
+            or _ledger_module._pairs is not ledger_pairs
+            or ledger_pairs.__code__ is not ledger_pairs_code
+            or _ledger_module._nonfinite is not ledger_nonfinite
+            or ledger_nonfinite.__code__ is not ledger_nonfinite_code
+            or _ledger_module._digest is not ledger_digest
+            or ledger_digest.__code__ is not ledger_digest_code
+            or _ledger_module._timestamp is not ledger_timestamp
+            or ledger_timestamp.__code__ is not ledger_timestamp_code
+            or _ledger_module._validate_json is not ledger_validate_json
+            or ledger_validate_json.__code__ is not ledger_validate_json_code
         ):
             raise error_cls(
                 "canonical Betfair verifier dependency authority changed"

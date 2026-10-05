@@ -849,6 +849,7 @@ class PersistentLiveDecisionLoop:
             None if paper_execution is None else paper_execution.config.fingerprint
         )
         self.ingestion_policy = ingestion_policy
+        self._ingestion_policy_authority = ingestion_policy
         self.max_quote_age = max_quote_age
         self._max_quote_age_authority = max_quote_age
         self.bounds = bounds or LiveLoopBounds()
@@ -1027,6 +1028,7 @@ class PersistentLiveDecisionLoop:
             self._observe = _default_observer
         else:
             self._observe = observation_runner
+        self._observe_authority = self._observe
 
         if self.decision_ledger.path.exists():
             def verify_decision_history(
@@ -2598,6 +2600,14 @@ class PersistentLiveDecisionLoop:
         if self.intent_provenance is not self._intent_provenance_authority:
             raise LiveDecisionProgressError(
                 "live intent provenance authority changed after construction"
+            )
+        if self.ingestion_policy is not self._ingestion_policy_authority:
+            raise LiveDecisionProgressError(
+                "live ingestion policy authority changed after construction"
+            )
+        if self._observe is not self._observe_authority:
+            raise LiveDecisionProgressError(
+                "live observation authority changed after construction"
             )
         if self.max_quote_age != self._max_quote_age_authority:
             raise LiveDecisionProgressError(

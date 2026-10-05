@@ -264,6 +264,94 @@ def _canonical_run_reservation_inputs(
     )
 
 
+def _require_durable_attempt_evidence_binding(
+    *,
+    events: list[dict[str, Any]],
+    reservation_payload: dict[str, Any],
+    attempt: PaperLegAttempt,
+) -> None:
+    raw_ids = reservation_payload.get("observation_evidence_ids")
+    if type(raw_ids) is not dict:
+        raise PaperExecutionIntegrityError(
+            "durable reservation observation evidence map is invalid"
+        )
+    for action_id, evidence_id in raw_ids.items():
+        if (
+            type(action_id) is not str
+            or not action_id
+            or action_id.strip() != action_id
+            or type(evidence_id) is not str
+            or not evidence_id
+            or evidence_id.strip() != evidence_id
+        ):
+            raise PaperExecutionIntegrityError(
+                "durable reservation observation evidence identity is invalid"
+            )
+
+    reserved_evidence_id = raw_ids.get(attempt.action_id)
+    if attempt.evidence_grade is EvidenceGrade.SYNTHETIC:
+        if reserved_evidence_id is not None:
+            raise PaperExecutionStateError(
+                "synthetic attempt conflicts with reserved observation evidence"
+            )
+        return
+
+    if reserved_evidence_id is None or attempt.evidence_id != reserved_evidence_id:
+        raise PaperExecutionStateError(
+            "attempt evidence identity is not authorized by durable reservation"
+        )
+    matches = [
+        event
+        for event in events
+        if event["event_type"] == "OBSERVATION_EVIDENCE_REGISTERED"
+        and event["payload"].get("evidence_id") == reserved_evidence_id
+    ]
+    if len(matches) != 1:
+        raise PaperExecutionStateError(
+            "attempt evidence is not uniquely registered in durable ledger"
+        )
+    payload = matches[0]["payload"]
+    if set(payload) != {"evidence_id", "evidence_sha256", "record"}:
+        raise PaperExecutionIntegrityError(
+            "registered evidence payload schema is invalid"
+        )
+    try:
+        record = PaperExecutionEvidenceRecord.from_dict(payload["record"])
+    except (PaperExecutionIntegrityError, TypeError, ValueError) as exc:
+        raise PaperExecutionIntegrityError(
+            "registered attempt evidence record is invalid"
+        ) from exc
+    if (
+        payload["evidence_id"] != record.evidence_id
+        or payload["evidence_sha256"] != record.evidence_sha256
+    ):
+        raise PaperExecutionIntegrityError(
+            "registered attempt evidence identity is inconsistent"
+        )
+    if (
+        attempt.evidence_sha256 != record.evidence_sha256
+        or attempt.action_id != record.action_id
+        or attempt.bookmaker_id != record.bookmaker_id
+        or attempt.account_id != record.account_id
+        or attempt.event_id != record.event_id
+        or attempt.market_id != record.market_id
+        or attempt.selection_id != record.selection_id
+        or attempt.side != record.side
+        or attempt.decision_quote_id != record.quote_id
+        or attempt.outcome is not record.outcome
+        or attempt.execution_observed_at != record.observed_at
+        or attempt.evidence_grade is not record.evidence_grade
+        or attempt.evidence_source != record.evidence_source
+        or attempt.execution_odds != record.accepted_odds
+        or attempt.execution_stake != record.accepted_stake
+        or attempt.suspended is not record.suspended
+        or attempt.reason != record.reason
+    ):
+        raise PaperExecutionStateError(
+            "attempt execution truth does not match durable observation evidence"
+        )
+
+
 class PaperExecutionLedger(_impl.PaperExecutionLedger):
     """PAPER ledger with mechanically derived completion economics."""
 
@@ -461,6 +549,11 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     "cannot record attempt after durable run completion"
                 )
             reservation_payload = reservations[0]["payload"]
+            _require_durable_attempt_evidence_binding(
+                events=events,
+                reservation_payload=reservation_payload,
+                attempt=attempt,
+            )
             action_ids_raw = reservation_payload.get("action_ids")
             if (
                 type(action_ids_raw) is not list

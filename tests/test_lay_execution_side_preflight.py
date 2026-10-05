@@ -205,6 +205,25 @@ def test_suspended_lay_is_durable_no_exposure_without_empirical_fill_evidence() 
 
 
 
+def test_noncanonical_suspension_container_fails_before_reservation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        back = _action("back-bad-suspension-container", side="BACK", odds="2.00", stake="5.00")
+        before = len(ledger.events())
+
+        with pytest.raises(TypeError, match="frozenset"):
+            execute_paper_plan(
+                plan=_plan(back),
+                trigger_id="bad-suspension-container",
+                config=_config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                suspended_action_ids={back.action_id},  # type: ignore[arg-type]
+            )
+
+        assert len(ledger.events()) == before
+
+
 def test_suspension_state_is_bound_to_durable_run_identity() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")

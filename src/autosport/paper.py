@@ -348,8 +348,20 @@ def _make_paperbook_causal_history_authority_registry():
 def _make_paperbook_operation_lock_registry():
     # Economic transitions/readouts must be linearizable per book. Key by object
     # identity so caller-defined __hash__/__eq__ can never run at the lock boundary.
+    # Capture construction dependencies once so mutable module dispatch cannot run
+    # caller-controlled code while a PaperBook is still establishing authority.
     entries: dict[int, tuple[object, threading.RLock]] = {}
     guard = threading.RLock()
+    weak_ref_factory = ref
+    lock_factory = threading.RLock
+    lock_factory_code = getattr(lock_factory, "__code__", None)
+
+    def require_lock_factory_authority() -> None:
+        if (
+            lock_factory_code is not None
+            and getattr(lock_factory, "__code__", None) is not lock_factory_code
+        ):
+            raise ValueError("PaperBook operation lock factory authority changed")
 
     def register_book(book: object) -> None:
         identity = id(book)
@@ -360,9 +372,12 @@ def _make_paperbook_operation_lock_registry():
                 if current is not None and current[0] is dead_ref:
                     entries.pop(_identity, None)
 
-        weak_book = ref(book, cleanup)
+        weak_book = weak_ref_factory(book, cleanup)
+        require_lock_factory_authority()
+        book_lock = lock_factory()
+        require_lock_factory_authority()
         with guard:
-            entries[identity] = (weak_book, threading.RLock())
+            entries[identity] = (weak_book, book_lock)
 
     def require_lock(book: object) -> threading.RLock:
         with guard:
@@ -426,6 +441,47 @@ def _guard_paperbook_runtime_authority(method):
     return guarded
 
 
+def _guard_paperbook_constructor_authority(method):
+    """Seal PaperBook authority registration before instance state is accepted."""
+    operation_register = _register_paperbook_operation_lock
+    operation_register_code = operation_register.__code__
+    opening_register = _register_ticket_opening_authority_book
+    opening_register_code = opening_register.__code__
+    causal_register = _register_paperbook_causal_history_authority_book
+    causal_register_code = causal_register.__code__
+
+    def invoke(registrar, expected_code, label: str, book: object) -> None:
+        if registrar.__code__ is not expected_code:
+            raise ValueError(f"PaperBook {label} constructor authority changed")
+        registrar(book)
+        if registrar.__code__ is not expected_code:
+            raise ValueError(f"PaperBook {label} constructor authority changed")
+
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        invoke(
+            operation_register,
+            operation_register_code,
+            "operation lock",
+            self,
+        )
+        invoke(
+            opening_register,
+            opening_register_code,
+            "opening registry",
+            self,
+        )
+        invoke(
+            causal_register,
+            causal_register_code,
+            "causal-history registry",
+            self,
+        )
+        return method(self, *args, **kwargs)
+
+    return guarded
+
+
 def _paper_decimal_context() -> Context:
     context = Context(
         prec=_PAPER_DECIMAL_PRECISION,
@@ -456,10 +512,8 @@ def _reject_nonfinite_json_constant(value: str) -> None:
 class PaperBook:
     """Virtual bankroll and auditable paper tickets. No real-money execution path exists."""
 
+    @_guard_paperbook_constructor_authority
     def __init__(self, initial_bankroll: Decimal | str = Decimal("10000")) -> None:
-        _register_paperbook_operation_lock(self)
-        _register_ticket_opening_authority_book(self)
-        _register_paperbook_causal_history_authority_book(self)
         initial = self._canonical_decimal_input(initial_bankroll, "initial_bankroll")
         if initial <= 0:
             raise ValueError("initial virtual bankroll must be positive")

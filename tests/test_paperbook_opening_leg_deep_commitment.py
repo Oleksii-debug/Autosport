@@ -815,6 +815,96 @@ def test_operation_lock_dispatch_rejects_in_place_code_mutation() -> None:
 
 
 @pytest.mark.parametrize(
+    "registrar_name",
+    (
+        "_register_paperbook_operation_lock",
+        "_register_ticket_opening_authority_book",
+        "_register_paperbook_causal_history_authority_book",
+    ),
+)
+def test_constructor_never_executes_rebound_authority_registrar(
+    monkeypatch, registrar_name: str
+) -> None:
+    attacker_calls = 0
+
+    def hostile(_book):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound constructor authority executed")
+
+    monkeypatch.setattr(paper_module, registrar_name, hostile)
+
+    book = PaperBook("100")
+
+    assert book.balance == Decimal("100")
+    assert attacker_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("registrar_name", "label"),
+    (
+        ("_register_paperbook_operation_lock", "operation lock"),
+        ("_register_ticket_opening_authority_book", "opening registry"),
+        (
+            "_register_paperbook_causal_history_authority_book",
+            "causal-history registry",
+        ),
+    ),
+)
+def test_constructor_rejects_in_place_registrar_code_mutation(
+    registrar_name: str, label: str
+) -> None:
+    registrar = getattr(paper_module, registrar_name)
+    original_code = registrar.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        registrar.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match=f"{label} constructor authority changed"):
+            PaperBook("100")
+    finally:
+        registrar.__code__ = original_code
+
+
+def test_operation_lock_registration_ignores_rebound_weakref_factory(
+    monkeypatch,
+) -> None:
+    attacker_calls = 0
+
+    def hostile_ref(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound weakref factory executed")
+
+    monkeypatch.setattr(paper_module, "ref", hostile_ref)
+
+    book = PaperBook("100")
+
+    assert book.committed_stake == Decimal("0")
+    assert attacker_calls == 0
+
+
+def test_operation_lock_registration_ignores_rebound_threading_module(
+    monkeypatch,
+) -> None:
+    attacker_calls = 0
+
+    class HostileThreading:
+        @staticmethod
+        def RLock():
+            nonlocal attacker_calls
+            attacker_calls += 1
+            raise AssertionError("rebound lock factory executed")
+
+    monkeypatch.setattr(paper_module, "threading", HostileThreading)
+
+    book = PaperBook("100")
+
+    assert book.committed_stake == Decimal("0")
+    assert attacker_calls == 0
+
+
+@pytest.mark.parametrize(
     "operation",
     ("committed_stake", "open_ticket", "settle", "save"),
 )

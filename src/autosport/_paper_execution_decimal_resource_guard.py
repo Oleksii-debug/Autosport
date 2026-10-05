@@ -83,21 +83,33 @@ def _bounded_decimal_text(
     return _serialize(value)
 
 
-def _bounded_evidence_to_dict(
-    self: _impl.PaperExecutionEvidenceRecord,
-    _serialize=_ORIGINAL_EVIDENCE_TO_DICT,
-    _validate=_RESOURCE_VALIDATOR,
-    _require=_require_helpers,
-) -> dict[str, object]:
-    """Preflight every accepted economic field before formatting any sibling."""
-    _require()
-    for value in (self.accepted_odds, self.accepted_stake):
-        if value is None:
-            continue
-        if type(value) is not Decimal:
-            raise ValueError("PAPER execution Decimal must be exact")
-        _validate(value)
-    return _serialize(self)
+def _build_bounded_evidence_to_dict(
+    serialize: FunctionType,
+    validate: FunctionType,
+    require: FunctionType,
+) -> FunctionType:
+    def bounded_evidence_to_dict(
+        self: _impl.PaperExecutionEvidenceRecord,
+    ) -> dict[str, object]:
+        """Preflight every accepted economic field before formatting any sibling."""
+        require()
+        for value in (self.accepted_odds, self.accepted_stake):
+            if value is None:
+                continue
+            if type(value) is not Decimal:
+                raise ValueError("PAPER execution Decimal must be exact")
+            validate(value)
+        return serialize(self)
+
+    return bounded_evidence_to_dict
+
+
+_BOUNDED_EVIDENCE_TO_DICT = _build_bounded_evidence_to_dict(
+    _ORIGINAL_EVIDENCE_TO_DICT,
+    _RESOURCE_VALIDATOR,
+    _require_helpers,
+)
+del _build_bounded_evidence_to_dict
 
 
 def _install() -> None:
@@ -111,7 +123,7 @@ def _install() -> None:
         raise RuntimeError("PAPER execution evidence serializer changed before resource guard")
     _impl._decimal = _bounded_decimal
     _impl._decimal_text = _bounded_decimal_text
-    _impl.PaperExecutionEvidenceRecord.to_dict = _bounded_evidence_to_dict
+    _impl.PaperExecutionEvidenceRecord.to_dict = _BOUNDED_EVIDENCE_TO_DICT
     _impl._autosport_decimal_resource_guard_installed = True
 
 

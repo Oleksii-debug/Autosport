@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 from decimal import Decimal
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, RLock, Thread
 
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.paper import PaperBook
@@ -960,6 +960,71 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 "paper_execution_attempt_id=",
                 next(iter(book.tickets.values())).strategy_reason,
             )
+
+
+
+    def test_execution_guard_rejects_serialization_authority_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            runtime._execution_lock = RLock()
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "serialization authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("rebound serialization authority must not be entered")
+
+    def test_execution_guard_rejects_quote_age_authority_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            runtime.max_quote_age = __import__("datetime").timedelta(seconds=500)
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "quote-age authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("mutated quote-age authority must not be entered")
+
+    def test_execution_guard_rejects_same_fingerprint_config_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            replacement = config()
+            self.assertEqual(replacement.fingerprint, runtime.config.fingerprint)
+            runtime.config = replacement
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "model authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("replacement execution model must not be entered")
+
+    def test_execution_guard_rejects_same_path_ledger_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, runtime = self.runtime(tmp)
+            runtime.ledger = PaperExecutionLedger(ledger.path)
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "ledger authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("replacement execution ledger must not be entered")
+
+    def test_execution_guard_rejects_paper_book_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            replacement = PaperBook(str(book.initial_bankroll))
+            runtime.book = replacement
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "PaperBook authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("replacement PaperBook must not be entered")
 
 
 if __name__ == "__main__":

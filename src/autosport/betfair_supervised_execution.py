@@ -1007,9 +1007,10 @@ def _place_action_with_final_durable_authority(
             )
 
         submitted = False
+        submitted_request_sha256: str | None = None
 
         def authorize_and_submit(request_sha256: str) -> None:
-            nonlocal submitted
+            nonlocal submitted, submitted_request_sha256
             _sha(request_sha256, "submitted_request_sha256")
             send_at = _supervised_execution_runtime._trusted_now()
             _require_approval(bound, approval, send_at)
@@ -1038,10 +1039,11 @@ def _place_action_with_final_durable_authority(
                     "submitted_request_sha256": request_sha256,
                 },
             )
+            submitted_request_sha256 = request_sha256
             submitted = True
 
         try:
-            return client.place_action(
+            report = client.place_action(
                 action,
                 profile=profile,
                 bound=bound,
@@ -1049,6 +1051,14 @@ def _place_action_with_final_durable_authority(
                 execution_workspace=execution_workspace,
                 _before_transport=authorize_and_submit,
             )
+            if (
+                submitted_request_sha256 is None
+                or report.request_sha256 != submitted_request_sha256
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "placeOrders report request digest mismatches durable submission"
+                )
+            return report
         except BetfairPlaceOrdersAmbiguous:
             raise
         except Exception as exc:

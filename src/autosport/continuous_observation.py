@@ -226,9 +226,10 @@ def _publish_status(
     if reporter is not None:
         try:
             reporter(_format_status(payload))
-        except (BrokenPipeError, OSError):
-            # Console output is observability only. Durable status and market/source
-            # stores remain authoritative and must not be rolled back by a closed pipe.
+        except Exception:
+            # Reporting is a non-authoritative projection. Once durable status is
+            # published, an ordinary reporter failure must never abort ingestion or
+            # misclassify already-durable market/source state.
             pass
 
 

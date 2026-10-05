@@ -75,6 +75,7 @@ _CANONICAL_OS_FDOPEN = os.fdopen
 _CANONICAL_OS_SAMEOPENFILE = os.path.sameopenfile
 _CANONICAL_STAT_ISREG = stat.S_ISREG
 _CANONICAL_OS_RDONLY = os.O_RDONLY
+_CANONICAL_OS_RDWR = os.O_RDWR
 _CANONICAL_OS_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _CANONICAL_OS_NAME = os.name
 
@@ -960,7 +961,11 @@ class PaperBook:
             try:
                 published_descriptor = _CANONICAL_OS_OPEN(
                     destination,
-                    _CANONICAL_OS_RDONLY,
+                    (
+                        _CANONICAL_OS_RDWR
+                        if _CANONICAL_OS_NAME == "nt"
+                        else _CANONICAL_OS_RDONLY
+                    ),
                 )
                 _CANONICAL_OS_FSYNC(published_descriptor)
                 if _CANONICAL_OS_NAME != "nt":

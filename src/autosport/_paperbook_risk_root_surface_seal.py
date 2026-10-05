@@ -30,8 +30,6 @@ _PROTECTED_ROOT_TYPES = (
     ("_identity_concentration_decision", classmethod),
     ("risk_of_ruin_portfolio_sha256", classmethod),
     ("risk_of_ruin_candidate_sha256", staticmethod),
-    ("provenance_payload", FunctionType),
-    ("provenance_record", FunctionType),
     ("_effective_fraction_limits", FunctionType),
     ("_decimal_context", staticmethod),
     ("_exact_positive_sum", staticmethod),
@@ -43,8 +41,6 @@ _PROTECTED_ROOT_TYPES = (
 
 
 _INSTANCE_CALL_ROOT_NAMES = (
-    "provenance_payload",
-    "provenance_record",
     "derive_goal_stake",
     "derive_goal_stake_vector",
     "evaluate",

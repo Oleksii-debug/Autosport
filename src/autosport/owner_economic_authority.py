@@ -50,13 +50,7 @@ INITIAL_OWNER_FORM_DEFAULTS: Final[Mapping[str, str]] = {
     "max_day_loss_fraction": "0.05",
     "max_drawdown_fraction": "0.20",
     "max_capital_at_risk_fraction": "0.20",
-    "max_event_concentration_fraction": "1",
-    "max_market_concentration_fraction": "1",
-    "max_provider_concentration_fraction": "1",
-    "max_sport_concentration_fraction": "1",
-    "max_turnover_fraction": "1",
     "max_risk_of_ruin": "0.01",
-    "max_execution_slippage_fraction": "0.01",
     "max_quote_age_seconds": "5",
     "minimum_data_quality": "0",
     "max_concurrent_positions": "1",
@@ -74,9 +68,9 @@ def _decimal_from_form(name: str, value: object, *, optional: bool = False) -> D
     if not isinstance(value, str):
         raise OwnerEconomicAuthorityError(text("ui.windows.owner_authority.error.text", field=_field_label(name)))
     candidate = value.strip()
-    if optional and not candidate and value == candidate:
+    if optional and not candidate:
         return None
-    if not candidate or value != candidate:
+    if not candidate:
         raise OwnerEconomicAuthorityError(text("ui.windows.owner_authority.error.required", field=_field_label(name)))
     try:
         parsed = Decimal(candidate)
@@ -92,35 +86,15 @@ def _decimal_from_form(name: str, value: object, *, optional: bool = False) -> D
 
 
 def _positive_int_from_form(name: str, value: object) -> int:
-    if not isinstance(value, str) or not value or value != value.strip():
+    if not isinstance(value, str) or not value.strip():
         raise OwnerEconomicAuthorityError(text("ui.windows.owner_authority.error.required", field=_field_label(name)))
-    candidate = value
+    candidate = value.strip()
     if not candidate.isascii() or not candidate.isdecimal() or str(int(candidate)) != candidate:
         raise OwnerEconomicAuthorityError(text("ui.windows.owner_authority.error.integer", field=_field_label(name)))
     result = int(candidate)
     if result <= 0:
         raise OwnerEconomicAuthorityError(text("ui.windows.owner_authority.error.integer", field=_field_label(name)))
     return result
-
-
-def _nonnegative_int_from_form(name: str, value: object) -> int:
-    if not isinstance(value, str) or not value or value != value.strip():
-        raise OwnerEconomicAuthorityError(
-            text("ui.windows.owner_authority.error.required", field=_field_label(name))
-        )
-    candidate = value
-    if (
-        not candidate.isascii()
-        or not candidate.isdecimal()
-        or str(int(candidate)) != candidate
-    ):
-        raise OwnerEconomicAuthorityError(
-            text(
-                "ui.windows.owner_authority.error.nonnegative_integer",
-                field=_field_label(name),
-            )
-        )
-    return int(candidate)
 
 
 def _canonical_text_from_form(name: str, value: object) -> str:
@@ -185,16 +159,10 @@ def build_initial_owner_contract(
             max_day_loss_fraction=_decimal_from_form("max_day_loss_fraction", values["max_day_loss_fraction"]),  # type: ignore[arg-type]
             max_drawdown_fraction=_decimal_from_form("max_drawdown_fraction", values["max_drawdown_fraction"]),  # type: ignore[arg-type]
             max_capital_at_risk_fraction=_decimal_from_form("max_capital_at_risk_fraction", values["max_capital_at_risk_fraction"]),  # type: ignore[arg-type]
-            max_event_concentration_fraction=_decimal_from_form("max_event_concentration_fraction", values["max_event_concentration_fraction"]),  # type: ignore[arg-type]
-            max_market_concentration_fraction=_decimal_from_form("max_market_concentration_fraction", values["max_market_concentration_fraction"]),  # type: ignore[arg-type]
-            max_provider_concentration_fraction=_decimal_from_form("max_provider_concentration_fraction", values["max_provider_concentration_fraction"]),  # type: ignore[arg-type]
-            max_sport_concentration_fraction=_decimal_from_form("max_sport_concentration_fraction", values["max_sport_concentration_fraction"]),  # type: ignore[arg-type]
-            max_turnover_fraction=_decimal_from_form("max_turnover_fraction", values["max_turnover_fraction"]),  # type: ignore[arg-type]
             max_risk_of_ruin=_decimal_from_form("max_risk_of_ruin", values["max_risk_of_ruin"]),  # type: ignore[arg-type]
-            max_execution_slippage_fraction=_decimal_from_form("max_execution_slippage_fraction", values["max_execution_slippage_fraction"]),  # type: ignore[arg-type]
             max_quote_age_seconds=_decimal_from_form("max_quote_age_seconds", values["max_quote_age_seconds"]),  # type: ignore[arg-type]
             minimum_data_quality=_decimal_from_form("minimum_data_quality", values["minimum_data_quality"]),  # type: ignore[arg-type]
-            max_concurrent_positions=_nonnegative_int_from_form("max_concurrent_positions", values["max_concurrent_positions"]),
+            max_concurrent_positions=_positive_int_from_form("max_concurrent_positions", values["max_concurrent_positions"]),
             max_parlay_legs=_positive_int_from_form("max_parlay_legs", values["max_parlay_legs"]),
             automation_level=automation_level,
             emergency_stop=emergency_stop,
@@ -209,9 +177,9 @@ def build_initial_owner_contract(
 
 
 def _positive_or_zero_int(name: str, value: object) -> int:
-    if not isinstance(value, str) or not value or value != value.strip():
-        raise ValueError(f"{name} is missing or non-canonical")
-    candidate = value
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} is missing")
+    candidate = value.strip()
     if not candidate.isascii() or not candidate.isdecimal() or str(int(candidate)) != candidate:
         raise ValueError(f"{name} is invalid")
     return int(candidate)
@@ -302,7 +270,20 @@ class OwnerEconomicAuthorityService:
 
     def read_view(self) -> OwnerEconomicAuthorityView:
         try:
-            contract = self.store.load_optional()
+            exists = self.store.path.exists()
+        except OSError:
+            exists = True
+        if not exists:
+            return OwnerEconomicAuthorityView(
+                state="absent",
+                summary_uk=text("ui.windows.owner_authority.state.absent"),
+                lines_uk=(
+                    text("ui.windows.owner_authority.state.absent"),
+                    text("ui.windows.owner_authority.boundary.initial_only"),
+                ),
+            )
+        try:
+            contract = self.store.load()
         except (EconomicGoalContractError, OSError, UnicodeError, ValueError):
             return OwnerEconomicAuthorityView(
                 state="corrupt",
@@ -310,15 +291,6 @@ class OwnerEconomicAuthorityService:
                 lines_uk=(
                     text("ui.windows.owner_authority.state.corrupt"),
                     text("ui.windows.owner_authority.boundary.corrupt"),
-                ),
-            )
-        if contract is None:
-            return OwnerEconomicAuthorityView(
-                state="absent",
-                summary_uk=text("ui.windows.owner_authority.state.absent"),
-                lines_uk=(
-                    text("ui.windows.owner_authority.state.absent"),
-                    text("ui.windows.owner_authority.boundary.initial_only"),
                 ),
             )
         return OwnerEconomicAuthorityView(

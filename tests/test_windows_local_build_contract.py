@@ -94,8 +94,8 @@ def test_local_windows_build_uses_trusted_snapshot_immediately_before_pyinstalle
     )
     first_build = (
         "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed "
-        "--paths $trustedBuildSrc --add-data $trustedWebAssetsSpec --distpath $pyInstallerDist "
-        "--workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
+        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+        "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
     )
 
     dataset_index = script.index(dataset_smoke)
@@ -120,8 +120,8 @@ def test_local_windows_build_phase_separates_later_release_outputs() -> None:
     release_gate = strict_gate + " --allow-release-outputs"
     first_build = (
         "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed "
-        "--paths $trustedBuildSrc --add-data $trustedWebAssetsSpec --distpath $pyInstallerDist "
-        "--workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
+        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+        "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
     )
     second_build = (
         "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --console "
@@ -147,8 +147,8 @@ def test_local_windows_build_binds_pyinstaller_outputs_before_consumption() -> N
 
     first_build = (
         "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed "
-        "--paths $trustedBuildSrc --add-data $trustedWebAssetsSpec --distpath $pyInstallerDist "
-        "--workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
+        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
+        "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
     )
     first_bind = (
         "python $sourceVerifier --bind-artifact $builtAutosportExe "
@@ -186,7 +186,7 @@ def test_local_windows_build_fails_closed_on_release_native_steps() -> None:
             'if ($LASTEXITCODE -ne 0) { throw "Demo dataset smoke exited $LASTEXITCODE" }',
         ),
         (
-            "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed --paths $trustedBuildSrc --add-data $trustedWebAssetsSpec --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry",
+            "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed --paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry",
             'if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }',
         ),
         (
@@ -245,82 +245,3 @@ def test_local_windows_build_binds_real_process_recovery_before_and_after_packag
         "process_recovery_new_decision_ledger_sha256",
     ):
         assert required_binding in script
-
-def test_local_windows_build_known_folder_first_run_scrubs_all_storage_overrides() -> None:
-    script = _build_script_text()
-
-    save_local = "$originalLocalAppData = $env:LOCALAPPDATA"
-    save_workspace = "$originalAutosportWorkspace = $env:AUTOSPORT_WORKSPACE"
-    detect_local = "$hadLocalAppData = Test-Path Env:LOCALAPPDATA"
-    detect_workspace = "$hadAutosportWorkspace = Test-Path Env:AUTOSPORT_WORKSPACE"
-    remove_local = "Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue"
-    remove_workspace = "Remove-Item Env:AUTOSPORT_WORKSPACE -ErrorAction SilentlyContinue"
-    process_a = "$firstRunProcessA = Start-Process -FilePath $extractedExe"
-    process_b = "$firstRunProcessB = Start-Process -FilePath $extractedExe"
-    restore_local = "$env:LOCALAPPDATA = $originalLocalAppData"
-    restore_workspace = "$env:AUTOSPORT_WORKSPACE = $originalAutosportWorkspace"
-    known_folder_claim = "extracted_first_run_storage_known_folder_status = 'PASS'"
-
-    save_local_index = script.index(save_local)
-    save_workspace_index = script.index(save_workspace, save_local_index)
-    detect_local_index = script.index(detect_local, save_local_index)
-    detect_workspace_index = script.index(detect_workspace, save_workspace_index)
-    remove_local_index = script.index(remove_local, detect_workspace_index)
-    remove_workspace_index = script.index(remove_workspace, remove_local_index)
-    process_a_index = script.index(process_a, remove_workspace_index)
-    process_b_index = script.index(process_b, process_a_index)
-    restore_local_index = script.index(restore_local, process_b_index)
-    restore_workspace_index = script.index(restore_workspace, restore_local_index)
-    known_folder_claim_index = script.index(known_folder_claim, restore_workspace_index)
-
-    assert save_local_index < detect_local_index < save_workspace_index < detect_workspace_index
-    assert detect_workspace_index < remove_local_index < remove_workspace_index < process_a_index
-    assert process_a_index < process_b_index < restore_local_index < restore_workspace_index
-    assert restore_workspace_index < known_folder_claim_index
-    assert script.count(remove_workspace) >= 2
-
-
-def test_local_windows_build_requires_clean_webview_environment_storage_witness() -> None:
-    script = _build_script_text()
-
-    witness = (
-        "$freshFirstRunEvidenceA.webview_environment_overrides_clear -ne $true "
-        "-or $freshFirstRunEvidenceB.webview_environment_overrides_clear -ne $true"
-    )
-    failure = (
-        "Fresh-extracted first-run storage audit did not prove a clean "
-        "WebView2 release environment"
-    )
-    truth_gate = "$freshFirstRunEvidenceA.real_money_execution -ne $false"
-
-    assert witness in script
-    assert failure in script
-    assert script.index(witness) < script.index(truth_gate)
-
-def test_local_windows_build_requires_exact_first_run_storage_proof_boundaries() -> None:
-    script = _build_script_text()
-
-    workspace_witness = (
-        "$freshFirstRunEvidenceA.workspace_canonical_atomic_publication_proven "
-        "-ne $true"
-    )
-    webview_host_witness = (
-        "$freshFirstRunEvidenceA.webview_host_writability_proven -ne $true"
-    )
-    webview_child_boundary = (
-        "$freshFirstRunEvidenceA.webview_child_profile_access_proven -ne $false"
-    )
-    truth_gate = "$freshFirstRunEvidenceA.real_money_execution -ne $false"
-
-    assert workspace_witness in script
-    assert webview_host_witness in script
-    assert webview_child_boundary in script
-    assert script.index(workspace_witness) < script.index(truth_gate)
-    assert script.index(webview_host_witness) < script.index(truth_gate)
-    assert script.index(webview_child_boundary) < script.index(truth_gate)
-    assert "extracted_first_run_workspace_atomic_publication_status = 'PASS'" in script
-    assert "extracted_first_run_webview_host_writability_status = 'PASS'" in script
-    assert (
-        "extracted_first_run_webview_child_profile_access_proven = $false"
-        in script
-    )

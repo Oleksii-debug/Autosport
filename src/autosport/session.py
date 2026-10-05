@@ -255,7 +255,7 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
         self,
     ) -> tuple[EconomicGoalContract | None, PaperRiskPolicy]:
         store = EconomicGoalStore(self.workspace)
-        goal = store.load_optional()
+        goal = store.load() if store.path.exists() else None
         policy = PaperRiskPolicy(economic_goal=goal)
         return goal, policy
 
@@ -267,13 +267,9 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
         if goal is None:
             return self.strategy_id
         goal_provenance = provenance_for(goal)
-        policy_provenance = policy.provenance_record()
-        policy_sha256 = policy_provenance["sha256"]
-        if not isinstance(policy_sha256, str):
-            raise ValueError("risk policy provenance digest is invalid")
         return (
             f"{self.strategy_id}::economic:"
-            f"{goal_provenance.contract_sha256}:{policy_sha256}"
+            f"{goal_provenance.contract_sha256}:{policy.provenance_sha256}"
         )
 
     @staticmethod
@@ -286,7 +282,7 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
         goal_provenance = provenance_for(goal)
         return (
             goal_provenance,
-            policy.provenance_record(),
+            {**policy.provenance_payload(), "sha256": policy.provenance_sha256},
         )
 
     def run_dataset(self, dataset: ReplayDataset, speed: float = 0.0, allow_repeat: bool = False) -> SessionResult:

@@ -8,10 +8,9 @@ class WindowsStartGuideTests(unittest.TestCase):
     def test_exposes_evaluation_keyboard_shortcut(self) -> None:
         guide = Path("WINDOWS_START_HERE.txt").read_text(encoding="utf-8")
 
-        self.assertIn("F2 — навігація поверхнями", guide)
-        self.assertIn("F8 — Evaluation", guide)
-        self.assertIn("F6/F7/F9/F10", guide)
-        self.assertIn("не перехоплюються", guide)
+        self.assertIn("F6 — paper tickets", guide)
+        self.assertIn("F7 — live quotes", guide)
+        self.assertIn("F8 — Evaluation і portfolio evidence", guide)
 
     def test_binds_physical_nvda_gate_to_exact_packaged_candidate(self) -> None:
         guide = Path("WINDOWS_START_HERE.txt").read_text(encoding="utf-8")

@@ -23,11 +23,7 @@ from autosport.research_strategy import (
     market_event_evidence_hash,
     research_market_snapshot_hash,
 )
-from autosport.risk import (
-    PAPER_RISK_POLICY_PROVENANCE_SCHEMA_VERSION,
-    PAPER_RISK_POLICY_SEMANTICS,
-    PaperRiskPolicy,
-)
+from autosport.risk import PaperRiskPolicy
 from autosport.session import AutosportSession
 
 
@@ -175,16 +171,8 @@ class SessionEconomicGoalRuntimeTests(unittest.TestCase):
                     expected_goal.contract_sha256,
                 )
                 self.assertEqual(
-                    runtime["risk_policy_provenance"],
-                    expected_policy.provenance_record(),
-                )
-                self.assertEqual(
-                    runtime["risk_policy_provenance"]["schema_version"],
-                    PAPER_RISK_POLICY_PROVENANCE_SCHEMA_VERSION,
-                )
-                self.assertEqual(
-                    runtime["risk_policy_provenance"]["semantics"],
-                    PAPER_RISK_POLICY_SEMANTICS,
+                    runtime["risk_policy_provenance"]["sha256"],
+                    expected_policy.provenance_sha256,
                 )
                 self.assertEqual(
                     runtime["risk_policy_provenance"]["economic_goal_contract_sha256"],
@@ -233,45 +221,9 @@ class SessionEconomicGoalRuntimeTests(unittest.TestCase):
                     provenance_for(goal).contract_sha256,
                 )
                 self.assertEqual(
-                    record.payload["risk_policy_provenance"],
-                    policy.provenance_record(),
+                    record.payload["risk_policy_provenance"]["sha256"],
+                    policy.provenance_sha256,
                 )
-                self.assertEqual(
-                    record.payload["risk_policy_provenance"]["schema_version"],
-                    2,
-                )
-                self.assertEqual(
-                    record.payload["risk_policy_provenance"]["semantics"],
-                    PAPER_RISK_POLICY_SEMANTICS,
-                )
-            finally:
-                session.close()
-
-    def test_broken_goal_alias_fails_before_registry_or_paper_mutation(self) -> None:
-        dataset = load_dataset(Path("examples/tt_demo"))
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            session = AutosportSession(
-                workspace,
-                "1000",
-                strategy_id="observe-only-v1",
-            )
-            try:
-                goal_path = workspace / EconomicGoalStore.FILE_NAME
-                target = workspace / "missing-external-economic-goal.json"
-                try:
-                    goal_path.symlink_to(target)
-                except OSError as exc:
-                    self.skipTest(f"symlinks unavailable on this runner: {exc}")
-
-                with self.assertRaises(EconomicGoalContractError):
-                    session.run_dataset(dataset)
-
-                self.assertTrue(goal_path.is_symlink())
-                self.assertFalse(target.exists())
-                self.assertEqual(session.registry.strategy_ids(), ())
-                self.assertFalse(session.registry.in_progress())
-                self.assertFalse((workspace / "paper_book.json").exists())
             finally:
                 session.close()
 
@@ -373,8 +325,8 @@ class SessionEconomicGoalRuntimeTests(unittest.TestCase):
                 risk_policy=policy,
             )
             self.assertEqual(
-                persisted.payload["risk_policy_provenance"],
-                policy.provenance_record(),
+                persisted.payload["risk_policy_provenance"]["sha256"],
+                policy.provenance_sha256,
             )
             with self.assertRaisesRegex(
                 DecisionLedgerIntegrityError,

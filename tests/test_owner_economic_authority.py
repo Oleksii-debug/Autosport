@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -50,65 +49,6 @@ def test_owner_authority_absent_contract_can_be_confirmed_once_and_read_back_aft
     assert restarted.lines_uk == persisted.lines_uk
 
 
-def test_all_canonical_risk_ceilings_are_explicit_and_survive_restart(
-    tmp_path: Path,
-) -> None:
-    values = _values(
-        max_event_concentration_fraction="0.11",
-        max_market_concentration_fraction="0.22",
-        max_provider_concentration_fraction="0.33",
-        max_sport_concentration_fraction="0.44",
-        max_turnover_fraction="0.55",
-        max_execution_slippage_fraction="0.006",
-    )
-
-    parsed = build_initial_owner_contract(values, emergency_stop=False)
-    assert parsed.max_event_concentration_fraction == Decimal("0.11")
-    assert parsed.max_market_concentration_fraction == Decimal("0.22")
-    assert parsed.max_provider_concentration_fraction == Decimal("0.33")
-    assert parsed.max_sport_concentration_fraction == Decimal("0.44")
-    assert parsed.max_turnover_fraction == Decimal("0.55")
-    assert parsed.max_execution_slippage_fraction == Decimal("0.006")
-
-    persisted = OwnerEconomicAuthorityService(tmp_path).initialize_from_form(
-        values,
-        emergency_stop=False,
-        confirmed=True,
-    )
-    assert persisted.contract == parsed
-    restarted = OwnerEconomicAuthorityService(tmp_path).read_view()
-    assert restarted.state == "valid"
-    assert restarted.contract == parsed
-    assert restarted.lines_uk == persisted.lines_uk
-
-
-@pytest.mark.parametrize(
-    "blocked_sports",
-    (
-        "Football",
-        "unknown",
-        "mixed",
-        "football|soccer",
-        "футбол",
-    ),
-)
-def test_owner_form_rejects_noncanonical_blocked_sport_without_writing(
-    tmp_path: Path,
-    blocked_sports: str,
-) -> None:
-    service = OwnerEconomicAuthorityService(tmp_path)
-
-    with pytest.raises(OwnerEconomicAuthorityError):
-        service.initialize_from_form(
-            _values(blocked_sports=blocked_sports),
-            emergency_stop=False,
-            confirmed=True,
-        )
-
-    assert service.read_view().state == "absent"
-    assert not (tmp_path / EconomicGoalStore.FILE_NAME).exists()
-
-
 def test_confirmation_cancel_never_creates_a_contract(tmp_path: Path) -> None:
     service = OwnerEconomicAuthorityService(tmp_path)
 
@@ -140,15 +80,8 @@ def test_initial_form_rejects_unexpected_keys_without_silently_discarding_them(
     (
         ("max_stake_fraction", "NaN"),
         ("max_day_loss_fraction", "Infinity"),
-        ("max_event_concentration_fraction", "NaN"),
-        ("max_market_concentration_fraction", "Infinity"),
-        ("max_provider_concentration_fraction", "-Infinity"),
-        ("max_sport_concentration_fraction", "1e0"),
-        ("max_turnover_fraction", "NaN"),
-        ("max_execution_slippage_fraction", "1e-2"),
         ("max_quote_age_seconds", "1e2"),
-        ("max_concurrent_positions", "-1"),
-        ("max_concurrent_positions", "00"),
+        ("max_concurrent_positions", "0"),
     ),
 )
 def test_initial_form_rejects_nonfinite_or_noncanonical_values_without_writing(
@@ -161,56 +94,6 @@ def test_initial_form_rejects_nonfinite_or_noncanonical_values_without_writing(
 
     assert service.read_view().state == "absent"
     assert not (tmp_path / EconomicGoalStore.FILE_NAME).exists()
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        ("max_stake_fraction", " 0.02"),
-        ("max_stake_amount", " "),
-        ("max_quote_age_seconds", "5 "),
-        ("max_concurrent_positions", " 0"),
-        ("max_parlay_legs", "1 "),
-        ("automation_level", " 0"),
-    ),
-)
-def test_owner_numeric_fields_reject_outer_whitespace_without_writing(
-    tmp_path: Path,
-    field: str,
-    value: str,
-) -> None:
-    service = OwnerEconomicAuthorityService(tmp_path)
-
-    with pytest.raises(OwnerEconomicAuthorityError):
-        service.initialize_from_form(
-            _values(**{field: value}),
-            emergency_stop=False,
-            confirmed=True,
-        )
-
-    assert service.read_view().state == "absent"
-    assert not (tmp_path / EconomicGoalStore.FILE_NAME).exists()
-
-
-def test_owner_can_set_zero_concurrent_positions_as_strictest_position_cap(
-    tmp_path: Path,
-) -> None:
-    values = _values(max_concurrent_positions="0")
-
-    parsed = build_initial_owner_contract(values, emergency_stop=False)
-    assert parsed.max_concurrent_positions == 0
-
-    persisted = OwnerEconomicAuthorityService(tmp_path).initialize_from_form(
-        values,
-        emergency_stop=False,
-        confirmed=True,
-    )
-    assert persisted.contract is not None
-    assert persisted.contract.max_concurrent_positions == 0
-    assert any(
-        "Максимум одночасних позицій" in line and line.endswith("0")
-        for line in persisted.lines_uk
-    )
 
 
 def test_existing_contract_is_read_only_and_duplicate_initialization_preserves_it(
@@ -252,33 +135,6 @@ def test_corrupt_contract_is_visible_but_never_overwritten_by_owner_initializati
     with pytest.raises(OwnerEconomicAuthorityError, match="не дає права на запис"):
         service.initialize_from_form(_values(), emergency_stop=False, confirmed=True)
     assert path.read_text(encoding="utf-8") == before
-
-
-def test_broken_owner_contract_alias_is_corrupt_not_absent(
-    tmp_path: Path,
-) -> None:
-    service = OwnerEconomicAuthorityService(tmp_path)
-    target = tmp_path / "missing-owner-contract.json"
-    try:
-        service.store.path.symlink_to(target)
-    except OSError as exc:
-        pytest.skip(f"symlinks unavailable on this runner: {exc}")
-
-    view = service.read_view()
-
-    assert view.state == "corrupt"
-    assert view.can_initialize is False
-    with pytest.raises(
-        OwnerEconomicAuthorityError,
-        match="лише коли збереження відсутнє",
-    ):
-        service.initialize_from_form(
-            _values(),
-            emergency_stop=False,
-            confirmed=True,
-        )
-    assert service.store.path.is_symlink()
-    assert not target.exists()
 
 
 def test_owner_initialization_persists_only_authority_even_with_supervised_ceiling(

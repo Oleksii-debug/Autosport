@@ -32,10 +32,6 @@ def test_interactive_gui_fails_before_gui_import_when_workspace_is_unwritable(
 ) -> None:
     workspace = tmp_path / "readonly workspace"
     monkeypatch.setenv("AUTOSPORT_WORKSPACE", str(workspace))
-    monkeypatch.setattr(
-        "autosport.webview2_runtime_deployment.ensure_webview2_runtime",
-        lambda: SimpleNamespace(available=True),
-    )
 
     def fail_probe(candidate: Path) -> None:
         assert candidate == workspace
@@ -70,10 +66,6 @@ def test_interactive_gui_fails_before_gui_import_when_atomic_publish_primitive_f
 ) -> None:
     workspace = tmp_path / "atomic publish workspace"
     monkeypatch.setenv("AUTOSPORT_WORKSPACE", str(workspace))
-    monkeypatch.setattr(
-        "autosport.webview2_runtime_deployment.ensure_webview2_runtime",
-        lambda: SimpleNamespace(available=True),
-    )
 
     if failing_primitive == "fsync":
         def fail_fsync(_fd: int) -> None:
@@ -115,19 +107,16 @@ def test_interactive_gui_fails_before_gui_import_when_atomic_publish_primitive_f
     assert list(workspace.iterdir()) == []
 
 
-def test_workspace_access_error_is_actionable_without_internal_error_disclosure(
-    tmp_path: Path,
-) -> None:
+def test_workspace_access_error_is_actionable_and_single_line(tmp_path: Path) -> None:
     workspace = tmp_path / "робоча папка"
     error = PermissionError("access denied\nsecondary detail")
 
     message = windows_entry._workspace_access_error_message(workspace, error)
 
     assert str(workspace) in message
+    assert "PermissionError: access denied secondary detail" in message
     assert "AUTOSPORT_WORKSPACE" in message
     assert "абсолютний шлях" in message
     assert "доступної для запису" in message
     assert "Права адміністратора не потрібні" in message
-    assert "PermissionError" not in message
-    assert "access denied" not in message
-    assert "secondary detail" not in message
+    assert "access denied\nsecondary detail" not in message

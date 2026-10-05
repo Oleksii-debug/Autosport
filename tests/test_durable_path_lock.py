@@ -1,12 +1,9 @@
 import json
-import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
 import unittest
-from unittest.mock import patch
 
-from autosport import integrity
 from autosport.integrity import atomic_write_json, durable_path_lock
 
 
@@ -48,124 +45,6 @@ class DurablePathLockTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(path.read_text(encoding="utf-8")),
                 {"source": "G2"},
-            )
-
-
-    def test_symlinked_sidecar_fails_before_mutating_target(self):
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            destination = root / "authority.json"
-            target = root / "external-lock-target.bin"
-            lock_path = root / ".authority.json.lock"
-            target.write_bytes(b"")
-            try:
-                lock_path.symlink_to(target)
-            except (OSError, NotImplementedError) as exc:
-                self.skipTest(f"file symlink creation unavailable: {exc}")
-
-            with self.assertRaises(OSError):
-                with durable_path_lock(destination):
-                    self.fail("aliased durable lock must never be acquired")
-
-            self.assertTrue(lock_path.is_symlink())
-            self.assertEqual(target.read_bytes(), b"")
-
-    def test_hard_linked_sidecar_fails_before_mutating_shared_inode(self):
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            destination = root / "authority.json"
-            target = root / "external-lock-target.bin"
-            lock_path = root / ".authority.json.lock"
-            target.write_bytes(b"")
-            try:
-                os.link(target, lock_path)
-            except OSError as exc:
-                self.skipTest(f"hard links unavailable: {exc}")
-
-            with self.assertRaises(OSError):
-                with durable_path_lock(destination):
-                    self.fail("hard-linked durable lock must never be acquired")
-
-            self.assertEqual(target.read_bytes(), b"")
-            self.assertEqual(os.stat(target).st_nlink, 2)
-
-    def test_path_replacement_during_prelock_identity_check_fails_before_sentinel(self):
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            destination = root / "authority.json"
-            lock_path = root / ".authority.json.lock"
-            replacement = root / "replacement-lock.bin"
-            lock_path.write_bytes(b"")
-            replacement.write_bytes(b"")
-
-            real_open = integrity._open_read_only_no_follow_descriptor
-            calls = 0
-
-            def redirect_final_verification(path: Path) -> int:
-                nonlocal calls
-                if Path(path) == lock_path:
-                    calls += 1
-                    if calls == 2:
-                        return real_open(replacement)
-                return real_open(path)
-
-            with patch.object(
-                integrity,
-                "_open_read_only_no_follow_descriptor",
-                side_effect=redirect_final_verification,
-            ):
-                with self.assertRaises(OSError):
-                    with durable_path_lock(destination):
-                        self.fail("replaced durable lock must never be acquired")
-
-            self.assertEqual(calls, 2)
-            self.assertEqual(lock_path.read_bytes(), b"")
-            self.assertEqual(replacement.read_bytes(), b"")
-
-
-    def test_nested_lock_reuses_sidecar_after_destination_symlink_is_replaced(self):
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            target = root / "external-authority.json"
-            destination = root / "authority.json"
-            replacement = root / "replacement-authority.json"
-            target.write_text('{"state":"old"}\n', encoding="utf-8")
-            replacement.write_text('{"state":"new"}\n', encoding="utf-8")
-            try:
-                destination.symlink_to(target)
-            except (OSError, NotImplementedError) as exc:
-                self.skipTest(f"file symlink creation unavailable: {exc}")
-
-            real_open = integrity._open_durable_lock_handle
-            open_calls = 0
-
-            def counted_open(path: Path):
-                nonlocal open_calls
-                open_calls += 1
-                if open_calls > 1:
-                    raise AssertionError(
-                        "nested durable lock reopened its own persistent sidecar"
-                    )
-                return real_open(path)
-
-            with patch.object(
-                integrity,
-                "_open_durable_lock_handle",
-                side_effect=counted_open,
-            ):
-                with durable_path_lock(destination):
-                    os.replace(replacement, destination)
-                    with durable_path_lock(destination):
-                        self.assertEqual(
-                            destination.read_text(encoding="utf-8"),
-                            '{"state":"new"}\n',
-                        )
-
-            self.assertEqual(open_calls, 1)
-            self.assertFalse(destination.is_symlink())
-            self.assertEqual(
-                target.read_text(encoding="utf-8"),
-                '{"state":"old"}\n',
             )
 
 

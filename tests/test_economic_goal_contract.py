@@ -99,10 +99,6 @@ def test_automation_levels_match_canonical_execution_contract() -> None:
         ("automation_level", 2),
         ("emergency_stop", 1),
         ("blocked_sports", {"football"}),
-        ("blocked_sports", frozenset({"Football"})),
-        ("blocked_sports", frozenset({"unknown"})),
-        ("blocked_sports", frozenset({"football|soccer"})),
-        ("blocked_sports", frozenset({"футбол"})),
         ("blocked_providers", frozenset({" padded "})),
     ],
 )

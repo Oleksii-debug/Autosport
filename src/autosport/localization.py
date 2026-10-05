@@ -10,7 +10,7 @@ from .localization_windows_surfaces import WINDOWS_SURFACE_CONTENT_UK_UA
 
 
 DEFAULT_LOCALE = _v2.DEFAULT_LOCALE
-CATALOG_VERSION = 8
+CATALOG_VERSION = 7
 
 # Public v4 keeps one localization API while preserving the proven v2 catalog
 # as an immutable base resource. Windows shell chrome and surface-contract
@@ -106,8 +106,6 @@ _WINDOWS_SHELL_UK_UA = MappingProxyType(
         "ui.windows.manual_calculation.error.unknown": "Невідома ручна операція.",
         "ui.windows.manual_calculation.error.operation_empty": "Операція не вибрана.",
         "ui.windows.shell.frame.title": "Навігація продукту",
-        "ui.windows.error.internal_hidden": "Сталася внутрішня помилка. Технічні подробиці приховано.",
-        "ui.windows.product_runtime.error.recovery_required": "Тривалий імітаційний режим завершився помилкою. Спочатку відновіть робочу область.",
         "ui.windows.shell.screen.label": "Екран:",
         "ui.windows.shell.button.open": "Перейти до робочої поверхні",
         "ui.windows.shell.state.active": "Активна робоча поверхня",

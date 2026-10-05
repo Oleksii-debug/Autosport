@@ -171,55 +171,11 @@ def _economic_goal_provenance_from_payload(
         ) from exc
 
 
-def _risk_policy_payload_sha256(payload: Mapping[str, object]) -> str:
-    try:
-        encoded = json.dumps(
-            dict(payload),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        raise DecisionLedgerIntegrityError(
-            "Decision Ledger risk-policy provenance is not canonical JSON"
-        ) from exc
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def _risk_policy_provenance_payload(
     policy: PaperRiskPolicy,
 ) -> dict[str, object]:
-    payload = policy.provenance_record()
-    if not isinstance(payload, dict):
-        raise DecisionLedgerIntegrityError(
-            "Decision Ledger risk-policy provenance is invalid"
-        )
-    return dict(payload)
-
-
-def _legacy_risk_policy_provenance_payload(
-    policy: PaperRiskPolicy,
-) -> dict[str, object]:
-    """Reconstruct exact v1 policy identity only for historical readback.
-
-    New appends never emit this shape. Accepting it during verification preserves
-    restart/idempotence for actions already committed under v1 while preventing a
-    pre-v2 record from being mislabelled as current executable semantics.
-    """
-
-    goal = policy.economic_goal
-    legacy: dict[str, object] = {
-        "schema": "autosport.paper_risk_policy_provenance",
-        "schema_version": 1,
-        "max_ticket_fraction": str(policy.max_ticket_fraction),
-        "max_committed_fraction": str(policy.max_committed_fraction),
-        "minimum_cash_reserve_fraction": str(policy.minimum_cash_reserve_fraction),
-        "economic_goal_contract_sha256": (
-            provenance_for(goal).contract_sha256 if goal is not None else None
-        ),
-    }
-    return {**legacy, "sha256": _risk_policy_payload_sha256(legacy)}
+    payload = policy.provenance_payload()
+    return {**payload, "sha256": policy.provenance_sha256}
 
 
 def bind_economic_goal(
@@ -312,9 +268,7 @@ def verify_economic_goal_binding(
                 "Decision Ledger risk policy is not bound to the supplied EconomicGoalContract"
             )
         actual_policy = record.payload.get(RISK_POLICY_PROVENANCE_PAYLOAD_KEY)
-        current_policy = _risk_policy_provenance_payload(risk_policy)
-        legacy_policy = _legacy_risk_policy_provenance_payload(risk_policy)
-        if actual_policy not in (current_policy, legacy_policy):
+        if actual_policy != _risk_policy_provenance_payload(risk_policy):
             raise DecisionLedgerIntegrityError(
                 "Decision Ledger risk-policy provenance mismatch"
             )

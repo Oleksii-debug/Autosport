@@ -51,6 +51,10 @@ PRODUCT_RUNTIME_UK_UA: Mapping[str, str] = MappingProxyType(
         "ui.product_runtime.status.configuration_saved": (
             "Джерело {source_id} збережено для наступного запуску."
         ),
+        "ui.product_runtime.status.workspace_conflict": (
+            "Тривала PAPER-робота не запущена: налаштований product workspace "
+            "не збігається з поточним workspace Автоспорт."
+        ),
         "ui.product_runtime.status.configuration_busy": (
             "Не можна змінити джерело, доки тривала PAPER-робота "
             "запускається, виконується або зупиняється."

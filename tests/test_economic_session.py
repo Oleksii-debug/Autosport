@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import unittest
 from datetime import datetime
 from decimal import Decimal
@@ -146,6 +147,32 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
 
         with self.assertRaises(MonotonicAuthorityRollbackError):
             self._store().current()
+
+    def test_corrupt_or_stale_durable_state_blocks_positive_resolution(self) -> None:
+        store = self._store()
+        store.current()
+
+        corrupt = store.state_path
+        corrupt.write_bytes(b"{\\n  \\"unexpected\\": true\\n}\\n")
+        with self.assertRaises(EconomicSessionIntegrityError):
+            self._store().current()
+
+        # Restore the valid durable state, then alter one canonical field without
+        # updating the independent monotonic authority digest.
+        fresh = self._store()
+        expected = fresh.current()
+        payload = json.loads(fresh.state_path.read_text(encoding="utf-8"))
+        payload["started_at"] = "2026-01-01T00:00:00Z"
+        fresh.state_path.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(MonotonicAuthorityRollbackError):
+            self._store().current()
+        self.assertNotEqual(
+            json.loads(fresh.state_path.read_text(encoding="utf-8"))["started_at"],
+            expected.started_at,
+        )
 
     def test_goal_revision_change_requires_explicit_session_transition(self) -> None:
         store = self._store()

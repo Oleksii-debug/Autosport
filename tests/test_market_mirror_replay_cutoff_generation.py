@@ -6016,5 +6016,56 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 store.close()
 
 
+    def test_history_decoder_rejects_inverted_local_receipt_chronology(self) -> None:
+        event = self.event(
+            sequence=1,
+            odds="2.00",
+            observed_ts="2026-09-16T19:00:01+00:00",
+            ingest_ts="2026-09-16T19:00:00+00:00",
+        )
+        row = (
+            event.dedupe_key,
+            event.quote_key,
+            event.event_id,
+            event.market_id,
+            event.selection_id,
+            str(event.decimal_odds),
+            event.observed_ts,
+            event.source_id,
+            event.sequence,
+            storage_module._canonical_payload(event),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "ingest_ts must not precede observed_ts",
+        ):
+            storage_module._event_from_history_row(row)
+
+    def test_history_decoder_accepts_timezone_equivalent_local_receipt_instants(self) -> None:
+        event = self.event(
+            sequence=1,
+            odds="2.00",
+            observed_ts="2026-09-16T19:00:00+00:00",
+            ingest_ts="2026-09-16T20:00:00+01:00",
+        )
+        row = (
+            event.dedupe_key,
+            event.quote_key,
+            event.event_id,
+            event.market_id,
+            event.selection_id,
+            str(event.decimal_odds),
+            event.observed_ts,
+            event.source_id,
+            event.sequence,
+            storage_module._canonical_payload(event),
+        )
+
+        decoded = storage_module._event_from_history_row(row)
+
+        self.assertEqual(decoded, event)
+
+
 if __name__ == "__main__":
     unittest.main()

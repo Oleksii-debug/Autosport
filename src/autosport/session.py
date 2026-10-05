@@ -222,6 +222,22 @@ class ObservationResult:
             raise ValueError(
                 "observation stats health status must match durable source health"
             )
+        if self.stats.cursor != self.health.last_cursor:
+            raise ValueError(
+                "observation stats cursor must match durable source health"
+            )
+        if self.stats.quality_flags != self.health.quality_flags:
+            raise ValueError(
+                "observation stats quality flags must match durable source health"
+            )
+        if (
+            self.stats.received > self.health.total_received
+            or self.stats.accepted > self.health.total_accepted
+            or self.stats.rejected > self.health.total_rejected
+        ):
+            raise ValueError(
+                "observation stats cannot exceed durable source health totals"
+            )
         if any(event.source_id != self.stats.source_id for event in self.current_quotes):
             raise ValueError(
                 "observation current quotes must belong to the observed source"

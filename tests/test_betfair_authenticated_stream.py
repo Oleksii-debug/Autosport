@@ -864,3 +864,26 @@ def test_noncanonical_transport_subclass_cannot_issue_subscription(
             heartbeat_ms=5000,
             conflate_ms=0,
         )
+
+
+def test_post_subscription_non_market_frame_closes_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport, fake = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _subscription_status(request_id=99),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+
+    with pytest.raises(
+        BetfairAuthenticatedStreamError,
+        match="accepts only mcm frames",
+    ):
+        runtime.read_and_ingest()
+
+    assert fake.closed
+    assert not transport.is_authenticated
+    with pytest.raises(BetfairAuthenticatedStreamError, match="not issued|no longer bound"):
+        runtime.read_and_ingest()

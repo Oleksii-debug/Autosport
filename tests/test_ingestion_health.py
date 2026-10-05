@@ -866,5 +866,86 @@ class IngestionHealthTests(unittest.TestCase):
                 store.close()
 
 
+    def test_submicrosecond_source_time_is_rejected_before_truth_classification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    policy=IngestionPolicy(
+                        max_batch_size=10,
+                        stale_after_seconds=60,
+                        max_future_skew_seconds=5,
+                    ),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:00+00:00",
+                )
+                quote = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="submicro-source",
+                    decimal_odds=Decimal("2.0"),
+                    observed_ts="2026-09-12T12:00:00+00:00",
+                    sequence=1,
+                    source_ts="2026-09-12T12:00:05.0000001+00:00",
+                )
+                provider = StaticProvider(
+                    "source",
+                    [ProviderBatch("source", (quote,), cursor="source-precision")],
+                )
+
+                stats = engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(stats.accepted, 0)
+                self.assertEqual(stats.rejected, 1)
+                self.assertEqual(stats.quality_flags, ("INVALID_SOURCE_TIMESTAMP",))
+                self.assertEqual(store.events(), [])
+                state = health.get("source")
+                self.assertEqual(state.status, "degraded")
+                self.assertIsNone(state.latest_source_ts)
+            finally:
+                store.close()
+
+    def test_zero_only_source_precision_tail_preserves_source_high_water(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:01+00:00",
+                )
+                quote = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="zero-tail-source",
+                    decimal_odds=Decimal("2.0"),
+                    observed_ts="2026-09-12T12:00:00+00:00",
+                    sequence=1,
+                    source_ts="2026-09-12T11:59:59.123456000+00:00",
+                )
+                provider = StaticProvider(
+                    "source",
+                    [ProviderBatch("source", (quote,), cursor="source-zero-tail")],
+                )
+
+                stats = engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(stats.accepted, 1)
+                self.assertEqual(stats.rejected, 0)
+                self.assertNotIn("INVALID_SOURCE_TIMESTAMP", stats.quality_flags)
+                state = health.get("source")
+                self.assertEqual(
+                    state.latest_source_ts,
+                    "2026-09-12T11:59:59.123456+00:00",
+                )
+            finally:
+                store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

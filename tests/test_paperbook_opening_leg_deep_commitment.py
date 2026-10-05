@@ -2089,3 +2089,39 @@ def test_load_rejects_in_place_snapshot_path_helper_code_mutation(tmp_path) -> N
             PaperBook.load(path)
     finally:
         authority.__code__ = original_code
+
+
+def test_constructor_rejects_rebound_canonical_decimal_helper_before_execution(
+    monkeypatch,
+) -> None:
+    attacker_calls = 0
+
+    def hostile(cls, value, label):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound constructor decimal helper executed")
+
+    monkeypatch.setattr(
+        PaperBook,
+        "_canonical_decimal_input",
+        classmethod(hostile),
+    )
+
+    with pytest.raises(ValueError, match="constructor decimal dispatch changed"):
+        PaperBook("100")
+
+    assert attacker_calls == 0
+
+
+def test_constructor_rejects_in_place_canonical_decimal_helper_code_mutation() -> None:
+    descriptor = PaperBook.__dict__["_canonical_decimal_input"]
+    authority = descriptor.__func__
+    original_code = authority.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        authority.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="constructor decimal authority changed"):
+            PaperBook("100")
+    finally:
+        authority.__code__ = original_code

@@ -777,6 +777,42 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(actual_path, expected_path)
         self.assertEqual(actual_drawdown, expected_drawdown)
 
+    def test_durable_resolver_fails_closed_on_rebound_internal_loader_dispatch(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(98),),
+            Decimal("9"),
+            placed_at="2026-09-21T19:00:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T19:05:00+00:00",
+        )
+        goal = self._goal()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper_book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with patch.object(
+                PaperBook,
+                "load_bytes",
+                side_effect=AssertionError("rebound internal PaperBook loader executed"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "canonical PaperBook durable loader authority is unavailable",
+                ):
+                    resolve_durable_product_issued_paper_equity_path(
+                        paper_book_path=str(paper_path),
+                        workspace=str(workspace),
+                    )
+
     def test_durable_resolver_rejects_alternate_paper_filename(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

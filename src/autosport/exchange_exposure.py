@@ -4,7 +4,7 @@ from decimal import Decimal
 from types import FunctionType
 
 
-_SUPPORTED_EXCHANGE_SIDES = frozenset({"BACK", "LAY"})
+_SUPPORTED_EXCHANGE_SIDES = frozenset({"BACK", "LAY", "back", "lay"})
 
 
 def _coefficient_and_exponent(value: Decimal) -> tuple[int, int]:
@@ -116,8 +116,10 @@ def locked_capital_for_exchange_side(
         raise ValueError("odds must be a finite Decimal > 1")
 
     if exchange_side not in _supported_sides:
-        raise ValueError("exchange_side must be exact canonical BACK or LAY")
-    if exchange_side == "BACK":
+        raise ValueError(
+            "exchange_side must be an exact canonical BACK/LAY or back/lay token"
+        )
+    if exchange_side in {"BACK", "back"}:
         return stake
     return _multiply(stake, _subtract(odds, _decimal_type("1")))
 

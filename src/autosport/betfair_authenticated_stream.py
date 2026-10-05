@@ -455,6 +455,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
         self._market_open_sequence: dict[str, int] = {}
         self._market_betting_type_by_id: dict[str, str] = {}
         self._market_price_ladder_by_id: dict[str, str] = {}
+        self._market_semantics_sequence: dict[str, int] = {}
         self._runner_status_by_key: dict[tuple[str, int, Decimal], str] = {}
         self._runner_active_sequence: dict[tuple[str, int, Decimal], int] = {}
         # The subscription acknowledgement is required to be authenticated frame 1.
@@ -511,9 +512,11 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                     )
                     self._commit_market_betting_type_updates(
                         market_betting_type_updates,
+                        frame.frame_sequence,
                     )
                     self._commit_market_price_ladder_updates(
                         market_price_ladder_updates,
+                        frame.frame_sequence,
                     )
                     self._commit_market_status_updates(
                         market_status_updates,
@@ -682,6 +685,16 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                     transport_frame_sha256=frame_sha,
                     evaluated_at_ms=evaluated_at_ms,
                 )
+            semantics_sequence = self._market_semantics_sequence.get(market_id)
+            if semantics_sequence is None or frame_sequence < semantics_sequence:
+                return BetfairAuthenticatedFreshnessDecision(
+                    verdict=BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED,
+                    reason="quote predates the current Betfair market-price semantics",
+                    evidence_id=structural.evidence_id,
+                    subscription_id=self._subscription.subscription_id,
+                    transport_frame_sha256=frame_sha,
+                    evaluated_at_ms=evaluated_at_ms,
+                )
             runner_key = (market_id, identity.selection_id, identity.handicap)
             if self._runner_status_by_key.get(runner_key) != "ACTIVE":
                 return BetfairAuthenticatedFreshnessDecision(
@@ -767,16 +780,24 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
     def _commit_market_betting_type_updates(
         self,
         updates: dict[str, str],
+        frame_sequence: int,
     ) -> None:
         for market_id, betting_type in updates.items():
+            prior = self._market_betting_type_by_id.get(market_id)
             self._market_betting_type_by_id[market_id] = betting_type
+            if prior != betting_type:
+                self._market_semantics_sequence[market_id] = frame_sequence
 
     def _commit_market_price_ladder_updates(
         self,
         updates: dict[str, str],
+        frame_sequence: int,
     ) -> None:
         for market_id, ladder_type in updates.items():
+            prior = self._market_price_ladder_by_id.get(market_id)
             self._market_price_ladder_by_id[market_id] = ladder_type
+            if prior != ladder_type:
+                self._market_semantics_sequence[market_id] = frame_sequence
 
     def _commit_market_status_updates(
         self,
@@ -789,6 +810,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 self._market_open_sequence.pop(market_id, None)
                 self._market_betting_type_by_id.pop(market_id, None)
                 self._market_price_ladder_by_id.pop(market_id, None)
+                self._market_semantics_sequence.pop(market_id, None)
                 for runner_key in tuple(self._runner_status_by_key):
                     if runner_key[0] == market_id:
                         self._runner_status_by_key.pop(runner_key, None)
@@ -914,6 +936,9 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 return False
             open_sequence = self._market_open_sequence.get(market_id)
             if open_sequence is None or frame_sequence < open_sequence:
+                return False
+            semantics_sequence = self._market_semantics_sequence.get(market_id)
+            if semantics_sequence is None or frame_sequence < semantics_sequence:
                 return False
             runner_key = (market_id, identity.selection_id, identity.handicap)
             if self._runner_status_by_key.get(runner_key) != "ACTIVE":

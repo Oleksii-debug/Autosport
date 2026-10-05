@@ -868,7 +868,19 @@ def _make_paperbook_snapshot_entry_dispatch_authority():
             raise ValueError("PaperBook parent durability dispatch changed")
         if ensure_parent_function.__code__ is not ensure_parent_code:
             raise ValueError("PaperBook parent durability authority changed")
+        # _ensure_snapshot_parent_durable() invokes the directory fsync helper
+        # internally when it creates nested parents. Validate that nested
+        # dispatch before entering the canonical helper so a rebound helper
+        # cannot execute during the parent-durability phase.
+        if canonical_type.__dict__.get("_fsync_snapshot_directory") is not fsync_directory_descriptor:
+            raise ValueError("PaperBook directory fsync dispatch changed")
+        if fsync_directory_function.__code__ is not fsync_directory_code:
+            raise ValueError("PaperBook directory fsync authority changed")
         ensure_parent_function(canonical_type, directory)
+        if canonical_type.__dict__.get("_fsync_snapshot_directory") is not fsync_directory_descriptor:
+            raise ValueError("PaperBook directory fsync dispatch changed")
+        if fsync_directory_function.__code__ is not fsync_directory_code:
+            raise ValueError("PaperBook directory fsync authority changed")
         if ensure_parent_function.__code__ is not ensure_parent_code:
             raise ValueError("PaperBook parent durability authority changed")
 

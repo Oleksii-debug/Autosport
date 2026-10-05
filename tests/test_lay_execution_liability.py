@@ -214,8 +214,9 @@ class DurableSideIntegrityTests(unittest.TestCase):
     def test_rejected_durable_attempt_does_not_normalize_side(self):
         attempt = self._attempt(
             outcome=PaperAttemptOutcome.REJECTED,
-            side=" back ",
+            side="BACK",
         )
+        object.__setattr__(attempt, "side", " back ")
         with self.assertRaisesRegex(
             PaperExecutionIntegrityError,
             "noncanonical exchange side",
@@ -225,8 +226,9 @@ class DurableSideIntegrityTests(unittest.TestCase):
     def test_unknown_durable_attempt_does_not_normalize_lay_side(self):
         attempt = self._attempt(
             outcome=PaperAttemptOutcome.UNKNOWN,
-            side=" lay ",
+            side="LAY",
         )
+        object.__setattr__(attempt, "side", " lay ")
         with self.assertRaisesRegex(
             PaperExecutionIntegrityError,
             "noncanonical exchange side",

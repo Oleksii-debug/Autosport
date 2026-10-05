@@ -713,7 +713,7 @@ def test_prior_post_auth_frame_prevents_subscription_relabeling(
 def test_old_subscription_message_is_rejected_before_freshness_state_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    transport, _ = _transport(
+    transport, fake = _transport(
         monkeypatch,
         _subscription_status() + _mcm(request_id=6),
     )
@@ -722,6 +722,8 @@ def test_old_subscription_message_is_rejected_before_freshness_state_mutation(
 
     with pytest.raises(ValueError, match="another subscription"):
         runtime.read_and_ingest()
+    assert fake.closed
+    assert not transport.is_authenticated
     decision = runtime.evaluate(
         _identity(),
         policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
@@ -812,7 +814,7 @@ def test_transport_origin_tracking_is_bounded_and_overflow_fails_closed(
     from autosport import betfair_authenticated_stream as auth
 
     monkeypatch.setattr(auth, "_MAX_TRACKED_AUTHORITATIVE_QUOTES", 1)
-    transport, _ = _transport(
+    transport, fake = _transport(
         monkeypatch,
         _subscription_status()
         + _mcm(
@@ -827,6 +829,8 @@ def test_transport_origin_tracking_is_bounded_and_overflow_fails_closed(
 
     with pytest.raises(BetfairAuthenticatedStreamError, match="exceeded its bound"):
         runtime.read_and_ingest()
+    assert fake.closed
+    assert not transport.is_authenticated
     decision = runtime.evaluate(
         _identity(1),
         policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),

@@ -359,3 +359,54 @@ def test_rebound_issuance_authority_factory_is_rejected_before_execution(monkeyp
 
     assert attacker_called is False
 
+def test_instance_shadowed_issuance_loader_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_load_locked(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("instance-shadowed durable issuance loader must never execute")
+
+    store._load_locked = attacker_load_locked
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="issuance_store method shadow is not allowed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_instance_shadowed_issuance_authority_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_authority(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("instance-shadowed monotonic authority must never execute")
+
+    store._authority = attacker_authority
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="issuance_store method shadow is not allowed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+

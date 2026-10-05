@@ -92,28 +92,37 @@ def contract_sha256(
     if not isinstance(contract, _goal_type):
         raise _goal_error("provenance hashing requires an EconomicGoalContract")
     return _sha256(_canonical(_to_payload(contract))).hexdigest()
-def provenance_for(contract: EconomicGoalContract) -> EconomicGoalProvenance:
+def provenance_for(
+    contract: EconomicGoalContract,
+    *,
+    _goal_type=_ECONOMIC_GOAL_TYPE,
+    _goal_error=_ECONOMIC_GOAL_ERROR,
+    _provenance_type=EconomicGoalProvenance,
+    _contract_sha=contract_sha256,
+) -> EconomicGoalProvenance:
     """Derive immutable provenance identity without introducing another authority."""
 
-    if not isinstance(contract, EconomicGoalContract):
-        raise EconomicGoalContractError("provenance requires an EconomicGoalContract")
-    return EconomicGoalProvenance(
+    if not isinstance(contract, _goal_type):
+        raise _goal_error("provenance requires an EconomicGoalContract")
+    return _provenance_type(
         schema=PROVENANCE_SCHEMA,
         schema_version=PROVENANCE_SCHEMA_VERSION,
         goal_id=contract.goal_id,
         revision=contract.revision,
         bankroll_id=contract.bankroll_id,
-        contract_sha256=contract_sha256(contract),
+        contract_sha256=_contract_sha(contract),
     )
-
-
 def verify_provenance(
     contract: EconomicGoalContract,
     provenance: EconomicGoalProvenance,
+    *,
+    _goal_type=_ECONOMIC_GOAL_TYPE,
+    _provenance_type=EconomicGoalProvenance,
+    _contract_sha=contract_sha256,
 ) -> None:
     """Fail closed when provenance no longer matches the canonical contract."""
 
-    if not isinstance(provenance, EconomicGoalProvenance):
+    if not isinstance(provenance, _provenance_type):
         raise EconomicGoalProvenanceError("provenance must be EconomicGoalProvenance")
     if provenance.goal_id != contract.goal_id:
         raise EconomicGoalProvenanceError("provenance goal_id mismatch")
@@ -121,6 +130,6 @@ def verify_provenance(
         raise EconomicGoalProvenanceError("provenance revision mismatch")
     if provenance.bankroll_id != contract.bankroll_id:
         raise EconomicGoalProvenanceError("provenance bankroll_id mismatch")
-    actual = contract_sha256(contract)
+    actual = _contract_sha(contract)
     if provenance.contract_sha256 != actual:
         raise EconomicGoalProvenanceError("provenance contract_sha256 mismatch")

@@ -92,6 +92,23 @@ def _is_sha256(value: object, *, _hex=_HEX) -> bool:
     )
 
 
+
+def _parse_instant(
+    value: object,
+    *,
+    _fromisoformat=datetime.fromisoformat,
+    _utc=timezone.utc,
+) -> datetime:
+    if type(value) is not str or not value or value != value.strip():
+        raise EconomicSessionIntegrityError("started_at must be canonical text")
+    try:
+        parsed = _fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise EconomicSessionIntegrityError("started_at must be valid ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise EconomicSessionIntegrityError("started_at must be timezone-aware")
+    return parsed.astimezone(_utc)
+
 @dataclass(frozen=True, slots=True)
 class ProductEconomicSession:
     workspace_instance_id: str
@@ -160,7 +177,6 @@ class ProductEconomicSession:
         return False
 
 
-
 def _is_transition_id(value: object, *, _hex=_HEX) -> bool:
     return (
         type(value) is str
@@ -168,22 +184,6 @@ def _is_transition_id(value: object, *, _hex=_HEX) -> bool:
         and all(character in _hex for character in value)
     )
 
-
-def _parse_instant(
-    value: object,
-    *,
-    _fromisoformat=datetime.fromisoformat,
-    _utc=timezone.utc,
-) -> datetime:
-    if type(value) is not str or not value or value != value.strip():
-        raise EconomicSessionIntegrityError("started_at must be canonical text")
-    try:
-        parsed = _fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise EconomicSessionIntegrityError("started_at must be valid ISO-8601") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise EconomicSessionIntegrityError("started_at must be timezone-aware")
-    return parsed.astimezone(_utc)
 
 
 def _clock_instant(

@@ -2238,6 +2238,78 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exact Decimal"):
             _ = book.committed_capital
 
+    def test_lay_settlement_bypasses_mutated_decimal_context_authority(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        def forbidden():
+            nonlocal hostile_calls
+            hostile_calls += 1
+            raise AssertionError("mutated decimal context authority executed")
+
+        with patch.object(paper_module, "_paper_decimal_context", forbidden):
+            settled = book.settle(ticket.ticket_id, set())
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(settled.status, TicketStatus.WON)
+        self.assertEqual(settled.payout, Decimal("50.00"))
+        self.assertEqual(book.balance, Decimal("110.00"))
+
+    def test_lay_open_bypasses_mutated_ticket_authority_module_dispatch(self):
+        book = PaperBook(Decimal("100"))
+        hostile_calls = 0
+
+        def forbidden(*_args, **_kwargs):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            raise AssertionError("mutated ticket authority module dispatch executed")
+
+        with patch.object(
+            paper_module,
+            "_require_ticket_opening_authority",
+            forbidden,
+        ), patch.object(
+            paper_module,
+            "_require_paperbook_causal_history_authority",
+            forbidden,
+        ), patch.object(
+            paper_module,
+            "_record_ticket_opening_authority",
+            forbidden,
+        ), patch.object(
+            paper_module,
+            "_advance_paperbook_causal_history_open",
+            forbidden,
+        ):
+            ticket = book.open_ticket(
+                [self._lay_leg()],
+                Decimal("10"),
+                placed_at=QUOTE_AT,
+            )
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(book.balance, Decimal("60.00"))
+        self.assertIn(ticket.ticket_id, book.tickets)
+
+    def test_lay_replay_bypasses_mutated_timestamp_parser_dispatch(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        def forbidden(*_args, **_kwargs):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            raise AssertionError("mutated timestamp parser dispatch executed")
+
+        with patch.object(paper_module, "parse_iso_timestamp", forbidden):
+            committed = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(committed, Decimal("40.00"))
+        self.assertEqual(book.balance, Decimal("60.00"))
+        self.assertIn(ticket.ticket_id, book.tickets)
+
     def test_open_lay_snapshot_round_trip_preserves_liability_and_side(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-book.json"

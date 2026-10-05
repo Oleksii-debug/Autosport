@@ -1730,8 +1730,30 @@ class LiveObservationTests(unittest.TestCase):
             self.assertIn("поточних=2", summary)
             self.assertEqual(len(lines), 2)
             self.assertIn("player-a", lines[0])
+            self.assertIn("спорт не вказано", lines[0])
+            self.assertIn("сторона не вказано", lines[0])
             self.assertIn("коефіцієнт 1.80", lines[0])
             self.assertIn("час джерела 2026-09-12T19:59:59+00:00", lines[0])
+
+    def test_presentation_announces_full_canonical_quote_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        payload = canonical.current_quotes[0].to_dict()
+        payload["sport"] = "tennis"
+        payload["exchange_side"] = "lay"
+        quote = MarketEvent.from_dict(payload)
+        result = ObservationResult(
+            canonical.stats,
+            canonical.health,
+            (quote,),
+        )
+
+        lines = observation_quote_lines(result)
+
+        self.assertEqual(len(lines), 1)
+        self.assertIn("спорт tennis", lines[0])
+        self.assertIn("сторона lay", lines[0])
 
 
 if __name__ == "__main__":

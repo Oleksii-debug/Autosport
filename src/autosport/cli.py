@@ -466,6 +466,9 @@ def run_endurance_command(
 
 
 def _print_observation(result: ObservationResult, show: int) -> None:
+    if type(result) is not ObservationResult:
+        raise TypeError("result must be an exact ObservationResult")
+    result.validate()
     flags = ",".join(result.stats.quality_flags) if result.stats.quality_flags else "none"
     print(
         f"source={result.stats.source_id} health={result.health.status} "
@@ -478,8 +481,9 @@ def _print_observation(result: ObservationResult, show: int) -> None:
     )
     for event in result.current_quotes[:show]:
         print(
-            f"{event.event_id} | {event.market_type.value} | {event.market_id} | "
-            f"{event.selection_id} | odds={event.decimal_odds} | source_ts={event.source_ts or '-'}"
+            f"{event.event_id} | sport={event.sport or '-'} | {event.market_type.value} | "
+            f"{event.market_id} | {event.selection_id} | side={event.exchange_side or '-'} | "
+            f"odds={event.decimal_odds} | source_ts={event.source_ts or '-'}"
         )
     if len(result.current_quotes) > show:
         print(f"... {len(result.current_quotes) - show} more current quotes not printed")

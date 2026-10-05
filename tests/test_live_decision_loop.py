@@ -9848,16 +9848,12 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 clock=_ManualClock(self.START + timedelta(seconds=1)),
             )
             loop.register_input("input-a", selection_ids="selection-a")
-            lock_path = (workspace / "decisions.jsonl").absolute().with_name(
-                "decisions.jsonl.writer.lock"
-            )
-            lock_path.write_text("owned", encoding="utf-8")
-
-            with self.assertRaisesRegex(
-                LiveDecisionProgressError,
-                "Decision Ledger transaction authority is unavailable",
-            ):
-                loop.run_cycle()
+            with loop.decision_ledger._writer_guard():
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "Decision Ledger transaction authority is unavailable",
+                ):
+                    loop.run_cycle()
 
             self.assertEqual(observer.calls, 0)
             self.assertFalse(loop.progress_path.exists())

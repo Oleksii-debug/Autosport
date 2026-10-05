@@ -4836,25 +4836,25 @@ class PersistentLiveDecisionLoop:
                     raise LiveDecisionProgressError(
                         "prepared live control authority has no durable control bytes"
                     )
-                kind = (
-                    "BOOTSTRAP"
-                    if pending.previous_committed_generation == 0
-                    and pending.previous_committed_state_sha256 is None
-                    else "TRANSITION"
-                )
-                binding = self._control_transition_binding(
-                    previous_state_sha256=pending.previous_committed_state_sha256,
-                    candidate=control,
-                    kind=kind,
-                )
-                tx_id = self._control_tx_id(binding)
-                if (
-                    tx_id != pending.tx_id
-                    or binding != pending.semantic_binding_sha256
-                ):
+                matched: tuple[str, str] | None = None
+                for kind in ("TRANSITION", "BOOTSTRAP"):
+                    candidate_binding = self._control_transition_binding(
+                        previous_state_sha256=pending.previous_committed_state_sha256,
+                        candidate=control,
+                        kind=kind,
+                    )
+                    candidate_tx_id = self._control_tx_id(candidate_binding)
+                    if (
+                        candidate_tx_id == pending.tx_id
+                        and candidate_binding == pending.semantic_binding_sha256
+                    ):
+                        matched = (candidate_tx_id, candidate_binding)
+                        break
+                if matched is None:
                     raise LiveDecisionProgressError(
                         "prepared live control authority conflicts with durable control semantics"
                     )
+                tx_id, binding = matched
                 self._control_authority.recover(
                     observed_state_sha256=observed,
                     tx_id=tx_id,

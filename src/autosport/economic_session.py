@@ -127,9 +127,9 @@ class ProductEconomicSession:
     state_sha256: str
     authority_generation: int
     product_clock_authoritative: bool
-    predecessor_session_id: str | None
-    predecessor_state_sha256: str | None
-    predecessor_ended_at: str | None
+    predecessor_session_id: str | None = None
+    predecessor_state_sha256: str | None = None
+    predecessor_ended_at: str | None = None
 
     def __post_init__(
         self,

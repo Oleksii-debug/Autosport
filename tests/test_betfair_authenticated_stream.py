@@ -150,6 +150,7 @@ def _delta_mcm(
     pt: int | None = None,
     clk: str = "c2",
     price: float = 2.1,
+    ladder_type: str = "CLASSIC",
 ) -> bytes:
     if pt is None:
         pt = time.time_ns() // 1_000_000
@@ -166,7 +167,7 @@ def _delta_mcm(
                 "marketDefinition": {
                     "status": "OPEN",
                     "bettingType": "ODDS",
-                    "priceLadderDefinition": {"type": "CLASSIC"},
+                    "priceLadderDefinition": {"type": ladder_type},
                 },
                 "rc": [{"id": 1, "hc": 0, "ltp": price}],
             }
@@ -2237,6 +2238,7 @@ def test_price_ladder_change_revokes_old_quote_until_new_price_frame(
             pt=publish_time_ms + 2,
             clk="c3",
             price=2.01,
+            ladder_type="FINEST",
         ),
     )
     subscription = _open(transport)

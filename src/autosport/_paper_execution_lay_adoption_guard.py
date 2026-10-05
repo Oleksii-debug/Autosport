@@ -322,6 +322,9 @@ def _preflight_adoption_inputs(
             raise TypeError("observations must be a stable mapping") from exc
     if any(type(action_id) is not str for action_id in observation_snapshot):
         raise TypeError("observation keys must be exact str action ids")
+    # Mapping iteration is caller code. Revalidate the minted authority after
+    # that callback boundary before reading any prepared execution fields.
+    self._require_minted(prepared)
     if type(suspended_action_ids) is not frozenset or any(
         type(item) is not str for item in suspended_action_ids
     ):
@@ -348,18 +351,26 @@ def _preflight_adoption_inputs(
             action.action_id: action
             for action in prepared.execution_plan.actions
         }
+        canonical_observations: dict[str, _reality.ObservedPaperExecution] = {}
         for action_id, observation in observation_snapshot.items():
-            _reality._impl._verify_observation_authority(
+            record = _reality._impl._verify_observation_authority(
                 action=action_by_id[action_id],
                 observation=observation,
                 registry=evidence_registry,
             )
+            canonical_observations[action_id] = record.as_observation()
+        observation_snapshot = canonical_observations
+        # Registry resolution is another callback boundary. Reject any mutation
+        # of the minted plan/bindings before those values can affect durable
+        # exposure scope or materialization.
+        self._require_minted(prepared)
     _reality._validate_lay_execution_surface(
         plan=prepared.execution_plan,
         observations=observation_snapshot,
         suspended_action_ids=suspended_action_ids,
     )
     if observation_snapshot:
+        self._require_minted(prepared)
         run_id = _reality._impl._run_id(
             prepared.execution_plan,
             trigger_id,

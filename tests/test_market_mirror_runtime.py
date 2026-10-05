@@ -1300,6 +1300,42 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_focused_dependency_registration_catches_mirror_advance_window(self) -> None:
+        mirror = MarketMirror()
+        first = self.event(selection="selection-1", sequence=1)
+        second = self.event(selection="selection-2", sequence=1)
+        mirror.apply(first)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+
+        original_view = mirror.view
+        calls = [0]
+
+        def racing_view(*args, **kwargs):
+            snapshot = original_view(*args, **kwargs)
+            calls[0] += 1
+            if calls[0] == 1:
+                mirror.apply(second)
+            return snapshot
+
+        with patch.object(mirror, "view", side_effect=racing_view):
+            dependencies.register("decision", source_ids="provider-a")
+
+        self.assertEqual(
+            dependencies.matching_keys("decision"),
+            tuple(sorted((
+                (first.source_id, first.quote_key),
+                (second.source_id, second.quote_key),
+            ))),
+        )
+        snapshot = dependencies.incremental_decision_view(
+            "decision",
+            as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=5),
+        )
+        self.assertEqual(
+            tuple(event.quote_key for event in snapshot.events),
+            tuple(sorted((first.quote_key, second.quote_key))),
+        )
     def test_focused_dependency_registration_is_explicit_and_non_overwriting(self) -> None:
         mirror = MarketMirror()
         dependencies = FocusedMirrorDependencyIndex(mirror)

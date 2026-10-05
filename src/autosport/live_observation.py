@@ -273,9 +273,27 @@ class _ReplayableBatchProvider:
         if type(current_source_id) is not str or current_source_id != self.source_id:
             return
 
-        reset_snapshot = getattr(self._provider, "reset_pending_snapshot", None)
-        if not callable(reset_snapshot):
-            reset_snapshot = getattr(self._provider, "_clear_pending_snapshot", None)
+        try:
+            reset_snapshot = getattr(
+                self._provider,
+                "reset_pending_snapshot",
+                None,
+            )
+            if not callable(reset_snapshot):
+                reset_snapshot = getattr(
+                    self._provider,
+                    "_clear_pending_snapshot",
+                    None,
+                )
+        except BaseException as cleanup_error:
+            try:
+                primary_error.add_note(
+                    "provider rejected-read snapshot reset lookup also failed: "
+                    f"{_exception_text(cleanup_error)}"
+                )
+            except BaseException:
+                pass
+            return
         if not callable(reset_snapshot):
             return
         try:
@@ -369,10 +387,18 @@ class _ReplayableBatchProvider:
         # to unwind and lose its cached batch while that iterator already points at
         # the tail. Reset that snapshot so reusing the same provider refetches from
         # the beginning instead of silently skipping the never-durable prefix.
-        reset_snapshot = getattr(self._provider, "reset_pending_snapshot", None)
-        if not callable(reset_snapshot):
-            reset_snapshot = getattr(self._provider, "_clear_pending_snapshot", None)
         try:
+            reset_snapshot = getattr(
+                self._provider,
+                "reset_pending_snapshot",
+                None,
+            )
+            if not callable(reset_snapshot):
+                reset_snapshot = getattr(
+                    self._provider,
+                    "_clear_pending_snapshot",
+                    None,
+                )
             current_source_id = getattr(self._provider, "source_id", None)
             if (
                 type(current_source_id) is not str
@@ -384,6 +410,8 @@ class _ReplayableBatchProvider:
             if callable(reset_snapshot):
                 reset_snapshot()
         finally:
+            # Cleanup lookup/hooks are provider-controlled. Even a hostile descriptor
+            # must not strand this wrapper's cached batch after abandonment begins.
             self._inflight = None
             self._inflight_max_items = None
             self._carried_quality_flags = ()

@@ -48,6 +48,36 @@ class StaticProvider:
 
 
 class IngestionHealthTests(unittest.TestCase):
+    def test_ingestion_rejects_substituted_provider_identity_and_batch_types(self):
+        class Text(str):
+            pass
+
+        class Batch(ProviderBatch):
+            pass
+
+        class SourceSubclassProvider:
+            source_id = Text("source-a")
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider read executed")
+
+        class BatchSubclassProvider:
+            source_id = "source-a"
+
+            def read_batch(self, max_items: int = 1000):
+                return Batch("source-a", ())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, _health = self._engine(tmp)
+            try:
+                with self.assertRaisesRegex(TypeError, "source_id must be an exact string"):
+                    engine.poll_once(SourceSubclassProvider(), max_items=1)
+                with self.assertRaisesRegex(TypeError, "exact ProviderBatch"):
+                    engine.poll_once(BatchSubclassProvider(), max_items=1)
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
     def test_ingestion_engine_rejects_substituted_authority_components(self):
         class Bus(MarketEventBus):
             pass

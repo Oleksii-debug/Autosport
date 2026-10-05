@@ -783,5 +783,18 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         )
 
 
+    def test_future_local_quote_availability_requires_vector_wait(self) -> None:
+        self.assertTrue(
+            PaperRiskPolicy._risk_rejection_requires_wait(
+                "quote was not locally available by proposal timestamp"
+            )
+        )
+        self.assertTrue(
+            PaperRiskPolicy._risk_rejection_requires_wait(
+                "quote local receipt chronology is invalid"
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

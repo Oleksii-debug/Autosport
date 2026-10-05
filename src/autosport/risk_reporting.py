@@ -1099,12 +1099,18 @@ def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
                 return None
 
             if action == "open":
+                if (
+                    _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL.__code__
+                    is not _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL_CODE
+                ):
+                    return None
+                locked_capital = _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL(ticket)
                 replay_balance = _CANONICAL_PAPERBOOK_DEBIT_BALANCE(
                     replay_balance,
-                    ticket.stake,
+                    locked_capital,
                 )
                 replay_committed = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
-                    (replay_committed, ticket.stake)
+                    (replay_committed, locked_capital)
                 )
             else:
                 _, _, replay_balance = _CANONICAL_PAPERBOOK_SETTLEMENT_RESULT(
@@ -1114,7 +1120,10 @@ def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
                     set(voids_raw),
                 )
                 with localcontext(_CANONICAL_RISK_DECIMAL_CONTEXT()):
-                    replay_committed = replay_committed - ticket.stake
+                    replay_committed = (
+                        replay_committed
+                        - _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL(ticket)
+                    )
                 if replay_committed < 0:
                     return None
 
@@ -1149,7 +1158,7 @@ def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
 
         current_committed = _CANONICAL_RISK_EXACT_POSITIVE_SUM(
             tuple(
-                ticket.stake
+                _CANONICAL_PAPER_TICKET_EQUITY_LOCKED_CAPITAL(ticket)
                 for ticket in book.tickets.values()
                 if ticket.status is TicketStatus.OPEN
             )

@@ -349,6 +349,46 @@ def test_invalid_actual_runtime_identity_never_publishes_witness(
     assert controller._close_complete is True
 
 
+def test_inflight_runtime_witness_observer_rebind_fails_closed(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    witness_path = workspace / "webview2-runtime-witness.json"
+    fake = _install_witness_webview(
+        monkeypatch,
+        "154.0.2847.51",
+        witness_path,
+    )
+    controller = AutosportWebController(workspace)
+    bridge = AutosportWebBridge(controller)
+    hostile_called = []
+
+    def hostile_observer(window: object) -> str:
+        hostile_called.append(window)
+        return "999.0.0.0"
+
+    def rebind_observer() -> None:
+        monkeypatch.setattr(
+            windows_webview_shell,
+            "_observed_webview2_browser_version",
+            hostile_observer,
+        )
+
+    fake.before_before_load = rebind_observer
+
+    with pytest.raises(WindowsWebViewUnavailable):
+        launch_windows_shell(
+            bridge,
+            storage_path=tmp_path / "webview2",
+        )
+
+    assert hostile_called == []
+    assert witness_path.exists() is False
+    assert controller._close_complete is True
+
+
 def test_inflight_runtime_witness_writer_rebind_fails_closed(
     monkeypatch,
     tmp_path: Path,

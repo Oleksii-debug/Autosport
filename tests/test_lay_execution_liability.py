@@ -236,6 +236,46 @@ class DurableSideIntegrityTests(unittest.TestCase):
             paper_reality._derive_run_economics(("action-1",), (attempt,))
 
 
+    def test_durable_unknown_back_rejects_oversized_requested_stake(self):
+        attempt = self._attempt(
+            outcome=PaperAttemptOutcome.UNKNOWN,
+            side="BACK",
+        )
+        object.__setattr__(attempt, "requested_stake", Decimal("1E+9000"))
+
+        with self.assertRaisesRegex(
+            PaperExecutionIntegrityError,
+            "canonical resource bounds",
+        ):
+            paper_reality._derive_run_economics(("action-1",), (attempt,))
+
+    def test_durable_side_subclass_is_rejected_without_hash_or_equality_hooks(self):
+        class HostileSide(str):
+            calls = 0
+
+            def __hash__(self) -> int:
+                type(self).calls += 1
+                return super().__hash__()
+
+            def __eq__(self, other: object) -> bool:
+                type(self).calls += 1
+                return super().__eq__(other)
+
+        attempt = self._attempt(
+            outcome=PaperAttemptOutcome.UNKNOWN,
+            side="BACK",
+        )
+        object.__setattr__(attempt, "side", HostileSide("BACK"))
+
+        with self.assertRaisesRegex(
+            PaperExecutionIntegrityError,
+            "noncanonical exchange side",
+        ):
+            paper_reality._derive_run_economics(("action-1",), (attempt,))
+
+        self.assertEqual(HostileSide.calls, 0)
+
+
 class LayExecutionLiabilityTests(unittest.TestCase):
     def test_empirical_accepted_lay_uses_liability_and_survives_resume(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -21,6 +21,9 @@ ProspectiveApplicableCostComponent = _cost_source.ProspectiveApplicableCostCompo
 ProspectiveApplicableCostError = _cost_source.ProspectiveApplicableCostError
 ProspectiveApplicableCostResolution = _cost_source.ProspectiveApplicableCostResolution
 resolve_prospective_applicable_costs = _cost_source.resolve_prospective_applicable_costs
+resolve_prospective_applicable_costs_with_betfair_standard_limit = (
+    _cost_source.resolve_prospective_applicable_costs_with_betfair_standard_limit
+)
 
 _COMPONENT_FIELDS = (
     "cost_class",
@@ -44,6 +47,9 @@ _RESOLUTION_FIELDS = (
 
 def _build_guard():
     canonical_resolver = _cost_source.resolve_prospective_applicable_costs
+    canonical_slippage_resolver = (
+        _cost_source.resolve_prospective_applicable_costs_with_betfair_standard_limit
+    )
     validate_component = _cost_source._SEALED_COMPONENT_VALIDATOR
     validate_resolution = _cost_source._SEALED_RESOLUTION_VALIDATOR
     (
@@ -162,7 +168,88 @@ def _build_guard():
         # The caller-supplied object never crosses the authority boundary.
         return canonical
 
-    return require_canonical_prospective_applicable_costs
+    def require_canonical_prospective_applicable_costs_with_betfair_standard_limit(
+        asserted: ProspectiveApplicableCostResolution,
+        *,
+        intent: OpportunityIntent,
+        plan: PortfolioPlan,
+        router_store: ModelComputeRouterStore,
+        model_request_id: str,
+        decision_at: datetime,
+        slippage_evidence,
+        ledger,
+        issuance_store,
+        runtime_profile,
+        execution_plan_id: str,
+        action_id: str,
+    ) -> ProspectiveApplicableCostResolution:
+        """Return fresh source-backed truth only after canonical product verification."""
+
+        if type(asserted) is not resolution_cls:
+            raise error_cls(
+                "prospective applicable-cost assertion must use the exact canonical type"
+            )
+        validate_resolution(asserted)
+        if type(intent) is not intent_cls:
+            raise error_cls("intent must be the exact canonical OpportunityIntent type")
+        if type(plan) is not plan_cls:
+            raise error_cls("plan must be the exact canonical PortfolioPlan type")
+        if type(router_store) is not router_store_cls:
+            raise error_cls(
+                "router_store must be the exact canonical ModelComputeRouterStore type"
+            )
+
+        canonical = canonical_slippage_resolver(
+            intent=intent,
+            plan=plan,
+            router_store=router_store,
+            model_request_id=model_request_id,
+            decision_at=decision_at,
+            slippage_evidence=slippage_evidence,
+            ledger=ledger,
+            issuance_store=issuance_store,
+            runtime_profile=runtime_profile,
+            execution_plan_id=execution_plan_id,
+            action_id=action_id,
+        )
+        if type(canonical) is not resolution_cls:
+            raise error_cls(
+                "canonical applicable-cost resolver returned a non-canonical resolution type"
+            )
+        validate_resolution(canonical)
+        for field in resolution_fields:
+            if slot_value(asserted, field) != slot_value(canonical, field):
+                raise error_cls(
+                    "prospective applicable-cost assertion does not match canonical "
+                    f"re-resolution at field {field}"
+                )
+        asserted_components = slot_value(asserted, "components")
+        canonical_components = slot_value(canonical, "components")
+        if type(asserted_components) is not tuple or type(canonical_components) is not tuple:
+            raise error_cls(
+                "prospective applicable-cost component collections must be canonical tuples"
+            )
+        if len(asserted_components) != len(canonical_components):
+            raise error_cls(
+                "prospective applicable-cost assertion component count does not match canonical re-resolution"
+            )
+        for index, (asserted_component, canonical_component) in enumerate(
+            zip(asserted_components, canonical_components, strict=True)
+        ):
+            assert_component_matches(
+                asserted_component,
+                canonical_component,
+                index=index,
+            )
+        return canonical
+
+    return (
+        require_canonical_prospective_applicable_costs,
+        require_canonical_prospective_applicable_costs_with_betfair_standard_limit,
+    )
 
 
-require_canonical_prospective_applicable_costs = _build_guard()
+(
+    require_canonical_prospective_applicable_costs,
+    require_canonical_prospective_applicable_costs_with_betfair_standard_limit,
+) = _build_guard()

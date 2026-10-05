@@ -73,20 +73,29 @@ def _make_ticket_opening_authority_registry():
     # become their own witness.
     authorities = WeakKeyDictionary()
     guard = threading.RLock()
+    require_registry_key = _require_registry_book_key_authority
+    require_registry_key_code = require_registry_key.__code__
     commitment_for = _ticket_opening_commitment
     commitment_code = commitment_for.__code__
+
+    def require_registry_key_authority(book: object) -> None:
+        if require_registry_key.__code__ is not require_registry_key_code:
+            raise ValueError("PaperBook registry key validator authority changed")
+        require_registry_key(book)
+        if require_registry_key.__code__ is not require_registry_key_code:
+            raise ValueError("PaperBook registry key validator authority changed")
 
     def require_commitment_authority() -> None:
         if commitment_for.__code__ is not commitment_code:
             raise ValueError("PaperBook ticket opening commitment authority changed")
 
     def register_book(book: object) -> None:
-        _require_registry_book_key_authority(book)
+        require_registry_key_authority(book)
         with guard:
             authorities[book] = {}
 
     def record(book: object, ticket: PaperTicket) -> None:
-        _require_registry_book_key_authority(book)
+        require_registry_key_authority(book)
         require_commitment_authority()
         commitment = commitment_for(ticket)
         require_commitment_authority()
@@ -100,12 +109,12 @@ def _make_ticket_opening_authority_registry():
             current[ticket.ticket_id] = commitment
 
     def revoke(book: object) -> None:
-        _require_registry_book_key_authority(book)
+        require_registry_key_authority(book)
         with guard:
             authorities.pop(book, None)
 
     def install_validated_snapshot(book: object) -> None:
-        _require_registry_book_key_authority(book)
+        require_registry_key_authority(book)
         require_commitment_authority()
         commitments = {
             ticket_id: commitment_for(ticket)
@@ -118,7 +127,7 @@ def _make_ticket_opening_authority_registry():
             authorities[book] = commitments
 
     def require_current(book: object) -> None:
-        _require_registry_book_key_authority(book)
+        require_registry_key_authority(book)
         require_commitment_authority()
         with guard:
             current = authorities.get(book)
@@ -140,8 +149,8 @@ def _make_ticket_opening_authority_registry():
                 )
 
     def require_candidate(source_book: object, candidate_book: object) -> None:
-        _require_registry_book_key_authority(source_book)
-        _require_registry_book_key_authority(candidate_book)
+        require_registry_key_authority(source_book)
+        require_registry_key_authority(candidate_book)
         require_commitment_authority()
         with guard:
             current = authorities.get(source_book)
@@ -203,25 +212,34 @@ def _make_paperbook_causal_history_authority_registry():
     # the authoritative copy outside caller-visible mutable PaperBook fields.
     authorities = WeakKeyDictionary()
     guard = threading.RLock()
+    require_registry_key = _require_registry_book_key_authority
+    require_registry_key_code = require_registry_key.__code__
+
+    def require_registry_key_authority(book: object) -> None:
+        if require_registry_key.__code__ is not require_registry_key_code:
+            raise ValueError("PaperBook registry key validator authority changed")
+        require_registry_key(book)
+        if require_registry_key.__code__ is not require_registry_key_code:
+            raise ValueError("PaperBook registry key validator authority changed")
 
     def register_book(book: object) -> None:
-        _require_registry_book_key_authority(book)
+        require_registry_key_authority(book)
         with guard:
             authorities[book] = ((), ())
 
     def revoke(book: object) -> None:
-        _require_registry_book_key_authority(book)
+        require_registry_key_authority(book)
         with guard:
             authorities.pop(book, None)
 
     def install_validated_snapshot(book: object) -> None:
-        _require_registry_book_key_authority(book)
+        require_registry_key_authority(book)
         snapshot = _paperbook_causal_history_snapshot(book)
         with guard:
             authorities[book] = snapshot
 
     def require_current(book: object) -> None:
-        _require_registry_book_key_authority(book)
+        require_registry_key_authority(book)
         actual = _paperbook_causal_history_snapshot(book)
         with guard:
             expected = authorities.get(book)
@@ -235,8 +253,8 @@ def _make_paperbook_causal_history_authority_registry():
             )
 
     def require_candidate(source_book: object, candidate_book: object) -> None:
-        _require_registry_book_key_authority(source_book)
-        _require_registry_book_key_authority(candidate_book)
+        require_registry_key_authority(source_book)
+        require_registry_key_authority(candidate_book)
         candidate = _paperbook_causal_history_snapshot(candidate_book)
         with guard:
             expected = authorities.get(source_book)
@@ -250,7 +268,7 @@ def _make_paperbook_causal_history_authority_registry():
             )
 
     def advance_open(book: object, ticket_id: str) -> None:
-        _require_registry_book_key_authority(book)
+        require_registry_key_authority(book)
         with guard:
             expected = authorities.get(book)
             if expected is None:
@@ -270,7 +288,7 @@ def _make_paperbook_causal_history_authority_registry():
         voids: tuple[str, ...],
         settled_at: str | None,
     ) -> None:
-        _require_registry_book_key_authority(book)
+        require_registry_key_authority(book)
         with guard:
             expected = authorities.get(book)
             if expected is None:

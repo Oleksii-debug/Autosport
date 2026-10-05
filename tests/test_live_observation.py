@@ -925,6 +925,30 @@ class LiveObservationTests(unittest.TestCase):
         self.assertIsNone(worker._thread)
         self.assertIsNone(worker.poll())
 
+    def test_worker_message_rejects_substituted_terminal_payload_types(self):
+        class ErrorText(str):
+            pass
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "worker message error must be an exact string",
+        ):
+            live_observation_module.ObservationWorkerMessage(
+                error=ErrorText("boom"),
+            )
+        with self.assertRaisesRegex(
+            TypeError,
+            "worker message result must be an exact ObservationResult",
+        ):
+            live_observation_module.ObservationWorkerMessage(
+                result=object(),
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "worker message error must be non-empty",
+        ):
+            live_observation_module.ObservationWorkerMessage(error="")
+
     def test_worker_rejects_non_observation_result_as_terminal_error(self):
         worker = OneShotObservationWorker()
 

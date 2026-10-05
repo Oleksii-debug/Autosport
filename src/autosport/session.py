@@ -165,6 +165,10 @@ class ObservationResult:
     current_quotes: tuple[MarketEvent, ...]
 
     def __post_init__(self) -> None:
+        if type(self.health) is not SourceHealthState:
+            raise TypeError("observation health must be an exact SourceHealthState")
+        health_snapshot = SourceHealthState(**asdict(self.health))
+        object.__setattr__(self, "health", health_snapshot)
         self.validate()
 
     def validate(self) -> None:

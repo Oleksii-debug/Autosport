@@ -441,6 +441,94 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             catalog_required_history=catalog_required_history,
         )
 
+    def test_live_loop_rejects_authority_subclass_before_workspace_creation(self) -> None:
+        class Authority(EconomicDecisionAuthority):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = self._scientific_registry(
+                root,
+                self._strategy_version(),
+            )
+            canonical = self._authority()
+            hostile = Authority(canonical.contract, canonical.risk_policy)
+            workspace = root / "uncreated-live-workspace"
+
+            with self.assertRaisesRegex(TypeError, "exact EconomicDecisionAuthority"):
+                PersistentLiveDecisionLoop(
+                    workspace,
+                    loop_id="live-test-loop",
+                    mode=LiveDecisionMode.PAPER,
+                    book=PaperBook("1000"),
+                    authority=hostile,
+                    intent_factory=_EmptyIntentFactory(),
+                    scientific_registry=registry,
+                    provider=_EmptyProvider(),
+                    max_quote_age=timedelta(seconds=5),
+                    clock=_ManualClock(self.START + timedelta(seconds=1)),
+                )
+
+            self.assertFalse(workspace.exists())
+
+    def test_live_loop_rejects_datetime_subclass_clock_before_workspace_creation(self) -> None:
+        class Instant(datetime):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = self._scientific_registry(
+                root,
+                self._strategy_version(),
+            )
+            workspace = root / "uncreated-clock-workspace"
+
+            with self.assertRaisesRegex(TypeError, "exact datetime"):
+                PersistentLiveDecisionLoop(
+                    workspace,
+                    loop_id="live-test-loop",
+                    mode=LiveDecisionMode.PAPER,
+                    book=PaperBook("1000"),
+                    authority=self._authority(),
+                    intent_factory=_EmptyIntentFactory(),
+                    scientific_registry=registry,
+                    provider=_EmptyProvider(),
+                    max_quote_age=timedelta(seconds=5),
+                    clock=lambda: Instant(
+                        2026, 9, 18, 18, 0, 1, tzinfo=timezone.utc
+                    ),
+                )
+
+            self.assertFalse(workspace.exists())
+
+    def test_live_loop_rejects_timedelta_subclass_quote_age_before_workspace_creation(self) -> None:
+        class Age(timedelta):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = self._scientific_registry(
+                root,
+                self._strategy_version(),
+            )
+            workspace = root / "uncreated-age-workspace"
+
+            with self.assertRaisesRegex(TypeError, "exact non-negative timedelta"):
+                PersistentLiveDecisionLoop(
+                    workspace,
+                    loop_id="live-test-loop",
+                    mode=LiveDecisionMode.PAPER,
+                    book=PaperBook("1000"),
+                    authority=self._authority(),
+                    intent_factory=_EmptyIntentFactory(),
+                    scientific_registry=registry,
+                    provider=_EmptyProvider(),
+                    max_quote_age=Age(seconds=5),
+                    clock=_ManualClock(self.START + timedelta(seconds=1)),
+                )
+
+            self.assertFalse(workspace.exists())
+
     def test_live_loop_rejects_ingestion_policy_subclass(self) -> None:
         class Policy(IngestionPolicy):
             pass

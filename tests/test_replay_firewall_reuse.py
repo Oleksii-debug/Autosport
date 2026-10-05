@@ -49,6 +49,53 @@ class ReplayFirewallReuseTests(unittest.TestCase):
         firewall._complete_replay(capability)
         self.assertEqual(firewall.result_for("event-1"), "alice")
 
+    def test_invalid_run_controls_do_not_retire_firewall(self) -> None:
+        firewall = ReplayLeakageFirewall({"event-1": "alice"})
+        engine = ReplayEngine([self._event()], firewall)
+
+        invalid_calls = (
+            {"speed": True},
+            {"speed": -1},
+            {"speed": float("nan")},
+            {"speed": float("inf")},
+            {"run_id": ""},
+            {"run_id": " spaced "},
+        )
+        for kwargs in invalid_calls:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises((TypeError, ValueError)):
+                    engine.run(lambda _event: None, **kwargs)
+                with self.assertRaisesRegex(FutureLeakageError, "sealed"):
+                    firewall.result_for("event-1")
+
+        run = engine.run(lambda _event: None, run_id="valid")
+        self.assertEqual(run.run_id, "valid")
+        self.assertEqual(firewall.result_for("event-1"), "alice")
+
+    def test_firewall_rejects_substituted_result_containers_and_values(self) -> None:
+        class Results(dict):
+            pass
+
+        class Text(str):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "exact dict"):
+            ReplayLeakageFirewall(Results({"event-1": "alice"}))
+        with self.assertRaisesRegex(TypeError, "event ids must be exact strings"):
+            ReplayLeakageFirewall({Text("event-1"): "alice"})
+        with self.assertRaisesRegex(TypeError, "result values must be exact strings"):
+            ReplayLeakageFirewall({"event-1": Text("alice")})
+
+    def test_result_lookup_rejects_event_id_subclass(self) -> None:
+        class Text(str):
+            pass
+
+        firewall = ReplayLeakageFirewall({"event-1": "alice"})
+        ReplayEngine([self._event()], firewall).run(lambda _event: None, run_id="done")
+
+        with self.assertRaisesRegex(TypeError, "event_id must be an exact string"):
+            firewall.result_for(Text("event-1"))
+
     def test_completed_engine_rejects_second_run_before_callback(self) -> None:
         firewall = ReplayLeakageFirewall({"event-1": "alice"})
         engine = ReplayEngine([self._event()], firewall)

@@ -373,6 +373,22 @@ class LayExecutionLiabilityTests(unittest.TestCase):
             self.assertEqual(result.worst_case_exposure, Decimal("10.00"))
 
 
+class _HostileStake:
+    calls = 0
+
+    def __str__(self) -> str:
+        type(self).calls += 1
+        raise AssertionError("hostile stake __str__ must not execute")
+
+
+class _HostileLegIterable:
+    calls = 0
+
+    def __iter__(self):
+        type(self).calls += 1
+        raise AssertionError("hostile leg iterable must not execute")
+
+
 class PaperBookLayEconomicsTests(unittest.TestCase):
     @staticmethod
     def _lay_leg() -> TicketLeg:
@@ -384,6 +400,57 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
             sport="football",
             exchange_side="lay",
         )
+
+    def test_lay_open_reuses_canonical_stake_ingress_when_available(self):
+        book = PaperBook(Decimal("100"))
+        _HostileStake.calls = 0
+
+        def canonical_decimal(value, label):
+            self.assertEqual(label, "stake")
+            if type(value) is not Decimal:
+                raise ValueError("canonical stake rejected")
+            return value
+
+        with patch.object(
+            PaperBook,
+            "_canonical_decimal_input",
+            canonical_decimal,
+            create=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "canonical stake rejected"):
+                book.open_ticket(
+                    [self._lay_leg()],
+                    _HostileStake(),
+                    placed_at=QUOTE_AT,
+                )
+
+        self.assertEqual(_HostileStake.calls, 0)
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+
+    def test_lay_open_preserves_exact_leg_container_ingress_when_available(self):
+        book = PaperBook(Decimal("100"))
+        _HostileLegIterable.calls = 0
+
+        def canonical_decimal(value, _label):
+            return Decimal(str(value))
+
+        with patch.object(
+            PaperBook,
+            "_canonical_decimal_input",
+            canonical_decimal,
+            create=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "exact list or tuple"):
+                book.open_ticket(
+                    _HostileLegIterable(),
+                    Decimal("10"),
+                    placed_at=QUOTE_AT,
+                )
+
+        self.assertEqual(_HostileLegIterable.calls, 0)
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
 
     def test_lay_open_reuses_canonical_paperbook_operation_lock_when_available(self):
         book = PaperBook(Decimal("100"))

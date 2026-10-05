@@ -132,7 +132,7 @@ def _derive_run_economics(
     for index, attempt in enumerate(attempts):
         if attempt.sequence != index or attempt.action_id != action_ids[index]:
             raise PaperExecutionIntegrityError("durable attempts are not a reserved plan prefix")
-        if attempt.side not in {"BACK", "LAY"}:
+        if type(attempt.side) is not str or attempt.side not in {"BACK", "LAY"}:
             raise PaperExecutionIntegrityError(
                 "durable attempt has noncanonical exchange side"
             )
@@ -141,23 +141,28 @@ def _derive_run_economics(
                 "durable attempts continue after a non-ACCEPTED terminal outcome"
             )
 
-        if attempt.outcome in {
-            PaperAttemptOutcome.ACCEPTED,
-            PaperAttemptOutcome.PARTIAL,
-        }:
-            known_exposure = _decimal_add_exact(
-                known_exposure,
-                _attempt_locked_capital(attempt),
-            )
-            worst_case = max(worst_case, known_exposure)
-        elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
-            worst_case = max(
-                worst_case,
-                _decimal_add_exact(
+        try:
+            if attempt.outcome in {
+                PaperAttemptOutcome.ACCEPTED,
+                PaperAttemptOutcome.PARTIAL,
+            }:
+                known_exposure = _decimal_add_exact(
                     known_exposure,
-                    _unknown_exposure_increment(attempt),
-                ),
-            )
+                    _attempt_locked_capital(attempt),
+                )
+                worst_case = max(worst_case, known_exposure)
+            elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
+                worst_case = max(
+                    worst_case,
+                    _decimal_add_exact(
+                        known_exposure,
+                        _unknown_exposure_increment(attempt),
+                    ),
+                )
+        except ValueError as exc:
+            raise PaperExecutionIntegrityError(
+                "durable attempt exposure arithmetic exceeds canonical resource bounds"
+            ) from exc
 
         if attempt.outcome is not PaperAttemptOutcome.ACCEPTED:
             terminal_seen = True

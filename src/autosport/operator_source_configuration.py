@@ -49,15 +49,18 @@ def _workspace(value: object) -> Path:
             "operator source workspace must be exact str or exact Path"
         )
     try:
-        resolved = Path(value).expanduser().resolve(strict=False)
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            raise OperatorSourceConfigurationError(
+                "operator source workspace must be absolute"
+            )
+        resolved = candidate.resolve(strict=False)
+    except OperatorSourceConfigurationError:
+        raise
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise OperatorSourceConfigurationError(
             "operator source workspace cannot be resolved"
         ) from exc
-    if not resolved.is_absolute():
-        raise OperatorSourceConfigurationError(
-            "operator source workspace must be absolute"
-        )
     return resolved
 
 

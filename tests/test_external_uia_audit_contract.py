@@ -45,7 +45,7 @@ def test_external_uia_audit_covers_packaged_readonly_surfaces() -> None:
     assert audit.count("automation_id = '205'") == 1
     assert audit.count("automation_id = '302'") == 1
     assert audit.count("automation_id = '306'") == 1
-    assert audit.count("require_value_read_only = $true") == 4
+    assert audit.count("require_value_read_only = $true") == 5
 
 
 def test_external_uia_audit_requires_semantic_control_type_for_every_critical_control() -> None:
@@ -64,6 +64,11 @@ def test_external_uia_audit_requires_semantic_control_type_for_every_critical_co
         "203": "ControlType.List",
         "204": "ControlType.List",
         "205": "ControlType.Edit",
+        "206": "ControlType.Button",
+        "207": "ControlType.Button",
+        "208": "ControlType.Edit",
+        "209": "ControlType.ComboBox",
+        "210": "ControlType.Button",
         "301": "ControlType.ComboBox",
         "302": "ControlType.Edit",
         "303": "ControlType.Button",

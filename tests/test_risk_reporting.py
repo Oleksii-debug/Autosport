@@ -2362,5 +2362,44 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(resolved.minimum_equity, Decimal("90"))
 
 
+    def test_durable_resolver_rejects_in_place_captured_loader_code_mutation(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper_book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            captured = risk_reporting._CANONICAL_PAPERBOOK_LOAD
+            function = captured.__func__
+            original_code = function.__code__
+
+            def hostile_load(_cls, _path):
+                return PaperBook("999999")
+
+            try:
+                function.__code__ = hostile_load.__code__
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "canonical durable equity resolver callable code changed",
+                ):
+                    resolve_durable_product_issued_paper_equity_path(
+                        paper_book_path=str(paper_path),
+                        workspace=str(workspace),
+                    )
+            finally:
+                function.__code__ = original_code
+
+            resolved = resolve_durable_product_issued_paper_equity_path(
+                paper_book_path=str(paper_path),
+                workspace=str(workspace),
+            )
+
+        self.assertEqual(resolved.initial_equity, Decimal("100"))
+        self.assertEqual(resolved.current_equity, Decimal("100"))
+
+
 if __name__ == "__main__":
     unittest.main()

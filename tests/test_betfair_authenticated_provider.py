@@ -151,6 +151,7 @@ def test_revoked_authenticated_authority_materializes_closed_tombstone(
     assert tombstone.sequence == 8
     assert tombstone.provider_selection_id == _identity_token(identity)
     assert tombstone.metadata["durable_disposition"] == "closed"
+    assert batch.quality_flags == ("BETFAIR_AUTHORITY_REVOKED",)
     assert (
         tombstone.metadata["invalidation_reason"]
         == "authenticated_stream_authority_revoked"

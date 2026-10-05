@@ -237,6 +237,8 @@ class AccountSnapshotAcquisitionReceipt:
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
 class AuthoritativeAccountSnapshot:
+    """Restart-verifiable provider-read evidence, never a reusable live capability."""
+
     snapshot: BookmakerAccountSnapshot
     receipt: AccountSnapshotAcquisitionReceipt
 
@@ -252,6 +254,8 @@ class AuthoritativeAccountSnapshot:
 
     @property
     def source_authority_proven(self) -> bool:
+        """Remain fail-closed outside the lexical canonical provider-read operation."""
+
         try:
             assert_account_snapshot_acquisition_authoritative(self)
         except AccountSnapshotAcquisitionError:
@@ -262,7 +266,12 @@ class AuthoritativeAccountSnapshot:
 def assert_account_snapshot_acquisition_authoritative(
     acquired: AuthoritativeAccountSnapshot,
 ) -> None:
-    """Require live provider-origin issuance, not durable local self-attestation."""
+    """Reject reusable provider-origin claims from durable Python evidence objects.
+
+    Same-process Python state is intentionally not a trust root for a reusable
+    provider-origin capability. Downstream positive authority must come from a
+    separately anchored product-owned boundary, not from this durable receipt.
+    """
 
     raise AccountSnapshotAcquisitionError(
         "account snapshot lacks live canonical provider-origin authority"
@@ -1173,11 +1182,11 @@ def _snapshot_from_payload(payload: dict[str, object]) -> BookmakerAccountSnapsh
 
 
 
-# Bind positive acquisition authority to the exact product-owned provider read.  The raw
-# provider-read function and raw durable-record function are captured only by this closure,
-# then removed from their classes.  This mirrors the canonical execution-readback issuance
-# pattern: callers can resolve/verify durable evidence, but cannot pass an arbitrary
-# caller-constructed BookmakerAccountSnapshot to a minting function.
+# Bind the acquisition implementation to the exact product-owned provider read. The raw
+# provider-read and durable-record functions are captured only by this closure, then
+# removed from their classes. Durable evidence can be resolved and verified, but this
+# module deliberately retains no reusable same-process "live origin" registry: ordinary
+# Python closure state is not an acceptable positive provider-origin trust root.
 def _install_account_snapshot_acquisition_authority() -> None:
     raw_init = BetfairAccountSnapshotAcquirer.__init__
     raw_read = BetfairAccountSnapshotAcquirer._read_provider_snapshot

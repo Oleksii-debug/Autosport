@@ -115,6 +115,49 @@ _DURABLE_FAILURE_RENDERER = _build_durable_failure_renderer()
 del _build_durable_failure_renderer
 
 
+def _build_record_failure_method(renderer):
+    def record_failure(
+        self,
+        source_id: str,
+        *,
+        now: str,
+        error: BaseException,
+        failure_kind: str | None = None,
+    ):
+        if failure_kind is not None and (
+            type(failure_kind) is not str
+            or failure_kind not in _ALLOWED_FAILURE_KINDS
+        ):
+            raise ValueError("invalid source health failure kind")
+        with self._writer_guard():
+            self._recover_current_for_write()
+            state = self.get(source_id)
+            state.poll_count += 1
+            state.total_failures += 1
+            state.consecutive_failures += 1
+            state.last_error_at = now
+            state.last_error = renderer(error)
+            if failure_kind is None:
+                state.last_failure_kind = None
+                state.consecutive_failure_kind_count = 0
+            elif (
+                state.status == "failed"
+                and state.last_failure_kind == failure_kind
+                and state.consecutive_failure_kind_count > 0
+            ):
+                state.last_failure_kind = failure_kind
+                state.consecutive_failure_kind_count += 1
+            else:
+                state.last_failure_kind = failure_kind
+                state.consecutive_failure_kind_count = 1
+            state.quality_flags = ()
+            state.status = "failed"
+            self._put(state, recorded_at=now)
+            return state
+
+    return record_failure
+
+
 def _source_health_authority_key(
     path: Path,
     *,
@@ -894,45 +937,7 @@ class SourceHealthStore:
                 quality_flags=quality_flags,
             )
 
-    def record_failure(
-        self,
-        source_id: str,
-        *,
-        now: str,
-        error: BaseException,
-        failure_kind: str | None = None,
-    ) -> SourceHealthState:
-        if failure_kind is not None and (
-            type(failure_kind) is not str
-            or failure_kind not in _ALLOWED_FAILURE_KINDS
-        ):
-            raise ValueError("invalid source health failure kind")
-        renderer = _DURABLE_FAILURE_RENDERER
-        with self._writer_guard():
-            self._recover_current_for_write()
-            state = self.get(source_id)
-            state.poll_count += 1
-            state.total_failures += 1
-            state.consecutive_failures += 1
-            state.last_error_at = now
-            state.last_error = renderer(error)
-            if failure_kind is None:
-                state.last_failure_kind = None
-                state.consecutive_failure_kind_count = 0
-            elif (
-                state.status == "failed"
-                and state.last_failure_kind == failure_kind
-                and state.consecutive_failure_kind_count > 0
-            ):
-                state.last_failure_kind = failure_kind
-                state.consecutive_failure_kind_count += 1
-            else:
-                state.last_failure_kind = failure_kind
-                state.consecutive_failure_kind_count = 1
-            state.quality_flags = ()
-            state.status = "failed"
-            self._put(state, recorded_at=now)
-            return state
+    record_failure = _build_record_failure_method(_DURABLE_FAILURE_RENDERER)
 
     def _writer_guard(self) -> _SourceHealthWriterLock:
         self._assert_persistence_authority()
@@ -1201,3 +1206,10 @@ class SourceHealthStore:
                 temporary.unlink()
             except FileNotFoundError:
                 pass
+
+
+# record_failure retains the sealed renderer and fallback through lexical cells.
+del _DURABLE_FAILURE_RENDERER
+del _DURABLE_FAILURE_FALLBACK
+del _build_record_failure_method
+del _secret_redaction

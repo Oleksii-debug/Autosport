@@ -300,7 +300,6 @@ class ResearchStrategyPlan:
             for instruction in self.instructions
         }
         processed: set[str] = set()
-        latest: dict[str, MarketEvent] = {}
         ordered = sorted(
             events,
             key=lambda event: (
@@ -325,18 +324,22 @@ class ResearchStrategyPlan:
             if previous_market_time is None or available_time < previous_market_time:
                 first_observed_market_times[market_identity] = available_time
         for event in ordered:
-            _advance_research_latest(latest, event)
             instruction = by_trigger.get((event.observed_ts, event.quote_key))
-            if instruction is None:
+            if instruction is None or instruction.decision_id in processed:
                 continue
+            decision_time = parse_iso_timestamp(instruction.decision_ts)
             _validate_scenario_future_identity(
                 instruction.groups,
                 first_observed_quote_times,
                 first_observed_event_times,
                 first_observed_market_times,
-                parse_iso_timestamp(instruction.decision_ts),
+                decision_time,
             )
-            _validate_market_binding(instruction, latest)
+            causal_latest: dict[str, MarketEvent] = {}
+            for causal_event in ordered:
+                if _event_causally_available(causal_event, decision_time):
+                    _advance_research_latest(causal_latest, causal_event)
+            _validate_market_binding(instruction, causal_latest)
             processed.add(instruction.decision_id)
         missing = [
             instruction.decision_id

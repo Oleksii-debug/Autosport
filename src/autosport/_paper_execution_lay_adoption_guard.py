@@ -276,10 +276,14 @@ def _assert_recoverable_book_state(
     started_at: str,
     materialize_exposure: bool,
 ) -> None:
-    if all(
-        action.side == "BACK"
+    if not isinstance(prepared, PreparedPaperExecution):
+        raise TypeError("prepared must be PreparedPaperExecution")
+    self._require_minted(prepared)
+    canonical_sides = tuple(
+        _require_action_side(action)
         for action in prepared.execution_plan.actions
-    ):
+    )
+    if all(side == "BACK" for side in canonical_sides):
         return _ORIGINAL_ASSERT_RECOVERABLE_BOOK_STATE(
             self,
             pre_action_book=pre_action_book,
@@ -291,9 +295,6 @@ def _assert_recoverable_book_state(
 
     if not isinstance(pre_action_book, _adoption.PaperBook):
         raise TypeError("pre_action_book must be PaperBook")
-    if not isinstance(prepared, PreparedPaperExecution):
-        raise TypeError("prepared must be PreparedPaperExecution")
-    self._require_minted(prepared)
     if type(materialize_exposure) is not bool:
         raise TypeError("materialize_exposure must be bool")
 

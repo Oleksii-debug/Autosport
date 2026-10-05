@@ -60,6 +60,7 @@ _ORIGINAL_REQUIRE_ACTION_SURFACE = _reality._impl._require_canonical_action_surf
 _ORIGINAL_ADOPTION_DIGEST = _adoption._digest
 _ORIGINAL_ADOPTION_UTC_TIMESTAMP = _adoption._utc_timestamp
 _ORIGINAL_ADOPTION_RESULT = _adoption.PaperExecutionAdoptionResult
+_ORIGINAL_DECIMAL_RESOURCE_BOUND = _validate_decimal_text_resource_bound
 _PREPARED_WITNESSES: dict[int, tuple[PreparedPaperExecution, str]] = {}
 _ACTION_WITNESSES: dict[int, tuple[ExecutionAction, str, str]] = {}
 _BINDING_WITNESSES: dict[int, tuple[PaperExposureBinding, tuple[str, str | None, str | None, str | None]]] = {}
@@ -221,8 +222,8 @@ def _prepared_authority_payload(
                 "prepared action economics left canonical positive finite authority"
             )
         try:
-            _validate_decimal_text_resource_bound(action.requested_odds)
-            _validate_decimal_text_resource_bound(action.requested_stake)
+            _ORIGINAL_DECIMAL_RESOURCE_BOUND(action.requested_odds)
+            _ORIGINAL_DECIMAL_RESOURCE_BOUND(action.requested_stake)
         except ValueError as exc:
             raise PaperExecutionAdoptionError(
                 "prepared action economics exceed canonical Decimal resource bounds"

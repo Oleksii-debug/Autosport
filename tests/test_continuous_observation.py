@@ -129,6 +129,41 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertFalse(workspace.exists())
             self.assertEqual(provider.calls, 0)
 
+    def test_invalid_wall_clock_output_fails_before_workspace_creation(self):
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(TypeError, "wall_clock must return"):
+                run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    wall_clock=lambda: object(),
+                    reporter=None,
+                )
+
+            self.assertFalse(workspace.exists())
+            self.assertEqual(provider.calls, 0)
+
+    def test_nonfinite_monotonic_fails_before_workspace_creation(self):
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(ValueError, "monotonic must return a finite number"):
+                run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: float("nan"),
+                    reporter=None,
+                )
+
+            self.assertFalse(workspace.exists())
+            self.assertEqual(provider.calls, 0)
+
     def test_invalid_stop_event_contract_fails_before_workspace_creation(self):
         class InvalidStopEvent:
             is_set = object()

@@ -22,7 +22,12 @@ def _trusted_package_launcher_source() -> str:
 
 def _write_snapshot(root: Path) -> dict[str, str]:
     files = {
+        "src/autosport/workspace_lock.py": (
+            "def _open_read_only_descriptor(path):\n"
+            "    return 7\n"
+        ),
         "src/autosport/release_package.py": (
+            "from autosport.workspace_lock import _open_read_only_descriptor\n"
             "def _require_git_commit_sha(value, *, field):\n"
             "    return value\n"
             "def build_windows_package(*args, **kwargs):\n"
@@ -121,7 +126,7 @@ def test_windows_build_materializes_exact_package_consumer_after_final_source_ga
     final_gate = "python $sourceVerifier --source-sha $sourceSha --late-build-boundary --allow-release-outputs"
     archive = (
         "& $gitExecutable archive --format=zip \"--output=$trustedPackageArchive\" $sourceSha -- "
-        "scripts/package_windows.py src/autosport/release_package.py src/autosport/data_tool_package.py"
+        "scripts/package_windows.py src/autosport/workspace_lock.py src/autosport/release_package.py src/autosport/data_tool_package.py"
     )
     package_command = "python scripts/package_windows.py `"
     isolated_runner = (
@@ -138,5 +143,9 @@ def test_windows_build_materializes_exact_package_consumer_after_final_source_ga
     assert isolated_runner in script
     assert "$trustedPackageLauncher = @'" in script
     assert "sys.path.insert" not in launcher
+    assert 'load_module("autosport.workspace_lock", "src/autosport/workspace_lock.py")' in launcher
+    assert launcher.index('load_module("autosport.workspace_lock"') < launcher.index(
+        'load_module("autosport.release_package"'
+    )
     assert 'load_module("autosport.release_package", "src/autosport/release_package.py")' in launcher
     assert 'load_module("autosport.data_tool_package", "src/autosport/data_tool_package.py")' in launcher

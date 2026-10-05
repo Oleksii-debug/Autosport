@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import (
@@ -78,6 +79,14 @@ def _validate_proposed_ticket_leg(leg: object) -> TicketLeg:
 
 def _canonical_context_timestamp(name: str, value: object) -> tuple[str, datetime]:
     timestamp = _canonical_context_text(name, value)
+    for match in re.finditer(r"[.,]([0-9]+)", timestamp):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(
+                f"{name} precision finer than microseconds is unsupported"
+            )
     try:
         parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     except ValueError as exc:

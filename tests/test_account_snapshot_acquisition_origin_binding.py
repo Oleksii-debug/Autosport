@@ -131,64 +131,14 @@ def test_durable_retry_never_reissues_provider_origin(
         assert retry_calls == []
 
 
-def _extract_outer_guard_raw_acquire():
-    guarded = vars(BetfairAccountSnapshotAcquirer)["acquire"]
-    closure = guarded.__closure__
-    assert closure is not None
-    candidates = [
-        cell.cell_contents
-        for cell in closure
-        if callable(cell.cell_contents)
-        and getattr(cell.cell_contents, "__name__", None) == "acquire"
-        and cell.cell_contents is not guarded
-    ]
-    assert len(candidates) == 1
-    return candidates[0]
+def _public_acquire() -> FunctionType:
+    candidate = vars(BetfairAccountSnapshotAcquirer)["acquire"]
+    assert type(candidate) is FunctionType
+    return candidate
 
 
-def test_inner_owner_bypass_still_cannot_reissue_durable_origin(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    database = tmp_path / "account.sqlite3"
-    first_calls = _install_transport(
-        monkeypatch,
-        [_DEVELOPER_APPS, _DETAILS, _FUNDS],
-    )
-    first_acquirer = BetfairAccountSnapshotAcquirer(
-        database,
-        _credentials("A"),
-        account_id="default-account",
-    )
-    first = first_acquirer.acquire(
-        _balance_capabilities(),
-        acquisition_id="inner-origin-request",
-    )
-    assert len(first_calls) == 3
-    assert first.source_authority_proven is False
-
-    raw_acquire = _extract_outer_guard_raw_acquire()
-    for label in ("A", "B"):
-        retry_calls = _install_transport(monkeypatch, [])
-        acquirer = BetfairAccountSnapshotAcquirer(
-            database,
-            _credentials(label),
-            account_id="default-account",
-        )
-        with pytest.raises(
-            AccountSnapshotAcquisitionError,
-            match="durable acquisition cannot reissue provider-origin authority",
-        ):
-            raw_acquire(
-                acquirer,
-                _balance_capabilities(),
-                acquisition_id="inner-origin-request",
-            )
-        assert retry_calls == []
-
-
-def _extract_inner_authority_boundary(raw_acquire):
-    closure = raw_acquire.__closure__
+def _extract_inner_authority_boundary():
+    closure = _public_acquire().__closure__
     assert closure is not None
     candidates = [
         cell.cell_contents
@@ -316,8 +266,8 @@ def test_closure_boundary_does_not_expose_hidden_client_state(tmp_path) -> None:
         _credentials("A"),
         account_id="default-account",
     )
-    raw_acquire = _extract_outer_guard_raw_acquire()
-    authority = _extract_inner_authority_boundary(raw_acquire)
+    raw_acquire = _public_acquire()
+    authority = _extract_inner_authority_boundary()
 
     assert not hasattr(acquirer, "_client")
     assert not hasattr(acquirer, "_store")
@@ -334,7 +284,7 @@ def test_closure_boundary_does_not_expose_hidden_client_state(tmp_path) -> None:
 
 
 def test_raw_acquire_metadata_does_not_expose_live_issuer_function() -> None:
-    raw_acquire = _extract_outer_guard_raw_acquire()
+    raw_acquire = _public_acquire()
     reachable = _reachable_function_names(raw_acquire)
 
     # Durable record/resolve helpers may remain closure-reachable because they cannot
@@ -344,7 +294,7 @@ def test_raw_acquire_metadata_does_not_expose_live_issuer_function() -> None:
     assert "current_live" not in reachable
     assert "state" not in reachable
 
-    authority = _extract_inner_authority_boundary(raw_acquire)
+    authority = _extract_inner_authority_boundary()
     for name in (
         "publish_live",
         "retry_live",
@@ -373,8 +323,8 @@ def test_boundary_cannot_rebind_initialized_acquirer_state(tmp_path) -> None:
         _credentials("A"),
         account_id="default-account",
     )
-    raw_acquire = _extract_outer_guard_raw_acquire()
-    authority = _extract_inner_authority_boundary(raw_acquire)
+    raw_acquire = _public_acquire()
+    authority = _extract_inner_authority_boundary()
 
     # The previous boundary exposed _state/_bind and therefore the exact hidden client
     # and credential origin. Ordinary recovered-boundary API no longer exposes either.
@@ -410,12 +360,12 @@ def test_durable_resolve_remains_non_authoritative_without_new_provider_read(
 
     # Recursive ordinary FunctionType metadata traversal of the raw owner cannot recover
     # a callable live issuer that could turn this durable object back into source authority.
-    raw_acquire = _extract_outer_guard_raw_acquire()
+    raw_acquire = _public_acquire()
     reachable = _reachable_function_names(raw_acquire)
     assert "issue_live" not in reachable
     assert "current_live" not in reachable
 
-    authority = _extract_inner_authority_boundary(raw_acquire)
+    authority = _extract_inner_authority_boundary()
     assert not hasattr(authority, "_publish_live")
     assert not hasattr(authority, "_state")
     assert not hasattr(authority, "_live")
@@ -452,9 +402,7 @@ def test_recovered_boundary_has_no_reusable_live_origin_capability(
     assert len(calls) == 3
     assert acquired.source_authority_proven is False
 
-    authority = _extract_inner_authority_boundary(
-        _extract_outer_guard_raw_acquire()
-    )
+    authority = _extract_inner_authority_boundary()
     assert not hasattr(authority, "assert_live")
     assert not hasattr(authority, "_fingerprint")
     assert not hasattr(authority, "_live")
@@ -488,9 +436,7 @@ def test_v4_closure_cell_replacement_cannot_create_live_origin_authority(
         acquisition_id="closure-cell-v4",
     )
     durable = acquirer.resolve(acquired.receipt.acquisition_id)
-    authority = _extract_inner_authority_boundary(
-        _extract_outer_guard_raw_acquire()
-    )
+    authority = _extract_inner_authority_boundary()
 
     # V4 depended on assert_live selecting a string-keyed live registry closure cell.
     # The boundary now has no such method or registry. Any remaining mapping snapshot

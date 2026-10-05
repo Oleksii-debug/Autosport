@@ -155,3 +155,90 @@ def test_leg_tuple_replacement_with_equal_quote_but_changed_odds_is_rejected() -
         match="opening economic identity changed after admission",
     ):
         _ = book.committed_stake
+
+
+class _HostileComparableString(str):
+    comparisons = 0
+
+    def __eq__(self, _other):
+        type(self).comparisons += 1
+        raise AssertionError("hostile string comparison must never execute")
+
+    __hash__ = str.__hash__
+
+
+class _HostileLifecycleAction(str):
+    comparisons = 0
+
+    def __eq__(self, _other):
+        type(self).comparisons += 1
+        raise AssertionError("hostile lifecycle comparison must never execute")
+
+    __hash__ = str.__hash__
+
+
+class _HostileSettlementKey(str):
+    hash_calls = 0
+
+    def __hash__(self):
+        type(self).hash_calls += 1
+        return super().__hash__()
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ("committed_stake", "open_ticket", "settle", "save"),
+)
+def test_public_operations_validate_hostile_ticket_state_before_authority_comparison(
+    operation: str,
+    tmp_path,
+) -> None:
+    book = PaperBook("100")
+    leg = _leg()
+    ticket = book.open_ticket([leg], "10", reason="safe", placed_at=_TS)
+    balance_before = book.balance
+    _HostileComparableString.comparisons = 0
+    ticket.strategy_reason = _HostileComparableString("safe")
+
+    with pytest.raises(ValueError, match="strategy_reason must be a string"):
+        if operation == "committed_stake":
+            _ = book.committed_stake
+        elif operation == "open_ticket":
+            book.open_ticket([_leg(odds="2.50")], "1", placed_at=_TS)
+        elif operation == "settle":
+            book.settle(ticket.ticket_id, {leg.quote_key}, settled_at=_TS)
+        else:
+            book.save(tmp_path / "hostile-authority.json")
+
+    assert _HostileComparableString.comparisons == 0
+    assert book.balance == balance_before
+    assert book.tickets[ticket.ticket_id].status.value == "open"
+
+
+def test_lifecycle_action_subclass_rejected_before_membership_or_authority_comparison() -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket([_leg()], "10", placed_at=_TS)
+    _HostileLifecycleAction.comparisons = 0
+    book._lifecycle[0] = (
+        _HostileLifecycleAction("open"),
+        ticket.ticket_id,
+        (),
+        (),
+    )
+
+    with pytest.raises(ValueError, match="canonical open or settle text"):
+        _ = book.committed_stake
+
+    assert _HostileLifecycleAction.comparisons == 0
+
+
+def test_settlement_witness_key_rejected_before_rehash() -> None:
+    book = PaperBook("100")
+    hostile = _HostileSettlementKey("ticket-hostile")
+    book._settlement_times[hostile] = None
+    _HostileSettlementKey.hash_calls = 0
+
+    with pytest.raises(ValueError, match="keys must be canonical strings"):
+        _ = book.committed_stake
+
+    assert _HostileSettlementKey.hash_calls == 0

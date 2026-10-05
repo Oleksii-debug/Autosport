@@ -2312,6 +2312,11 @@ class PersistentLiveDecisionLoop:
     ) -> LiveCycleResult:
         decision_ts = now.isoformat()
         affected = self.dependencies.input_ids
+        expected_input_specs = tuple(self._input_specs.values())
+        if tuple(spec.input_id for spec in expected_input_specs) != affected:
+            raise LiveDecisionProgressError(
+                "live dependency registry diverged before provider-gap snapshot capture"
+            )
         self._capture_input_views(affected, now, incremental=False)
         market_sha = self._market_state_sha256()
         self._write_pending(
@@ -2319,6 +2324,7 @@ class PersistentLiveDecisionLoop:
             market_state_sha256=market_sha,
             affected_input_ids=affected,
             gate=_GATE_PROVIDER_GAP,
+            expected_input_specs=expected_input_specs,
         )
         plan = build_portfolio_plan(
             self.book,

@@ -397,6 +397,8 @@ def test_final_send_persists_exact_serialized_request_digest_across_restart() ->
             == "attempt-durable-request-digest"
         )
         assert attempt.submitted_request_sha256 == expected_digest
+        assert attempt.provider_evidence is not None
+        assert attempt.provider_evidence.request_sha256 == expected_digest
 
         reconstructed = dict(request)
         reconstructed["id"] = request["id"] + 1

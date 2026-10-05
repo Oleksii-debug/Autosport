@@ -803,7 +803,11 @@ class PersistentLiveDecisionLoop:
         self.authority = authority
         self._economic_authority = authority
         self._economic_contract_authority = authority.contract
+        self._economic_contract_sha256_authority = provenance_for(
+            authority.contract
+        ).contract_sha256
         self._risk_policy_authority = authority.risk_policy
+        self._risk_policy_sha256_authority = authority.risk_policy.provenance_sha256
         self.intent_factory = intent_factory
         self.intent_provenance = intent_provenance
         self._intent_provenance_authority = intent_provenance
@@ -2602,6 +2606,20 @@ class PersistentLiveDecisionLoop:
         if self.authority.risk_policy is not self._risk_policy_authority:
             raise LiveDecisionProgressError(
                 "risk policy authority changed after construction"
+            )
+        if (
+            provenance_for(self.authority.contract).contract_sha256
+            != self._economic_contract_sha256_authority
+        ):
+            raise LiveDecisionProgressError(
+                "economic goal contract semantics changed after construction"
+            )
+        if (
+            self.authority.risk_policy.provenance_sha256
+            != self._risk_policy_sha256_authority
+        ):
+            raise LiveDecisionProgressError(
+                "risk policy semantics changed after construction"
             )
         if self.intent_provenance is not self._intent_provenance_authority:
             raise LiveDecisionProgressError(

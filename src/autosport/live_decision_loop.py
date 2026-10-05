@@ -800,6 +800,9 @@ class PersistentLiveDecisionLoop:
         self.book = book
         self._book_authority = book
         self.authority = authority
+        self._economic_authority = authority
+        self._economic_contract_authority = authority.contract
+        self._risk_policy_authority = authority.risk_policy
         self.intent_factory = intent_factory
         self.intent_provenance = intent_provenance
         self.provider = provider
@@ -845,6 +848,7 @@ class PersistentLiveDecisionLoop:
         )
         self.ingestion_policy = ingestion_policy
         self.max_quote_age = max_quote_age
+        self._max_quote_age_authority = max_quote_age
         self.bounds = bounds or LiveLoopBounds()
         self.clock = resolved_clock
         self._last_clock_time = provenance_as_of
@@ -2549,6 +2553,22 @@ class PersistentLiveDecisionLoop:
         if self.book is not self._book_authority:
             raise LiveDecisionProgressError(
                 "live PaperBook authority changed after construction"
+            )
+        if self.authority is not self._economic_authority:
+            raise LiveDecisionProgressError(
+                "economic decision authority changed after construction"
+            )
+        if self.authority.contract is not self._economic_contract_authority:
+            raise LiveDecisionProgressError(
+                "economic goal contract authority changed after construction"
+            )
+        if self.authority.risk_policy is not self._risk_policy_authority:
+            raise LiveDecisionProgressError(
+                "risk policy authority changed after construction"
+            )
+        if self.max_quote_age != self._max_quote_age_authority:
+            raise LiveDecisionProgressError(
+                "live quote-age authority changed after construction"
             )
         if self.decision_ledger is not self._decision_ledger_authority:
             raise LiveDecisionProgressError(

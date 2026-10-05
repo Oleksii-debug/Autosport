@@ -3,6 +3,8 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
+import pytest
+
 from autosport.continuous_session import SessionStoppedError
 from autosport.operator_source_store import OperatorSourceConfigStore
 from autosport.product_gui_worker import ProductGuiWorker
@@ -363,3 +365,72 @@ def test_semantic_shell_contains_runtime_controls_and_real_tickets_table() -> No
     assert "detail=live_message.error" not in shell
     assert "detail=recovery_message.error" not in shell
     assert "error=export_message.error" not in shell
+
+
+class _StopSignalFailureWorker:
+    def __init__(self, exc: BaseException) -> None:
+        self.busy = True
+        self.stop_requested = False
+        self.exc = exc
+        self.stop_reasons: list[str] = []
+
+    def poll(self):
+        return None
+
+    def request_stop(self, reason: str = "operator_stop") -> bool:
+        self.stop_reasons.append(reason)
+        self.stop_requested = True
+        raise self.exc
+
+
+def test_webview_stop_signal_failure_quarantines_without_secret_leak(
+    tmp_path: Path,
+) -> None:
+    controller = _bare_controller(tmp_path)
+    secret = "SECRET_STOP_SIGNAL_DETAIL"
+    worker = _StopSignalFailureWorker(RuntimeError(secret))
+    controller.product_worker = worker
+    controller._product_runtime_economic_snapshot = object()
+    controller.bank = "stale healthy bank"
+    controller.tickets = ["stale healthy ticket"]
+    controller.evaluation = ["stale healthy portfolio"]
+
+    result = controller._action_product_runtime_stop({})
+
+    assert result["status"] == "rejected"
+    assert worker.stop_reasons == ["operator_stop"]
+    assert worker.stop_requested is True
+    assert tmp_path in controller._recovery_required_workspaces
+    assert controller._product_runtime_economic_snapshot is None
+    assert "stale healthy bank" not in controller.bank
+    assert controller.tickets != ["stale healthy ticket"]
+    assert controller.evaluation != ["stale healthy portfolio"]
+    assert secret not in result["message"]
+    assert secret not in controller.last_error
+    assert secret not in "\n".join(controller.log)
+    assert "віднов" in controller.product_runtime_status.casefold()
+
+
+def test_webview_stop_process_interrupt_quarantines_before_unwind(
+    tmp_path: Path,
+) -> None:
+    controller = _bare_controller(tmp_path)
+    secret = "SECRET_STOP_PROCESS_CONTROL"
+    worker = _StopSignalFailureWorker(KeyboardInterrupt(secret))
+    controller.product_worker = worker
+    controller._product_runtime_economic_snapshot = object()
+    controller.bank = "stale healthy bank"
+    controller.tickets = ["stale healthy ticket"]
+    controller.evaluation = ["stale healthy portfolio"]
+
+    with pytest.raises(KeyboardInterrupt, match=secret):
+        controller._action_product_runtime_stop({})
+
+    assert worker.stop_reasons == ["operator_stop"]
+    assert worker.stop_requested is True
+    assert tmp_path in controller._recovery_required_workspaces
+    assert controller._product_runtime_economic_snapshot is None
+    assert "stale healthy bank" not in controller.bank
+    assert secret not in controller.last_error
+    assert secret not in "\n".join(controller.log)
+    assert "віднов" in controller.product_runtime_status.casefold()

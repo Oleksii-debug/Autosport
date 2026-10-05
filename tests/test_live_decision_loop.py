@@ -2955,7 +2955,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             record = JsonlDecisionLedger(
                 workspace / "decisions.jsonl"
             ).verified_records()[0]
-            self.assertEqual(record.payload["schema_version"], 2)
+            self.assertEqual(record.payload["schema_version"], 3)
             self.assertEqual(
                 record.payload["intent_strategy_version_id"],
                 loop.intent_provenance.strategy_version_id,

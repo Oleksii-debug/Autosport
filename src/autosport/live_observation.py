@@ -342,11 +342,16 @@ def _poll_acknowledged(
                 except BaseException as reset_error:
                     # Cleanup must never replace the primary storage failure. Reset
                     # hooks are provider-controlled and can themselves raise
-                    # BaseException or even fail during stringification.
-                    exc.add_note(
-                        "provider pending-snapshot reset also failed: "
-                        f"{_exception_text(reset_error)}"
-                    )
+                    # BaseException or even fail during stringification. Diagnostic
+                    # annotation is also best-effort: a hostile sqlite exception
+                    # subclass must not be able to replace the original failure.
+                    try:
+                        exc.add_note(
+                            "provider pending-snapshot reset also failed: "
+                            f"{_exception_text(reset_error)}"
+                        )
+                    except BaseException:
+                        pass
                 raise
             continue
         except Exception:

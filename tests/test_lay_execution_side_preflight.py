@@ -355,6 +355,66 @@ def test_direct_attempt_must_match_reserved_action_identity() -> None:
         assert ledger.events() == events_before
 
 
+def test_evidence_registry_cannot_be_retargeted_after_construction() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        redirected = PaperExecutionLedger(Path(tmp) / "redirected-evidence.jsonl")
+        registry = PaperExecutionEvidenceRegistry(ledger)
+        registry._ledger = redirected
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="ledger authority changed after construction",
+        ):
+            registry.resolve("missing-evidence")
+
+        assert ledger.events() == []
+        assert redirected.events() == []
+
+
+def test_execution_rejects_evidence_registry_bound_to_different_ledger() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        run_ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+        evidence_ledger = PaperExecutionLedger(Path(tmp) / "evidence-execution.jsonl")
+        current_action = _action("cross-ledger-evidence", side="BACK")
+        record = PaperExecutionEvidenceRecord(
+            action_id=current_action.action_id,
+            bookmaker_id=current_action.bookmaker_id,
+            account_id=current_action.account_id,
+            event_id=current_action.event_id,
+            market_id=current_action.market_id,
+            selection_id=current_action.selection_id,
+            side=current_action.side,
+            quote_id=current_action.quote_id,
+            outcome=PaperAttemptOutcome.ACCEPTED,
+            observed_at="2026-09-20T03:00:00.250000+00:00",
+            evidence_grade=EvidenceGrade.EMPIRICAL,
+            evidence_source="captured-paper-observation-v1",
+            accepted_odds="5.00",
+            accepted_stake="10.00",
+            reason="observed accepted",
+        )
+        registry = PaperExecutionEvidenceRegistry(evidence_ledger)
+        registry.register(record)
+        run_events_before = list(run_ledger.events())
+
+        with pytest.raises(
+            PaperExecutionStateError,
+            match="bound to the exact run ledger",
+        ):
+            execute_paper_plan(
+                plan=_plan(current_action),
+                trigger_id="cross-ledger-evidence",
+                config=_config(),
+                ledger=run_ledger,
+                started_at=STARTED_AT,
+                observations={current_action.action_id: record.as_observation()},
+                evidence_registry=registry,
+            )
+
+        assert run_ledger.events() == run_events_before
+
+
 def test_mutated_config_identity_fails_before_fingerprint_or_reservation() -> None:
     class HostileModelId(str):
         calls = 0

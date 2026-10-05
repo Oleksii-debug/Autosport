@@ -2374,6 +2374,70 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("100"))
         self.assertEqual(book.tickets, {})
 
+    def test_lay_snapshot_rejects_balance_decimal_subclass_before_arithmetic_hooks(self):
+        book = PaperBook(Decimal("100"))
+        book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        class HostileDecimal(Decimal):
+            def __lt__(self, _other):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("balance comparison hook executed")
+
+            def __add__(self, _other):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("balance arithmetic hook executed")
+
+        book.balance = HostileDecimal("60")
+
+        with self.assertRaisesRegex(ValueError, "balance must be an exact Decimal"):
+            _ = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+
+    def test_lay_snapshot_rejects_ticket_stake_decimal_subclass_before_economic_hooks(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        class HostileDecimal(Decimal):
+            def __le__(self, _other):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("stake comparison hook executed")
+
+            def __mul__(self, _other):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("stake multiplication hook executed")
+
+        object.__setattr__(ticket, "stake", HostileDecimal("10"))
+
+        with self.assertRaisesRegex(ValueError, "stake for ticket .* exact Decimal"):
+            _ = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+
+    def test_lay_snapshot_rejects_ticket_payout_decimal_subclass_before_comparison_hooks(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)
+        hostile_calls = 0
+
+        class HostileDecimal(Decimal):
+            def __lt__(self, _other):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("payout comparison hook executed")
+
+        object.__setattr__(ticket, "payout", HostileDecimal("0"))
+
+        with self.assertRaisesRegex(ValueError, "payout for ticket .* exact Decimal"):
+            _ = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+
     def test_lay_snapshot_rejects_strategy_reason_str_subclass_before_contains_hook(self):
         book = PaperBook(Decimal("100"))
         ticket = book.open_ticket([self._lay_leg()], Decimal("10"), placed_at=QUOTE_AT)

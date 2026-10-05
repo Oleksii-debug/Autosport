@@ -74,6 +74,7 @@ class ProductIssuedPaperEquityPath:
     currency: str
     goal_contract_sha256: str
     portfolio_risk_state_sha256: str
+    paperbook_source_state_sha256: str
     history_view: str
     historical_as_known_supported: bool
     initial_equity: Decimal
@@ -96,6 +97,7 @@ class ProductIssuedPaperDrawdownEvidence:
     schema: str
     metric_class: str
     equity_path_sha256: str
+    paperbook_source_state_sha256: str
     equity_path_point_count: int
     goal_id: str
     goal_revision: int
@@ -141,6 +143,7 @@ class PaperRiskReport:
     includes_live_execution_exposure: bool
     live_execution_headroom_authoritative: bool
     portfolio_risk_state_sha256: str
+    paperbook_source_state_sha256: str
     equity_path_sha256: str
     drawdown_evidence_sha256: str
     equity_path_point_count: int
@@ -186,11 +189,94 @@ def _decimal_text(value: Decimal, label: str) -> str:
     return str(value)
 
 
+def _paperbook_equity_source_sha256(book: PaperBook) -> str:
+    """Commit the complete validated PAPER economic/source state for #1253.
+
+    This deliberately differs from the risk-state digest: equity-path evidence
+    must also bind source-market dimensions such as sport/exchange_side even
+    when those dimensions do not currently change BACK-only risk arithmetic.
+    """
+
+    if type(book) is not PaperBook:
+        raise TypeError("book must be canonical PaperBook")
+    _require_product_issued_paper_state(book)
+    PaperBook._validate_loaded_state(book)
+    tickets: list[dict[str, object]] = []
+    for ticket_id in sorted(book.tickets):
+        ticket = book.tickets[ticket_id]
+        tickets.append(
+            {
+                "ticket_id": ticket.ticket_id,
+                "stake": _decimal_text(ticket.stake, "ticket stake"),
+                "placed_at": ticket.placed_at,
+                "settled_at": ticket.settled_at,
+                "status": ticket.status.value,
+                "payout": _decimal_text(ticket.payout, "ticket payout"),
+                "strategy_reason": ticket.strategy_reason,
+                "provider_source_ids": list(ticket.provider_source_ids),
+                "provider_accounts": [
+                    {"source_id": source_id, "account_id": account_id}
+                    for source_id, account_id in ticket.provider_accounts
+                ],
+                "bankroll_id": ticket.bankroll_id,
+                "currency": ticket.currency,
+                "legs": [
+                    {
+                        "event_id": leg.event_id,
+                        "market_id": leg.market_id,
+                        "selection_id": leg.selection_id,
+                        "locked_odds": _decimal_text(
+                            leg.locked_odds,
+                            "ticket leg locked_odds",
+                        ),
+                        "sport": leg.sport,
+                        "exchange_side": leg.exchange_side,
+                    }
+                    for leg in ticket.legs
+                ],
+            }
+        )
+    lifecycle: list[dict[str, object]] = []
+    for raw_entry in book._lifecycle:
+        action, ticket_id, winners, voids = PaperBook._validate_lifecycle_entry(
+            raw_entry
+        )
+        lifecycle.append(
+            {
+                "action": action,
+                "ticket_id": ticket_id,
+                "winning_quote_keys": list(winners),
+                "void_quote_keys": list(voids),
+                "settled_at": (
+                    book._settlement_times[ticket_id]
+                    if action == "settle"
+                    else None
+                ),
+            }
+        )
+    payload = {
+        "schema": "autosport.paper-equity-source.v1",
+        "initial_bankroll": _decimal_text(book.initial_bankroll, "initial bankroll"),
+        "balance": _decimal_text(book.balance, "balance"),
+        "tickets": tickets,
+        "lifecycle": lifecycle,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _equity_path_payload(
     *,
     goal_snapshot: EconomicGoalContract,
     goal_contract_sha256: str,
     portfolio_risk_state_sha256: str,
+    paperbook_source_state_sha256: str,
     initial_equity: Decimal,
     points: tuple[PaperEquityPathPoint, ...],
     availability_complete: bool,
@@ -209,6 +295,7 @@ def _equity_path_payload(
         "currency": goal_snapshot.currency,
         "goal_contract_sha256": goal_contract_sha256,
         "portfolio_risk_state_sha256": portfolio_risk_state_sha256,
+        "paperbook_source_state_sha256": paperbook_source_state_sha256,
         "history_view": HISTORY_VIEW_RESTATED_CURRENT,
         "historical_as_known_supported": False,
         "initial_equity": _decimal_text(initial_equity, "initial_equity"),
@@ -273,6 +360,7 @@ def build_product_issued_paper_equity_path(
         raise ValueError("canonical economic goal changed during equity-path issuance")
 
     before_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    before_source_sha256 = _paperbook_equity_source_sha256(book)
     if before_sha256 is None:
         raise ValueError("canonical PAPER risk state cannot issue an equity path")
 
@@ -361,8 +449,11 @@ def build_product_issued_paper_equity_path(
         raise ValueError("canonical PAPER equity path current equity is inconsistent")
 
     after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    after_source_sha256 = _paperbook_equity_source_sha256(book)
     if after_sha256 is None or after_sha256 != before_sha256:
         raise ValueError("canonical PAPER risk state changed during equity-path issuance")
+    if after_source_sha256 != before_source_sha256:
+        raise ValueError("canonical PAPER source state changed during equity-path issuance")
     if provenance_for(goal) != goal_snapshot_provenance:
         raise ValueError("canonical economic goal changed during equity-path issuance")
 
@@ -390,6 +481,7 @@ def build_product_issued_paper_equity_path(
         goal_snapshot=goal_snapshot,
         goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
         portfolio_risk_state_sha256=after_sha256,
+        paperbook_source_state_sha256=after_source_sha256,
         initial_equity=book.initial_bankroll,
         points=point_tuple,
         availability_complete=availability_complete,
@@ -417,6 +509,7 @@ def build_product_issued_paper_equity_path(
         currency=goal_snapshot.currency,
         goal_contract_sha256=goal_snapshot_provenance.contract_sha256,
         portfolio_risk_state_sha256=after_sha256,
+        paperbook_source_state_sha256=after_source_sha256,
         history_view=HISTORY_VIEW_RESTATED_CURRENT,
         historical_as_known_supported=False,
         initial_equity=book.initial_bankroll,
@@ -549,6 +642,7 @@ def _drawdown_evidence_payload(
         "schema": DRAWDOWN_EVIDENCE_SCHEMA,
         "metric_class": DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
         "equity_path_sha256": path.path_sha256,
+        "paperbook_source_state_sha256": path.paperbook_source_state_sha256,
         "equity_path_point_count": path.point_count,
         "goal_id": path.goal_id,
         "goal_revision": path.goal_revision,
@@ -597,6 +691,7 @@ def build_product_issued_paper_drawdown_evidence(
         schema=DRAWDOWN_EVIDENCE_SCHEMA,
         metric_class=DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
         equity_path_sha256=path.path_sha256,
+        paperbook_source_state_sha256=path.paperbook_source_state_sha256,
         equity_path_point_count=path.point_count,
         goal_id=path.goal_id,
         goal_revision=path.goal_revision,
@@ -1036,6 +1131,7 @@ def build_paper_risk_report(
         includes_live_execution_exposure=False,
         live_execution_headroom_authoritative=False,
         portfolio_risk_state_sha256=after_sha256,
+        paperbook_source_state_sha256=equity_path.paperbook_source_state_sha256,
         equity_path_sha256=equity_path.path_sha256,
         drawdown_evidence_sha256=drawdown_evidence.evidence_sha256,
         equity_path_point_count=equity_path.point_count,

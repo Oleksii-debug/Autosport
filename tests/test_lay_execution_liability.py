@@ -1526,6 +1526,107 @@ class PaperBookLayEconomicsTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("100.00"))
         self.assertEqual(book.committed_capital, Decimal("0"))
 
+    def test_lay_replay_class_debit_override_cannot_replace_locked_capital_economics(self):
+        book = PaperBook(Decimal("100"))
+        book.open_ticket(
+            [self._lay_leg()],
+            Decimal("10"),
+            placed_at=QUOTE_AT,
+        )
+        hostile_calls = 0
+
+        def hostile_debit(_cls, _balance, _amount):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return Decimal("100")
+
+        with patch.object(
+            PaperBook,
+            "_debit_balance",
+            classmethod(hostile_debit),
+        ):
+            committed = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(committed, Decimal("40.00"))
+        self.assertEqual(book.balance, Decimal("60.00"))
+
+    def test_lay_replay_class_settlement_override_cannot_forge_snapshot_economics(self):
+        book = PaperBook(Decimal("100"))
+        ticket = book.open_ticket(
+            [self._lay_leg()],
+            Decimal("10"),
+            placed_at=QUOTE_AT,
+        )
+        book.settle(ticket.ticket_id, set())
+        hostile_calls = 0
+
+        def hostile_settlement(_cls, _ticket, balance, _winners, _voids):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return TicketStatus.LOST, Decimal("0"), balance
+
+        with patch.object(
+            PaperBook,
+            "_settlement_result",
+            classmethod(hostile_settlement),
+        ):
+            committed = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(committed, Decimal("0"))
+        self.assertEqual(book.balance, Decimal("110.00"))
+        self.assertEqual(book.tickets[ticket.ticket_id].status, TicketStatus.WON)
+
+    def test_lay_replay_class_lifecycle_entry_override_cannot_forge_history(self):
+        book = PaperBook(Decimal("100"))
+        book.open_ticket(
+            [self._lay_leg()],
+            Decimal("10"),
+            placed_at=QUOTE_AT,
+        )
+        hostile_calls = 0
+
+        def hostile_entry(_cls, _entry):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return ("open", "forged-ticket", (), ())
+
+        with patch.object(
+            PaperBook,
+            "_validate_lifecycle_entry",
+            classmethod(hostile_entry),
+        ):
+            committed = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(committed, Decimal("40.00"))
+        self.assertEqual(book.balance, Decimal("60.00"))
+
+    def test_lay_loaded_state_class_reachability_override_cannot_skip_replay(self):
+        book = PaperBook(Decimal("100"))
+        book.open_ticket(
+            [self._lay_leg()],
+            Decimal("10"),
+            placed_at=QUOTE_AT,
+        )
+        hostile_calls = 0
+
+        def hostile_reachability(_cls, _book):
+            nonlocal hostile_calls
+            hostile_calls += 1
+
+        with patch.object(
+            PaperBook,
+            "_validate_lifecycle_reachability",
+            classmethod(hostile_reachability),
+        ):
+            committed = book.committed_capital
+
+        self.assertEqual(hostile_calls, 0)
+        self.assertEqual(committed, Decimal("40.00"))
+        self.assertEqual(book.balance, Decimal("60.00"))
+
     def test_open_lay_snapshot_round_trip_preserves_liability_and_side(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-book.json"

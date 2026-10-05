@@ -837,6 +837,31 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertNotEqual(first.goal_contract_sha256, second.goal_contract_sha256)
         self.assertNotEqual(first.path_sha256, second.path_sha256)
 
+    def test_durable_resolver_rejects_goal_change_after_final_book_read(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+        changed_goal = self._goal(max_drawdown_fraction=Decimal("0.10"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper-book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with patch.object(
+                EconomicGoalStore,
+                "load",
+                side_effect=(goal, goal, changed_goal),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "durable economic goal changed during equity-path resolution",
+                ):
+                    resolve_durable_product_issued_paper_equity_path(
+                        paper_book_path=str(paper_path),
+                        workspace=str(workspace),
+                    )
+
     def test_durable_verifier_rejects_copied_forged_equity_evidence(self) -> None:
         book = PaperBook("100")
         ticket = book.open_ticket(

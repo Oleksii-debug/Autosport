@@ -190,9 +190,3 @@ _FENCED_REVOKE.__module__ = _LEDGER_TYPE.__module__
 _LEDGER_TYPE.revoke_supervised_approval = _FENCED_REVOKE
 
 del _RAW_REVOKE, _RAW_REVOKE_CODE
-
-# Provider-origin matched economics are a separate positive authority surface.
-# Install its raw-ledger mint fence only after the execution write/readback graph is
-# composed, so VERIFIED_PROVIDER_EFFECT_BOUND cannot be appended as caller-authored
-# schema-valid bytes around the canonical provider verifier.
-from . import _verified_provider_effect_ledger_mint_fence as _verified_provider_effect_ledger_mint_fence  # noqa: F401,E402

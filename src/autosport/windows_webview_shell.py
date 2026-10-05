@@ -2893,6 +2893,29 @@ def launch_windows_shell(
     title: str | None = None,
     storage_path: Path | None = None,
 ) -> int:
+    runtime_version_observer = _observed_webview2_browser_version
+    runtime_version_observer_code = getattr(
+        runtime_version_observer,
+        "__code__",
+        None,
+    )
+    runtime_witness_writer = _write_webview2_runtime_witness
+    runtime_witness_writer_code = getattr(
+        runtime_witness_writer,
+        "__code__",
+        None,
+    )
+
+    def runtime_witness_dispatch_intact() -> bool:
+        return (
+            _observed_webview2_browser_version is runtime_version_observer
+            and getattr(runtime_version_observer, "__code__", None)
+            is runtime_version_observer_code
+            and _write_webview2_runtime_witness is runtime_witness_writer
+            and getattr(runtime_witness_writer, "__code__", None)
+            is runtime_witness_writer_code
+        )
+
     _reject_webview2_environment_overrides()
 
     try:
@@ -2994,9 +3017,19 @@ def launch_windows_shell(
             trusted_document_violation = True
             return False
         if runtime_witness_path is not None:
+            if not runtime_witness_dispatch_intact():
+                revoke_trust()
+                runtime_identity_violation = True
+                trusted_document_violation = True
+                return False
             try:
-                observed_version = _observed_webview2_browser_version(window)
+                observed_version = runtime_version_observer(window)
             except WindowsWebViewUnavailable:
+                revoke_trust()
+                runtime_identity_violation = True
+                trusted_document_violation = True
+                return False
+            if not runtime_witness_dispatch_intact():
                 revoke_trust()
                 runtime_identity_violation = True
                 trusted_document_violation = True
@@ -3034,8 +3067,13 @@ def launch_windows_shell(
         # session must not erase the only exact-runtime binding evidence.
         if runtime_witness_path is not None and not runtime_witness_published:
             assert runtime_browser_version is not None
+            if not runtime_witness_dispatch_intact():
+                revoke_trust()
+                runtime_identity_violation = True
+                trusted_document_violation = True
+                return False
             try:
-                _write_webview2_runtime_witness(
+                runtime_witness_writer(
                     runtime_witness_path,
                     runtime_browser_version,
                 )

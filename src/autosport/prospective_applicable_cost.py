@@ -17,8 +17,18 @@ import json
 import re
 from typing import Any
 
+from .betfair_standard_limit_price_bound import (
+    BetfairStandardLimitPriceBoundEvidence,
+    BetfairStandardLimitPriceBoundStatus,
+)
+from .betfair_standard_limit_price_bound_product_verifier import (
+    verify_product_betfair_standard_limit_price_bound,
+)
 from .campaign_cost_evidence import CostClass, REQUIRED_COST_CLASSES
 from .model_compute_router import ModelComputeRouterStore
+from .real_execution_ledger import RealExecutionLedger
+from .supervised_plan_issuance import SupervisedPlanIssuanceStore
+from .trusted_runtime_code_profile import TrustedRuntimeCodeProfile
 from .portfolio_plan import OpportunityIntent, PortfolioPlan
 from .prospective_model_compute_money import (
     ProspectiveModelComputeMoneyEvidence,
@@ -28,9 +38,10 @@ from .prospective_model_compute_money import (
 )
 
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MODEL_SOURCE_FAMILY = "autosport.prospective_model_compute_money"
+_BETFAIR_STANDARD_LIMIT_SOURCE_FAMILY = "autosport.betfair_standard_limit_price_bound"
 
 
 class ProspectiveApplicableCostError(ValueError):
@@ -39,6 +50,7 @@ class ProspectiveApplicableCostError(ValueError):
 
 class ProspectiveCostResolutionStatus(StrEnum):
     UNKNOWN_UNPROVEN = "UNKNOWN_UNPROVEN"
+    KNOWN_ZERO = "KNOWN_ZERO"
     EXECUTION_STATE_DEPENDENT = "EXECUTION_STATE_DEPENDENT"
     TERMINAL_STATE_DEPENDENT = "TERMINAL_STATE_DEPENDENT"
     EXECUTION_AND_TERMINAL_STATE_DEPENDENT = "EXECUTION_AND_TERMINAL_STATE_DEPENDENT"
@@ -62,6 +74,9 @@ class ProspectiveApplicableCostReason(StrEnum):
         "NO_PROSPECTIVE_FIXED_ALLOCATION_AUTHORITY"
     )
     EXECUTION_SLIPPAGE_DEPENDS_ON_EXECUTION = "EXECUTION_SLIPPAGE_DEPENDS_ON_EXECUTION"
+    BETFAIR_STANDARD_LIMIT_ZERO_ADVERSE_PRICE = (
+        "BETFAIR_STANDARD_LIMIT_ZERO_ADVERSE_PRICE"
+    )
     EXECUTION_FEES_DEPEND_ON_EXECUTION_OR_TERMINAL_STATE = (
         "EXECUTION_FEES_DEPEND_ON_EXECUTION_OR_TERMINAL_STATE"
     )
@@ -129,6 +144,7 @@ _STATUS_AXES: dict[
     ProspectiveCostResolutionStatus, tuple[ProspectiveCostDependencyAxis, ...]
 ] = {
     ProspectiveCostResolutionStatus.UNKNOWN_UNPROVEN: (),
+    ProspectiveCostResolutionStatus.KNOWN_ZERO: (),
     ProspectiveCostResolutionStatus.EXECUTION_STATE_DEPENDENT: (
         ProspectiveCostDependencyAxis.EXECUTION_STATE,
     ),
@@ -170,10 +186,18 @@ _COMPONENT_SEMANTICS: dict[
         None,
     ),
     CostClass.EXECUTION_SLIPPAGE: (
-        ProspectiveCostResolutionStatus.EXECUTION_STATE_DEPENDENT,
-        ProspectiveApplicableCostReason.EXECUTION_SLIPPAGE_DEPENDS_ON_EXECUTION,
-        (ProspectiveCostDependencyAxis.EXECUTION_STATE,),
-        None,
+        (
+            ProspectiveCostResolutionStatus.EXECUTION_STATE_DEPENDENT,
+            ProspectiveApplicableCostReason.EXECUTION_SLIPPAGE_DEPENDS_ON_EXECUTION,
+            (ProspectiveCostDependencyAxis.EXECUTION_STATE,),
+            None,
+        ),
+        (
+            ProspectiveCostResolutionStatus.KNOWN_ZERO,
+            ProspectiveApplicableCostReason.BETFAIR_STANDARD_LIMIT_ZERO_ADVERSE_PRICE,
+            (),
+            _BETFAIR_STANDARD_LIMIT_SOURCE_FAMILY,
+        ),
     ),
     CostClass.EXECUTION_FEES_COMMISSION_TAX: (
         ProspectiveCostResolutionStatus.EXECUTION_AND_TERMINAL_STATE_DEPENDENT,
@@ -189,7 +213,7 @@ _COMPONENT_SEMANTICS: dict[
 
 @dataclass(frozen=True, slots=True, init=False)
 class ProspectiveApplicableCostComponent:
-    """Schema-v2 assertion/transport component; public construction is disabled."""
+    """Schema-v3 assertion/transport component; public construction is disabled."""
 
     cost_class: CostClass
     status: ProspectiveCostResolutionStatus
@@ -232,23 +256,42 @@ class ProspectiveApplicableCostComponent:
         expected = _COMPONENT_SEMANTICS.get(self.cost_class)
         if expected is None:
             raise ProspectiveApplicableCostError(
-                "cost_class has no schema-v2 prospective semantic authority"
+                "cost_class has no schema-v3 prospective semantic authority"
             )
-        expected_status, expected_reason, expected_axes, expected_source_family = expected
+        candidates = (
+            expected
+            if self.cost_class is CostClass.EXECUTION_SLIPPAGE
+            else (expected,)
+        )
+        matched = next(
+            (
+                candidate
+                for candidate in candidates
+                if self.status is candidate[0]
+                and self.reason is candidate[1]
+                and self.dependency_axes == candidate[2]
+            ),
+            None,
+        )
+        if matched is None:
+            raise ProspectiveApplicableCostError(
+                "cost component does not match the canonical schema-v3 semantic tuple"
+            )
+        expected_status, expected_reason, expected_axes, expected_source_family = matched
         if (
             self.status is not expected_status
             or self.reason is not expected_reason
             or self.dependency_axes != expected_axes
         ):
             raise ProspectiveApplicableCostError(
-                "cost component does not match the canonical schema-v2 semantic tuple"
+                "cost component does not match the canonical schema-v3 semantic tuple"
             )
 
         refs = (self.source_family, self.source_evidence_id, self.source_sha256)
         if expected_source_family is None:
             if any(value is not None for value in refs):
                 raise ProspectiveApplicableCostError(
-                    "this cost class cannot carry source authority in schema v2"
+                    "this cost class cannot carry source authority in schema v3"
                 )
             return
 
@@ -264,7 +307,7 @@ class ProspectiveApplicableCostComponent:
         source_sha256 = _sha256(self.source_sha256, "source_sha256")
         if evidence_id != source_sha256:
             raise ProspectiveApplicableCostError(
-                "schema-v2 model source evidence id and source SHA-256 must match"
+                "schema-v3 model source evidence id and source SHA-256 must match"
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -283,7 +326,7 @@ class ProspectiveApplicableCostComponent:
 
 @dataclass(frozen=True, slots=True, init=False)
 class ProspectiveApplicableCostResolution:
-    """Schema-v2 assertion/transport aggregate; public construction is disabled."""
+    """Schema-v3 assertion/transport aggregate; public construction is disabled."""
 
     intent_sha256: str
     opportunity_id: str
@@ -327,11 +370,11 @@ class ProspectiveApplicableCostResolution:
             or self.completeness is not ProspectiveApplicableCostCompleteness.INCOMPLETE
         ):
             raise ProspectiveApplicableCostError(
-                "schema v2 cannot represent COMPLETE applicable-cost authority"
+                "schema v3 cannot represent COMPLETE applicable-cost authority"
             )
         if self.total_subtractable_amount is not None or self.currency is not None:
             raise ProspectiveApplicableCostError(
-                "schema v2 cannot represent an authoritative monetary total"
+                "schema v3 cannot represent an authoritative monetary total"
             )
 
     @property
@@ -367,6 +410,13 @@ def _build_canonical_authority():
     model_status_cls = ProspectiveModelComputeMoneyStatus
     model_reason_cls = ProspectiveModelComputeMoneyReason
     model_resolver = resolve_prospective_model_compute_money
+    slippage_evidence_cls = BetfairStandardLimitPriceBoundEvidence
+    slippage_status_cls = BetfairStandardLimitPriceBoundStatus
+    slippage_product_verifier = verify_product_betfair_standard_limit_price_bound
+    slippage_product_verifier_code = slippage_product_verifier.__code__
+    ledger_cls = RealExecutionLedger
+    issuance_store_cls = SupervisedPlanIssuanceStore
+    runtime_profile_cls = TrustedRuntimeCodeProfile
     cost_class_cls = CostClass
     component_cls = ProspectiveApplicableCostComponent
     resolution_cls = ProspectiveApplicableCostResolution
@@ -378,10 +428,12 @@ def _build_canonical_authority():
     timezone_utc = timezone.utc
     sha_pattern = re.compile(r"^[0-9a-f]{64}$")
     model_source_family = "autosport.prospective_model_compute_money"
+    slippage_source_family = "autosport.betfair_standard_limit_price_bound"
     required_classes = tuple(sorted(REQUIRED_COST_CLASSES, key=lambda value: value.value))
 
     status_axes = (
         (resolution_status_cls.UNKNOWN_UNPROVEN, ()),
+        (resolution_status_cls.KNOWN_ZERO, ()),
         (
             resolution_status_cls.EXECUTION_STATE_DEPENDENT,
             (dependency_axis_cls.EXECUTION_STATE,),
@@ -426,6 +478,13 @@ def _build_canonical_authority():
             reason_cls.EXECUTION_SLIPPAGE_DEPENDS_ON_EXECUTION,
             (dependency_axis_cls.EXECUTION_STATE,),
             None,
+        ),
+        (
+            cost_class_cls.EXECUTION_SLIPPAGE,
+            resolution_status_cls.KNOWN_ZERO,
+            reason_cls.BETFAIR_STANDARD_LIMIT_ZERO_ADVERSE_PRICE,
+            (),
+            slippage_source_family,
         ),
         (
             cost_class_cls.EXECUTION_FEES_COMMISSION_TAX,
@@ -488,13 +547,20 @@ def _build_canonical_authority():
         for candidate, axes in status_axes:
             if status is candidate:
                 return axes
-        raise error_cls("status has no sealed schema-v2 dependency semantics")
+        raise error_cls("status has no sealed schema-v3 dependency semantics")
 
-    def expected_semantics(cost_class: CostClass):
+    def expected_semantics(cost_class: CostClass, status, reason, axes):
         for row in semantics:
-            if cost_class is row[0]:
+            if (
+                cost_class is row[0]
+                and status is row[1]
+                and reason is row[2]
+                and axes == row[3]
+            ):
                 return row[1:]
-        raise error_cls("cost_class has no sealed schema-v2 prospective semantic authority")
+        raise error_cls(
+            "cost component does not match the sealed canonical schema-v3 semantic tuple"
+        )
 
     def validate_component(value: object) -> None:
         if type(value) is not component_cls:
@@ -524,7 +590,7 @@ def _build_canonical_authority():
                 "status and dependency_axes must describe the same dependency dimensions"
             )
         expected_status, expected_reason, expected_component_axes, expected_source = (
-            expected_semantics(cost_class)
+            expected_semantics(cost_class, status, reason, axes)
         )
         if (
             status is not expected_status
@@ -532,13 +598,13 @@ def _build_canonical_authority():
             or axes != expected_component_axes
         ):
             raise error_cls(
-                "cost component does not match the sealed canonical schema-v2 semantic tuple"
+                "cost component does not match the sealed canonical schema-v3 semantic tuple"
             )
         refs = (source_family, source_evidence_id, source_sha256)
         if expected_source is None:
             if any(item is not None for item in refs):
                 raise error_cls(
-                    "this cost class cannot carry source authority in schema v2"
+                    "this cost class cannot carry source authority in schema v3"
                 )
             return
         if source_family != expected_source:
@@ -549,7 +615,7 @@ def _build_canonical_authority():
             source_sha256, "source_sha256"
         ):
             raise error_cls(
-                "schema-v2 model source evidence id and source SHA-256 must match"
+                "schema-v3 model source evidence id and source SHA-256 must match"
             )
 
     def validate_resolution(value: object) -> None:
@@ -585,9 +651,9 @@ def _build_canonical_authority():
             type(completeness) is not completeness_cls
             or completeness is not completeness_cls.INCOMPLETE
         ):
-            raise error_cls("schema v2 cannot represent COMPLETE applicable-cost authority")
+            raise error_cls("schema v3 cannot represent COMPLETE applicable-cost authority")
         if amount is not None or currency is not None:
-            raise error_cls("schema v2 cannot represent an authoritative monetary total")
+            raise error_cls("schema v3 cannot represent an authoritative monetary total")
 
     def model_evidence_id(value: object, *, expected_request_id: str) -> str:
         if type(value) is not model_evidence_cls:
@@ -619,11 +685,11 @@ def _build_canonical_authority():
         if router_decided_at > decision_at:
             raise error_cls("model-compute evidence router decision is from the future")
         if type(status) is not model_status_cls or status is not model_status_cls.UNKNOWN_UNPROVEN:
-            raise error_cls("aggregate schema v2 cannot consume positive model-compute money")
+            raise error_cls("aggregate schema v3 cannot consume positive model-compute money")
         if type(reason) is not model_reason_cls:
             raise error_cls("model-compute evidence reason is non-canonical")
         if amount is not None or currency is not None or tariff is not None:
-            raise error_cls("aggregate schema v2 cannot consume positive model-compute money")
+            raise error_cls("aggregate schema v3 cannot consume positive model-compute money")
         payload = {
             "schema": "autosport.prospective_model_compute_money",
             "schema_version": 1,
@@ -786,7 +852,125 @@ def _build_canonical_authority():
         validate_resolution(resolution)
         return resolution
 
-    return resolve, validate_component, validate_resolution, (
+    def resolve_with_betfair_standard_limit(
+        *,
+        intent: OpportunityIntent,
+        plan: PortfolioPlan,
+        router_store: ModelComputeRouterStore,
+        model_request_id: str,
+        decision_at: datetime,
+        slippage_evidence: BetfairStandardLimitPriceBoundEvidence,
+        ledger: RealExecutionLedger,
+        issuance_store: SupervisedPlanIssuanceStore,
+        runtime_profile: TrustedRuntimeCodeProfile,
+        execution_plan_id: str,
+        action_id: str,
+    ) -> ProspectiveApplicableCostResolution:
+        """Re-resolve aggregate truth with one exact product-verified slippage source."""
+
+        if type(slippage_evidence) is not slippage_evidence_cls:
+            raise error_cls(
+                "slippage_evidence must be exact BetfairStandardLimitPriceBoundEvidence"
+            )
+        if type(ledger) is not ledger_cls:
+            raise error_cls("ledger must be exact RealExecutionLedger")
+        if type(issuance_store) is not issuance_store_cls:
+            raise error_cls("issuance_store must be exact SupervisedPlanIssuanceStore")
+        if type(runtime_profile) is not runtime_profile_cls:
+            raise error_cls("runtime_profile must be exact TrustedRuntimeCodeProfile")
+        text(execution_plan_id, "execution_plan_id")
+        text(action_id, "action_id")
+        if slippage_product_verifier.__code__ is not slippage_product_verifier_code:
+            raise error_cls("canonical Betfair slippage verifier authority changed")
+
+        verified = slippage_product_verifier(
+            evidence=slippage_evidence,
+            ledger=ledger,
+            issuance_store=issuance_store,
+            runtime_profile=runtime_profile,
+            execution_plan_id=execution_plan_id,
+            action_id=action_id,
+        )
+        if slippage_product_verifier.__code__ is not slippage_product_verifier_code:
+            raise error_cls("canonical Betfair slippage verifier authority changed")
+        if type(verified) is not slippage_evidence_cls or verified is not slippage_evidence:
+            raise error_cls("canonical Betfair slippage verifier returned changed evidence")
+        if (
+            object.__getattribute__(verified, "status")
+            is not slippage_status_cls.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION
+            or object.__getattribute__(verified, "zero_adverse_price_deterioration") is not True
+            or object.__getattribute__(verified, "execution_feasibility_proven") is not False
+            or object.__getattribute__(verified, "realized_price_exact") is not False
+        ):
+            raise error_cls(
+                "Betfair slippage evidence does not prove the narrow zero-adverse-price contract"
+            )
+
+        base = resolve(
+            intent=intent,
+            plan=plan,
+            router_store=router_store,
+            model_request_id=model_request_id,
+            decision_at=decision_at,
+        )
+        canonical_intent_sha = object.__getattribute__(base, "intent_sha256")
+        canonical_plan_sha = object.__getattribute__(base, "portfolio_plan_sha256")
+        canonical_opportunity_id = object.__getattribute__(base, "opportunity_id")
+        cutoff = object.__getattribute__(base, "decision_at")
+        if sha256(
+            object.__getattribute__(verified, "intent_sha256"),
+            "slippage intent_sha256",
+        ) != canonical_intent_sha:
+            raise error_cls("Betfair slippage evidence intent mismatch")
+        if text(
+            object.__getattribute__(verified, "intent_id"),
+            "slippage intent_id",
+        ) != text(object.__getattribute__(intent, "intent_id"), "intent.intent_id"):
+            raise error_cls("Betfair slippage evidence intent id mismatch")
+        if sha256(
+            object.__getattribute__(verified, "portfolio_plan_sha256"),
+            "slippage portfolio_plan_sha256",
+        ) != canonical_plan_sha:
+            raise error_cls("Betfair slippage evidence portfolio plan mismatch")
+        if instant(
+            object.__getattribute__(verified, "decision_at"),
+            "slippage decision_at",
+        ) != cutoff:
+            raise error_cls("Betfair slippage evidence decision cutoff mismatch")
+        text(canonical_opportunity_id, "opportunity_id")
+
+        source_evidence_id = sha256(
+            object.__getattribute__(verified, "evidence_id"),
+            "slippage evidence_id",
+        )
+        replacement = issue_component(
+            cost_class_cls.EXECUTION_SLIPPAGE,
+            reason_cls.BETFAIR_STANDARD_LIMIT_ZERO_ADVERSE_PRICE,
+            status=resolution_status_cls.KNOWN_ZERO,
+            source_family=slippage_source_family,
+            source_evidence_id=source_evidence_id,
+            source_sha256=source_evidence_id,
+        )
+        components = tuple(
+            replacement
+            if object.__getattribute__(component, "cost_class")
+            is cost_class_cls.EXECUTION_SLIPPAGE
+            else component
+            for component in object.__getattribute__(base, "components")
+        )
+        resolution = object.__new__(resolution_cls)
+        object.__setattr__(resolution, "intent_sha256", canonical_intent_sha)
+        object.__setattr__(resolution, "opportunity_id", canonical_opportunity_id)
+        object.__setattr__(resolution, "portfolio_plan_sha256", canonical_plan_sha)
+        object.__setattr__(resolution, "decision_at", cutoff)
+        object.__setattr__(resolution, "components", components)
+        object.__setattr__(resolution, "completeness", completeness_cls.INCOMPLETE)
+        object.__setattr__(resolution, "total_subtractable_amount", None)
+        object.__setattr__(resolution, "currency", None)
+        validate_resolution(resolution)
+        return resolution
+
+    return resolve, resolve_with_betfair_standard_limit, validate_component, validate_resolution, (
         error_cls,
         component_cls,
         resolution_cls,
@@ -798,6 +982,7 @@ def _build_canonical_authority():
 
 (
     resolve_prospective_applicable_costs,
+    resolve_prospective_applicable_costs_with_betfair_standard_limit,
     _SEALED_COMPONENT_VALIDATOR,
     _SEALED_RESOLUTION_VALIDATOR,
     _SEALED_CANONICAL_TYPES,

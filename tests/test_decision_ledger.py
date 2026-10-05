@@ -125,6 +125,29 @@ class DecisionLedgerTests(unittest.TestCase):
             ledger.append(self._record(decision_id="published-after-retry"))
             self.assertEqual(ledger.verify_integrity(), 1)
 
+    def test_verified_snapshot_if_exists_is_empty_before_first_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+
+            snapshot = ledger.verified_snapshot_if_exists()
+
+            self.assertEqual(snapshot.payload, b"")
+            self.assertEqual(snapshot.record_count, 0)
+            self.assertFalse(path.exists())
+
+    def test_verified_snapshot_if_exists_rejects_externally_appeared_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            ledger = JsonlDecisionLedger(path)
+            path.write_text("", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "appeared outside this persistence authority",
+            ):
+                ledger.verified_snapshot_if_exists()
+
     def test_append_only_record_is_hashed_and_has_no_outcome_field(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"

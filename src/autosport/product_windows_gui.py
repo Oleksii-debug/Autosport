@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
@@ -26,6 +27,42 @@ PRODUCT_RUNTIME_AUTOMATION_IDS = {
     "source_save": 210,
 }
 _PRODUCT_POLL_SECONDS = 30.0
+_PRODUCT_WORKSPACE_ENV = "AUTOSPORT_PRODUCT_WORKSPACE"
+_GUI_WORKSPACE_ENV = "AUTOSPORT_WORKSPACE"
+
+
+def _normalized_workspace_identity(value: object) -> str:
+    if type(value) not in {str, type(Path("."))}:
+        raise ValueError("workspace identity must be exact str or exact Path")
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError("workspace identity must be absolute")
+    try:
+        resolved = candidate.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError("workspace identity cannot be resolved") from exc
+    return os.path.normcase(str(resolved))
+
+
+def _bind_product_workspace_environment(workspace: Path) -> None:
+    expected = _normalized_workspace_identity(workspace)
+
+    gui_override = os.environ.get(_GUI_WORKSPACE_ENV)
+    if gui_override is not None and gui_override.strip():
+        if _normalized_workspace_identity(gui_override) != expected:
+            raise ValueError(
+                "AUTOSPORT_WORKSPACE no longer matches the active GUI workspace"
+            )
+
+    product_override = os.environ.get(_PRODUCT_WORKSPACE_ENV)
+    if product_override is not None and product_override.strip():
+        if _normalized_workspace_identity(product_override) != expected:
+            raise ValueError(
+                "AUTOSPORT_PRODUCT_WORKSPACE conflicts with the active GUI workspace"
+            )
+        return
+
+    os.environ[_PRODUCT_WORKSPACE_ENV] = str(workspace)
 
 
 def _product_source_display_bindings() -> tuple[tuple[str, str], ...]:
@@ -343,6 +380,17 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
         ):
             message = product_text(
                 "ui.product_runtime.status.configuration_unsaved"
+            )
+            self.product_status.set(message)
+            self.status.set(message)
+            self.bell()
+            return
+
+        try:
+            _bind_product_workspace_environment(workspace)
+        except ValueError:
+            message = product_text(
+                "ui.product_runtime.status.workspace_conflict"
             )
             self.product_status.set(message)
             self.status.set(message)

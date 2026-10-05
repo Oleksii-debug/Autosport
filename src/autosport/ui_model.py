@@ -182,9 +182,11 @@ def observation_quote_lines(result: ObservationResult) -> list[str]:
         text(
             "ui.observation.quote",
             event_id=event.event_id,
+            sport=event.sport or text("ui.observation.unspecified"),
             market_type=event.market_type.value,
             market_id=event.market_id,
             selection_id=event.selection_id,
+            exchange_side=event.exchange_side or text("ui.observation.unspecified"),
             odds=event.decimal_odds,
             source_time=event.source_ts or text("ui.observation.unknown_time"),
         )

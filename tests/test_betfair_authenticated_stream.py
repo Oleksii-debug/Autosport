@@ -965,3 +965,56 @@ def test_semantic_breach_revocation_blocks_concurrent_stale_evaluation(
     assert len(evaluation_results) == 1
     assert isinstance(evaluation_results[0], BetfairAuthenticatedStreamError)
     assert "no longer bound" in str(evaluation_results[0])
+
+
+def test_out_of_band_frame_consumption_revokes_existing_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, fake = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(pt=publish_time_ms)
+        + _mcm(pt=publish_time_ms + 1),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert decision.decision_eligible
+
+    stolen = transport.read_authenticated_frame()
+    stolen.assert_transport_issued()
+
+    assert not decision.decision_eligible
+    assert fake.closed
+    assert not transport.is_authenticated
+
+
+def test_out_of_band_frame_consumption_prevents_later_gap_ingest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, fake = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(pt=publish_time_ms)
+        + _mcm(pt=publish_time_ms + 1),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+
+    stolen = transport.read_authenticated_frame()
+    stolen.assert_transport_issued()
+
+    with pytest.raises(
+        BetfairAuthenticatedStreamError,
+        match="frame position advanced outside",
+    ):
+        runtime.read_and_ingest()
+
+    assert fake.closed
+    assert not transport.is_authenticated

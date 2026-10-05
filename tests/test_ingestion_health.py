@@ -7,7 +7,11 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from autosport.ingestion import IngestionEngine, IngestionStats
+from autosport.ingestion import (
+    CommittedIngestionHealthError,
+    IngestionEngine,
+    IngestionStats,
+)
 from autosport.ingestion_health import IngestionPolicy, SourceHealthStore
 from autosport.market_bus import MarketEventBus
 from autosport.providers import (
@@ -715,6 +719,35 @@ class IngestionHealthTests(unittest.TestCase):
             self.assertEqual(len(store.events()), 2)
             self.assertEqual(health.get("source").status, "degraded")
             store.close()
+
+    def test_committed_market_outcome_survives_health_base_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, _health = self._engine(tmp)
+            provider = StaticProvider(
+                "source",
+                [
+                    ProviderBatch(
+                        "source",
+                        (self._quote("2026-09-12T11:59:59+00:00"),),
+                        cursor="cursor-1",
+                    )
+                ],
+            )
+            health_failure = SystemExit("health-stop")
+            try:
+                with patch.object(
+                    SourceHealthStore,
+                    "record_success",
+                    side_effect=health_failure,
+                ):
+                    with self.assertRaises(CommittedIngestionHealthError) as raised:
+                        engine.poll_once(provider, max_items=10)
+
+                self.assertIs(raised.exception.__cause__, health_failure)
+                self.assertEqual(raised.exception.outcome.accepted, 1)
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
 
     def test_source_health_locked_success_adds_regression_flag_against_current_high_water(self):
         with tempfile.TemporaryDirectory() as tmp:

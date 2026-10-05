@@ -238,12 +238,14 @@ class PaperExecutionAdoptionRuntime:
             raise ValueError("effective max_quote_age must be positive")
 
     def _mint_prepared(self, prepared: PreparedPaperExecution) -> PreparedPaperExecution:
-        if not isinstance(prepared, PreparedPaperExecution):
-            raise TypeError("prepared must be PreparedPaperExecution")
+        if type(prepared) is not PreparedPaperExecution:
+            raise TypeError("prepared must be exact PreparedPaperExecution")
         self._prepared_authorities[id(prepared)] = prepared
         return prepared
 
     def _require_minted(self, prepared: PreparedPaperExecution) -> None:
+        if type(prepared) is not PreparedPaperExecution:
+            raise TypeError("prepared must be exact PreparedPaperExecution")
         if self._prepared_authorities.get(id(prepared)) is not prepared:
             raise PaperExecutionAdoptionError(
                 "prepared execution was not minted by this runtime from canonical authority"

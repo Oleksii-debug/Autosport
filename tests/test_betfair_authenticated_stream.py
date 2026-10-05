@@ -1329,3 +1329,80 @@ def test_runner_reactivation_requires_quote_from_new_active_epoch(
         policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
     )
     assert refreshed.decision_eligible
+
+
+def test_live_decision_requires_market_definition_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status() + _mcm(pt=publish_time_ms),
+    )
+    subscription = open_authenticated_market_subscription(
+        transport,
+        provider_request_id=7,
+        market_filter={"marketIds": ["1.A"]},
+        market_data_fields=("EX_LTP",),
+        ladder_levels=None,
+        heartbeat_ms=5000,
+        conflate_ms=0,
+    )
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+
+    assert decision.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    assert "EX_MARKET_DEF is required" in decision.reason
+    assert not decision.decision_eligible
+
+
+def test_duplicate_runner_definition_poison_closes_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    payload = {
+        "op": "mcm",
+        "id": 7,
+        "ct": "SUB_IMAGE",
+        "initialClk": "i1",
+        "clk": "c1",
+        "pt": publish_time_ms,
+        "conflateMs": 0,
+        "heartbeatMs": 5000,
+        "mc": [
+            {
+                "id": "1.A",
+                "img": True,
+                "con": False,
+                "marketDefinition": {
+                    "status": "OPEN",
+                    "runners": [
+                        {"id": 1, "hc": 0, "status": "ACTIVE"},
+                        {"id": 1, "hc": 0, "status": "REMOVED"},
+                    ],
+                },
+                "rc": [{"id": 1, "hc": 0, "ltp": 2.0}],
+            }
+        ],
+    }
+    frame = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
+    transport, fake = _transport(
+        monkeypatch,
+        _subscription_status() + frame,
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+
+    with pytest.raises(
+        BetfairAuthenticatedStreamError,
+        match="duplicate runner identity",
+    ):
+        runtime.read_and_ingest()
+
+    assert fake.closed
+    assert not transport.is_authenticated

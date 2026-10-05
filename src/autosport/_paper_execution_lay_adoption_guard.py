@@ -4,8 +4,8 @@ from collections.abc import Mapping
 from dataclasses import replace
 from decimal import Decimal
 
-from . import paper_execution_adoption as _adoption
 from . import paper as _paper
+from . import paper_execution_adoption as _adoption
 from . import paper_execution_reality as _reality
 from .domain import TicketLeg
 from .paper_execution_adoption import (

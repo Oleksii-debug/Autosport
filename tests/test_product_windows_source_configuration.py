@@ -73,6 +73,7 @@ def _start_surface(tmp_path: Path) -> SimpleNamespace:
     surface._append_log = lambda _message: None
     surface.after = lambda *_args: None
     surface._product_last_stop = None
+    surface._product_expected_provider_source_id = "parlayapi:table_tennis"
     surface._active_workspace = surface.workspace
     surface._recovery_view = None
     return surface
@@ -202,6 +203,10 @@ def test_start_passes_closed_registry_identity_to_product_worker(
     )
     assert call["initial_bankroll"] == "10000"
     assert surface._active_workspace == surface.workspace
+    assert (
+        surface._product_expected_provider_source_id
+        == configured.entry.expected_provider_source_id
+    )
 
 
 def _started_message(source_id: str) -> ProductGuiMessage:
@@ -259,6 +264,28 @@ def test_unexpected_started_source_stops_and_quarantines_without_identity_leak(
     assert blocked == [surface.workspace]
     assert "unexpected:provider" not in surface.product_status.value
     assert logs == [surface.product_status.value]
+
+
+def test_known_but_wrong_started_source_is_rejected_against_configured_identity(
+    tmp_path: Path,
+) -> None:
+    surface = _start_surface(tmp_path)
+    surface._product_provider_id_to_display["other:known"] = "Інше відоме джерело"
+    stop_reasons: list[str] = []
+    blocked: list[Path] = []
+    surface.product_worker.request_stop = lambda reason: (
+        stop_reasons.append(reason) or True
+    )
+    surface._block_workspace_for_recovery = blocked.append
+
+    ProductWindowsAutosportApp._apply_product_message(
+        surface,
+        _started_message("other:known"),
+    )
+
+    assert stop_reasons == ["source_identity_mismatch"]
+    assert blocked == [surface.workspace]
+    assert "other:known" not in surface.product_status.value
 
 
 def test_source_configuration_change_is_blocked_while_runtime_busy(

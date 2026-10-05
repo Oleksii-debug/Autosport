@@ -219,6 +219,8 @@ def _build_product_verifier():
     ledger_saga_code = ledger_saga.__code__
     ledger_approval_active = ledger_cls.supervised_approval_is_active
     ledger_approval_active_code = ledger_approval_active.__code__
+    ledger_events = ledger_cls._events
+    ledger_events_code = ledger_events.__code__
 
     def require_canonical_resolver_authority() -> None:
         if (
@@ -269,6 +271,8 @@ def _build_product_verifier():
             or ledger_saga.__code__ is not ledger_saga_code
             or ledger_cls.supervised_approval_is_active is not ledger_approval_active
             or ledger_approval_active.__code__ is not ledger_approval_active_code
+            or ledger_cls._events is not ledger_events
+            or ledger_events.__code__ is not ledger_events_code
         ):
             raise error_cls(
                 "canonical Betfair verifier dependency authority changed"
@@ -300,6 +304,11 @@ def _build_product_verifier():
             raise error_cls(
                 "ledger must be the exact canonical RealExecutionLedger type"
             )
+        if hasattr(ledger, "__dict__") and any(
+            name in vars(ledger)
+            for name in ("saga", "supervised_approval_is_active", "_events")
+        ):
+            raise error_cls("ledger authority method shadow is not allowed")
         if type(bound) is not bound_cls:
             raise error_cls(
                 "issued bound must be the exact canonical BoundSupervisedExecutionPlan type"

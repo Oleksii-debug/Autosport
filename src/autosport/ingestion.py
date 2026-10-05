@@ -454,7 +454,10 @@ class IngestionEngine:
             if self.health_store is not None:
                 try:
                     outcome._record_health_once(self.health_store)
-                except Exception as health_error:
+                except BaseException as health_error:
+                    # Market persistence already committed. Preserve that typed
+                    # disposition even if health publication is interrupted by a
+                    # BaseException so live retry logic cannot replay durable events.
                     raise CommittedIngestionHealthError(
                         outcome,
                         delivery_error=delivery_error,
@@ -478,7 +481,9 @@ class IngestionEngine:
         if self.health_store is not None:
             try:
                 state = outcome._record_health_once(self.health_store)
-            except Exception as health_error:
+            except BaseException as health_error:
+                # The market transaction is already durable at this point. Always
+                # surface the committed-outcome wrapper, including interrupts.
                 raise CommittedIngestionHealthError(outcome) from health_error
             health_status = state.status
             final_quality_flags = state.quality_flags

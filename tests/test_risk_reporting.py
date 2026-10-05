@@ -25,7 +25,10 @@ from autosport.risk_reporting import (
     build_product_issued_paper_equity_path,
     resolve_durable_product_issued_paper_drawdown_evidence,
     resolve_durable_product_issued_paper_equity_path,
+    resolve_durable_verified_settled_minimum_equity,
     verified_settled_minimum_equity,
+    verify_durable_product_issued_paper_drawdown_evidence,
+    verify_durable_product_issued_paper_equity_path,
     verify_product_issued_paper_drawdown_evidence,
     verify_product_issued_paper_equity_path,
 )
@@ -831,6 +834,155 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(first.goal_revision, second.goal_revision)
         self.assertNotEqual(first.goal_contract_sha256, second.goal_contract_sha256)
         self.assertNotEqual(first.path_sha256, second.path_sha256)
+
+    def test_durable_verifier_rejects_copied_forged_equity_evidence(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(70),),
+            Decimal("20"),
+            placed_at="2026-09-21T14:20:00+00:00",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T14:25:00+00:00",
+        )
+        goal = self._goal()
+        evidence = build_product_issued_paper_equity_path(book, goal)
+        forged = replace(evidence, minimum_equity=Decimal("100"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper-book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "equity-path evidence does not match durable product state",
+            ):
+                verify_durable_product_issued_paper_equity_path(
+                    paper_book_path=str(paper_path),
+                    workspace=str(workspace),
+                    evidence=forged,
+                )
+
+    def test_durable_verifier_rejects_copied_forged_drawdown_evidence(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(71),),
+            Decimal("20"),
+            placed_at="2026-09-21T14:30:00+00:00",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T14:35:00+00:00",
+        )
+        goal = self._goal()
+        evidence = build_product_issued_paper_drawdown_evidence(book, goal)
+        forged = replace(evidence, max_drawdown_amount=Decimal("0"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper-book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "drawdown evidence does not match durable product state",
+            ):
+                verify_durable_product_issued_paper_drawdown_evidence(
+                    paper_book_path=str(paper_path),
+                    workspace=str(workspace),
+                    evidence=forged,
+                )
+
+    def test_durable_minimum_equity_returns_path_identity_for_downstream_binding(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(72),),
+            Decimal("40"),
+            placed_at="2026-09-21T14:40:00+00:00",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T14:45:00+00:00",
+        )
+        goal = self._goal()
+        expected = build_product_issued_paper_equity_path(book, goal)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper-book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            minimum, point_id, path_sha256 = (
+                resolve_durable_verified_settled_minimum_equity(
+                    paper_book_path=str(paper_path),
+                    workspace=str(workspace),
+                )
+            )
+
+        self.assertEqual(minimum, Decimal("60"))
+        self.assertEqual(point_id, expected.minimum_equity_point_id)
+        self.assertEqual(path_sha256, expected.path_sha256)
+
+    def test_durable_minimum_equity_rejects_open_exposure(self) -> None:
+        book = PaperBook("100")
+        book.open_ticket(
+            (self._leg(73),),
+            Decimal("10"),
+            placed_at="2026-09-21T14:50:00+00:00",
+        )
+        goal = self._goal()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper-book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "all economically material PAPER tickets settled",
+            ):
+                resolve_durable_verified_settled_minimum_equity(
+                    paper_book_path=str(paper_path),
+                    workspace=str(workspace),
+                )
+
+    def test_evidence_subclasses_cannot_cross_verification_boundary(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+        path = build_product_issued_paper_equity_path(book, goal)
+        drawdown = build_product_issued_paper_drawdown_evidence(book, goal)
+
+        PathSubclass = type("PathSubclass", (type(path),), {})
+        DrawdownSubclass = type("DrawdownSubclass", (type(drawdown),), {})
+        path_subclass = PathSubclass(**{
+            field: getattr(path, field)
+            for field in path.__dataclass_fields__
+        })
+        drawdown_subclass = DrawdownSubclass(**{
+            field: getattr(drawdown, field)
+            for field in drawdown.__dataclass_fields__
+        })
+
+        with self.assertRaisesRegex(TypeError, "exact ProductIssuedPaperEquityPath"):
+            verify_product_issued_paper_equity_path(book, goal, path_subclass)
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact ProductIssuedPaperDrawdownEvidence",
+        ):
+            verify_product_issued_paper_drawdown_evidence(
+                book,
+                goal,
+                drawdown_subclass,
+            )
 
     def test_restart_preserves_exact_report_identity_and_values(self) -> None:
         book = PaperBook("100")

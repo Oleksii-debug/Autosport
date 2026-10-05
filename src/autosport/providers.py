@@ -189,8 +189,11 @@ class ProviderBatch:
         for quote in self.quotes:
             if type(quote) is not ProviderQuote:
                 raise TypeError("provider batch quote must be ProviderQuote")
-        if self.cursor is not None and type(self.cursor) is not str:
-            raise TypeError("provider batch cursor must be an exact str or None")
+        if self.cursor is not None:
+            if type(self.cursor) is not str:
+                raise TypeError("provider batch cursor must be an exact str or None")
+            if any(ord(ch) < 32 or ord(ch) == 127 for ch in self.cursor):
+                raise ValueError("provider batch cursor must not contain control characters")
         if type(self.quality_flags) is not tuple:
             raise TypeError("provider batch quality_flags must be a tuple of strings")
         for flag in self.quality_flags:

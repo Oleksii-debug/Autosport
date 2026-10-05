@@ -16,34 +16,21 @@ _ORIGINAL_VALIDATE_LIFECYCLE_REACHABILITY = (
     _paper.PaperBook._validate_lifecycle_reachability.__func__
 )
 _ORIGINAL_VALIDATE_LOADED_STATE = _paper.PaperBook._validate_loaded_state.__func__
-_ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY = _paper._require_ticket_opening_authority
-_ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY = _paper._require_paperbook_causal_history_authority
-_ORIGINAL_RECORD_TICKET_OPENING_AUTHORITY = _paper._record_ticket_opening_authority
-_ORIGINAL_ADVANCE_CAUSAL_HISTORY_OPEN = _paper._advance_paperbook_causal_history_open
-_ORIGINAL_PAPER_DECIMAL_CONTEXT = _paper._paper_decimal_context
-_ORIGINAL_UTC_NOW_ISO = _paper.utc_now_iso
-_ORIGINAL_UUID4 = _paper.uuid.uuid4
-_ORIGINAL_REQUIRE_OPERATION_LOCK = getattr(_paper, "_require_paperbook_operation_lock", None)
-_ORIGINAL_REQUIRE_FINITE = _paper.PaperBook._require_finite
-_ORIGINAL_DEBIT_BALANCE = _paper.PaperBook._debit_balance.__func__
-_ORIGINAL_VALIDATE_PLACED_AT = _paper.PaperBook._validate_placed_at.__func__
-_ORIGINAL_REQUIRE_UTF8_STRING = _paper.PaperBook._require_utf8_string
-_ORIGINAL_VALIDATE_TICKET_PROVENANCE = _paper.PaperBook._validate_ticket_provenance.__func__
-_ORIGINAL_CANONICAL_DECIMAL_INPUT = getattr(_paper.PaperBook, "_canonical_decimal_input", None)
 
 
 def _paperbook_operation_context(book: _paper.PaperBook):
     """Reuse canonical PaperBook serialization when that authority is installed."""
-    if _ORIGINAL_REQUIRE_OPERATION_LOCK is None:
+    require_lock = getattr(_paper, "_require_paperbook_operation_lock", None)
+    if require_lock is None:
         return nullcontext()
-    if not callable(_ORIGINAL_REQUIRE_OPERATION_LOCK):
+    if not callable(require_lock):
         raise RuntimeError("PaperBook operation lock authority is invalid")
-    return _ORIGINAL_REQUIRE_OPERATION_LOCK(book)
+    return require_lock(book)
 
 
 def _canonical_open_legs(legs):
     """Preserve the canonical exact-container ingress once PaperBook provides it."""
-    if _ORIGINAL_CANONICAL_DECIMAL_INPUT is not None and type(legs) not in {
+    if hasattr(_paper.PaperBook, "_canonical_decimal_input") and type(legs) not in {
         list,
         tuple,
     }:
@@ -52,28 +39,12 @@ def _canonical_open_legs(legs):
 
 
 def _canonical_open_stake(book: _paper.PaperBook, stake) -> Decimal:
-    if _ORIGINAL_CANONICAL_DECIMAL_INPUT is not None:
-        return _ORIGINAL_CANONICAL_DECIMAL_INPUT(stake, "stake")
+    parser = getattr(_paper.PaperBook, "_canonical_decimal_input", None)
+    if parser is not None:
+        return parser(stake, "stake")
     amount = Decimal(str(stake))
-    _ORIGINAL_REQUIRE_FINITE(amount, "stake")
+    type(book)._require_finite(amount, "stake")
     return amount
-
-
-def _canonical_lay_debit_balance(balance: Decimal, amount: Decimal) -> Decimal:
-    _ORIGINAL_REQUIRE_FINITE(balance, "balance")
-    _ORIGINAL_REQUIRE_FINITE(amount, "stake")
-    if amount <= 0:
-        raise ValueError("stake must be positive")
-    if amount > balance:
-        raise ValueError("insufficient virtual bankroll")
-    try:
-        with localcontext(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
-            new_balance = balance - amount
-            if context.flags[Inexact]:
-                raise ValueError("PaperBook stake debit loses Decimal precision")
-    except DecimalException as exc:
-        raise ValueError("PaperBook stake debit arithmetic is not representable") from exc
-    return new_balance
 
 
 def _is_lay_leg(leg: object) -> bool:
@@ -180,8 +151,8 @@ def _open_ticket_unlocked(
         )
 
     _validate_loaded_state(_paper.PaperBook, self)
-    _ORIGINAL_REQUIRE_TICKET_OPENING_AUTHORITY(self)
-    _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY(self)
+    _paper._require_ticket_opening_authority(self)
+    _paper._require_paperbook_causal_history_authority(self)
 
     leg = ticket_legs[0]
     _validate_ticket_leg(_paper.PaperBook, leg)
@@ -193,20 +164,18 @@ def _open_ticket_unlocked(
         odds=leg.locked_odds,
         exchange_side="LAY",
     )
-    new_balance = _canonical_lay_debit_balance(self.balance, locked_capital)
+    new_balance = type(self)._debit_balance(self.balance, locked_capital)
 
-    ticket_placed_at = _ORIGINAL_VALIDATE_PLACED_AT(
-        _paper.PaperBook,
-        placed_at if placed_at is not None else _ORIGINAL_UTC_NOW_ISO(),
+    ticket_placed_at = type(self)._validate_placed_at(
+        placed_at if placed_at is not None else _paper.utc_now_iso()
     )
-    _ORIGINAL_REQUIRE_UTF8_STRING(reason, "strategy_reason")
+    type(self)._require_utf8_string(reason, "strategy_reason")
     (
         provider_source_ids,
         provider_accounts,
         bankroll_id,
         currency,
-    ) = _ORIGINAL_VALIDATE_TICKET_PROVENANCE(
-        _paper.PaperBook,
+    ) = type(self)._validate_ticket_provenance(
         provider_source_ids,
         provider_accounts,
         bankroll_id,
@@ -214,7 +183,7 @@ def _open_ticket_unlocked(
     )
 
     ticket = PaperTicket(
-        ticket_id=str(_ORIGINAL_UUID4()),
+        ticket_id=str(_paper.uuid.uuid4()),
         stake=amount,
         legs=ticket_legs,
         placed_at=ticket_placed_at,
@@ -224,11 +193,11 @@ def _open_ticket_unlocked(
         bankroll_id=bankroll_id,
         currency=currency,
     )
-    _ORIGINAL_RECORD_TICKET_OPENING_AUTHORITY(self, ticket)
+    _paper._record_ticket_opening_authority(self, ticket)
     self.balance = new_balance
     self.tickets[ticket.ticket_id] = ticket
     self._lifecycle.append(("open", ticket.ticket_id, (), ()))
-    _ORIGINAL_ADVANCE_CAUSAL_HISTORY_OPEN(self, ticket.ticket_id)
+    _paper._advance_paperbook_causal_history_open(self, ticket.ticket_id)
     return ticket
 
 
@@ -296,7 +265,7 @@ def _settlement_result(
     else:
         status = TicketStatus.WON
         try:
-            with localcontext(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
+            with localcontext(_paper._paper_decimal_context()) as context:
                 payout = locked_capital + ticket.stake
                 if context.flags[Inexact]:
                     raise ValueError("PaperBook LAY payout loses Decimal precision")
@@ -307,7 +276,7 @@ def _settlement_result(
 
     cls._require_finite(payout, f"settlement payout for ticket {ticket.ticket_id}")
     try:
-        with localcontext(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
+        with localcontext(_paper._paper_decimal_context()) as context:
             new_balance = balance + payout
             if context.flags[Inexact]:
                 raise ValueError("PaperBook LAY balance credit loses Decimal precision")
@@ -508,7 +477,7 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
             expected_payout = locked_capital
         elif ticket.status is TicketStatus.WON:
             try:
-                with localcontext(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
+                with localcontext(_paper._paper_decimal_context()) as context:
                     expected_payout = locked_capital + ticket.stake
                     if context.flags[Inexact]:
                         raise ValueError(
@@ -531,9 +500,9 @@ def _validate_loaded_state(cls, book: _paper.PaperBook) -> None:
 def _committed_capital_unlocked(self: _paper.PaperBook) -> Decimal:
     _validate_loaded_state(_paper.PaperBook, self)
     _paper._require_ticket_opening_authority(self)
-    _ORIGINAL_REQUIRE_CAUSAL_HISTORY_AUTHORITY(self)
+    _paper._require_paperbook_causal_history_authority(self)
     try:
-        with localcontext(_ORIGINAL_PAPER_DECIMAL_CONTEXT()) as context:
+        with localcontext(_paper._paper_decimal_context()) as context:
             total = Decimal("0")
             for ticket in self.tickets.values():
                 if ticket.status is TicketStatus.OPEN:
@@ -544,7 +513,7 @@ def _committed_capital_unlocked(self: _paper.PaperBook) -> Decimal:
         raise ValueError(
             "PaperBook committed capital arithmetic is not representable"
         ) from exc
-    _ORIGINAL_REQUIRE_FINITE(total, "committed_capital")
+    _paper.PaperBook._require_finite(total, "committed_capital")
     return total
 
 

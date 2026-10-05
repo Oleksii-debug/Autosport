@@ -23,6 +23,8 @@ from . import real_execution_ledger as _ledger_module
 from . import supervised_plan_issuance as _issuance_module
 from . import monotonic_workspace_authority as _monotonic_module
 from . import json_integrity as _json_integrity_module
+from . import integrity as _integrity_module
+from . import workspace_lock as _workspace_lock_module
 from .betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundError,
     BetfairStandardLimitPriceBoundEvidence,
@@ -290,6 +292,27 @@ def _build_product_verifier():
     issuance_workspace_lock_acquire_code = issuance_workspace_lock_acquire.__code__
     issuance_workspace_lock_release = issuance_workspace_lock_cls.release
     issuance_workspace_lock_release_code = issuance_workspace_lock_release.__code__
+    integrity_durable_lock = _integrity_module.durable_path_lock
+    integrity_durable_lock_body = integrity_durable_lock.__wrapped__
+    integrity_resolved_key = _integrity_module._resolved_key
+    integrity_resolved_key_code = integrity_resolved_key.__code__
+    integrity_thread_lock_for = _integrity_module._thread_lock_for
+    integrity_thread_lock_for_code = integrity_thread_lock_for.__code__
+    integrity_lock_handle = _integrity_module._lock_handle
+    integrity_lock_handle_code = integrity_lock_handle.__code__
+    integrity_unlock_handle = _integrity_module._unlock_handle
+    integrity_unlock_handle_code = integrity_unlock_handle.__code__
+    workspace_lock_cls = _workspace_lock_module.WorkspaceEconomicLock
+    workspace_lock_open = workspace_lock_cls._open_lock_handle
+    workspace_lock_open_code = workspace_lock_open.__code__
+    workspace_lock_validate_existing = workspace_lock_cls._validate_existing_lock_path
+    workspace_lock_validate_existing_code = workspace_lock_validate_existing.__code__
+    workspace_lock_validate_handle = workspace_lock_cls._validate_open_handle_identity
+    workspace_lock_validate_handle_code = workspace_lock_validate_handle.__code__
+    workspace_lock_lock_handle = workspace_lock_cls._lock_handle
+    workspace_lock_lock_handle_code = workspace_lock_lock_handle.__code__
+    workspace_lock_unlock_handle = workspace_lock_cls._unlock_handle
+    workspace_lock_unlock_handle_code = workspace_lock_unlock_handle.__code__
     monotonic_cls = _issuance_module.MonotonicWorkspaceAuthority
     monotonic_init = monotonic_cls.__init__
     monotonic_init_code = monotonic_init.__code__
@@ -503,6 +526,28 @@ def _build_product_verifier():
             or issuance_workspace_lock_acquire.__code__ is not issuance_workspace_lock_acquire_code
             or issuance_workspace_lock_cls.release is not issuance_workspace_lock_release
             or issuance_workspace_lock_release.__code__ is not issuance_workspace_lock_release_code
+            or _integrity_module.durable_path_lock is not integrity_durable_lock
+            or integrity_durable_lock.__wrapped__ is not integrity_durable_lock_body
+            or _integrity_module._resolved_key is not integrity_resolved_key
+            or integrity_resolved_key.__code__ is not integrity_resolved_key_code
+            or _integrity_module._thread_lock_for is not integrity_thread_lock_for
+            or integrity_thread_lock_for.__code__ is not integrity_thread_lock_for_code
+            or _integrity_module._lock_handle is not integrity_lock_handle
+            or integrity_lock_handle.__code__ is not integrity_lock_handle_code
+            or _integrity_module._unlock_handle is not integrity_unlock_handle
+            or integrity_unlock_handle.__code__ is not integrity_unlock_handle_code
+            or _workspace_lock_module.WorkspaceEconomicLock is not workspace_lock_cls
+            or workspace_lock_cls is not issuance_workspace_lock_cls
+            or workspace_lock_cls._open_lock_handle is not workspace_lock_open
+            or workspace_lock_open.__code__ is not workspace_lock_open_code
+            or workspace_lock_cls._validate_existing_lock_path is not workspace_lock_validate_existing
+            or workspace_lock_validate_existing.__code__ is not workspace_lock_validate_existing_code
+            or workspace_lock_cls._validate_open_handle_identity is not workspace_lock_validate_handle
+            or workspace_lock_validate_handle.__code__ is not workspace_lock_validate_handle_code
+            or workspace_lock_cls._lock_handle is not workspace_lock_lock_handle
+            or workspace_lock_lock_handle.__code__ is not workspace_lock_lock_handle_code
+            or workspace_lock_cls._unlock_handle is not workspace_lock_unlock_handle
+            or workspace_lock_unlock_handle.__code__ is not workspace_lock_unlock_handle_code
             or _issuance_module.MonotonicWorkspaceAuthority is not monotonic_cls
             or monotonic_cls.__init__ is not monotonic_init
             or monotonic_init.__code__ is not monotonic_init_code

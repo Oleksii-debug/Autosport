@@ -165,11 +165,28 @@ def _observed_instant(value: str) -> datetime:
     return _timezone_aware_instant(value, "observed_ts")
 
 
-def _validate_local_receipt_order(event: MarketEvent) -> tuple[datetime, datetime]:
-    """Return local observation/ingest instants iff their causal order is valid."""
+def _validate_local_receipt_order(
+    event: MarketEvent,
+    *,
+    require_supported_precision: bool = True,
+) -> tuple[datetime, datetime] | None:
+    """Validate local receipt order without laundering unsupported clock precision."""
 
-    observed = _observed_instant(event.observed_ts)
-    ingest = _timezone_aware_instant(event.ingest_ts, "ingest_ts")
+    if type(require_supported_precision) is not bool:
+        raise TypeError("require_supported_precision must be a bool")
+    try:
+        observed = _observed_instant(event.observed_ts)
+        ingest = _timezone_aware_instant(event.ingest_ts, "ingest_ts")
+    except ValueError as exc:
+        if (
+            not require_supported_precision
+            and "precision finer than microseconds is unsupported" in str(exc)
+        ):
+            # Live/raw mirror state may retain exact unsupported clock text for audit,
+            # but decision views independently fail closed on that precision. Do not
+            # round it merely to decide chronology here.
+            return None
+        raise
     if ingest < observed:
         raise ValueError("ingest_ts must not precede observed_ts")
     return observed, ingest

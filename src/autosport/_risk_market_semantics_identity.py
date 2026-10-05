@@ -54,9 +54,7 @@ def _leg_settlement_key(
     _leg_validator=_CANONICAL_PROPOSED_LEG_VALIDATOR,
     _semantic_identity=_CANONICAL_SEMANTIC_IDENTITY,
     _settlement_key=_CANONICAL_MARKET_SETTLEMENT_KEY,
-    _to_dict=_CANONICAL_QUOTE_TO_DICT,
-    _from_dict=_CANONICAL_QUOTE_FROM_DICT,
-    _quote_key=_CANONICAL_QUOTE_QUOTE_KEY,
+    _quote_key=_CANONICAL_LEG_QUOTE_KEY,
 ) -> str:
     if type(leg) is not _leg_type:
         raise ValueError("proposal leg must be an exact TicketLeg")
@@ -72,13 +70,15 @@ def _quote_settlement_key(
     _quote_type=_QUOTE_TYPE,
     _semantic_identity=_CANONICAL_SEMANTIC_IDENTITY,
     _settlement_key=_CANONICAL_MARKET_SETTLEMENT_KEY,
-    _quote_key=_CANONICAL_LEG_QUOTE_KEY,
+    _to_dict=_CANONICAL_QUOTE_TO_DICT,
+    _from_dict=_CANONICAL_QUOTE_FROM_DICT,
+    _quote_key=_CANONICAL_QUOTE_QUOTE_KEY,
 ) -> str:
     if type(quote) is not _quote_type:
         raise ValueError("proposal quote must be an exact MarketEvent")
-    # Re-run the canonical serializer/parser contract so object.__setattr__ changes
+    # Re-run the captured serializer/parser contract so object.__setattr__ changes
     # after context construction cannot smuggle noncanonical quote fields into a
-    # money-moving decision.
+    # money-moving decision or retarget through mutable class dispatch.
     serialized = _to_dict(quote)
     rebuilt = _from_dict(serialized)
     if _to_dict(rebuilt) != serialized:
@@ -270,7 +270,6 @@ def _risk_of_ruin_candidate_sha256(
         return _digest(_payload_builder(context))
     except (ArithmeticError, AttributeError, TypeError, ValueError):
         return None
-
 
 
 def _risk_of_ruin_candidate_vector_sha256(

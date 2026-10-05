@@ -159,6 +159,29 @@ class MarketMirrorTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_market_mirror_rejects_market_event_subclasses(self) -> None:
+        class Event(MarketEvent):
+            pass
+
+        canonical = self.event()
+        hostile = Event.from_dict(canonical.to_dict())
+        self.assertIs(type(hostile), Event)
+
+        mirror = MarketMirror()
+        with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+            mirror.apply(hostile)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+                    mirror.persist_and_apply(store, hostile)
+            finally:
+                store.close()
+
+        with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+            MarketMirror._from_proven_history(((hostile, 1),))
+
     def test_new_and_forward_updates_are_applied(self) -> None:
         mirror = MarketMirror()
 

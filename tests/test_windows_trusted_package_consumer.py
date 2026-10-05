@@ -128,6 +128,14 @@ def test_windows_build_materializes_exact_package_consumer_after_final_source_ga
         "& $gitExecutable archive --format=zip \"--output=$trustedPackageArchive\" $sourceSha -- "
         "scripts/package_windows.py src/autosport/workspace_lock.py src/autosport/release_package.py src/autosport/data_tool_package.py"
     )
+    trusted_paths_block = (
+        "$trustedPackagePathsJson = ConvertTo-Json -Compress -InputObject @(\n"
+        "  'scripts/package_windows.py',\n"
+        "  'src/autosport/workspace_lock.py',\n"
+        "  'src/autosport/release_package.py',\n"
+        "  'src/autosport/data_tool_package.py'\n"
+        ")"
+    )
     package_command = "python scripts/package_windows.py `"
     isolated_runner = (
         "& $script:pythonExecutable -I -S -c $script:trustedPackageLauncher "
@@ -140,6 +148,7 @@ def test_windows_build_materializes_exact_package_consumer_after_final_source_ga
     launcher = _trusted_package_launcher_source()
 
     assert final_gate_index < archive_index < package_index
+    assert trusted_paths_block in script
     assert isolated_runner in script
     assert "$trustedPackageLauncher = @'" in script
     assert "sys.path.insert" not in launcher

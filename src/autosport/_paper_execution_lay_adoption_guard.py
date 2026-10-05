@@ -35,7 +35,7 @@ _ORIGINAL_REQUIRE_MINTED = PaperExecutionAdoptionRuntime._require_minted
 _ORIGINAL_EXPECTED_RUN_ID = PaperExecutionAdoptionRuntime.expected_run_id
 _ORIGINAL_EXECUTE_UNLOCKED = PaperExecutionAdoptionRuntime._execute_unlocked
 _PREPARED_WITNESSES: dict[int, tuple[PreparedPaperExecution, str]] = {}
-_ACTION_WITNESSES: dict[int, tuple[ExecutionAction, str]] = {}
+_ACTION_WITNESSES: dict[int, tuple[ExecutionAction, str, str]] = {}
 _BINDING_WITNESSES: dict[int, tuple[PaperExposureBinding, tuple[str, str | None, str | None, str | None]]] = {}
 _RUNTIME_WITNESSES: dict[int, tuple[object, ...]] = {}
 
@@ -279,12 +279,14 @@ def _binding_authority_witness(
 def _require_materialization_authority(
     action: ExecutionAction,
     binding: PaperExposureBinding,
-) -> None:
+) -> str:
     action_witness = _ACTION_WITNESSES.get(id(action))
     if (
         action_witness is None
+        or len(action_witness) != 3
         or action_witness[0] is not action
         or action_witness[1] != _action_authority_witness(action)
+        or type(action_witness[2]) is not str
     ):
         raise PaperExecutionAdoptionError(
             "prepared action authority changed after mint"
@@ -302,6 +304,7 @@ def _require_materialization_authority(
         raise PaperExecutionAdoptionError(
             "prepared exposure binding no longer matches execution action"
         )
+    return action_witness[2]
 
 
 def _mint_prepared(
@@ -312,8 +315,16 @@ def _mint_prepared(
     witness = _prepared_authority_witness(prepared)
     minted = _ORIGINAL_MINT_PREPARED(self, prepared)
     _PREPARED_WITNESSES[id(minted)] = (minted, witness)
+    decision_id = _exact_text(
+        minted.execution_plan.decision_id,
+        "prepared decision_id",
+    )
     for action in minted.execution_plan.actions:
-        _ACTION_WITNESSES[id(action)] = (action, _action_authority_witness(action))
+        _ACTION_WITNESSES[id(action)] = (
+            action,
+            _action_authority_witness(action),
+            decision_id,
+        )
     for binding in minted.exposure_bindings:
         _BINDING_WITNESSES[id(binding)] = (
             binding,
@@ -757,7 +768,7 @@ def _ticket_matches_attempt(
     binding: PaperExposureBinding,
 ) -> bool:
     try:
-        _require_materialization_authority(action, binding)
+        authority_decision_id = _require_materialization_authority(action, binding)
         side = _require_action_side(action)
     except PaperExecutionAdoptionError:
         return False
@@ -780,6 +791,12 @@ def _ticket_matches_attempt(
         or attempt.decision_quote_id != action.quote_id
         or attempt.decision_odds != action.requested_odds
         or attempt.requested_stake != action.requested_stake
+        or ticket.strategy_reason
+        != (
+            f"paper execution adoption; decision_id={authority_decision_id}; "
+            f"run_id={attempt.run_id}; "
+            f"{PaperExecutionAdoptionRuntime._TICKET_MARKER}{attempt.attempt_id}"
+        )
     ):
         return False
     leg = ticket.legs[0]
@@ -803,7 +820,11 @@ def _materialize_attempt(
 ):
     _require_runtime_authority(self)
     side = _require_action_side(action)
-    _require_materialization_authority(action, binding)
+    authority_decision_id = _require_materialization_authority(action, binding)
+    if _exact_text(decision_id, "materialization decision_id") != authority_decision_id:
+        raise PaperExecutionAdoptionError(
+            "materialization decision_id changed after prepared authority mint"
+        )
     self._require_attempt_action_identity(attempt, action)
     # Existing PaperBook state is durable economic authority. Revalidate the
     # complete canonical snapshot before searching marker strings or comparing

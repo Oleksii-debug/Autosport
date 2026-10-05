@@ -28,6 +28,21 @@ PRODUCT_RUNTIME_AUTOMATION_IDS = {
 _PRODUCT_POLL_SECONDS = 30.0
 
 
+def _product_source_display_bindings() -> tuple[tuple[str, str], ...]:
+    bindings = tuple(
+        (
+            product_text(f"ui.product_runtime.source.option.{entry.source_id}"),
+            entry.source_id,
+        )
+        for entry in list_product_source_entries()
+    )
+    displays = tuple(display for display, _source_id in bindings)
+    source_ids = tuple(source_id for _display, source_id in bindings)
+    if len(set(displays)) != len(displays) or len(set(source_ids)) != len(source_ids):
+        raise RuntimeError("product source presentation identities are ambiguous")
+    return bindings
+
+
 class ProductWindowsAutosportApp(WindowsAutosportApp):
     """Packaged Windows shell over the canonical durable PAPER runtime."""
 
@@ -48,13 +63,8 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             value=product_text("ui.product_runtime.status.idle")
         )
         self.product_source = tk.StringVar(value="")
-        entries = list_product_source_entries()
-        self._product_source_display_to_id = {
-            product_text(
-                f"ui.product_runtime.source.option.{entry.source_id}"
-            ): entry.source_id
-            for entry in entries
-        }
+        bindings = _product_source_display_bindings()
+        self._product_source_display_to_id = dict(bindings)
         self._product_source_id_to_display = {
             source_id: display
             for display, source_id in self._product_source_display_to_id.items()

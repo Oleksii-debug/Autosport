@@ -1849,3 +1849,55 @@ def test_missing_market_betting_type_poison_closes_generation(
 
     assert fake.closed
     assert not transport.is_authenticated
+
+
+@pytest.mark.parametrize("betting_type", ["LINE", "RANGE"])
+def test_non_odds_price_models_do_not_gain_live_decision_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    betting_type: str,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    payload = {
+        "op": "mcm",
+        "id": 7,
+        "ct": "SUB_IMAGE",
+        "initialClk": "i1",
+        "clk": "c1",
+        "pt": publish_time_ms,
+        "conflateMs": 0,
+        "heartbeatMs": 5000,
+        "mc": [
+            {
+                "id": "1.A",
+                "img": True,
+                "con": False,
+                "marketDefinition": {
+                    "status": "OPEN",
+                    "bettingType": betting_type,
+                    "runners": [
+                        {"id": 1, "hc": 0, "status": "ACTIVE"},
+                    ],
+                },
+                "rc": [{"id": 1, "hc": 0, "ltp": 10.5}],
+            }
+        ],
+    }
+    frame = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
+    transport, fake = _transport(
+        monkeypatch,
+        _subscription_status() + frame,
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+
+    assert decision.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    assert "betting type is not supported" in decision.reason
+    assert not decision.decision_eligible
+    assert transport.is_authenticated
+    assert not fake.closed

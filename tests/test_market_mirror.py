@@ -799,5 +799,48 @@ class MarketMirrorTests(unittest.TestCase):
                 store.close()
 
 
+    def test_live_apply_rejects_non_boolean_sequence_type_drift(self) -> None:
+        mirror = MarketMirror()
+        malformed = MarketEvent(
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            decimal_odds=Decimal("2.00"),
+            observed_ts="2026-09-16T19:00:00+00:00",
+            source_id="provider-a",
+            sequence=True,
+            ingest_ts="2026-09-16T19:00:00+00:00",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "sequence must be a non-boolean int",
+        ):
+            mirror.apply(malformed)
+
+        self.assertEqual(mirror.snapshot(), ())
+
+    def test_live_apply_rejects_sequence_outside_sqlite_authority_range(self) -> None:
+        mirror = MarketMirror()
+        malformed = MarketEvent(
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            decimal_odds=Decimal("2.00"),
+            observed_ts="2026-09-16T19:00:00+00:00",
+            source_id="provider-a",
+            sequence=1 << 63,
+            ingest_ts="2026-09-16T19:00:00+00:00",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "fit signed 64-bit SQLite INTEGER",
+        ):
+            mirror.apply(malformed)
+
+        self.assertEqual(mirror.snapshot(), ())
+
+
 if __name__ == "__main__":
     unittest.main()

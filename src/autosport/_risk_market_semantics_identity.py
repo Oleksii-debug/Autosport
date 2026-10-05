@@ -35,6 +35,8 @@ _CANONICAL_QUOTE_TO_DICT = _risk._CANONICAL_MARKET_EVENT_TO_DICT
 _CANONICAL_QUOTE_FROM_DICT = _risk._CANONICAL_MARKET_EVENT_FROM_DICT
 _CANONICAL_BOOK_VALIDATE_STATE = _BOOK_TYPE._validate_loaded_state
 _CANONICAL_BOOK_VALIDATE_LIFECYCLE_ENTRY = _BOOK_TYPE._validate_lifecycle_entry
+_CANONICAL_LEG_QUOTE_KEY = _risk._CANONICAL_TICKET_LEG_QUOTE_KEY
+_CANONICAL_QUOTE_QUOTE_KEY = _risk._CANONICAL_MARKET_EVENT_QUOTE_KEY
 
 _policy_namespace = vars(_POLICY_TYPE)
 _original_quote_descriptor = _policy_namespace.get("_quote_risk_decision")
@@ -54,6 +56,7 @@ def _leg_settlement_key(
     _settlement_key=_CANONICAL_MARKET_SETTLEMENT_KEY,
     _to_dict=_CANONICAL_QUOTE_TO_DICT,
     _from_dict=_CANONICAL_QUOTE_FROM_DICT,
+    _quote_key=_CANONICAL_QUOTE_QUOTE_KEY,
 ) -> str:
     if type(leg) is not _leg_type:
         raise ValueError("proposal leg must be an exact TicketLeg")
@@ -61,7 +64,7 @@ def _leg_settlement_key(
     semantics = leg.market_semantics_id
     if semantics is not None:
         _semantic_identity(semantics, "leg market_semantics_id")
-    return _settlement_key(leg.quote_key, semantics)
+    return _settlement_key(_quote_key(leg), semantics)
 
 
 def _quote_settlement_key(
@@ -69,6 +72,7 @@ def _quote_settlement_key(
     _quote_type=_QUOTE_TYPE,
     _semantic_identity=_CANONICAL_SEMANTIC_IDENTITY,
     _settlement_key=_CANONICAL_MARKET_SETTLEMENT_KEY,
+    _quote_key=_CANONICAL_LEG_QUOTE_KEY,
 ) -> str:
     if type(quote) is not _quote_type:
         raise ValueError("proposal quote must be an exact MarketEvent")
@@ -82,7 +86,7 @@ def _quote_settlement_key(
     semantics = quote.market_semantics_id
     if semantics is not None:
         _semantic_identity(semantics, "quote market_semantics_id")
-    return _settlement_key(quote.quote_key, semantics)
+    return _settlement_key(_quote_key(quote), semantics)
 
 
 def _validate_context_market_semantics(

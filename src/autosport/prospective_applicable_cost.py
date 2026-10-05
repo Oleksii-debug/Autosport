@@ -723,6 +723,114 @@ def _build_canonical_authority():
         }
         return digest(payload)
 
+    def slippage_evidence_id(value: object) -> str:
+        if type(value) is not slippage_evidence_cls:
+            raise error_cls("canonical Betfair slippage evidence type changed")
+        payload = {
+            "schema": "autosport.betfair_standard_limit_price_bound",
+            "schema_version": 2,
+            "execution_plan_id": text(
+                object.__getattribute__(value, "execution_plan_id"),
+                "slippage execution_plan_id",
+            ),
+            "execution_plan_sha256": sha256(
+                object.__getattribute__(value, "execution_plan_sha256"),
+                "slippage execution_plan_sha256",
+            ),
+            "portfolio_plan_sha256": sha256(
+                object.__getattribute__(value, "portfolio_plan_sha256"),
+                "slippage portfolio_plan_sha256",
+            ),
+            "intent_id": text(
+                object.__getattribute__(value, "intent_id"),
+                "slippage intent_id",
+            ),
+            "intent_sha256": sha256(
+                object.__getattribute__(value, "intent_sha256"),
+                "slippage intent_sha256",
+            ),
+            "action_id": text(
+                object.__getattribute__(value, "action_id"),
+                "slippage action_id",
+            ),
+            "bookmaker_id": text(
+                object.__getattribute__(value, "bookmaker_id"),
+                "slippage bookmaker_id",
+            ),
+            "account_id": text(
+                object.__getattribute__(value, "account_id"),
+                "slippage account_id",
+            ),
+            "event_id": text(
+                object.__getattribute__(value, "event_id"),
+                "slippage event_id",
+            ),
+            "market_id": text(
+                object.__getattribute__(value, "market_id"),
+                "slippage market_id",
+            ),
+            "selection_id": text(
+                object.__getattribute__(value, "selection_id"),
+                "slippage selection_id",
+            ),
+            "side": text(
+                object.__getattribute__(value, "side"),
+                "slippage side",
+            ),
+            "requested_stake": str(
+                object.__getattribute__(value, "requested_stake")
+            ),
+            "price_floor_odds": str(
+                object.__getattribute__(value, "price_floor_odds")
+            ),
+            "quote_id": text(
+                object.__getattribute__(value, "quote_id"),
+                "slippage quote_id",
+            ),
+            "quote_observed_at": text(
+                object.__getattribute__(value, "quote_observed_at"),
+                "slippage quote_observed_at",
+            ),
+            "quote_expires_at": text(
+                object.__getattribute__(value, "quote_expires_at"),
+                "slippage quote_expires_at",
+            ),
+            "decision_at": text(
+                object.__getattribute__(value, "decision_at"),
+                "slippage decision_at",
+            ),
+            "instruction_sha256": sha256(
+                object.__getattribute__(value, "instruction_sha256"),
+                "slippage instruction_sha256",
+            ),
+            "provider_contract_id": text(
+                object.__getattribute__(value, "provider_contract_id"),
+                "slippage provider_contract_id",
+            ),
+            "provider_contract_ref": text(
+                object.__getattribute__(value, "provider_contract_ref"),
+                "slippage provider_contract_ref",
+            ),
+            "write_adapter_id": text(
+                object.__getattribute__(value, "write_adapter_id"),
+                "slippage write_adapter_id",
+            ),
+            "write_adapter_version": text(
+                object.__getattribute__(value, "write_adapter_version"),
+                "slippage write_adapter_version",
+            ),
+            "status": "PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION",
+            "matchme_applicability_proven": object.__getattribute__(
+                value, "matchme_applicability_proven"
+            ),
+            "zero_adverse_price_deterioration": object.__getattribute__(
+                value, "zero_adverse_price_deterioration"
+            ),
+            "execution_feasibility_proven": False,
+            "realized_price_exact": False,
+        }
+        return digest(payload)
+
     def resolve(
         *,
         intent: OpportunityIntent,
@@ -1012,10 +1120,7 @@ def _build_canonical_authority():
             raise error_cls("Betfair slippage evidence decision cutoff mismatch")
         text(canonical_opportunity_id, "opportunity_id")
 
-        source_evidence_id = sha256(
-            object.__getattribute__(verified, "evidence_id"),
-            "slippage evidence_id",
-        )
+        source_evidence_id = slippage_evidence_id(verified)
         replacement = issue_component(
             cost_class_cls.EXECUTION_SLIPPAGE,
             reason_cls.BETFAIR_STANDARD_LIMIT_ZERO_ADVERSE_PRICE,

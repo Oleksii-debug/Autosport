@@ -9,6 +9,7 @@ import autosport.risk_reporting as risk_reporting
 
 from autosport.domain import TicketLeg
 from autosport.economic_goal import EconomicGoalContract
+from autosport.economic_goal_store import EconomicGoalStore
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy
 from autosport.risk_reporting import (
@@ -21,6 +22,8 @@ from autosport.risk_reporting import (
     build_paper_risk_report,
     build_product_issued_paper_drawdown_evidence,
     build_product_issued_paper_equity_path,
+    resolve_durable_product_issued_paper_drawdown_evidence,
+    resolve_durable_product_issued_paper_equity_path,
     verify_product_issued_paper_drawdown_evidence,
     verify_product_issued_paper_equity_path,
 )
@@ -654,6 +657,52 @@ class PaperRiskReportingTests(unittest.TestCase):
 
         self.assertEqual(report.drawdown_evidence_sha256, evidence.evidence_sha256)
         self.assertEqual(report.equity_path_sha256, evidence.equity_path_sha256)
+
+    def test_durable_resolver_reissues_same_equity_and_drawdown_evidence(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(64),),
+            Decimal("18"),
+            placed_at="2026-09-21T13:10:00+00:00",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T13:15:00+00:00",
+        )
+        goal = self._goal()
+        expected_path = build_product_issued_paper_equity_path(book, goal)
+        expected_drawdown = build_product_issued_paper_drawdown_evidence(book, goal)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper-book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            actual_path = resolve_durable_product_issued_paper_equity_path(
+                paper_book_path=str(paper_path),
+                workspace=str(workspace),
+            )
+            actual_drawdown = resolve_durable_product_issued_paper_drawdown_evidence(
+                paper_book_path=str(paper_path),
+                workspace=str(workspace),
+            )
+
+        self.assertEqual(actual_path, expected_path)
+        self.assertEqual(actual_drawdown, expected_drawdown)
+
+    def test_durable_resolver_rejects_noncanonical_path_argument_types(self) -> None:
+        with self.assertRaisesRegex(TypeError, "paper_book_path"):
+            resolve_durable_product_issued_paper_equity_path(
+                paper_book_path=Path("paper-book.json"),  # type: ignore[arg-type]
+                workspace="workspace",
+            )
+        with self.assertRaisesRegex(TypeError, "workspace"):
+            resolve_durable_product_issued_paper_equity_path(
+                paper_book_path="paper-book.json",
+                workspace=Path("workspace"),  # type: ignore[arg-type]
+            )
 
     def test_restart_preserves_exact_report_identity_and_values(self) -> None:
         book = PaperBook("100")

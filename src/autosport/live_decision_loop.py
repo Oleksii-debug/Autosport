@@ -2597,6 +2597,7 @@ class PersistentLiveDecisionLoop:
         detail: str = "",
         decision_context_sha256_override: str | None = None,
     ) -> LiveCycleResult:
+        self._assert_canonical_persistence_authority()
         if decision_context_sha256_override is None:
             decision_context_sha256 = self._decision_context_sha256()
         else:

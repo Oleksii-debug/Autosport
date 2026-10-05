@@ -1393,8 +1393,8 @@ class PaperBook:
 
     @classmethod
     def load_bytes(cls, payload: bytes) -> "PaperBook":
-        if not isinstance(payload, bytes):
-            raise TypeError("PaperBook.load_bytes payload must be bytes")
+        if type(payload) is not bytes:
+            raise TypeError("PaperBook.load_bytes payload must be canonical bytes")
         try:
             text = payload.decode("utf-8")
         except UnicodeDecodeError as exc:

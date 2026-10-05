@@ -136,9 +136,6 @@ def _quote_settlement_key(
 ) -> str:
     if type(quote) is not _quote_type:
         raise ValueError("proposal quote must be an exact MarketEvent")
-    # Re-run the captured serializer/parser contract so object.__setattr__ changes
-    # after context construction cannot smuggle noncanonical quote fields into a
-    # money-moving decision or retarget through mutable class dispatch.
     serialized = _to_dict(quote)
     rebuilt = _from_dict(serialized)
     if _to_dict(rebuilt) != serialized:
@@ -159,12 +156,7 @@ def _validate_context_market_semantics(
 ) -> None:
     if type(context) is not _context_type:
         raise ValueError("risk context must be canonical ProposedTicketRiskContext")
-
     _authority()
-
-    # The source validator owns every pre-existing context invariant.  This layer
-    # adds only the new settlement-semantic relation and intentionally delegates
-    # all other schema/economic checks back to that canonical implementation.
     _base_validator(context)
 
     leg_keys = tuple(_leg_key(leg) for leg in context.legs)
@@ -212,11 +204,13 @@ def _portfolio_payload(
     book: object,
     _book_type=_BOOK_TYPE,
     _ticket_status_type=_TICKET_STATUS_TYPE,
+    _semantics_authority=_require_domain_market_semantics_authority,
     _validate_state=_CANONICAL_BOOK_VALIDATE_STATE,
     _validate_lifecycle_entry=_CANONICAL_BOOK_VALIDATE_LIFECYCLE_ENTRY,
 ) -> dict[str, object]:
     if type(book) is not _book_type:
         raise ValueError("risk portfolio requires exact PaperBook")
+    _semantics_authority()
     _validate_state(book)
 
     tickets: list[dict[str, object]] = []
@@ -283,6 +277,9 @@ _PORTFOLIO_HELPER_WITNESSES = tuple(
     _capture_function_witness(helper)
     for helper in (
         _portfolio_payload,
+        _require_domain_market_semantics_authority,
+        _CANONICAL_STRING_VALUE,
+        _CANONICAL_REQUIRE_UTF8_ENCODABLE,
         _CANONICAL_BOOK_VALIDATE_STATE,
         _CANONICAL_BOOK_VALIDATE_LIFECYCLE_ENTRY,
         _CANONICAL_SHA256_PAYLOAD,
@@ -479,8 +476,6 @@ def _quote_risk_decision(
 
 
 def _install() -> None:
-    # ProposedTicketRiskContext remains the one source-defined type.  Extend its
-    # post-init validation rather than introducing a parallel context schema.
     _CONTEXT_TYPE.__post_init__ = _context_post_init
 
     setattr(

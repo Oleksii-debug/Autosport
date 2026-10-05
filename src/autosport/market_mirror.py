@@ -109,7 +109,9 @@ class MarketMirror:
         """Normalize a focused-view selector without treating one ID as characters."""
         if values is None:
             return None
-        if type(values) is str:
+        if isinstance(values, str):
+            if type(values) is not str:
+                raise TypeError(f"{name} must be an exact string")
             selected = frozenset({values})
         else:
             if isinstance(values, str):

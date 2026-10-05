@@ -223,6 +223,47 @@ class DurableSideIntegrityTests(unittest.TestCase):
         ):
             paper_reality._derive_run_economics(("action-1",), (attempt,))
 
+    def test_durable_attempt_rejects_numeric_decimal_token_laundering(self):
+        attempt = self._attempt(
+            outcome=PaperAttemptOutcome.REJECTED,
+            side="BACK",
+        )
+        payload = attempt.to_dict()
+        payload["decision_odds"] = 2
+
+        with self.assertRaisesRegex(
+            PaperExecutionIntegrityError,
+            "canonical serialized decimal string",
+        ):
+            PaperLegAttempt.from_dict(payload)
+
+    def test_registered_evidence_rejects_numeric_decimal_token_laundering(self):
+        source_action = _action()
+        record = PaperExecutionEvidenceRecord(
+            action_id=source_action.action_id,
+            bookmaker_id=source_action.bookmaker_id,
+            account_id=source_action.account_id,
+            event_id=source_action.event_id,
+            market_id=source_action.market_id,
+            selection_id=source_action.selection_id,
+            side=source_action.side,
+            quote_id=source_action.quote_id,
+            outcome=PaperAttemptOutcome.ACCEPTED,
+            observed_at=STARTED_AT,
+            evidence_grade=EvidenceGrade.EMPIRICAL,
+            evidence_source="captured-paper-observation-v1",
+            accepted_odds="5.00",
+            accepted_stake="10.00",
+        )
+        payload = record.to_dict()
+        payload["accepted_stake"] = 10.0
+
+        with self.assertRaisesRegex(
+            PaperExecutionIntegrityError,
+            "canonical serialized decimal string",
+        ):
+            PaperExecutionEvidenceRecord.from_dict(payload)
+
     def test_unknown_durable_attempt_does_not_normalize_lay_side(self):
         attempt = self._attempt(
             outcome=PaperAttemptOutcome.UNKNOWN,

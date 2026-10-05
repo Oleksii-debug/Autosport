@@ -384,6 +384,7 @@ class BetfairStreamTlsTransport:
         self._max_frame_bytes = max_frame_bytes
         self._socket: _TlsSocket | None = None
         self._receive_buffer = bytearray()
+        self._receive_timing_chunks: list[tuple[int, int]] = []
         self._connection_id: str | None = None
         self._frame_sequence = 0
         self._consecutive_connect_failures = 0
@@ -488,7 +489,7 @@ class BetfairStreamTlsTransport:
             )
             if not stale_attempt:
                 self._socket = stream
-                self._receive_buffer.clear()
+                self._clear_receive_buffer()
                 self._connection_id = None
                 self._frame_sequence = 0
         if stale_attempt:
@@ -605,6 +606,55 @@ class BetfairStreamTlsTransport:
                 "Betfair stream handshake failed validation"
             ) from None
 
+    def _clear_receive_buffer(self) -> None:
+        self._receive_buffer.clear()
+        self._receive_timing_chunks.clear()
+
+    def _append_received_block(self, block: bytes) -> None:
+        if type(block) is not bytes or not block:
+            raise BetfairStreamProtocolError(
+                "Betfair stream receive block must be non-empty bytes"
+            )
+        received_monotonic_ns = time.monotonic_ns()
+        if type(received_monotonic_ns) is not int or received_monotonic_ns <= 0:
+            raise BetfairStreamTransportError(
+                "Betfair stream monotonic receive clock is invalid"
+            )
+        self._receive_buffer.extend(block)
+        self._receive_timing_chunks.append(
+            (len(block), received_monotonic_ns)
+        )
+
+    def _consume_received_bytes(self, count: int) -> int:
+        if type(count) is not int or count <= 0:
+            raise BetfairStreamProtocolError(
+                "Betfair stream receive accounting count must be positive"
+            )
+        remaining = count
+        last_received_monotonic_ns: int | None = None
+        while remaining:
+            if not self._receive_timing_chunks:
+                raise BetfairStreamProtocolError(
+                    "Betfair stream receive timing accounting is inconsistent"
+                )
+            chunk_size, received_monotonic_ns = self._receive_timing_chunks[0]
+            if chunk_size <= remaining:
+                remaining -= chunk_size
+                last_received_monotonic_ns = received_monotonic_ns
+                self._receive_timing_chunks.pop(0)
+            else:
+                self._receive_timing_chunks[0] = (
+                    chunk_size - remaining,
+                    received_monotonic_ns,
+                )
+                last_received_monotonic_ns = received_monotonic_ns
+                remaining = 0
+        if last_received_monotonic_ns is None:
+            raise BetfairStreamProtocolError(
+                "Betfair stream receive timing accounting produced no timestamp"
+            )
+        return last_received_monotonic_ns
+
     def read_authenticated_frame(self) -> BetfairStreamAuthenticatedFrame:
         """Return one exact frame with process-local authenticated transport-origin proof."""
 
@@ -624,8 +674,10 @@ class BetfairStreamTlsTransport:
                     raise BetfairStreamProtocolError(
                         "Betfair stream frame exceeded the configured size limit"
                     )
-                payload = bytes(self._receive_buffer[: marker + 2])
-                del self._receive_buffer[: marker + 2]
+                payload_size = marker + 2
+                payload = bytes(self._receive_buffer[:payload_size])
+                received_monotonic_ns = self._consume_received_bytes(payload_size)
+                del self._receive_buffer[:payload_size]
                 if marker == 0:
                     self._close_with_backoff()
                     raise BetfairStreamProtocolError(
@@ -664,7 +716,7 @@ class BetfairStreamTlsTransport:
                 raise BetfairStreamTransportError(
                     "Betfair stream connection closed before receiving data"
                 )
-            self._receive_buffer.extend(block)
+            self._append_received_block(block)
 
         with self._lifecycle_lock:
             if (
@@ -684,7 +736,7 @@ class BetfairStreamTlsTransport:
             frame_sequence=frame_sequence,
             payload=payload,
             payload_sha256=sha256(payload).hexdigest(),
-            received_monotonic_ns=time.monotonic_ns(),
+            received_monotonic_ns=received_monotonic_ns,
         )
         _ISSUED_AUTHENTICATED_FRAMES[issued] = _authenticated_frame_fingerprint(
             issued
@@ -715,7 +767,7 @@ class BetfairStreamTlsTransport:
             if self._socket is stream:
                 self._socket = None
                 self._connection_id = None
-                self._receive_buffer.clear()
+                self._clear_receive_buffer()
             if self._active_connect_cancel is cancellation:
                 self._active_connect_cancel = None
         _close_socket_quietly(stream)
@@ -736,7 +788,7 @@ class BetfairStreamTlsTransport:
             stream = self._socket
             self._socket = None
             self._connection_id = None
-            self._receive_buffer.clear()
+            self._clear_receive_buffer()
         if stream is not None:
             _close_socket_quietly(stream)
 
@@ -763,8 +815,10 @@ class BetfairStreamTlsTransport:
                     raise BetfairStreamProtocolError(
                         "Betfair stream handshake message exceeded the size limit"
                     )
+                consumed_size = marker + 2
                 raw = bytes(self._receive_buffer[:marker])
-                del self._receive_buffer[: marker + 2]
+                self._consume_received_bytes(consumed_size)
+                del self._receive_buffer[:consumed_size]
                 if not raw:
                     raise BetfairStreamProtocolError(
                         "Betfair stream handshake contained an empty message"
@@ -791,7 +845,7 @@ class BetfairStreamTlsTransport:
                 raise BetfairStreamTransportError(
                     "Betfair stream connection closed during handshake"
                 )
-            self._receive_buffer.extend(block)
+            self._append_received_block(block)
 
 
 def _open_verified_tls_socket(

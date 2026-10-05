@@ -17,6 +17,10 @@ _StableReadT = TypeVar("_StableReadT")
 _DEPENDENCY_READ_RETRY_LIMIT = 8
 
 
+class FocusedMirrorDependencyChurnError(RuntimeError):
+    """Raised when one focused dependency cannot be read from a stable incarnation."""
+
+
 @dataclass(frozen=True, slots=True)
 class MirrorInvalidationBatch:
     """Bounded downstream work derived from already-applied durable market updates.
@@ -508,7 +512,7 @@ class FocusedMirrorDependencyIndex:
             # in flight. Retry against its now-authoritative selectors rather than
             # returning a result from an incarnation that no longer exists. Churn
             # in unrelated registrations does not invalidate this selector read.
-        raise RuntimeError(
+        raise FocusedMirrorDependencyChurnError(
             "focused mirror dependency changed continuously during stable read"
         )
 

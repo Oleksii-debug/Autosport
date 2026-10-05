@@ -499,6 +499,21 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("100"))
         self.assertEqual(book.tickets, {})
 
+    def test_save_does_not_create_parent_for_rejected_snapshot_candidate(self):
+        book = PaperBook("100")
+        destination = Path(self._tmp.name) / "rejected-parent" / "nested" / "snapshot.json"
+
+        with patch.object(
+            PaperBook,
+            "_from_raw_snapshot",
+            side_effect=ValueError("candidate rejected"),
+        ):
+            with self.assertRaisesRegex(ValueError, "candidate rejected"):
+                book.save(destination)
+
+        self.assertFalse(destination.parent.exists())
+        self.assertFalse(destination.exists())
+
     def test_save_rejects_snapshot_path_subclass_before_fspath(self):
         _HostilePathSubclass.fspath_calls = 0
         book = PaperBook("100")

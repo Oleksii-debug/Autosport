@@ -190,6 +190,43 @@ class IngestionHealthTests(unittest.TestCase):
 
             self.assertEqual(target.read_text(encoding="utf-8"), "sentinel")
 
+    def test_source_health_rejects_hardlinked_target_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "source-health.json"
+            store = SourceHealthStore(path)
+            alias = root / "source-health-alias.json"
+            try:
+                os.link(path, alias)
+            except OSError:
+                self.skipTest("hardlinks are unavailable")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "one regular non-symlink file",
+            ):
+                store.get("source-a")
+
+    def test_source_health_rejects_hardlinked_writer_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SourceHealthStore(root / "source-health.json")
+            alias = root / "source-health-lock-alias"
+            try:
+                os.link(store._lock_path, alias)
+            except OSError:
+                self.skipTest("hardlinks are unavailable")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "writer-lock path must be one regular file",
+            ):
+                store.record_failure(
+                    "source-a",
+                    now="2026-09-12T12:00:00+00:00",
+                    error=RuntimeError("offline"),
+                )
+
     def test_source_health_relative_path_survives_cwd_change(self):
         original_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as tmp:

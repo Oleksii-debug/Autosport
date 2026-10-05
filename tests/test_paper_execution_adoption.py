@@ -292,7 +292,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     PaperExecutionAdoptionError,
-                    "binding authority changed after mint",
+                    "authority changed after mint",
                 ):
                     runtime.execute(
                         prepared=current_prepared,
@@ -333,7 +333,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     PaperExecutionAdoptionError,
-                    "materialization decision_id changed after prepared authority mint",
+                    "authority changed after mint",
                 ):
                     runtime.execute(
                         prepared=current_prepared,
@@ -421,6 +421,38 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(replacement.tickets, {})
             self.assertEqual(book.balance, Decimal("100.00"))
             self.assertEqual(replacement.balance, Decimal("100.00"))
+
+    def test_save_callback_cannot_redirect_durable_verification_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            current = action("save-path-redirection", side="BACK")
+            current_prepared = prepared(runtime, current)
+            original_save = PaperBook.save
+            canonical_path = runtime.paper_book_path
+            redirected_path = Path(tmp) / "redirected-paper-book.json"
+
+            def save_then_redirect(target, path):
+                result = original_save(target, path)
+                redirected_path.write_bytes(Path(path).read_bytes())
+                runtime.paper_book_path = redirected_path
+                return result
+
+            with patch.object(PaperBook, "save", save_then_redirect):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "runtime configuration changed after construction",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="save-path-redirection",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertTrue(Path(canonical_path).exists())
+            self.assertTrue(redirected_path.exists())
+            self.assertEqual(len(book.tickets), 1)
+            self.assertEqual(book.balance, Decimal("85.00"))
 
     def test_post_run_ticket_marker_mutation_cannot_redirect_restart_identity(self):
         with tempfile.TemporaryDirectory() as tmp:

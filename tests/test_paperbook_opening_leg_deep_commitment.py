@@ -359,3 +359,49 @@ def test_hidden_registries_reject_in_place_registry_key_validator_code_mutation(
 
     assert attacker_calls == 0
     assert book.balance == Decimal("90")
+
+
+def test_causal_registry_ignores_rebound_snapshot_module_dispatch(monkeypatch) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    attacker_calls = 0
+
+    def hostile_snapshot(_book):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound causal snapshot executed")
+
+    monkeypatch.setattr(
+        paper_module,
+        "_paperbook_causal_history_snapshot",
+        hostile_snapshot,
+    )
+
+    assert book.committed_stake == Decimal("10")
+    assert attacker_calls == 0
+
+
+def test_causal_registry_rejects_in_place_snapshot_code_mutation_before_execution() -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    snapshot = paper_module._paperbook_causal_history_snapshot
+    original_code = snapshot.__code__
+    attacker_calls = 0
+
+    def hostile_snapshot(_book):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        return ((), ())
+
+    try:
+        snapshot.__code__ = hostile_snapshot.__code__
+        with pytest.raises(
+            ValueError,
+            match="causal-history snapshot authority changed",
+        ):
+            _ = book.committed_stake
+    finally:
+        snapshot.__code__ = original_code
+
+    assert attacker_calls == 0
+    assert book.balance == Decimal("90")

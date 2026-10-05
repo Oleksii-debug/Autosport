@@ -409,6 +409,36 @@ class LiveObservationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_replayable_provider_rejects_equal_string_subclass_before_read(self):
+        class SourceId(str):
+            pass
+
+        class Provider:
+            def __init__(self) -> None:
+                self.source_id = "live-fixture"
+                self.calls = 0
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                self.calls += 1
+                return ProviderBatch(
+                    source_id="live-fixture",
+                    quotes=(),
+                    cursor="cursor-1",
+                )
+
+        provider = Provider()
+        wrapped = live_observation_module._ReplayableBatchProvider(provider)
+        provider.source_id = SourceId("live-fixture")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "source identity changed before live batch read",
+        ):
+            wrapped.read_batch(max_items=1)
+
+        self.assertEqual(provider.calls, 0)
+        self.assertFalse(wrapped.has_inflight)
+
     def test_open_store_poll_rejects_equal_string_subclass_source_substitution(self):
         class SourceId(str):
             pass
@@ -613,6 +643,45 @@ class LiveObservationTests(unittest.TestCase):
                 for note in getattr(raised.exception, "__notes__", ())
             )
         )
+
+    def test_sqlite_primary_failure_survives_hostile_diagnostic_annotation(self):
+        batch = ProviderBatch(
+            source_id="live-fixture",
+            quotes=(),
+            cursor="cursor-1",
+            quality_flags=("TRUNCATED_BATCH",),
+        )
+
+        class HostileOperationalError(sqlite3.OperationalError):
+            def add_note(self, note: str) -> None:
+                raise RuntimeError("note-rejected")
+
+        class Provider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                raise RuntimeError("reset-failed")
+
+        class Engine:
+            def poll_once(self, provider, max_items: int = 1000):
+                provider.read_batch(max_items=max_items)
+                raise HostileOperationalError("database-locked")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(Provider())
+        with self.assertRaisesRegex(
+            HostileOperationalError,
+            "database-locked",
+        ):
+            live_observation_module._poll_acknowledged(
+                Engine(),
+                wrapped,
+                max_items=1,
+            )
+
+        self.assertFalse(wrapped.has_inflight)
 
     def test_open_store_poll_does_not_rescan_append_only_history(self):
         with tempfile.TemporaryDirectory() as tmp:

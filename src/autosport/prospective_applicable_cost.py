@@ -412,6 +412,7 @@ def _build_canonical_authority():
     model_status_cls = ProspectiveModelComputeMoneyStatus
     model_reason_cls = ProspectiveModelComputeMoneyReason
     model_resolver = resolve_prospective_model_compute_money
+    model_resolver_code = model_resolver.__code__
     slippage_error_cls = BetfairStandardLimitPriceBoundError
     slippage_evidence_cls = BetfairStandardLimitPriceBoundEvidence
     slippage_status_cls = BetfairStandardLimitPriceBoundStatus
@@ -764,12 +765,16 @@ def _build_canonical_authority():
         portfolio_plan_sha256 = sha256(plan.plan_sha256, "portfolio plan plan_sha256")
         canonical_request_id = text(model_request_id, "model_request_id")
 
+        if model_resolver.__code__ is not model_resolver_code:
+            raise error_cls("canonical model-compute resolver authority changed")
         model_evidence = model_resolver(
             intent=intent,
             router_store=router_store,
             request_id=canonical_request_id,
             decision_at=cutoff,
         )
+        if model_resolver.__code__ is not model_resolver_code:
+            raise error_cls("canonical model-compute resolver authority changed")
         evidence_id = model_evidence_id(
             model_evidence,
             expected_request_id=canonical_request_id,

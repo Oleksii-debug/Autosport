@@ -360,10 +360,11 @@ def test_raw_acquire_metadata_does_not_expose_live_issuer_function() -> None:
     ):
         assert not hasattr(authority, name)
 
-    # The remaining authority-bearing operation is safe to invoke: it accepts an
-    # acquirer + request and must execute the canonical provider acquisition path.
+    # Acquisition remains the only provider-I/O operation. There is deliberately no
+    # reusable positive live-origin assertion capability on the recovered boundary.
     assert callable(authority.acquire)
-    assert callable(authority.assert_live)
+    assert not hasattr(authority, "assert_live")
+    assert not hasattr(authority, "_fingerprint")
 
 
 def test_boundary_cannot_rebind_initialized_acquirer_state(tmp_path) -> None:
@@ -401,7 +402,7 @@ def test_durable_resolve_remains_non_authoritative_without_new_provider_read(
         acquisition_id="durable-cannot-self-promote",
     )
     assert len(calls) == 3
-    assert live.source_authority_proven is True
+    assert live.source_authority_proven is False
 
     durable = acquirer.resolve(live.receipt.acquisition_id)
     assert durable is not live
@@ -431,23 +432,7 @@ def test_durable_resolve_remains_non_authoritative_without_new_provider_read(
     assert durable.source_authority_proven is False
 
 
-def _boundary_mapping_snapshots(authority: object) -> list[MappingProxyType]:
-    snapshots: list[MappingProxyType] = []
-    seen: set[int] = set()
-    for method_name in ("initialize", "acquire", "resolve", "verify", "assert_live"):
-        method = vars(type(authority))[method_name]
-        for cell in method.__closure__ or ():
-            try:
-                value = cell.cell_contents
-            except ValueError:
-                continue
-            if type(value) is MappingProxyType and id(value) not in seen:
-                seen.add(id(value))
-                snapshots.append(value)
-    return snapshots
-
-
-def test_closure_boundary_direct_object_setattr_cannot_replace_live_authority(
+def test_recovered_boundary_has_no_reusable_live_origin_capability(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -460,73 +445,32 @@ def test_closure_boundary_direct_object_setattr_cannot_replace_live_authority(
         _credentials("A"),
         account_id="default-account",
     )
-    live = acquirer.acquire(
+    acquired = acquirer.acquire(
         _balance_capabilities(),
-        acquisition_id="direct-object-setattr",
+        acquisition_id="no-reusable-live-origin",
     )
     assert len(calls) == 3
-    durable = acquirer.resolve(live.receipt.acquisition_id)
-    assert live.source_authority_proven is True
-    assert durable.source_authority_proven is False
+    assert acquired.source_authority_proven is False
 
     authority = _extract_inner_authority_boundary(
         _extract_outer_guard_raw_acquire()
     )
-    forged = MappingProxyType(
-        {
-            durable.receipt.acquisition_id: (
-                ref(durable),
-                authority._fingerprint(durable),
-                _credentials("A"),
-            )
-        }
-    )
+    assert not hasattr(authority, "assert_live")
+    assert not hasattr(authority, "_fingerprint")
+    assert not hasattr(authority, "_live")
 
-    with pytest.raises(AttributeError):
-        object.__setattr__(
-            authority,
-            "_AccountSnapshotAuthorityBoundary__live",
-            forged,
-        )
-
+    # The public compatibility assertion remains permanently fail-closed even for
+    # the exact object returned by a canonical provider read.
     with pytest.raises(
         AccountSnapshotAcquisitionError,
-        match="not issued by live canonical provider acquisition",
+        match="lacks live canonical provider-origin authority",
     ):
-        authority.assert_live(durable)
-    authority.assert_live(live)
-    assert durable.source_authority_proven is False
+        acquisition_module.assert_account_snapshot_acquisition_authoritative(
+            acquired
+        )
 
 
-@pytest.mark.parametrize(
-    "storage_name",
-    (
-        "_AccountSnapshotAuthorityBoundary__issued",
-        "_AccountSnapshotAuthorityBoundary__live",
-        "_AccountSnapshotAuthorityBoundary__lock",
-    ),
-)
-def test_closure_boundary_has_no_replaceable_authority_storage(
-    tmp_path,
-    storage_name: str,
-) -> None:
-    BetfairAccountSnapshotAcquirer(
-        tmp_path / "account.sqlite3",
-        _credentials("A"),
-        account_id="default-account",
-    )
-    authority = _extract_inner_authority_boundary(
-        _extract_outer_guard_raw_acquire()
-    )
-
-    assert not hasattr(authority, storage_name)
-    with pytest.raises(AttributeError):
-        setattr(authority, storage_name, object())
-    with pytest.raises(AttributeError):
-        object.__setattr__(authority, storage_name, object())
-
-
-def test_closure_boundary_authority_snapshots_are_immutable_and_copy_isolated(
+def test_v4_closure_cell_replacement_cannot_create_live_origin_authority(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -539,85 +483,43 @@ def test_closure_boundary_authority_snapshots_are_immutable_and_copy_isolated(
         _credentials("A"),
         account_id="default-account",
     )
-    live = acquirer.acquire(
+    acquired = acquirer.acquire(
         _balance_capabilities(),
-        acquisition_id="closure-snapshot-copy",
+        acquisition_id="closure-cell-v4",
     )
-    durable = acquirer.resolve(live.receipt.acquisition_id)
+    durable = acquirer.resolve(acquired.receipt.acquisition_id)
     authority = _extract_inner_authority_boundary(
         _extract_outer_guard_raw_acquire()
     )
 
-    snapshots = _boundary_mapping_snapshots(authority)
-    assert snapshots
-    live_snapshots = [
-        snapshot
-        for snapshot in snapshots
-        if live.receipt.acquisition_id in snapshot
-    ]
-    assert live_snapshots
-    canonical_live_snapshot = live_snapshots[0]
+    # V4 depended on assert_live selecting a string-keyed live registry closure cell.
+    # The boundary now has no such method or registry. Any remaining mapping snapshot
+    # is initialization state keyed by acquirer object identity and cannot turn either
+    # returned or reconstructed durable evidence into positive origin authority.
+    assert not hasattr(authority, "assert_live")
+    for method_name in ("initialize", "acquire", "resolve", "verify"):
+        method = vars(type(authority))[method_name]
+        for cell in method.__closure__ or ():
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if isinstance(value, dict):
+                assert acquired.receipt.acquisition_id not in value
 
-    with pytest.raises(TypeError):
-        canonical_live_snapshot[durable.receipt.acquisition_id] = (
-            ref(durable),
-            authority._fingerprint(durable),
-            _credentials("A"),
-        )
-
-    forged = dict(canonical_live_snapshot)
-    forged[durable.receipt.acquisition_id] = (
-        ref(durable),
-        authority._fingerprint(durable),
-        _credentials("A"),
-    )
-    assert forged is not canonical_live_snapshot
-
-    with pytest.raises(
-        AccountSnapshotAcquisitionError,
-        match="not issued by live canonical provider acquisition",
-    ):
-        authority.assert_live(durable)
-    authority.assert_live(live)
+    assert acquired.source_authority_proven is False
+    assert durable.source_authority_proven is False
+    for candidate in (acquired, durable):
+        with pytest.raises(
+            AccountSnapshotAcquisitionError,
+            match="lacks live canonical provider-origin authority",
+        ):
+            acquisition_module.assert_account_snapshot_acquisition_authoritative(
+                candidate
+            )
 
 
-def test_closure_boundary_immutable_live_snapshot_preserves_weakref_expiry(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    database = tmp_path / "account.sqlite3"
-    calls = _install_transport(
-        monkeypatch,
-        [_DEVELOPER_APPS, _DETAILS, _FUNDS],
-    )
-    acquirer = BetfairAccountSnapshotAcquirer(
-        database,
-        _credentials("A"),
-        account_id="default-account",
-    )
-    live = acquirer.acquire(
-        _balance_capabilities(),
-        acquisition_id="weakref-expiry",
-    )
-    assert len(calls) == 3
-    live_ref = ref(live)
-    del live
-    gc.collect()
-    assert live_ref() is None
-
-    retry_calls = _install_transport(monkeypatch, [])
-    with pytest.raises(
-        AccountSnapshotAcquisitionError,
-        match="durable acquisition cannot reissue provider-origin authority",
-    ):
-        acquirer.acquire(
-            _balance_capabilities(),
-            acquisition_id="weakref-expiry",
-        )
-    assert retry_calls == []
-
-
-def test_closure_boundary_storage_ignores_mappingproxy_module_rebind(
+def test_mappingproxy_module_rebind_cannot_restore_positive_origin_authority(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -630,30 +532,21 @@ def test_closure_boundary_storage_ignores_mappingproxy_module_rebind(
         monkeypatch,
         [_DEVELOPER_APPS, _DETAILS, _FUNDS],
     )
-    acquirer = BetfairAccountSnapshotAcquirer(
+    acquired = BetfairAccountSnapshotAcquirer(
         tmp_path / "account.sqlite3",
         _credentials("A"),
         account_id="default-account",
-    )
-    live = acquirer.acquire(
+    ).acquire(
         _balance_capabilities(),
-        acquisition_id="mappingproxy-rebind",
+        acquisition_id="mappingproxy-no-live-origin",
     )
+
     assert len(calls) == 3
-
-    authority = _extract_inner_authority_boundary(
-        _extract_outer_guard_raw_acquire()
-    )
-    snapshots = _boundary_mapping_snapshots(authority)
-    assert snapshots
-    live_snapshots = [
-        snapshot
-        for snapshot in snapshots
-        if live.receipt.acquisition_id in snapshot
-    ]
-    assert live_snapshots
-    assert all(type(snapshot) is MappingProxyType for snapshot in snapshots)
-
-    with pytest.raises(TypeError):
-        live_snapshots[0]["forged"] = object()
-
+    assert acquired.source_authority_proven is False
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="lacks live canonical provider-origin authority",
+    ):
+        acquisition_module.assert_account_snapshot_acquisition_authoritative(
+            acquired
+        )

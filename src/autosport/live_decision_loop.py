@@ -2678,6 +2678,19 @@ class PersistentLiveDecisionLoop:
                     "live decision progress changed before durable ledger publication"
                 )
 
+            if (
+                durable_progress.phase == _PHASE_PENDING
+                and prepared_execution is not None
+            ):
+                assert expected_execution_payload is not None
+                orphan_execution_events = self.paper_execution.ledger.events(
+                    expected_execution_payload["run_id"]
+                )
+                if orphan_execution_events:
+                    raise LiveDecisionProgressError(
+                        "pending live decision has orphan #623 execution history"
+                    )
+
             if durable_progress.phase == _PHASE_APPEND_PENDING:
                 if (
                     durable_progress.decision_id != decision_id

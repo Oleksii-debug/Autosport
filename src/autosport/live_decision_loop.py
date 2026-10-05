@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from enum import Enum
 from pathlib import Path
+from threading import RLock
 from time import monotonic
 from typing import Callable, Protocol
 
@@ -893,6 +894,7 @@ class PersistentLiveDecisionLoop:
             max_dirty_keys=self.bounds.max_dirty_keys,
         )
         self.dependencies = FocusedMirrorDependencyIndex(mirror)
+        self._dependency_mutation_lock = RLock()
         self.inputs_path = self.workspace / self.INPUTS_FILE_NAME
         durable_input_specs = self._load_input_registry() or ()
         if len(durable_input_specs) > self.bounds.max_registered_inputs:
@@ -1285,6 +1287,26 @@ class PersistentLiveDecisionLoop:
         market_ids: str | tuple[str, ...] | None = None,
         selection_ids: str | tuple[str, ...] | None = None,
     ) -> None:
+        with self._dependency_mutation_lock:
+            self._register_input_locked(
+                input_id,
+                source_ids=source_ids,
+                sports=sports,
+                event_ids=event_ids,
+                market_ids=market_ids,
+                selection_ids=selection_ids,
+            )
+
+    def _register_input_locked(
+        self,
+        input_id: str,
+        *,
+        source_ids: str | tuple[str, ...] | None = None,
+        sports: str | tuple[str, ...] | None = None,
+        event_ids: str | tuple[str, ...] | None = None,
+        market_ids: str | tuple[str, ...] | None = None,
+        selection_ids: str | tuple[str, ...] | None = None,
+    ) -> None:
         normalized_id = FocusedMirrorDependencyIndex._input_id(input_id)
         candidate = _InputSpec(
             input_id=normalized_id,
@@ -1342,6 +1364,10 @@ class PersistentLiveDecisionLoop:
         self._needs_cache_rebuild = True
 
     def unregister_input(self, input_id: str) -> bool:
+        with self._dependency_mutation_lock:
+            return self._unregister_input_locked(input_id)
+
+    def _unregister_input_locked(self, input_id: str) -> bool:
         normalized_id = FocusedMirrorDependencyIndex._input_id(input_id)
         existing = self._input_specs.get(normalized_id)
         if existing is None:
@@ -3021,7 +3047,16 @@ class PersistentLiveDecisionLoop:
                 raise LiveDecisionProgressError(
                     "live dependency registry changed concurrently"
                 )
-            atomic_write_json(self.inputs_path, payload)
+            with self.dependencies.registry_state_guard() as focused_state:
+                focused_candidate = tuple(
+                    _InputSpec.from_dependency(dependency)
+                    for dependency, _revision in focused_state
+                )
+                if focused_candidate != candidate:
+                    raise LiveDecisionProgressError(
+                        "focused dependency registry changed before dependency publication"
+                    )
+                atomic_write_json(self.inputs_path, payload)
 
     def _ledger_end_offset(self) -> int:
         path = self.decision_ledger.path

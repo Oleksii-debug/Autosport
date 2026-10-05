@@ -404,7 +404,20 @@ class PaperBook:
         self._validate_loaded_state(self)
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
-        return sum((t.stake for t in self.tickets.values() if t.status is TicketStatus.OPEN), Decimal("0"))
+        try:
+            with localcontext(_paper_decimal_context()) as context:
+                total = Decimal("0")
+                for ticket in self.tickets.values():
+                    if ticket.status is TicketStatus.OPEN:
+                        total += ticket.stake
+                if context.flags[Inexact]:
+                    raise ValueError("PaperBook committed stake loses Decimal precision")
+        except DecimalException as exc:
+            raise ValueError(
+                "PaperBook committed stake arithmetic is not representable"
+            ) from exc
+        self._require_finite(total, "committed_stake")
+        return total
 
     @classmethod
     def _canonical_decimal_input(cls, value: object, label: str) -> Decimal:

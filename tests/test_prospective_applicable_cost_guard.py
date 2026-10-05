@@ -276,3 +276,27 @@ def test_noncanonical_resolution_subclass_rejected_before_rebound_resolver_execu
             _require(asserted, case)
 
     assert attacker_called is False
+
+
+def test_guard_rejects_in_place_base_resolver_code_mutation():
+    with canonical_applicable_cost_case() as case:
+        canonical = _canonical(case)
+        asserted = _copy_resolution(
+            canonical,
+            components=tuple(_copy_component(item) for item in canonical.components),
+        )
+        resolver = guard.resolve_prospective_applicable_costs
+        original_code = resolver.__code__
+
+        def attacker_resolver(**_kwargs):
+            raise AssertionError("mutated resolver body must never execute")
+
+        try:
+            resolver.__code__ = attacker_resolver.__code__
+            with pytest.raises(
+                cost.ProspectiveApplicableCostError,
+                match="resolver authority changed",
+            ):
+                _require(asserted, case)
+        finally:
+            resolver.__code__ = original_code

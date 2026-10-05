@@ -196,6 +196,53 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(book.tickets, {})
             self.assertEqual(book.balance, Decimal("100.00"))
 
+    def test_post_mint_binding_mutation_fails_before_durable_scope_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("binding-mutation", side="BACK")
+            current_prepared = prepared(runtime, current)
+            binding = current_prepared.exposure_bindings[0]
+            object.__setattr__(binding, "bankroll_id", "other-bankroll")
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "authority changed after mint",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="binding-mutation",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
+    def test_post_mint_valid_action_mutation_fails_before_durable_scope_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current = action("action-mutation", odds="2.50", stake="10.00", side="BACK")
+            current_prepared = prepared(runtime, current)
+            object.__setattr__(current, "requested_stake", Decimal("11.00"))
+            events_before = list(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "authority changed after mint",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id="action-mutation",
+                    started_at=STARTED_AT,
+                    materialize_exposure=False,
+                )
+
+            self.assertEqual(ledger.events(), events_before)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(book.balance, Decimal("100.00"))
+
     def test_paper_value_rejects_mutated_side_subclass_without_comparison_hooks(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)

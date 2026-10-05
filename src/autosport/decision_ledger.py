@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -319,6 +320,9 @@ class JsonlDecisionLedger:
         self._writer_lock_path_authority = self._absolute_path_authority.with_name(
             self._absolute_path_authority.name + ".writer.lock"
         )
+        self._file_identity_authority: tuple[int, int] | None = None
+        if self._absolute_path_authority.exists():
+            self._file_identity_authority = self._read_file_identity()
 
     def _assert_persistence_authority(self) -> None:
         if (
@@ -332,6 +336,49 @@ class JsonlDecisionLedger:
             raise DecisionLedgerIntegrityError(
                 "Decision Ledger persistence authority changed after construction"
             )
+
+    def _read_file_identity(self) -> tuple[int, int]:
+        try:
+            info = os.lstat(self._absolute_path_authority)
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger path identity is unavailable"
+            ) from exc
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or getattr(info, "st_nlink", 1) != 1
+        ):
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger path must be one regular non-linked file"
+            )
+        return (info.st_dev, info.st_ino)
+
+    def _assert_file_identity(self, fd: int | None = None) -> None:
+        identity = self._file_identity_authority
+        if identity is None:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger file identity is not bound"
+            )
+        if self._read_file_identity() != identity:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger file identity changed after construction"
+            )
+        if fd is not None:
+            try:
+                opened = os.fstat(fd)
+            except OSError as exc:
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger opened file identity is unavailable"
+                ) from exc
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or getattr(opened, "st_nlink", 1) != 1
+                or (opened.st_dev, opened.st_ino) != identity
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger opened file identity changed"
+                )
 
     def _sync_parent_directory(self) -> None:
         if os.name == "nt":
@@ -354,6 +401,9 @@ class JsonlDecisionLedger:
 
     def _ensure_path_durable(self) -> None:
         if self._absolute_path_authority.exists():
+            if self._file_identity_authority is None:
+                self._file_identity_authority = self._read_file_identity()
+            self._assert_file_identity()
             return
         try:
             with self._absolute_path_authority.open(
@@ -364,6 +414,7 @@ class JsonlDecisionLedger:
                 handle.flush()
                 os.fsync(handle.fileno())
             self._sync_parent_directory()
+            self._file_identity_authority = self._read_file_identity()
         except DecisionLedgerIntegrityError:
             raise
         except OSError as exc:
@@ -572,10 +623,13 @@ class JsonlDecisionLedger:
                 encoding="utf-8",
                 newline="\n",
             ) as handle:
+                self._assert_file_identity(handle.fileno())
                 handle.write(envelope + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+                self._assert_file_identity(handle.fileno())
             self._assert_persistence_authority()
+            self._assert_file_identity()
             return digest
         finally:
             os.close(lock_fd)
@@ -705,10 +759,12 @@ class JsonlDecisionLedger:
 
     def verified_snapshot(self) -> VerifiedDecisionLedgerSnapshot:
         self._assert_persistence_authority()
+        self._assert_file_identity()
         if self._writer_lock_path_authority.exists():
             raise DecisionLedgerIntegrityError(
                 "Decision Ledger writer lock exists; verified snapshot is unavailable"
             )
+        self._assert_file_identity()
         try:
             raw = self._absolute_path_authority.read_bytes()
         except OSError as exc:

@@ -288,10 +288,6 @@ class KeyboardAuditTests(unittest.TestCase):
             self.assertEqual(list(destination.parent.glob(f".{destination.name}.*.tmp")), [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class PackagedRuntimeKeyboardAuditTests(unittest.TestCase):
     def test_packaged_runtime_start_must_be_tab_reachable(self):
         bindings, focus, reachable, reverse_reachable = KeyboardAuditTests()._passing()
@@ -325,3 +321,7 @@ class PackagedRuntimeKeyboardAuditTests(unittest.TestCase):
                 for item in report["failures"]
             )
         )
+
+
+if __name__ == "__main__":
+    unittest.main()

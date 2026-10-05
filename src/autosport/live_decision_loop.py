@@ -2549,7 +2549,7 @@ class PersistentLiveDecisionLoop:
             )
         if self.decision_ledger is not self._decision_ledger_authority:
             raise LiveDecisionProgressError(
-                "live Decision Ledger object authority changed after construction"
+                "live Decision Ledger persistence authority changed after construction"
             )
         canonical_decision_ledger = self._workspace_authority / "decisions.jsonl"
         if self.decision_ledger.path != canonical_decision_ledger:
@@ -2572,7 +2572,7 @@ class PersistentLiveDecisionLoop:
             )
         if self.paper_execution.ledger is not self._paper_execution_ledger_authority:
             raise LiveDecisionProgressError(
-                "PAPER execution ledger object authority changed after construction"
+                "PAPER execution ledger authority changed after construction"
             )
         if self.paper_execution.ledger.path != self._workspace_authority / "paper-execution.jsonl":
             raise LiveDecisionProgressError(

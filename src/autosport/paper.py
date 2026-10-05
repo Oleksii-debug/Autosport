@@ -700,6 +700,29 @@ def _seal_paperbook_save_candidate_authority(method):
     return sealed
 
 
+
+def _seal_paperbook_snapshot_json_publish_authority(method):
+    """Inject closure-captured JSON serialization authority into durable save."""
+    dump = json.dump
+    dump_code = dump.__code__
+
+    def publish(raw: object, handle: object) -> None:
+        if dump.__code__ is not dump_code:
+            raise ValueError("PaperBook JSON serializer authority changed")
+        dump(raw, handle, ensure_ascii=False, indent=2)
+        if dump.__code__ is not dump_code:
+            raise ValueError("PaperBook JSON serializer authority changed")
+
+    @wraps(method)
+    def sealed(self, *args, **kwargs):
+        if dump.__code__ is not dump_code:
+            raise ValueError("PaperBook JSON serializer authority changed")
+        return method(self, *args, _json_dump=publish, **kwargs)
+
+    del sealed.__wrapped__
+    return sealed
+
+
 def _seal_paperbook_settle_transition_authority(method):
     """Inject closure-captured write authority into settle."""
     causal_advance = _advance_paperbook_causal_history_settle
@@ -1040,12 +1063,14 @@ class PaperBook:
     @_serialized_paperbook_operation
     @_guard_paperbook_runtime_authority
     @_seal_paperbook_save_candidate_authority
+    @_seal_paperbook_snapshot_json_publish_authority
     def save(
         self,
         path: str | Path,
         *,
         _opening_candidate_authority=None,
         _causal_candidate_authority=None,
+        _json_dump=None,
     ) -> None:
         # Runtime visible-state + hidden-authority validation is performed once
         # by the closure-captured guard before this body executes.
@@ -1109,7 +1134,7 @@ class PaperBook:
                 delete=False,
             ) as handle:
                 temporary = Path(handle.name)
-                json.dump(raw, handle, ensure_ascii=False, indent=2)
+                _json_dump(raw, handle)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, destination)

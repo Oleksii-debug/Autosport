@@ -660,7 +660,7 @@ def _execute_unlocked(
     # Durable ledger execution can cross filesystem and registry boundaries.
     # Re-prove runtime/prepared authority before any post-run materialization
     # reads the caller-visible prepared value again.
-    run = _adoption.execute_paper_plan(
+    returned_run = _adoption.execute_paper_plan(
         plan=prepared.execution_plan,
         trigger_id=trigger_id,
         config=self.config,
@@ -671,13 +671,38 @@ def _execute_unlocked(
         suspended_action_ids=suspended_action_ids,
     )
     self._require_minted(prepared)
-    decision_id = _exact_text(
-        prepared.execution_plan.decision_id,
-        "prepared decision_id",
-    )
-    if run.run_id != expected_run_id:
+    if (
+        type(returned_run) is not _reality.PaperExecutionRun
+        or type(returned_run.run_id) is not str
+        or returned_run.run_id != expected_run_id
+    ):
         raise PaperExecutionAdoptionError(
             "canonical execution returned unexpected run identity"
+        )
+
+    # Durable ledger state is execution truth. Reconstruct from the reservation,
+    # attempt and completion evidence before reading execution economics.
+    action_ids = tuple(
+        action.action_id for action in prepared.execution_plan.actions
+    )
+    observation_evidence_ids = _durable_observation_evidence_ids(
+        self.ledger,
+        run_id=expected_run_id,
+        action_ids=action_ids,
+    )
+    run = self.ledger.load_run(
+        run_id=expected_run_id,
+        trigger_id=trigger_id,
+        plan=prepared.execution_plan,
+        config=self.config,
+        started_at=started_at,
+        observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspended_action_ids,
+    )
+    self._require_minted(prepared)
+    if run is None or type(run) is not _reality.PaperExecutionRun:
+        raise PaperExecutionAdoptionError(
+            "canonical durable execution run is unavailable after execution"
         )
     if not materialize_exposure:
         return _adoption.PaperExecutionAdoptionResult(run=run, ticket_ids=())

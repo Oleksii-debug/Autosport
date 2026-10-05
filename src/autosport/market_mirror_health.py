@@ -37,7 +37,7 @@ class ProviderHealthReplayBoundary:
 
     def __post_init__(self) -> None:
         if (
-            not isinstance(self.source_id, str)
+            type(self.source_id) is not str
             or not self.source_id
             or self.source_id.strip() != self.source_id
         ):
@@ -58,7 +58,7 @@ class ProviderHealthReplayBoundary:
                     "zero health replay boundary cannot carry recorded_at"
                 )
         else:
-            if not isinstance(self.recorded_at, str):
+            if type(self.recorded_at) is not str:
                 raise ValueError(
                     "positive health replay boundary requires recorded_at"
                 )
@@ -133,8 +133,8 @@ class HealthGatedMirrorDecisionIndex:
             raise TypeError("dependencies must be a FocusedMirrorDependencyIndex")
         if not isinstance(health_store, SourceHealthStore):
             raise TypeError("health_store must be a SourceHealthStore")
-        if not isinstance(max_health_age, timedelta):
-            raise TypeError("max_health_age must be a timedelta")
+        if type(max_health_age) is not timedelta:
+            raise TypeError("max_health_age must be an exact timedelta")
         if max_health_age < timedelta(0):
             raise ValueError("max_health_age must be non-negative")
         self._dependencies = dependencies
@@ -143,15 +143,15 @@ class HealthGatedMirrorDecisionIndex:
 
     @staticmethod
     def _as_of(value: datetime) -> datetime:
-        if not isinstance(value, datetime):
-            raise TypeError("as_of must be a datetime")
+        if type(value) is not datetime:
+            raise TypeError("as_of must be an exact datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("as_of must be timezone-aware")
         return value.astimezone(timezone.utc)
 
     @staticmethod
     def _source_id(value: str) -> str:
-        if not isinstance(value, str) or not value or value.strip() != value:
+        if type(value) is not str or not value or value.strip() != value:
             raise ValueError("source_id must be a non-empty trimmed string")
         return value
 
@@ -225,8 +225,10 @@ class HealthGatedMirrorDecisionIndex:
                     )
                     horizon_recorded_at = entry["recorded_at"]
         else:
-            if not isinstance(replay_boundary, ProviderHealthReplayBoundary):
-                raise TypeError("replay_boundary must be a ProviderHealthReplayBoundary")
+            if type(replay_boundary) is not ProviderHealthReplayBoundary:
+                raise TypeError(
+                    "replay_boundary must be an exact ProviderHealthReplayBoundary"
+                )
             if replay_boundary.source_id != source_id:
                 raise ValueError("health replay boundary source_id mismatch")
             horizon_order = self._boundary_order(replay_boundary.transition_order)
@@ -343,13 +345,24 @@ class HealthGatedMirrorDecisionIndex:
         health_boundaries: Mapping[str, ProviderHealthReplayBoundary] | None = None,
     ) -> HealthGatedMirrorSnapshot:
         """Health-gate an already proven market snapshot without rebuilding market truth."""
-        if not isinstance(captured, MirrorSnapshot):
-            raise TypeError("captured must be a MirrorSnapshot")
+        if type(captured) is not MirrorSnapshot:
+            raise TypeError("captured must be an exact MirrorSnapshot")
         boundary = self._as_of(as_of)
         source_ids = tuple(sorted({event.source_id for event in captured.events}))
         if health_boundaries is not None:
             if not isinstance(health_boundaries, Mapping):
                 raise TypeError("health_boundaries must be a mapping or null")
+            if any(type(key) is not str for key in health_boundaries):
+                raise TypeError(
+                    "health replay boundary mapping keys must be exact strings"
+                )
+            if any(
+                type(value) is not ProviderHealthReplayBoundary
+                for value in health_boundaries.values()
+            ):
+                raise TypeError(
+                    "health replay boundary mapping values must be exact boundaries"
+                )
             if set(health_boundaries) != set(source_ids):
                 raise ValueError(
                     "health replay boundaries must match decision-view sources"

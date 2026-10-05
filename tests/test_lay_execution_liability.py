@@ -684,6 +684,93 @@ class LayExecutionLiabilityTests(unittest.TestCase):
             self.assertEqual(hostile_calls, 0)
             self.assertEqual(resolved, record)
 
+    def test_execution_rejects_mutated_ledger_storage_identity_before_durable_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mutations = (
+                ("path", root / "redirect.jsonl"),
+                ("_lock_path", root / "redirect.lock"),
+                ("_anchor_path", root / "redirect.anchor.json"),
+                ("_lock", object()),
+            )
+            for index, (attribute, replacement) in enumerate(mutations):
+                ledger = PaperExecutionLedger(root / f"canonical-{index}.jsonl")
+                setattr(ledger, attribute, replacement)
+                with self.subTest(attribute=attribute):
+                    with self.assertRaisesRegex(
+                        PaperExecutionStateError,
+                        "storage authority changed after construction",
+                    ):
+                        execute_paper_plan(
+                            plan=_plan(_action(f"storage-{index}", side="BACK")),
+                            trigger_id=f"storage-{index}",
+                            config=_config(),
+                            ledger=ledger,
+                            started_at=STARTED_AT,
+                        )
+                    if attribute == "path":
+                        self.assertFalse(replacement.exists())
+
+    def test_execution_bypasses_instance_storage_witness_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("instance storage-witness override executed")
+
+            ledger._require_storage_authority = forbidden
+            try:
+                run = execute_paper_plan(
+                    plan=_plan(_action("sealed-storage-witness", side="BACK")),
+                    trigger_id="sealed-storage-witness",
+                    config=_config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                )
+            finally:
+                ledger.__dict__.pop("_require_storage_authority", None)
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertTrue(run.completed)
+
+    def test_forged_path_durable_flag_cannot_skip_directory_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            execute_paper_plan(
+                plan=_plan(_action("durability-seed", side="BACK")),
+                trigger_id="durability-seed",
+                config=_config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            ledger._path_durable = True
+            sync_calls = 0
+            original_sync = paper_reality._CANONICAL_LEDGER_SYNC_PARENT_DIRECTORY
+
+            def counting_sync(current):
+                nonlocal sync_calls
+                sync_calls += 1
+                return original_sync(current)
+
+            with patch.object(
+                paper_reality,
+                "_CANONICAL_LEDGER_SYNC_PARENT_DIRECTORY",
+                counting_sync,
+            ):
+                run = execute_paper_plan(
+                    plan=_plan(_action("durability-followup", side="BACK")),
+                    trigger_id="durability-followup",
+                    config=_config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                )
+
+            self.assertTrue(run.completed)
+            self.assertGreater(sync_calls, 0)
+
     def test_registry_revalidates_mutated_decimal_before_durable_write(self):
         class HostileDecimal(Decimal):
             pass

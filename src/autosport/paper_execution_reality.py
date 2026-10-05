@@ -251,6 +251,36 @@ def _canonical_run_reservation_inputs(
 class PaperExecutionLedger(_impl.PaperExecutionLedger):
     """PAPER ledger with mechanically derived completion economics."""
 
+    def register_observation_evidence(
+        self,
+        record: PaperExecutionEvidenceRecord,
+    ) -> None:
+        if type(self) is not PaperExecutionLedger:
+            raise TypeError("ledger must be exact PaperExecutionLedger")
+        _impl._require_canonical_evidence_record_surface(record)
+        try:
+            canonical_record = PaperExecutionEvidenceRecord.from_dict(
+                record.to_dict()
+            )
+        except (PaperExecutionIntegrityError, TypeError, ValueError) as exc:
+            raise PaperExecutionIntegrityError(
+                "evidence record no longer satisfies canonical value invariants"
+            ) from exc
+        if canonical_record != record:
+            raise PaperExecutionIntegrityError(
+                "evidence record changed outside canonical construction authority"
+            )
+        super().register_observation_evidence(record)
+
+    def resolve_observation_evidence(
+        self,
+        evidence_id: str,
+    ) -> PaperExecutionEvidenceRecord:
+        if type(self) is not PaperExecutionLedger:
+            raise TypeError("ledger must be exact PaperExecutionLedger")
+        evidence_id = _impl._text(evidence_id, "evidence_id")
+        return super().resolve_observation_evidence(evidence_id)
+
     def reserve_run(
         self,
         *,

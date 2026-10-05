@@ -20,6 +20,7 @@ from autosport.live_observation import (
 from autosport.market_mirror import MarketMirror
 from autosport.market_mirror_runtime import BoundedMirrorInvalidationBuffer
 from autosport.providers import InMemoryProvider, ProviderBatch, ProviderQuote
+from autosport.session import ObservationResult
 from autosport.storage import SQLiteMarketStore
 from autosport.ui_model import observation_quote_lines, observation_summary
 
@@ -958,6 +959,47 @@ class LiveObservationTests(unittest.TestCase):
                 invalidations.changed_keys,
             )
             self.assertEqual(len(invalidations.changed_keys), 3)
+
+    def test_observation_result_rejects_substituted_components(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        class Stats(type(canonical.stats)):
+            pass
+
+        class Health(type(canonical.health)):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "exact IngestionStats"):
+            ObservationResult(
+                Stats(
+                    canonical.stats.source_id,
+                    canonical.stats.received,
+                    canonical.stats.accepted,
+                    canonical.stats.rejected,
+                    canonical.stats.elapsed_seconds,
+                    canonical.stats.cursor,
+                    canonical.stats.quality_flags,
+                    canonical.stats.health_status,
+                ),
+                canonical.health,
+                canonical.current_quotes,
+            )
+        with self.assertRaisesRegex(TypeError, "exact SourceHealthState"):
+            ObservationResult(
+                canonical.stats,
+                Health(**{
+                    name: getattr(canonical.health, name)
+                    for name in canonical.health.__dataclass_fields__
+                }),
+                canonical.current_quotes,
+            )
+        with self.assertRaisesRegex(TypeError, "exact tuple"):
+            ObservationResult(
+                canonical.stats,
+                canonical.health,
+                list(canonical.current_quotes),
+            )
 
     def test_worker_rejects_noncallable_task_before_claiming_slot(self):
         worker = OneShotObservationWorker()

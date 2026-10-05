@@ -125,6 +125,11 @@ def _timestamp_text(value: datetime) -> str:
 # mutation of the ledger instance's public `events` attribute cannot fabricate the
 # pre-existing RUN_RESERVED fact used to choose the execution clock.
 _PAPER_EXECUTION_LEDGER_LOAD_UNL = PaperExecutionLedger._load_unlocked
+_PAPER_EXECUTION_LEDGER_LOAD_UNL_CODE = getattr(
+    _PAPER_EXECUTION_LEDGER_LOAD_UNL,
+    "__code__",
+    None,
+)
 
 
 class PaperExecutionAdoptionRuntime:
@@ -547,10 +552,19 @@ class PaperExecutionAdoptionRuntime:
             )
 
         run_id = self.expected_run_id(prepared, trigger_id)
+        durable_loader = _PAPER_EXECUTION_LEDGER_LOAD_UNL
+        if (
+            PaperExecutionLedger._load_unlocked is not durable_loader
+            or getattr(durable_loader, "__code__", None)
+            is not _PAPER_EXECUTION_LEDGER_LOAD_UNL_CODE
+        ):
+            raise PaperExecutionAdoptionError(
+                "canonical PAPER execution ledger reader changed"
+            )
         with self.ledger._lock:
             events = tuple(
                 event
-                for event in _PAPER_EXECUTION_LEDGER_LOAD_UNL(self.ledger)
+                for event in durable_loader(self.ledger)
                 if event["run_id"] == run_id
             )
         reservations = [

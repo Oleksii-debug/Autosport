@@ -703,7 +703,6 @@ class PaperBook:
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
         destination = self._canonical_snapshot_path(path)
-        self._ensure_snapshot_parent_durable(destination.parent)
         raw = {
             "schema_version": _PAPER_SNAPSHOT_SCHEMA_VERSION,
             "initial_bankroll": str(self.initial_bankroll),
@@ -747,6 +746,10 @@ class PaperBook:
         candidate = self._from_raw_snapshot(raw)
         _require_snapshot_candidate_opening_authority(self, candidate)
         _require_snapshot_candidate_causal_history_authority(self, candidate)
+
+        # Do not publish filesystem state for a candidate that failed any
+        # structural/economic/authority check above.
+        self._ensure_snapshot_parent_durable(destination.parent)
 
         temporary: Path | None = None
         try:

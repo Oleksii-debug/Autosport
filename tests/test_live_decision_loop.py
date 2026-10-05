@@ -9683,6 +9683,76 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             loop.close()
 
 
+    def test_cycle_entry_rejects_active_decision_ledger_writer_before_provider_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),)],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            lock_path = (workspace / "decisions.jsonl").absolute().with_name(
+                "decisions.jsonl.writer.lock"
+            )
+            lock_path.write_text("owned", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "Decision Ledger transaction authority is unavailable",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(observer.calls, 0)
+            self.assertFalse(loop.progress_path.exists())
+            loop.close()
+
+    def test_cycle_entry_rejects_bound_decision_ledger_pathname_replacement_before_provider_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),)],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            loop.decision_ledger.append(
+                DecisionRecord(
+                    replay_run_id="authority-probe",
+                    agent="authority-probe",
+                    observed_ts=self.START.isoformat(),
+                    action="OBSERVE",
+                    payload={"probe": True},
+                    context_hash="authority-probe",
+                    decision_id="authority-probe",
+                )
+            )
+            path = workspace / "decisions.jsonl"
+            original = path.read_bytes()
+            path.unlink()
+            path.write_bytes(original)
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "Decision Ledger transaction authority is unavailable",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(observer.calls, 0)
+            self.assertFalse(loop.progress_path.exists())
+            loop.close()
+
+
     def test_post_append_hook_cannot_rebind_live_and_execution_book_together(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

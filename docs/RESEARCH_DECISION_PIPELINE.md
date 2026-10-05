@@ -84,7 +84,10 @@ Research replay uses the same causal market boundary as the canonical Market Mir
 A quote is decision-visible only when its provider/source clock (or local observation
 fallback), local `observed_ts`, and local `ingest_ts` are all no later than the
 decision cutoff. A quote that was observed but not yet locally ingested is not evidence
-available to that historical decision.
+available to that historical decision. Market-derived `ResearchEvidence.available_at`
+must be no earlier than this full causal market-availability instant; an evidence record
+cannot backdate itself to the provider/observation clock while local receipt happened
+later.
 
 Provider-local `sequence` is the latest-state authority; later wall-clock observation
 does not allow a lower sequence to replace a newer quote. Reusing one sequence with a

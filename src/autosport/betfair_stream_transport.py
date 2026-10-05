@@ -38,6 +38,7 @@ _BACKOFF_BASE_SECONDS = 1.0
 _BACKOFF_MAX_SECONDS = 60.0
 _ALLOWED_APP_KEY_CLASSES = frozenset({"DELAYED", "LIVE"})
 _ALLOWED_ENVIRONMENTS = frozenset({"PRODUCTION"})
+_MONOTONIC_NS = time.monotonic_ns
 
 
 class BetfairStreamTransportError(RuntimeError):
@@ -615,7 +616,11 @@ class BetfairStreamTlsTransport:
             raise BetfairStreamProtocolError(
                 "Betfair stream receive block must be non-empty bytes"
             )
-        received_monotonic_ns = time.monotonic_ns()
+        if time.monotonic_ns is not _MONOTONIC_NS:
+            raise BetfairStreamTransportError(
+                "Betfair stream monotonic receive clock dispatch changed"
+            )
+        received_monotonic_ns = _MONOTONIC_NS()
         if type(received_monotonic_ns) is not int or received_monotonic_ns <= 0:
             raise BetfairStreamTransportError(
                 "Betfair stream monotonic receive clock is invalid"

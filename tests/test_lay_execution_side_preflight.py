@@ -36,20 +36,24 @@ class _HostileSide(str):
 
 
 def _action(action_id: str, *, side: str, odds: str = "5.00", stake: str = "10.00") -> ExecutionAction:
-    return ExecutionAction(
+    constructor_side = side if side.strip() == side else "BACK"
+    action = ExecutionAction(
         action_id=action_id,
         bookmaker_id="paper-exchange",
         account_id="paper-account",
         event_id="event-1",
         market_id=f"market-{action_id}",
         selection_id=f"selection-{action_id}",
-        side=side,
+        side=constructor_side,
         requested_odds=odds,
         requested_stake=stake,
         quote_id=f"quote-{action_id}",
         quote_observed_at=QUOTE_AT,
         expires_at=EXPIRES_AT,
     )
+    if constructor_side != side:
+        object.__setattr__(action, "side", side)
+    return action
 
 
 def _plan(*actions: ExecutionAction) -> ExecutionPlan:

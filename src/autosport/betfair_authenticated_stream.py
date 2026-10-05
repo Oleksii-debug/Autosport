@@ -452,6 +452,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
         # Every later market frame must therefore be consumed by this runtime without
         # gaps; otherwise an unseen delta could make the local market image false.
         self._next_frame_sequence = 2
+        self._transport._claim_authenticated_reader(self)  # noqa: SLF001 - canonical composition ownership
 
     @property
     def subscription(self) -> BetfairAuthenticatedMarketSubscription:
@@ -463,8 +464,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
         # evaluation uses a separate short state lock and does not wait behind recv().
         with self._read_lock:
             self._require_current_connection()
-            self._require_runtime_frame_position()
-            frame = self._transport.read_authenticated_frame()
+            frame = self._transport.read_authenticated_frame(reader=self)
             # Once recv() returns, semantic validation and any resulting revocation are
             # one state-critical transition.  This prevents a concurrent evaluate()
             # from issuing authority from older evidence after a newly received frame
@@ -510,10 +510,6 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                             frame.payload_sha256,
                             frame.received_monotonic_ns,
                         )
-                    if _transport_frame_sequence(self._transport) != frame.frame_sequence:
-                        raise BetfairAuthenticatedStreamError(
-                            "authenticated transport advanced outside the market runtime"
-                        )
                     self._next_frame_sequence += 1
                     return issued
                 except BetfairStreamAuthenticationError as exc:
@@ -548,11 +544,9 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             max_future_skew_ms=policy.max_future_skew_ms,
         )
         self._require_current_connection()
-        self._require_runtime_frame_position()
         evaluated_at_ms = _wall_time_ms()
         with self._state_lock:
             self._require_current_connection()
-            self._require_runtime_frame_position()
             structural = self._freshness.evaluate(
                 identity,
                 as_of_ms=evaluated_at_ms,
@@ -639,13 +633,11 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             return False
         try:
             self._require_current_connection()
-            self._require_runtime_frame_position()
         except BetfairAuthenticatedStreamError:
             return False
         with self._state_lock:
             try:
                 self._require_current_connection()
-                self._require_runtime_frame_position()
             except BetfairAuthenticatedStreamError:
                 return False
             if decision.subscription_id != self._subscription.subscription_id:
@@ -677,13 +669,6 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             ):
                 return False
             return frame_sha == decision.transport_frame_sha256
-
-    def _require_runtime_frame_position(self) -> None:
-        if _transport_frame_sequence(self._transport) != self._next_frame_sequence - 1:
-            self._transport.close()
-            raise BetfairAuthenticatedStreamError(
-                "authenticated transport frame position advanced outside the market runtime"
-            )
 
     def _require_current_connection(self) -> None:
         _require_subscription_for_transport(self._subscription, self._transport)
@@ -762,15 +747,6 @@ def _require_same_connection(
         raise BetfairAuthenticatedStreamError(
             "transport frame belongs to another connection generation"
         )
-
-
-def _transport_frame_sequence(transport: BetfairStreamTlsTransport) -> int:
-    value = getattr(transport, "_frame_sequence", None)
-    if type(value) is not int or value < 0:
-        raise BetfairAuthenticatedStreamError(
-            "authenticated transport frame sequence is unavailable"
-        )
-    return value
 
 
 def _transport_generation(transport: BetfairStreamTlsTransport) -> int:

@@ -37,13 +37,18 @@ from .workspace_lock import WorkspaceEconomicLock
 from .real_execution_ledger import (
     AcknowledgementStatus,
     AttemptState,
+    EventType,
     ExecutionAction,
+    ExecutionStateError,
     ExternalAcknowledgement,
     RealExecutionLedger,
 )
+from . import supervised_execution as _supervised_execution_runtime
 from .supervised_execution import (
     BoundSupervisedExecutionPlan,
     SupervisedApproval,
+    _require_approval,
+    _require_durable_approval,
     begin_supervised_attempt,
 )
 
@@ -588,6 +593,7 @@ class BetfairSupervisedPlaceOrdersClient:
         bound: BoundSupervisedExecutionPlan,
         provider_order_ref: str,
         execution_workspace: Path,
+        _before_transport: Callable[[str], None] | None = None,
     ) -> BetfairPlaceExecutionReport:
         selection_id = _validate_betfair_place_action(action)
         self._gate.require(
@@ -641,6 +647,8 @@ class BetfairSupervisedPlaceOrdersClient:
             "X-Application": self._credentials.application_key,
             "X-Authentication": self._credentials.session_token,
         }
+        if _before_transport is not None:
+            _before_transport(request_sha256)
         try:
             payload = self._transport.post(
                 BETTING_JSON_RPC_ENDPOINT,
@@ -937,6 +945,118 @@ def read_betfair_supervised_action_readback(
     return capture
 
 
+
+def _place_action_with_final_durable_authority(
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+    *,
+    action: ExecutionAction,
+    attempt_id: str,
+    profile: BookmakerCapabilityProfile,
+    client: BetfairSupervisedPlaceOrdersClient,
+    provider_order_ref: str,
+    execution_workspace: Path,
+) -> BetfairPlaceExecutionReport:
+    """Hold durable approval stable and fsync SUBMITTED at the provider boundary."""
+
+    def operation() -> BetfairPlaceExecutionReport:
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        if view.plan_fingerprint != bound.execution_plan.fingerprint:
+            raise ExecutionStateError(
+                "durable execution-plan fingerprint changed before final send"
+            )
+        attempts = [
+            item
+            for item in view.attempts
+            if item.attempt.attempt_id == attempt_id
+        ]
+        if len(attempts) != 1:
+            raise ExecutionStateError(
+                "final supervised send requires one durable attempt"
+            )
+        attempt = attempts[0]
+        if (
+            attempt.state is not AttemptState.RESERVED
+            or attempt.attempt.action_id != action.action_id
+            or attempt.action != action
+        ):
+            raise ExecutionStateError(
+                "final supervised send requires the exact RESERVED action"
+            )
+        if attempt.provider_order_ref != provider_order_ref:
+            raise ExecutionStateError(
+                "final supervised send provider order reference drifted"
+            )
+
+        _require_durable_approval(ledger, bound, approval)
+        _validate_betfair_place_action(action)
+        client._gate.require(
+            action=action,
+            profile=profile,
+            bound=bound,
+            execution_workspace=execution_workspace,
+        )
+        provider_ref = _text(provider_order_ref, "provider_order_ref")
+        if len(provider_ref) > 32 or any(
+            character not in "0123456789abcdef"
+            for character in provider_ref
+        ):
+            raise BetfairSupervisedExecutionError(
+                "provider_order_ref must be <=32 lowercase hex characters"
+            )
+
+        submitted = False
+
+        def authorize_and_submit(_request_sha256: str) -> None:
+            nonlocal submitted
+            send_at = _supervised_execution_runtime._trusted_now()
+            _require_approval(bound, approval, send_at)
+            _require_durable_approval(ledger, bound, approval)
+            if _time(send_at, "final send time") < _time(
+                attempt.attempt.reserved_at,
+                "attempt reserved_at",
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "final send time precedes attempt reservation"
+                )
+            if _time(send_at, "final send time") >= _time(
+                action.expires_at,
+                "action expires_at",
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "placeOrders final send is at/after quote expiry"
+                )
+            ledger._append(
+                EventType.ATTEMPT_SUBMITTED,
+                bound.execution_plan.plan_id,
+                action.action_id,
+                attempt_id,
+                {"submitted_at": send_at},
+            )
+            submitted = True
+
+        try:
+            return client.place_action(
+                action,
+                profile=profile,
+                bound=bound,
+                provider_order_ref=provider_ref,
+                execution_workspace=execution_workspace,
+                _before_transport=authorize_and_submit,
+            )
+        except BetfairPlaceOrdersAmbiguous:
+            raise
+        except Exception as exc:
+            if not submitted:
+                raise
+            raise BetfairPlaceOrdersAmbiguous(
+                "placeOrders dispatch failed after durable submission; "
+                "authoritative readback required"
+            ) from exc
+
+    return ledger._mutate(operation)
+
 def execute_betfair_supervised_action(
     ledger: RealExecutionLedger,
     bound: BoundSupervisedExecutionPlan,
@@ -961,7 +1081,9 @@ def execute_betfair_supervised_action(
         )
     action = bound.action_for(action_id)
     _validate_betfair_place_action(action)
-    now = clock or _now
+    # API compatibility only: execution-authority time is product-owned.
+    _ = clock
+    trusted_now = _supervised_execution_runtime._trusted_now
     execution_workspace = ledger.path.parent.resolve()
 
     # Serialize the current owner authority through the actual provider-write
@@ -991,29 +1113,26 @@ def execute_betfair_supervised_action(
             attempt_id=attempt_id,
             provider_id=action.bookmaker_id,
         )
-        ledger.mark_submitted(
-            attempt_id,
-            submitted_at=now(),
-        )
         try:
-            report = client.place_action(
-                action,
+            report = _place_action_with_final_durable_authority(
+                ledger,
+                bound,
+                approval,
+                action=action,
+                attempt_id=attempt_id,
                 profile=profile,
-                bound=bound,
+                client=client,
                 provider_order_ref=provider_order_ref,
                 execution_workspace=execution_workspace,
             )
-        except (
-            BetfairPlaceOrdersAmbiguous,
-            BetfairSupervisedExecutionError,
-        ):
+        except BetfairPlaceOrdersAmbiguous:
             ledger.mark_unknown(
                 attempt_id,
                 reason=(
                     "betfair_placeOrders_ambiguous_effect_"
                     "requires_readback"
                 ),
-                observed_at=now(),
+                observed_at=trusted_now(),
             )
             return BetfairSupervisedExecutionResult(
                 PlaceOrdersOutcome.UNKNOWN,

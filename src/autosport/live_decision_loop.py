@@ -817,18 +817,27 @@ class PersistentLiveDecisionLoop:
         catalog_required_history: timedelta = timedelta(0),
     ) -> None:
         self.workspace = Path(workspace)
-        self.workspace.mkdir(parents=True, exist_ok=True)
         self._workspace_authority = self.workspace
         self.loop_id = _canonical_text("loop_id", loop_id)
         self._loop_id_authority = self.loop_id
-        if not isinstance(mode, LiveDecisionMode):
-            raise TypeError("mode must be LiveDecisionMode")
-        if not isinstance(book, PaperBook):
-            raise TypeError("book must be PaperBook")
-        if not isinstance(authority, EconomicDecisionAuthority):
-            raise TypeError("authority must be EconomicDecisionAuthority")
+        if type(mode) is not LiveDecisionMode:
+            raise TypeError("mode must be an exact LiveDecisionMode")
+        if type(book) is not PaperBook:
+            raise TypeError("book must be an exact PaperBook")
+        if type(authority) is not EconomicDecisionAuthority:
+            raise TypeError("authority must be an exact EconomicDecisionAuthority")
+        if type(scientific_registry) is not ScientificRegistry:
+            raise TypeError("scientific_registry must be an exact ScientificRegistry")
+        if decision_ledger is not None and type(decision_ledger) is not JsonlDecisionLedger:
+            raise TypeError("decision_ledger must be an exact JsonlDecisionLedger or None")
+        if paper_execution is not None and type(paper_execution) is not PaperExecutionAdoptionRuntime:
+            raise TypeError(
+                "paper_execution must be an exact PaperExecutionAdoptionRuntime or None"
+            )
         if ingestion_policy is not None and type(ingestion_policy) is not IngestionPolicy:
             raise TypeError("ingestion_policy must be an exact IngestionPolicy or None")
+        if bounds is not None and type(bounds) is not LiveLoopBounds:
+            raise TypeError("bounds must be an exact LiveLoopBounds or None")
         if not callable(intent_factory):
             raise TypeError("intent_factory must be callable")
         factory_strategy_version_id = getattr(
@@ -850,14 +859,16 @@ class PersistentLiveDecisionLoop:
         goal_quote_age = authority.contract.max_quote_age_seconds
         if max_quote_age is None:
             max_quote_age = _conservative_timedelta(goal_quote_age)
-        elif not isinstance(max_quote_age, timedelta) or max_quote_age < timedelta(0):
-            raise ValueError("max_quote_age must be a non-negative timedelta or None")
+        elif type(max_quote_age) is not timedelta or max_quote_age < timedelta(0):
+            raise ValueError("max_quote_age must be an exact non-negative timedelta or None")
         elif _timedelta_decimal_seconds(max_quote_age) > goal_quote_age:
             raise ValueError(
                 "max_quote_age cannot exceed EconomicGoalContract.max_quote_age_seconds"
             )
         if observation_runner is None and provider is None:
             raise ValueError("provider is required when observation_runner is omitted")
+
+        self.workspace.mkdir(parents=True, exist_ok=True)
 
         self.mode = mode
         self._configured_mode = mode
@@ -893,10 +904,6 @@ class PersistentLiveDecisionLoop:
             )
         self._decision_ledger_authority = self.decision_ledger
         if paper_execution is not None:
-            if not isinstance(paper_execution, PaperExecutionAdoptionRuntime):
-                raise TypeError(
-                    "paper_execution must be PaperExecutionAdoptionRuntime or None"
-                )
             if paper_execution.book is not book:
                 raise ValueError(
                     "paper_execution must materialize into the live loop PaperBook"

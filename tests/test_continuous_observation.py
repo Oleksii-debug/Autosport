@@ -498,12 +498,19 @@ class ContinuousObservationTests(unittest.TestCase):
                 ]
             )
             waits = []
+            now = [0.0]
+
+            def wait_and_advance(seconds: float) -> bool:
+                waits.append(seconds)
+                now[0] += seconds
+                return False
+
             result = run_continuous_observation(
                 provider,
                 self._config(Path(tmp)),
                 ingestion_clock=lambda: _NOW,
-                monotonic=lambda: 0.0,
-                waiter=lambda seconds: waits.append(seconds) or False,
+                monotonic=lambda: now[0],
+                waiter=wait_and_advance,
                 reporter=None,
             )
 
@@ -515,6 +522,29 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertEqual(status["state"], "stopped")
             self.assertEqual(status["health_status"], "healthy")
             self.assertIsNone(status["last_error"])
+
+    def test_provider_unavailable_rejects_waiter_that_skips_backoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = SequenceProvider(
+                [
+                    ProviderUnavailableError("temporary outage"),
+                    _batch(_quote(), cursor="must-not-run"),
+                ]
+            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "waiter returned before provider backoff elapsed",
+            ):
+                run_continuous_observation(
+                    provider,
+                    self._config(Path(tmp)),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    waiter=lambda _seconds: False,
+                    reporter=None,
+                )
+
+            self.assertEqual(provider.calls, 1)
 
     def test_provider_unavailable_respects_attempt_budget_and_backoff_cap(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -530,12 +560,19 @@ class ContinuousObservationTests(unittest.TestCase):
                 max_backoff_seconds=2,
                 max_items=10,
             )
+            now = [0.0]
+
+            def wait_and_advance(seconds: float) -> bool:
+                waits.append(seconds)
+                now[0] += seconds
+                return False
+
             result = run_continuous_observation(
                 provider,
                 config,
                 ingestion_clock=lambda: _NOW,
-                monotonic=lambda: 0.0,
-                waiter=lambda seconds: waits.append(seconds) or False,
+                monotonic=lambda: now[0],
+                waiter=wait_and_advance,
                 reporter=None,
             )
 

@@ -9387,7 +9387,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 workspace / "paper-execution.jsonl"
             )
             foreign_ledger = PaperExecutionLedger(
-                workspace / "foreign-paper-execution.jsonl"
+                workspace / "paper-execution.jsonl"
             )
             execution = PaperExecutionAdoptionRuntime(
                 book=book,
@@ -9671,7 +9671,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.register_input("input-a", selection_ids="selection-a")
             foreign_ledger = JsonlDecisionLedger(
-                workspace / "foreign-decisions.jsonl"
+                workspace / "decisions.jsonl"
             )
             loop.decision_ledger = foreign_ledger
 
@@ -9689,6 +9689,78 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 ).verified_records(),
                 (),
             )
+            loop.close()
+
+
+    def test_post_append_hook_cannot_rebind_live_and_execution_book_together(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+            model = PaperExecutionModelConfig(
+                model_id="post-append-book-authority",
+                model_version="1",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="post-append-book-authority",
+                seed="post-append-book-authority",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            book = PaperBook("1000")
+            canonical_ledger = PaperExecutionLedger(
+                workspace / "paper-execution.jsonl"
+            )
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=canonical_ledger,
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            goal = EconomicGoalContract(
+                goal_id="goal-post-append-book-authority",
+                revision=1,
+                bankroll_id="bankroll-live-test",
+                currency="EUR",
+                max_risk_of_ruin=Decimal("1"),
+            )
+            authority = EconomicDecisionAuthority(
+                goal,
+                PaperRiskPolicy(economic_goal=goal),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(event,)]),
+                factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+                book=book,
+                authority=authority,
+                paper_execution=execution,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            replacement_book = copy.deepcopy(book)
+
+            def rebind_books_after_decision_append() -> None:
+                loop.book = replacement_book
+                execution.book = replacement_book
+
+            loop.post_append_hook = rebind_books_after_decision_append
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "PaperBook authority changed",
+            ):
+                loop.run_cycle()
+
+            self.assertEqual(canonical_ledger.events(), ())
+            durable_book = PaperBook.load(workspace / "paper_book.json")
+            self.assertEqual(durable_book.tickets, {})
+            progress = json.loads(loop.progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(progress["phase"], "append_pending")
             loop.close()
 
 if __name__ == "__main__":

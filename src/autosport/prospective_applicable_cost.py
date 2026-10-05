@@ -996,6 +996,26 @@ def _build_canonical_authority():
             raise error_cls("canonical PortfolioPlan digest authority changed")
         canonical_request_id = text(model_request_id, "model_request_id")
 
+        if (
+            router_store_cls.get_request is not router_get_request
+            or router_get_request.__code__ is not router_get_request_code
+        ):
+            raise error_cls("canonical router request reader authority changed")
+        if (
+            router_store_cls.get_decision is not router_get_decision
+            or router_get_decision.__code__ is not router_get_decision_code
+        ):
+            raise error_cls("canonical router decision reader authority changed")
+        if (
+            router_request_cls.payload is not router_request_payload
+            or router_request_payload.__code__ is not router_request_payload_code
+        ):
+            raise error_cls("canonical router request payload authority changed")
+        if (
+            router_decision_cls.payload is not router_decision_payload
+            or router_decision_payload.__code__ is not router_decision_payload_code
+        ):
+            raise error_cls("canonical router decision payload authority changed")
         if model_resolver.__code__ is not model_resolver_code:
             raise error_cls("canonical model-compute resolver authority changed")
         model_evidence = model_resolver(
@@ -1006,6 +1026,26 @@ def _build_canonical_authority():
         )
         if model_resolver.__code__ is not model_resolver_code:
             raise error_cls("canonical model-compute resolver authority changed")
+        if (
+            router_store_cls.get_request is not router_get_request
+            or router_get_request.__code__ is not router_get_request_code
+        ):
+            raise error_cls("canonical router request reader authority changed")
+        if (
+            router_store_cls.get_decision is not router_get_decision
+            or router_get_decision.__code__ is not router_get_decision_code
+        ):
+            raise error_cls("canonical router decision reader authority changed")
+        if (
+            router_request_cls.payload is not router_request_payload
+            or router_request_payload.__code__ is not router_request_payload_code
+        ):
+            raise error_cls("canonical router request payload authority changed")
+        if (
+            router_decision_cls.payload is not router_decision_payload
+            or router_decision_payload.__code__ is not router_decision_payload_code
+        ):
+            raise error_cls("canonical router decision payload authority changed")
         evidence_id = model_evidence_id(
             model_evidence,
             expected_request_id=canonical_request_id,

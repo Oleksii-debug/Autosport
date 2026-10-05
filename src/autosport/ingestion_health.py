@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
@@ -39,6 +40,17 @@ _HISTORY_ENTRY_V3_FIELDS = frozenset({"recorded_at", "transition_order", "state"
 def parse_source_timestamp(value: str) -> datetime:
     if not isinstance(value, str) or not value or value.strip() != value:
         raise ValueError("provider source timestamp must be a non-empty trimmed string")
+    # datetime.fromisoformat() silently discards non-zero precision beyond
+    # microseconds. That is not acceptable for source-health or causal as-of
+    # authority because D+submicrosecond evidence could otherwise appear at D.
+    for match in re.finditer(r"[.,]([0-9]+)", value):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(
+                "provider source timestamp precision finer than microseconds is unsupported"
+            )
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:

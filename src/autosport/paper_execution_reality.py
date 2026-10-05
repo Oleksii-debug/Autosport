@@ -7,7 +7,11 @@ from typing import Any, Mapping
 
 from . import _paper_execution_reality_legacy as _impl
 from .exchange_exposure import locked_capital_for_exchange_side
-from .real_execution_ledger import ExecutionAction, ExecutionPlan
+from .real_execution_ledger import (
+    ExecutionAction,
+    ExecutionPlan,
+    _validate_decimal_text_resource_bound,
+)
 
 
 PaperExecutionRealityError = _impl.PaperExecutionRealityError
@@ -25,8 +29,11 @@ PaperExecutionEvidenceRegistry = _impl.PaperExecutionEvidenceRegistry
 
 
 def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
+    if type(value) is not Decimal:
+        raise ValueError("Decimal must be an exact canonical Decimal")
     if not value.is_finite():
         raise ValueError("Decimal must be finite")
+    _validate_decimal_text_resource_bound(value)
     parts = value.as_tuple()
     coefficient = 0
     for digit in parts.digits:
@@ -39,7 +46,9 @@ def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
 def _decimal_from_coefficient(coefficient: int, exponent: int) -> Decimal:
     sign = 1 if coefficient < 0 else 0
     digits = tuple(int(ch) for ch in str(abs(coefficient)))
-    return Decimal((sign, digits, exponent))
+    value = Decimal((sign, digits, exponent))
+    _validate_decimal_text_resource_bound(value)
+    return value
 
 
 def _decimal_add_exact(left: Decimal, right: Decimal) -> Decimal:

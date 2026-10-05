@@ -93,6 +93,7 @@ def test_provenance_trust_roots_are_detached_from_live_rebinding(monkeypatch) ->
     provenance.verify_provenance(goal, expected)
     assert calls == 0
 
+
 def test_provenance_fails_closed_after_contract_tampering() -> None:
     goal = _goal()
     evidence = provenance_for(goal)

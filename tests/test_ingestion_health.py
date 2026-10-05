@@ -783,5 +783,88 @@ class IngestionHealthTests(unittest.TestCase):
                 store.close()
 
 
+    def test_submicrosecond_local_observation_is_quote_local_rejection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:01+00:00",
+                )
+                valid = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="valid",
+                    decimal_odds=Decimal("2.0"),
+                    observed_ts="2026-09-12T12:00:00+00:00",
+                    sequence=1,
+                )
+                unsupported = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="submicro",
+                    decimal_odds=Decimal("2.1"),
+                    observed_ts="2026-09-12T12:00:00.0000001+00:00",
+                    sequence=2,
+                )
+                provider = StaticProvider(
+                    "source",
+                    [ProviderBatch("source", (valid, unsupported), cursor="precision")],
+                )
+
+                stats = engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(stats.accepted, 1)
+                self.assertEqual(stats.rejected, 1)
+                self.assertIn("INVALID_QUOTE", stats.quality_flags)
+                persisted = store.events()
+                self.assertEqual(len(persisted), 1)
+                self.assertEqual(persisted[0].selection_id, "source:valid")
+                self.assertEqual(health.get("source").status, "degraded")
+            finally:
+                store.close()
+
+    def test_zero_only_submicrosecond_receipt_tail_remains_exactly_admissible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:01+00:00",
+                )
+                quote = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="exact-zero-tail",
+                    decimal_odds=Decimal("2.0"),
+                    observed_ts="2026-09-12T12:00:00.123456000+00:00",
+                    sequence=1,
+                )
+                provider = StaticProvider(
+                    "source",
+                    [ProviderBatch("source", (quote,), cursor="zero-tail")],
+                )
+
+                stats = engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(stats.accepted, 1)
+                self.assertEqual(stats.rejected, 0)
+                self.assertEqual(stats.quality_flags, ())
+                persisted = store.events()
+                self.assertEqual(len(persisted), 1)
+                self.assertEqual(
+                    persisted[0].observed_ts,
+                    "2026-09-12T12:00:00.123456000+00:00",
+                )
+            finally:
+                store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

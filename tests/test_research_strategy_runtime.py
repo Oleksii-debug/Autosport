@@ -10,6 +10,7 @@ from autosport.dataset import load_dataset
 from autosport.research_strategy import (
     RESEARCH_STRATEGY_ID,
     ResearchStrategyPlan,
+    _advance_research_latest,
     market_event_evidence_hash,
     research_market_snapshot_hash,
 )
@@ -171,6 +172,91 @@ class ResearchStrategyRuntimeTests(unittest.TestCase):
             market_event_evidence_hash(trigger),
             market_event_evidence_hash(explicit_equal),
         )
+
+
+    def test_research_latest_ignores_lower_provider_sequence_even_if_observed_later(self):
+        dataset = load_dataset(Path("examples/tt_demo"))
+        current = next(
+            event for event in dataset.load_market_events() if event.sequence == 4
+        )
+        stale = replace(
+            current,
+            sequence=2,
+            observed_ts=(
+                datetime.fromisoformat(
+                    current.observed_ts.replace("Z", "+00:00")
+                )
+                + timedelta(seconds=5)
+            ).isoformat(),
+            ingest_ts=(
+                datetime.fromisoformat(
+                    current.observed_ts.replace("Z", "+00:00")
+                )
+                + timedelta(seconds=5)
+            ).isoformat(),
+            decimal_odds=Decimal("9.99"),
+        )
+        latest = {}
+        _advance_research_latest(latest, current)
+        _advance_research_latest(latest, stale)
+
+        self.assertIs(latest[current.quote_key], current)
+
+    def test_research_latest_rejects_conflicting_same_provider_sequence(self):
+        dataset = load_dataset(Path("examples/tt_demo"))
+        current = next(
+            event for event in dataset.load_market_events() if event.sequence == 4
+        )
+        conflicting = replace(current, decimal_odds=Decimal("9.99"))
+        latest = {}
+        _advance_research_latest(latest, current)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "conflicting payload reused provider-local sequence",
+        ):
+            _advance_research_latest(latest, conflicting)
+
+    def test_research_latest_rejects_cross_provider_quote_key_ambiguity(self):
+        dataset = load_dataset(Path("examples/tt_demo"))
+        current = next(
+            event for event in dataset.load_market_events() if event.sequence == 4
+        )
+        foreign = replace(
+            current,
+            source_id="other-provider",
+            sequence=current.sequence + 1,
+        )
+        latest = {}
+        _advance_research_latest(latest, current)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "ambiguous across provider sources",
+        ):
+            _advance_research_latest(latest, foreign)
+
+    def test_scenario_identity_is_not_known_before_local_receipt(self):
+        dataset = load_dataset(Path("examples/tt_demo"))
+        events = list(dataset.load_market_events())
+        trigger = next(event for event in events if event.sequence == 4)
+        future_receipt = (
+            datetime.fromisoformat(trigger.observed_ts.replace("Z", "+00:00"))
+            + timedelta(seconds=1)
+        ).isoformat()
+        events = [
+            replace(event, ingest_ts=future_receipt)
+            if event.selection_id == "player-a"
+            else event
+            for event in events
+        ]
+        plan = ResearchStrategyPlan.from_dict(self._plan_dict())
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "scenario outcome identity first appears after decision",
+        ):
+            plan.preflight(events)
 
     def test_research_strategy_runs_full_typed_pipeline_in_dataset_session(self):
         dataset = load_dataset(Path("examples/tt_demo"))

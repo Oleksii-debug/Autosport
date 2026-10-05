@@ -348,6 +348,9 @@ class SourceHealthStore:
         finally:
             os.close(directory_fd)
 
+    def assert_persistence_authority(self) -> None:
+        self._assert_persistence_authority()
+
     @staticmethod
     def _state_from_payload(payload: dict, *, normalize_failed_flags: bool = True) -> SourceHealthState:
         value = dict(payload)

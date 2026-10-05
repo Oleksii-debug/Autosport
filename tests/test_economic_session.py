@@ -319,6 +319,36 @@ class EconomicSessionBoundaryTests(unittest.TestCase):
 
         self.assertEqual(calls, 0)
 
+
+    def test_internal_authority_binding_rebinding_fails_closed(self) -> None:
+        store = self._store()
+        store.current()
+        store._authority.namespace_marker_path = (
+            store._authority.namespace_marker_path.parent / "redirected.json"
+        )
+        with self.assertRaisesRegex(
+            EconomicSessionIntegrityError,
+            "authority composition changed after construction",
+        ):
+            store.current()
+
+    def test_schema_constant_rebinding_fails_before_state_bootstrap(self) -> None:
+        import autosport.economic_session as economic_session
+
+        store = self._store()
+        original = economic_session._STATE_SCHEMA
+        economic_session._STATE_SCHEMA = "forged-schema"
+        try:
+            with self.assertRaisesRegex(
+                EconomicSessionIntegrityError,
+                "authority composition changed after construction",
+            ):
+                store.current()
+        finally:
+            economic_session._STATE_SCHEMA = original
+
+        self.assertFalse(store.state_path.exists())
+
     def test_default_clock_session_is_positive_boundary_authority(self) -> None:
         store = ProductEconomicSessionStore(
             self.workspace,

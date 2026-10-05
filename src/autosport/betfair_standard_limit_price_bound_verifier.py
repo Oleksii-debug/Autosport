@@ -284,6 +284,41 @@ def _build_product_verifier():
     monotonic_digest_code = monotonic_digest.__code__
     monotonic_text = _monotonic_module._text
     monotonic_text_code = monotonic_text.__code__
+    monotonic_absolute_path = _monotonic_module._absolute_path
+    monotonic_absolute_path_code = monotonic_absolute_path.__code__
+    monotonic_resolve_root = _monotonic_module.resolve_monotonic_authority_root
+    monotonic_resolve_root_code = monotonic_resolve_root.__code__
+    monotonic_preflight_root = _monotonic_module.preflight_authority_root_selection
+    monotonic_preflight_root_code = monotonic_preflight_root.__code__
+    monotonic_workspace_binding_cls = _monotonic_module.WorkspaceIdentityBinding
+    monotonic_workspace_resolve = monotonic_workspace_binding_cls.__dict__["resolve"].__func__
+    monotonic_workspace_resolve_code = monotonic_workspace_resolve.__code__
+    monotonic_root_binding_cls = _monotonic_module.AuthorityRootSelectionBinding
+    monotonic_root_resolve = monotonic_root_binding_cls.__dict__["resolve"].__func__
+    monotonic_root_resolve_code = monotonic_root_resolve.__code__
+    monotonic_validate_root_selection = monotonic_cls._validate_authority_root_selection
+    monotonic_validate_root_selection_code = monotonic_validate_root_selection.__code__
+    monotonic_validate_root_activation = monotonic_cls._validate_authority_root_activation
+    monotonic_validate_root_activation_code = monotonic_validate_root_activation.__code__
+    monotonic_validate_workspace = monotonic_cls._validate_workspace_binding
+    monotonic_validate_workspace_code = monotonic_validate_workspace.__code__
+    monotonic_ensure_root_bound = monotonic_cls._ensure_authority_root_bound
+    monotonic_ensure_root_bound_code = monotonic_ensure_root_bound.__code__
+    monotonic_ensure_root_activated = monotonic_cls._ensure_authority_root_activated
+    monotonic_ensure_root_activated_code = monotonic_ensure_root_activated.__code__
+    monotonic_new_terminal = monotonic_cls._new_terminal_record
+    monotonic_new_terminal_code = monotonic_new_terminal.__code__
+    monotonic_append_record = monotonic_cls._append_record
+    monotonic_append_record_code = monotonic_append_record.__code__
+    monotonic_workspace_lock_cls = _monotonic_module.WorkspaceEconomicLock
+    monotonic_hash_constructor = _monotonic_module.hashlib.sha256
+    monotonic_authority_id = _monotonic_module.AUTHORITY_ID
+    monotonic_authority_schema = _monotonic_module.AUTHORITY_SCHEMA
+    monotonic_authority_schema_version = _monotonic_module.AUTHORITY_SCHEMA_VERSION
+    monotonic_namespace_schema = _monotonic_module._NAMESPACE_SCHEMA
+    monotonic_namespace_keys = _monotonic_module._NAMESPACE_MARKER_KEYS
+    monotonic_record_keys = _monotonic_module._RECORD_KEYS
+    monotonic_record_file_re = _monotonic_module._RECORD_FILE_RE
     strict_json_function = _json_integrity_module.strict_json_loads
     strict_json_function_code = strict_json_function.__code__
     strict_json_loader = _json_integrity_module.json.loads
@@ -434,6 +469,41 @@ def _build_product_verifier():
             or monotonic_digest.__code__ is not monotonic_digest_code
             or _monotonic_module._text is not monotonic_text
             or monotonic_text.__code__ is not monotonic_text_code
+            or _monotonic_module._absolute_path is not monotonic_absolute_path
+            or monotonic_absolute_path.__code__ is not monotonic_absolute_path_code
+            or _monotonic_module.resolve_monotonic_authority_root is not monotonic_resolve_root
+            or monotonic_resolve_root.__code__ is not monotonic_resolve_root_code
+            or _monotonic_module.preflight_authority_root_selection is not monotonic_preflight_root
+            or monotonic_preflight_root.__code__ is not monotonic_preflight_root_code
+            or _monotonic_module.WorkspaceIdentityBinding is not monotonic_workspace_binding_cls
+            or monotonic_workspace_binding_cls.__dict__["resolve"].__func__ is not monotonic_workspace_resolve
+            or monotonic_workspace_resolve.__code__ is not monotonic_workspace_resolve_code
+            or _monotonic_module.AuthorityRootSelectionBinding is not monotonic_root_binding_cls
+            or monotonic_root_binding_cls.__dict__["resolve"].__func__ is not monotonic_root_resolve
+            or monotonic_root_resolve.__code__ is not monotonic_root_resolve_code
+            or monotonic_cls._validate_authority_root_selection is not monotonic_validate_root_selection
+            or monotonic_validate_root_selection.__code__ is not monotonic_validate_root_selection_code
+            or monotonic_cls._validate_authority_root_activation is not monotonic_validate_root_activation
+            or monotonic_validate_root_activation.__code__ is not monotonic_validate_root_activation_code
+            or monotonic_cls._validate_workspace_binding is not monotonic_validate_workspace
+            or monotonic_validate_workspace.__code__ is not monotonic_validate_workspace_code
+            or monotonic_cls._ensure_authority_root_bound is not monotonic_ensure_root_bound
+            or monotonic_ensure_root_bound.__code__ is not monotonic_ensure_root_bound_code
+            or monotonic_cls._ensure_authority_root_activated is not monotonic_ensure_root_activated
+            or monotonic_ensure_root_activated.__code__ is not monotonic_ensure_root_activated_code
+            or monotonic_cls._new_terminal_record is not monotonic_new_terminal
+            or monotonic_new_terminal.__code__ is not monotonic_new_terminal_code
+            or monotonic_cls._append_record is not monotonic_append_record
+            or monotonic_append_record.__code__ is not monotonic_append_record_code
+            or _monotonic_module.WorkspaceEconomicLock is not monotonic_workspace_lock_cls
+            or _monotonic_module.hashlib.sha256 is not monotonic_hash_constructor
+            or _monotonic_module.AUTHORITY_ID != monotonic_authority_id
+            or _monotonic_module.AUTHORITY_SCHEMA != monotonic_authority_schema
+            or _monotonic_module.AUTHORITY_SCHEMA_VERSION != monotonic_authority_schema_version
+            or _monotonic_module._NAMESPACE_SCHEMA != monotonic_namespace_schema
+            or _monotonic_module._NAMESPACE_MARKER_KEYS is not monotonic_namespace_keys
+            or _monotonic_module._RECORD_KEYS is not monotonic_record_keys
+            or _monotonic_module._RECORD_FILE_RE is not monotonic_record_file_re
             or _json_integrity_module.strict_json_loads is not strict_json_function
             or strict_json_function.__code__ is not strict_json_function_code
             or _json_integrity_module.json.loads is not strict_json_loader

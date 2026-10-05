@@ -26,7 +26,7 @@ $expected = @(
     [ordered]@{ key = 'bankroll'; automation_id = '205'; name = 'Віртуальний банк'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_named_rows = $false; require_value_read_only = $true },
     [ordered]@{ key = 'product_runtime_start'; automation_id = '206'; name = 'Запустити канонічну тривалу PAPER-роботу'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
     [ordered]@{ key = 'product_runtime_stop'; automation_id = '207'; name = 'Зупинити канонічну тривалу PAPER-роботу'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false; allow_disabled = $true },
-    [ordered]@{ key = 'product_runtime_status'; automation_id = '208'; name = 'Стан тривалої PAPER-роботи'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_named_rows = $false; require_value_read_only = $true },
+    [ordered]@{ key = 'product_runtime_status'; automation_id = '208'; name = 'Стан тривалої PAPER-роботи'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.Edit'; require_named_rows = $false; require_value_read_only = $true; expected_value = 'Оберіть і збережіть джерело даних перед запуском тривалої PAPER-роботи.' },
     [ordered]@{ key = 'product_runtime_source'; automation_id = '209'; name = 'Джерело тривалої PAPER-роботи'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; require_named_rows = $false },
     [ordered]@{ key = 'product_runtime_source_save'; automation_id = '210'; name = 'Зберегти джерело тривалої PAPER-роботи'; required_pattern = 'Invoke'; require_external_focus = $true; expected_control_type = 'ControlType.Button'; require_named_rows = $false },
     [ordered]@{ key = 'shell_navigation'; automation_id = '301'; name = 'Навігація екранами Автоспорт'; required_pattern = 'Value'; require_external_focus = $true; expected_control_type = 'ControlType.ComboBox'; require_named_rows = $false },
@@ -178,6 +178,7 @@ $report = [ordered]@{
     launcher_process_id = $null
     process_id = $null
     process_family_ids = @()
+    first_run_workspace = $null
     root_name = $null
     descendant_count = 0
     controls = @()
@@ -198,7 +199,27 @@ try {
         New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
     }
 
-    $process = Start-Process -FilePath $exePath -PassThru
+    $firstRunWorkspace = Join-Path $outputDirectory 'external-uia-first-run-workspace'
+    if (Test-Path $firstRunWorkspace) {
+        Remove-Item -LiteralPath $firstRunWorkspace -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $firstRunWorkspace | Out-Null
+    $report.first_run_workspace = $firstRunWorkspace
+
+    $priorWorkspace = [Environment]::GetEnvironmentVariable(
+        'AUTOSPORT_WORKSPACE',
+        [EnvironmentVariableTarget]::Process
+    )
+    $env:AUTOSPORT_WORKSPACE = $firstRunWorkspace
+    try {
+        $process = Start-Process -FilePath $exePath -PassThru
+    } finally {
+        if ($null -eq $priorWorkspace) {
+            Remove-Item Env:AUTOSPORT_WORKSPACE -ErrorAction SilentlyContinue
+        } else {
+            $env:AUTOSPORT_WORKSPACE = $priorWorkspace
+        }
+    }
     $report.launcher_process_id = $process.Id
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
@@ -266,8 +287,10 @@ try {
         $enabled = [bool]$element.Current.IsEnabled
         $patternOk = Test-Pattern -Element $element -PatternName $spec.required_pattern
         $valueReadOnlyRequired = [bool]$spec.require_value_read_only
+        $expectedValue = [string]$spec.expected_value
         $valueReadOnly = $null
-        if ($valueReadOnlyRequired) {
+        $currentValue = $null
+        if ($valueReadOnlyRequired -or -not [string]::IsNullOrWhiteSpace($expectedValue)) {
             $valuePatternObject = $null
             try {
                 $valuePatternAvailable = $element.TryGetCurrentPattern(
@@ -277,9 +300,11 @@ try {
                 if ($valuePatternAvailable -and $null -ne $valuePatternObject) {
                     $valuePattern = [System.Windows.Automation.ValuePattern]$valuePatternObject
                     $valueReadOnly = [bool]$valuePattern.Current.IsReadOnly
+                    $currentValue = [string]$valuePattern.Current.Value
                 }
             } catch {
                 $valueReadOnly = $null
+                $currentValue = $null
             }
         }
         $namedRowCount = 0
@@ -301,6 +326,8 @@ try {
             required_pattern_available = $patternOk
             value_read_only_required = $valueReadOnlyRequired
             value_read_only = $valueReadOnly
+            expected_value = $expectedValue
+            value = $currentValue
             named_list_item_count = $namedRowCount
         }
         $report.controls += $record
@@ -325,6 +352,12 @@ try {
         }
         if ($valueReadOnlyRequired -and $valueReadOnly -ne $true) {
             $report.failures += "automation_id=$($spec.automation_id): external UIA ValuePattern is writable or read-only state unavailable"
+        }
+        if (
+            -not [string]::IsNullOrWhiteSpace($expectedValue) -and
+            $currentValue -ne $expectedValue
+        ) {
+            $report.failures += "automation_id=$($spec.automation_id): external UIA Value mismatch expected='$expectedValue' actual='$currentValue'"
         }
     }
 

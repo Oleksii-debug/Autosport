@@ -63,11 +63,17 @@ def _install_legacy_v1_chain(
         "_machine_account_authority_root",
         lambda: production_root,
     )
-    if environment_authority_root is not None:
-        monkeypatch.setenv(
-            "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
-            str(environment_authority_root.resolve(strict=False)),
-        )
+    generic_authority_root = (
+        environment_authority_root
+        if environment_authority_root is not None
+        else custom_authority_root
+        if custom_authority_root is not None
+        else production_root
+    )
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str(generic_authority_root.resolve(strict=False)),
+    )
 
     registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
     root_members = _members("a")

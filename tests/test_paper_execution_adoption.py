@@ -1581,6 +1581,89 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(len(book.tickets), 1)
             self.assertEqual(book.balance, Decimal("90.00"))
 
+    def test_materialization_bypasses_post_execution_class_ledger_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(
+                runtime,
+                action("durable-class-override", stake="10.00"),
+            )
+            original_execute = adoption_module.execute_paper_plan
+            original_events = PaperExecutionLedger.events
+            original_load_run = PaperExecutionLedger.load_run
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("class ledger override must not own durable truth")
+
+            def execute_then_override_class_ledger(**kwargs):
+                run = original_execute(**kwargs)
+                PaperExecutionLedger.events = forbidden
+                PaperExecutionLedger.load_run = forbidden
+                return run
+
+            try:
+                with patch.object(
+                    adoption_module,
+                    "execute_paper_plan",
+                    execute_then_override_class_ledger,
+                ):
+                    result = runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id="trigger-durable-class-override",
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+            finally:
+                PaperExecutionLedger.events = original_events
+                PaperExecutionLedger.load_run = original_load_run
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(result.run.attempts[0].execution_stake, Decimal("10.00"))
+            self.assertEqual(len(book.tickets), 1)
+            self.assertEqual(book.balance, Decimal("90.00"))
+
+    def test_lay_recovery_class_load_override_cannot_replace_durable_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            pre_action_book = PaperBook("100.00")
+            current_prepared = prepared(
+                runtime,
+                action(
+                    "lay-recovery-ledger-class-override",
+                    odds="5.00",
+                    stake="10.00",
+                    side="LAY",
+                ),
+            )
+            runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-lay-recovery-ledger-class-override",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("class load_run override must not own recovery truth")
+
+            with patch.object(PaperExecutionLedger, "load_run", new=forbidden):
+                runtime.assert_recoverable_book_state(
+                    pre_action_book=pre_action_book,
+                    prepared=current_prepared,
+                    trigger_id="trigger-lay-recovery-ledger-class-override",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertEqual(len(book.tickets), 1)
+            self.assertEqual(book.balance, Decimal("60.00"))
+
     def test_materialization_reloads_durable_attempt_economics_after_execution_callback(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, _ledger, runtime = self.runtime(tmp)

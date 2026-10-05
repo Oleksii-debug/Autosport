@@ -465,6 +465,7 @@ def _canonical_instruction_projection(action: ExecutionAction) -> dict[str, Any]
     if (
         type(instruction.get("selectionId")) is not int
         or instruction.get("selectionId") != selection_id
+        or type(instruction.get("handicap")) is not int
         or instruction.get("handicap") != 0
         or instruction.get("orderType") != "LIMIT"
         or instruction.get("side") != "BACK"

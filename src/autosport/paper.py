@@ -398,16 +398,24 @@ def _make_paperbook_operation_lock_registry():
 def _serialized_paperbook_operation(method):
     require_lock = _require_paperbook_operation_lock
     require_lock_code = require_lock.__code__
+    method_code = method.__code__
 
     @wraps(method)
     def serialized(self, *args, **kwargs):
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook operation callable authority changed")
         if require_lock.__code__ is not require_lock_code:
             raise ValueError("PaperBook operation lock authority changed")
         lock = require_lock(self)
         if require_lock.__code__ is not require_lock_code:
             raise ValueError("PaperBook operation lock authority changed")
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook operation callable authority changed")
         with lock:
-            return method(self, *args, **kwargs)
+            result = method(self, *args, **kwargs)
+        if method.__code__ is not method_code:
+            raise ValueError("PaperBook operation callable authority changed")
+        return result
 
     # functools.wraps publishes the guarded callable through __wrapped__, which
     # would let callers bypass serialization and authority checks directly.

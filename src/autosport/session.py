@@ -232,11 +232,7 @@ class ObservationResult:
         canonical_order = tuple(
             sorted(
                 self.current_quotes,
-                key=lambda event: (
-                    event.event_id,
-                    event.market_id,
-                    event.selection_id,
-                ),
+                key=lambda event: event.quote_key,
             )
         )
         if self.current_quotes != canonical_order:

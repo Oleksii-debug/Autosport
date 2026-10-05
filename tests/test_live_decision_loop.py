@@ -5775,6 +5775,10 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             self.assertIsNotNone(loop._progress)
             self.assertEqual(loop._progress.phase, "pending")
+            # Exact idempotent re-registration is a no-op and remains allowed;
+            # only mutations are fenced while recovery is unfinished.
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.dependencies.input_ids, ("input-a",))
             with self.assertRaisesRegex(
                 LiveDecisionProgressError,
                 "cannot mutate live dependency registry while a decision is unfinished",

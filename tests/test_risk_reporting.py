@@ -710,7 +710,7 @@ class PaperRiskReportingTests(unittest.TestCase):
                 workspace=Path("workspace"),  # type: ignore[arg-type]
             )
 
-    def test_verified_minimum_equity_requires_complete_settled_causal_path(self) -> None:
+    def test_verified_minimum_equity_rejects_unissued_opening_capital(self) -> None:
         settled = PaperBook("100")
         loser = settled.open_ticket(
             (self._leg(65),),
@@ -727,14 +727,17 @@ class PaperRiskReportingTests(unittest.TestCase):
         goal = self._goal()
         evidence = build_product_issued_paper_equity_path(settled, goal)
 
-        minimum, point_id = verified_settled_minimum_equity(
-            settled,
-            goal,
-            evidence,
-        )
-
-        self.assertEqual(minimum, Decimal("65"))
-        self.assertEqual(point_id, evidence.minimum_equity_point_id)
+        self.assertTrue(evidence.money_scope_complete)
+        self.assertFalse(evidence.opening_capital_authority_complete)
+        with self.assertRaisesRegex(
+            ValueError,
+            "product-issued opening-capital authority",
+        ):
+            verified_settled_minimum_equity(
+                settled,
+                goal,
+                evidence,
+            )
 
     def test_verified_minimum_equity_rejects_open_exposure(self) -> None:
         book = PaperBook("100")
@@ -1026,7 +1029,7 @@ class PaperRiskReportingTests(unittest.TestCase):
                     evidence=forged,
                 )
 
-    def test_durable_minimum_equity_returns_path_identity_for_downstream_binding(self) -> None:
+    def test_durable_minimum_equity_rejects_unissued_opening_capital(self) -> None:
         book = PaperBook("100")
         ticket = book.open_ticket(
             (self._leg(72),),
@@ -1041,7 +1044,6 @@ class PaperRiskReportingTests(unittest.TestCase):
             settled_at="2026-09-21T14:45:00+00:00",
         )
         goal = self._goal()
-        expected = build_product_issued_paper_equity_path(book, goal)
 
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -1049,16 +1051,20 @@ class PaperRiskReportingTests(unittest.TestCase):
             book.save(paper_path)
             EconomicGoalStore(workspace).initialize_owner(goal)
 
-            minimum, point_id, path_sha256 = (
+            resolved = resolve_durable_product_issued_paper_equity_path(
+                paper_book_path=str(paper_path),
+                workspace=str(workspace),
+            )
+            self.assertTrue(resolved.money_scope_complete)
+            self.assertFalse(resolved.opening_capital_authority_complete)
+            with self.assertRaisesRegex(
+                ValueError,
+                "product-issued opening-capital authority",
+            ):
                 resolve_durable_verified_settled_minimum_equity(
                     paper_book_path=str(paper_path),
                     workspace=str(workspace),
                 )
-            )
-
-        self.assertEqual(minimum, Decimal("60"))
-        self.assertEqual(point_id, expected.minimum_equity_point_id)
-        self.assertEqual(path_sha256, expected.path_sha256)
 
     def test_durable_minimum_equity_rejects_open_exposure(self) -> None:
         book = PaperBook("100")
@@ -1134,6 +1140,21 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertFalse(path.money_scope_complete)
         self.assertFalse(drawdown.money_scope_complete)
         self.assertFalse(report.money_scope_complete)
+
+    def test_pristine_book_never_claims_vacuous_money_scope_or_opening_authority(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+
+        path = build_product_issued_paper_equity_path(book, goal)
+        drawdown = build_product_issued_paper_drawdown_evidence(book, goal)
+        report = build_paper_risk_report(book, goal)
+
+        self.assertFalse(path.money_scope_complete)
+        self.assertFalse(path.opening_capital_authority_complete)
+        self.assertFalse(drawdown.money_scope_complete)
+        self.assertFalse(drawdown.opening_capital_authority_complete)
+        self.assertFalse(report.money_scope_complete)
+        self.assertFalse(report.opening_capital_authority_complete)
 
     def test_verified_minimum_equity_rejects_wrong_bankroll_or_currency_scope(self) -> None:
         book = PaperBook("100")

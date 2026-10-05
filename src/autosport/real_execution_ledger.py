@@ -1286,7 +1286,7 @@ class RealExecutionLedger:
                         payload_keys = set(followup["payload"])
                         if payload_keys not in (
                             {"submitted_at"},
-                            {"submitted_at", "submitted_request_sha256"},
+                            {"submitted_at", "request_sha256"},
                         ):
                             raise ExecutionLedgerIntegrityError(
                                 "ATTEMPT_SUBMITTED payload schema is invalid"
@@ -1295,9 +1295,7 @@ class RealExecutionLedger:
                             followup["payload"]["submitted_at"],
                             "submitted_at",
                         )
-                        submitted_request_sha256 = followup["payload"].get(
-                            "submitted_request_sha256"
-                        )
+                        submitted_request_sha256 = followup["payload"].get("request_sha256")
                         if submitted_request_sha256 is not None:
                             try:
                                 _sha256_text(
@@ -2110,9 +2108,7 @@ class RealExecutionLedger:
                     raise ExecutionLedgerIntegrityError(
                         "attempt has multiple submission facts"
                     )
-                existing_digest = submitted_events[0]["payload"].get(
-                    "submitted_request_sha256"
-                )
+                existing_digest = submitted_events[0]["payload"].get("request_sha256")
                 if (
                     submitted_request_sha256 is not None
                     and existing_digest != submitted_request_sha256
@@ -2150,7 +2146,7 @@ class RealExecutionLedger:
                 {
                     "submitted_at": actual_submitted_at,
                     **(
-                        {"submitted_request_sha256": submitted_request_sha256}
+                        {"request_sha256": submitted_request_sha256}
                         if submitted_request_sha256 is not None
                         else {}
                     ),
@@ -2736,7 +2732,7 @@ class RealExecutionLedger:
                 submitted[0]["payload"]["submitted_at"] if submitted else None
             )
             submitted_request_sha256 = (
-                submitted[0]["payload"].get("submitted_request_sha256")
+                submitted[0]["payload"].get("request_sha256")
                 if submitted
                 else None
             )

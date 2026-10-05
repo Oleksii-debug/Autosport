@@ -1407,6 +1407,24 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     quote = quotes_by_key[leg.quote_key]
                     quote_ts = quote.source_ts if quote.source_ts is not None else quote.observed_ts
                     _, quote_time = _canonical_context_timestamp("quote timestamp", quote_ts)
+                    _, observed_time = _canonical_context_timestamp(
+                        "quote observed_ts",
+                        quote.observed_ts,
+                    )
+                    _, ingest_time = _canonical_context_timestamp(
+                        "quote ingest_ts",
+                        quote.ingest_ts,
+                    )
+                    if ingest_time < observed_time:
+                        return RiskDecision(
+                            False,
+                            "quote local receipt chronology is invalid",
+                        )
+                    if observed_time > proposal_time or ingest_time > proposal_time:
+                        return RiskDecision(
+                            False,
+                            "quote was not locally available by proposal timestamp",
+                        )
                     age_delta = proposal_time - quote_time
                     age_seconds = (
                         Decimal(age_delta.days * 86400 + age_delta.seconds)

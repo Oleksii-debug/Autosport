@@ -1941,3 +1941,33 @@ def test_exact_paperbook_type_remains_operational_after_type_authority_seal(
     assert type(restored) is PaperBook
     assert restored.committed_stake == Decimal("10")
     assert restored.tickets[ticket.ticket_id].legs[0].locked_odds == Decimal("2.00")
+
+
+def test_constructor_ignores_rebound_canonical_type_authority(monkeypatch) -> None:
+    attacker_calls = 0
+
+    def hostile(_target):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound canonical type authority executed")
+
+    monkeypatch.setattr(paper_module, "_require_paperbook_type_authority", hostile)
+
+    book = PaperBook("100")
+
+    assert type(book) is PaperBook
+    assert book.balance == Decimal("100")
+    assert attacker_calls == 0
+
+
+def test_constructor_rejects_in_place_canonical_type_authority_code_mutation() -> None:
+    authority = paper_module._require_paperbook_type_authority
+    original_code = authority.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        authority.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="canonical type authority changed"):
+            PaperBook("100")
+    finally:
+        authority.__code__ = original_code

@@ -24,6 +24,7 @@ from .risk import PaperRiskPolicy
 
 RISK_REPORT_SCHEMA = "autosport.paper-risk-report.v5"
 EQUITY_PATH_SCHEMA = "autosport.paper-equity-path.v1"
+DRAWDOWN_EVIDENCE_SCHEMA = "autosport.paper-realized-settled-drawdown.v1"
 RISK_REPORT_SCOPE_PAPER_ONLY = "PAPER_ONLY"
 DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY = "REALIZED_SETTLED_EQUITY_DRAWDOWN"
 RISK_OF_RUIN_STATUS_UNKNOWN = "UNKNOWN_REQUIRES_PROVENANCE_BOUND_EVIDENCE"
@@ -71,6 +72,31 @@ class ProductIssuedPaperEquityPath:
     minimum_equity_point_id: str
     availability_complete: bool
     settled_history_complete: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProductIssuedPaperDrawdownEvidence:
+    schema: str
+    metric_class: str
+    equity_path_sha256: str
+    drawdown_evidence_sha256: str
+    equity_path_point_count: int
+    goal_id: str
+    goal_revision: int
+    bankroll_id: str
+    currency: str
+    initial_equity: Decimal
+    current_equity: Decimal
+    peak_equity: Decimal
+    minimum_equity: Decimal
+    minimum_equity_point_id: str
+    max_drawdown_amount: Decimal
+    max_drawdown_fraction: Decimal | None
+    max_drawdown_peak_id: str | None
+    max_drawdown_trough_id: str | None
+    availability_complete: bool
+    settled_history_complete: bool
+    evidence_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -368,6 +394,109 @@ def _historical_max_drawdown_from_path(
     )
 
 
+def verify_product_issued_paper_equity_path(
+    book: PaperBook,
+    goal: EconomicGoalContract,
+    evidence: ProductIssuedPaperEquityPath,
+) -> ProductIssuedPaperEquityPath:
+    """Re-resolve product state and require byte-semantic equity-path equality."""
+
+    if type(evidence) is not ProductIssuedPaperEquityPath:
+        raise TypeError("equity-path evidence must be exact ProductIssuedPaperEquityPath")
+    resolved = build_product_issued_paper_equity_path(book, goal)
+    if resolved != evidence:
+        raise ValueError("equity-path evidence does not match canonical product state")
+    return resolved
+
+
+def _drawdown_evidence_payload(
+    *,
+    path: ProductIssuedPaperEquityPath,
+    maximum: _HistoricalMaxDrawdown,
+) -> dict[str, object]:
+    return {
+        "schema": DRAWDOWN_EVIDENCE_SCHEMA,
+        "metric_class": DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
+        "equity_path_sha256": path.path_sha256,
+        "equity_path_point_count": path.point_count,
+        "goal_id": path.goal_id,
+        "goal_revision": path.goal_revision,
+        "bankroll_id": path.bankroll_id,
+        "currency": path.currency,
+        "initial_equity": _decimal_text(path.initial_equity, "initial_equity"),
+        "current_equity": _decimal_text(path.current_equity, "current_equity"),
+        "peak_equity": _decimal_text(maximum.peak_equity, "peak_equity"),
+        "minimum_equity": _decimal_text(path.minimum_equity, "minimum_equity"),
+        "minimum_equity_point_id": path.minimum_equity_point_id,
+        "max_drawdown_amount": _decimal_text(maximum.amount, "max_drawdown_amount"),
+        "max_drawdown_fraction": (
+            None
+            if maximum.fraction is None
+            else _decimal_text(maximum.fraction, "max_drawdown_fraction")
+        ),
+        "max_drawdown_peak_id": maximum.peak_id,
+        "max_drawdown_trough_id": maximum.trough_id,
+        "availability_complete": path.availability_complete,
+        "settled_history_complete": path.settled_history_complete,
+    }
+
+
+def build_product_issued_paper_drawdown_evidence(
+    book: PaperBook,
+    goal: EconomicGoalContract,
+) -> ProductIssuedPaperDrawdownEvidence:
+    path = build_product_issued_paper_equity_path(book, goal)
+    maximum = _historical_max_drawdown_from_path(path)
+    payload = _drawdown_evidence_payload(path=path, maximum=maximum)
+    evidence_sha256 = hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return ProductIssuedPaperDrawdownEvidence(
+        schema=DRAWDOWN_EVIDENCE_SCHEMA,
+        metric_class=DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
+        equity_path_sha256=path.path_sha256,
+        equity_path_point_count=path.point_count,
+        goal_id=path.goal_id,
+        goal_revision=path.goal_revision,
+        bankroll_id=path.bankroll_id,
+        currency=path.currency,
+        initial_equity=path.initial_equity,
+        current_equity=path.current_equity,
+        peak_equity=maximum.peak_equity,
+        minimum_equity=path.minimum_equity,
+        minimum_equity_point_id=path.minimum_equity_point_id,
+        max_drawdown_amount=maximum.amount,
+        max_drawdown_fraction=maximum.fraction,
+        max_drawdown_peak_id=maximum.peak_id,
+        max_drawdown_trough_id=maximum.trough_id,
+        availability_complete=path.availability_complete,
+        settled_history_complete=path.settled_history_complete,
+        evidence_sha256=evidence_sha256,
+    )
+
+
+def verify_product_issued_paper_drawdown_evidence(
+    book: PaperBook,
+    goal: EconomicGoalContract,
+    evidence: ProductIssuedPaperDrawdownEvidence,
+) -> ProductIssuedPaperDrawdownEvidence:
+    """Reject copied/replaced caller evidence unless canonical state reissues it."""
+
+    if type(evidence) is not ProductIssuedPaperDrawdownEvidence:
+        raise TypeError(
+            "drawdown evidence must be exact ProductIssuedPaperDrawdownEvidence"
+        )
+    resolved = build_product_issued_paper_drawdown_evidence(book, goal)
+    if resolved != evidence:
+        raise ValueError("drawdown evidence does not match canonical product state")
+    return resolved
+
+
 def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
     """Replay the durable PAPER equity path and preserve its worst drawdown episode.
 
@@ -538,7 +667,20 @@ def build_paper_risk_report(
     metrics = PaperRiskPolicy._historical_risk_metrics(book)
     rooms = PaperRiskPolicy._goal_history_rooms(book, goal_snapshot)
     equity_path = build_product_issued_paper_equity_path(book, goal_snapshot)
-    maximum_drawdown = _historical_max_drawdown_from_path(equity_path)
+    drawdown_evidence = build_product_issued_paper_drawdown_evidence(
+        book,
+        goal_snapshot,
+    )
+    if drawdown_evidence.equity_path_sha256 != equity_path.path_sha256:
+        raise ValueError("canonical PAPER drawdown evidence path identity is inconsistent")
+    maximum_drawdown = _HistoricalMaxDrawdown(
+        amount=drawdown_evidence.max_drawdown_amount,
+        fraction=drawdown_evidence.max_drawdown_fraction,
+        peak_id=drawdown_evidence.max_drawdown_peak_id,
+        trough_id=drawdown_evidence.max_drawdown_trough_id,
+        current_equity=drawdown_evidence.current_equity,
+        peak_equity=drawdown_evidence.peak_equity,
+    )
     after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
     if (
         metrics is None
@@ -572,6 +714,7 @@ def build_paper_risk_report(
         live_execution_headroom_authoritative=False,
         portfolio_risk_state_sha256=after_sha256,
         equity_path_sha256=equity_path.path_sha256,
+        drawdown_evidence_sha256=drawdown_evidence.evidence_sha256,
         equity_path_point_count=equity_path.point_count,
         equity_path_availability_complete=equity_path.availability_complete,
         settled_history_complete=equity_path.settled_history_complete,

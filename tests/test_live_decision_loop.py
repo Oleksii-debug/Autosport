@@ -33,6 +33,7 @@ from autosport.live_decision_loop import (
 )
 from autosport.market_bus import MarketEventBus
 from autosport.market_mirror import MirrorSnapshot
+from autosport.market_mirror_runtime import FocusedMirrorDependencyChurnError
 from autosport.market_state_identity import PROPHETX_REST_MARKET_STATE_CONTRACT
 from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
 from autosport.opportunity import Opportunity, OpportunityDecision, QuoteRef, StrategyClass
@@ -8496,6 +8497,39 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 [("input-a", (("selection-a", 1, "open"),))],
             )
             self.assertFalse(loop._needs_cache_rebuild)
+            loop.close()
+
+
+    def test_runtime_dependency_churn_is_normalized_to_live_progress_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            loop._observe(loop.mirror_updates)
+
+            with patch.object(
+                loop.dependencies,
+                "incremental_decision_view",
+                side_effect=FocusedMirrorDependencyChurnError(
+                    "focused mirror dependency changed continuously during stable read"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "changed continuously during snapshot capture",
+                ):
+                    loop._capture_input_views(
+                        ("input-a",),
+                        self.START + timedelta(seconds=1),
+                    )
             loop.close()
 
 

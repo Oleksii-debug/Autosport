@@ -437,7 +437,9 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             requested_conflate_ms=subscription.requested_conflate_ms,
         )
         self._freshness = BetfairStreamPublishFreshnessRuntime(context)
-        self._transport_by_identity: dict[BetfairQuoteIdentity, tuple[str, str]] = {}
+        self._transport_by_identity: dict[
+            BetfairQuoteIdentity, tuple[str, str, int]
+        ] = {}
 
     @property
     def subscription(self) -> BetfairAuthenticatedMarketSubscription:
@@ -483,6 +485,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                     self._transport_by_identity[identity] = (
                         evidence.evidence_id,
                         frame.payload_sha256,
+                        frame.received_monotonic_ns,
                     )
                 return issued
 
@@ -510,16 +513,34 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 as_of_ms=evaluated_at_ms,
                 policy=policy_snapshot,
             )
-            frame_sha = self._bound_frame_sha(identity, structural.evidence_id)
+            frame_binding = self._bound_frame_binding(
+                identity,
+                structural.evidence_id,
+            )
+            frame_sha = None if frame_binding is None else frame_binding[0]
             if (
                 structural.verdict
                 is not BetfairStreamFreshnessVerdict.AUTH_CONTEXT_UNPROVEN
                 or structural.evidence_id is None
-                or frame_sha is None
+                or frame_binding is None
             ):
                 return BetfairAuthenticatedFreshnessDecision(
                     verdict=BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED,
                     reason=structural.reason,
+                    evidence_id=structural.evidence_id,
+                    subscription_id=self._subscription.subscription_id,
+                    transport_frame_sha256=frame_sha,
+                    evaluated_at_ms=evaluated_at_ms,
+                )
+            frame_sha, received_monotonic_ns = frame_binding
+            lag_reason = _consumer_lag_rejection_reason(
+                received_monotonic_ns,
+                policy_snapshot,
+            )
+            if lag_reason is not None:
+                return BetfairAuthenticatedFreshnessDecision(
+                    verdict=BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED,
+                    reason=lag_reason,
                     evidence_id=structural.evidence_id,
                     subscription_id=self._subscription.subscription_id,
                     transport_frame_sha256=frame_sha,
@@ -547,16 +568,16 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 )
             return decision
 
-    def _bound_frame_sha(
+    def _bound_frame_binding(
         self,
         identity: BetfairQuoteIdentity,
         evidence_id: str | None,
-    ) -> str | None:
+    ) -> tuple[str, int] | None:
         binding = self._transport_by_identity.get(identity)
         if evidence_id is not None and binding is not None:
-            bound_evidence_id, bound_frame_sha = binding
+            bound_evidence_id, bound_frame_sha, received_monotonic_ns = binding
             if bound_evidence_id == evidence_id:
-                return bound_frame_sha
+                return bound_frame_sha, received_monotonic_ns
             self._transport_by_identity.pop(identity, None)
         elif evidence_id is None:
             self._transport_by_identity.pop(identity, None)
@@ -593,11 +614,22 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
                 or structural.evidence_id != decision.evidence_id
             ):
                 return False
-            frame_sha = self._bound_frame_sha(identity, structural.evidence_id)
-            return (
-                frame_sha is not None
-                and frame_sha == decision.transport_frame_sha256
+            frame_binding = self._bound_frame_binding(
+                identity,
+                structural.evidence_id,
             )
+            if frame_binding is None:
+                return False
+            frame_sha, received_monotonic_ns = frame_binding
+            if (
+                _consumer_lag_rejection_reason(
+                    received_monotonic_ns,
+                    policy,
+                )
+                is not None
+            ):
+                return False
+            return frame_sha == decision.transport_frame_sha256
 
     def _require_current_connection(self) -> None:
         _require_subscription_for_transport(self._subscription, self._transport)
@@ -610,6 +642,22 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             raise BetfairAuthenticatedStreamError(
                 "authenticated subscription is no longer bound to the live transport connection"
             )
+
+
+def _consumer_lag_rejection_reason(
+    received_monotonic_ns: int,
+    policy: BetfairStreamFreshnessPolicy,
+) -> str | None:
+    if type(received_monotonic_ns) is not int or received_monotonic_ns <= 0:
+        return "authenticated frame receive monotonic evidence is invalid"
+    now_ns = time.monotonic_ns()
+    if type(now_ns) is not int or now_ns <= 0:
+        return "local monotonic clock is invalid"
+    if now_ns < received_monotonic_ns:
+        return "local monotonic clock regressed after authenticated frame receive"
+    if now_ns - received_monotonic_ns > policy.max_age_ms * 1_000_000:
+        return "local authenticated frame consumer lag exceeds max_age_ms"
+    return None
 
 
 def _require_subscription_for_transport(

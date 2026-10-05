@@ -5,8 +5,12 @@ from typing import Any
 
 from .gui import AUTOMATION_IDS
 from .integrity import atomic_write_json
+from .product_windows_gui import (
+    PRODUCT_RUNTIME_AUTOMATION_IDS,
+    ProductWindowsAutosportApp,
+)
 from .windows_entry import _STARTUP_FOCUS_CONTROL
-from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
+from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID
 from .windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
 from .windows_manual_calculation import WORKBENCH_AUTOMATION_IDS, show_manual_calculation_workbench
 
@@ -50,6 +54,10 @@ _FOCUSABLE_CONTROLS = (
     "replay_speed",
     "live_mode",
     "live_refresh",
+    "product_runtime_start",
+    "product_runtime_source",
+    "product_runtime_source_save",
+    "product_runtime_status",
     "live_quotes",
     "tickets",
     "evaluation",
@@ -119,6 +127,15 @@ def summarize_keyboard_contract(
     def automation_id_for(name: str) -> int:
         if name == "bankroll":
             return WINDOWS_BANKROLL_AUTOMATION_ID
+        if name.startswith("product_runtime_"):
+            return PRODUCT_RUNTIME_AUTOMATION_IDS[
+                {
+                    "product_runtime_start": "start",
+                    "product_runtime_source": "source",
+                    "product_runtime_source_save": "source_save",
+                    "product_runtime_status": "status",
+                }[name]
+            ]
         if name in workbench_names:
             return WORKBENCH_AUTOMATION_IDS[workbench_names[name]]
         if name.startswith("shell_") or name.startswith("owner_economic_"):
@@ -162,7 +179,7 @@ def summarize_keyboard_contract(
         "evidence_scope": (
             "in-process packaged Windows GUI keyboard contract: actual first focus is sampled before any "
             "audit-induced focus change, action shortcuts and shell cycling are bound, F2/F6/F7/F8/F9/F10 "
-            "focus shortcuts are executed, and critical shell controls plus the manual calculation workbench "
+            "focus shortcuts are executed, and critical shell/product runtime controls plus the manual calculation workbench "
             "are reachable through forward Tab and reverse Shift+Tab traversal; not physical keyboard or NVDA "
             "speech proof"
         ),
@@ -173,7 +190,7 @@ def summarize_keyboard_contract(
 
 
 def _critical_widgets(
-    app: WindowsAutosportApp,
+    app: ProductWindowsAutosportApp,
     workbench_dialog: Any | None = None,
 ) -> dict[str, Any]:
     controls = {
@@ -192,6 +209,10 @@ def _critical_widgets(
         "replay_speed": app.speed,
         "live_mode": app.live_mode,
         "live_refresh": app.live_refresh_button,
+        "product_runtime_start": app.product_start_button,
+        "product_runtime_source": app.product_source_choice,
+        "product_runtime_source_save": app.product_source_save_button,
+        "product_runtime_status": app.product_status_entry,
         "live_quotes": app.live_quotes,
         "tickets": app.tickets,
         "evaluation": app.evaluation,
@@ -208,7 +229,7 @@ def _critical_widgets(
     return controls
 
 
-def _focused_control_name(app: WindowsAutosportApp) -> str | None:
+def _focused_control_name(app: ProductWindowsAutosportApp) -> str | None:
     focused = app.focus_get()
     for control_name, widget in _critical_widgets(app).items():
         if focused is widget:
@@ -217,7 +238,7 @@ def _focused_control_name(app: WindowsAutosportApp) -> str | None:
 
 
 def _tab_reachable_controls(
-    app: WindowsAutosportApp,
+    app: ProductWindowsAutosportApp,
     *,
     reverse: bool = False,
     workbench_dialog: Any | None = None,
@@ -252,7 +273,7 @@ def _tab_reachable_controls(
     return list(dict.fromkeys(reachable))
 
 
-def _binding_presence(app: WindowsAutosportApp) -> dict[str, bool]:
+def _binding_presence(app: ProductWindowsAutosportApp) -> dict[str, bool]:
     return {
         sequence: bool(str(app.bind(sequence) or "").strip())
         for sequence in (*_ACTION_BINDINGS, *_FOCUS_BINDINGS)
@@ -260,7 +281,7 @@ def _binding_presence(app: WindowsAutosportApp) -> dict[str, bool]:
 
 
 def _execute_focus_shortcuts(
-    app: WindowsAutosportApp,
+    app: ProductWindowsAutosportApp,
     workbench_dialog: Any | None = None,
 ) -> dict[str, bool]:
     controls = _critical_widgets(app, workbench_dialog)
@@ -279,10 +300,10 @@ def _execute_focus_shortcuts(
 def run_keyboard_audit(output_path: str | Path) -> int:
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    app: WindowsAutosportApp | None = None
+    app: ProductWindowsAutosportApp | None = None
     dialog: Any | None = None
     try:
-        app = WindowsAutosportApp()
+        app = ProductWindowsAutosportApp()
         app.update_idletasks()
         app.update()
         startup_focus_control = _focused_control_name(app)

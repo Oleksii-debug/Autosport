@@ -118,6 +118,33 @@ def test_leg_quote_identity_rejects_semantics_substitution() -> None:
         PaperExecutionAdoptionRuntime._require_leg_quote_identity(leg, event)
 
 
+@pytest.mark.parametrize(
+    ("leg_semantics", "event_semantics"),
+    [(_S1, None), (None, _S1)],
+)
+def test_leg_quote_identity_rejects_none_concrete_semantics_mismatch(
+    leg_semantics: str | None,
+    event_semantics: str | None,
+) -> None:
+    event = _event(event_semantics)
+    leg = TicketLeg(
+        event.event_id,
+        event.market_id,
+        event.selection_id,
+        event.decimal_odds,
+        sport=event.sport,
+        exchange_side=event.exchange_side,
+        market_semantics_id=leg_semantics,
+    )
+    assert leg.quote_key == event.quote_key
+
+    with pytest.raises(
+        PaperExecutionAdoptionError,
+        match="ticket leg identity does not match canonical execution quote",
+    ):
+        PaperExecutionAdoptionRuntime._require_leg_quote_identity(leg, event)
+
+
 def test_paper_value_prepared_binding_carries_market_semantics(tmp_path) -> None:
     runtime = _runtime(tmp_path)
 

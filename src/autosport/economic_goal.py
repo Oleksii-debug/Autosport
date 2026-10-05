@@ -45,14 +45,20 @@ class AutomationLevel(IntEnum):
 
 _ZERO: Final = Decimal("0")
 _ONE: Final = Decimal("1")
+_MAX_CANONICAL_TEXT_CHARS: Final = 512
+_MAX_RESTRICTION_MEMBERS: Final = 1024
 
 
 def _canonical_text(name: str, value: object) -> str:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise EconomicGoalContractError(f"{name} must be a string")
     if not value or value != value.strip():
         raise EconomicGoalContractError(
             f"{name} must be a non-empty canonical string"
+        )
+    if len(value) > _MAX_CANONICAL_TEXT_CHARS:
+        raise EconomicGoalContractError(
+            f"{name} exceeds the canonical text size limit"
         )
     if "\x00" in value:
         raise EconomicGoalContractError(f"{name} must not contain NUL")
@@ -64,7 +70,7 @@ def _canonical_text(name: str, value: object) -> str:
 
 
 def _decimal(name: str, value: object) -> Decimal:
-    if not isinstance(value, Decimal):
+    if type(value) is not Decimal:
         raise EconomicGoalContractError(f"{name} must be an exact Decimal")
     if not value.is_finite():
         raise EconomicGoalContractError(f"{name} must be finite")
@@ -92,7 +98,7 @@ def _optional_nonnegative_decimal(name: str, value: object) -> Decimal | None:
 
 
 def _nonnegative_int(name: str, value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
+    if type(value) is not int:
         raise EconomicGoalContractError(f"{name} must be a non-boolean integer")
     if value < 0:
         raise EconomicGoalContractError(f"{name} must be non-negative")
@@ -107,8 +113,12 @@ def _positive_int(name: str, value: object) -> int:
 
 
 def _canonical_restrictions(name: str, value: object) -> frozenset[str]:
-    if not isinstance(value, frozenset):
+    if type(value) is not frozenset:
         raise EconomicGoalContractError(f"{name} must be a frozenset of strings")
+    if len(value) > _MAX_RESTRICTION_MEMBERS:
+        raise EconomicGoalContractError(
+            f"{name} exceeds the canonical restriction-count limit"
+        )
     normalized: set[str] = set()
     for item in value:
         normalized.add(_canonical_text(f"{name} member", item))
@@ -168,65 +178,142 @@ class EconomicGoalContract:
     blocked_markets: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
-        _canonical_text("goal_id", self.goal_id)
-        _positive_int("revision", self.revision)
-        _canonical_text("bankroll_id", self.bankroll_id)
-
-        currency = _canonical_text("currency", self.currency)
-        if len(currency) != 3 or not currency.isascii() or not currency.isalpha():
-            raise EconomicGoalContractError(
-                "currency must be a three-letter uppercase ASCII code"
-            )
-        if currency != currency.upper():
-            raise EconomicGoalContractError(
-                "currency must be a three-letter uppercase ASCII code"
-            )
-
-        if not isinstance(self.objective, EconomicObjective):
-            raise EconomicGoalContractError("objective must be an EconomicObjective")
-
-        _fraction("max_stake_fraction", self.max_stake_fraction)
-        _optional_nonnegative_decimal("max_stake_amount", self.max_stake_amount)
-        _fraction("max_session_loss_fraction", self.max_session_loss_fraction)
-        _fraction("max_day_loss_fraction", self.max_day_loss_fraction)
-        _fraction("max_drawdown_fraction", self.max_drawdown_fraction)
-        _fraction(
-            "max_capital_at_risk_fraction", self.max_capital_at_risk_fraction
+        # Keep the positive validation path self-contained. Authority validation
+        # must not become caller-replaceable merely because a module helper name
+        # is rebound after import.
+        error_type = EconomicGoalContractError
+        canonical_decimal_type = type(
+            __class__.__dataclass_fields__["max_stake_fraction"].default
         )
-        _fraction(
-            "max_event_concentration_fraction", self.max_event_concentration_fraction
+        zero = canonical_decimal_type("0")
+        one = canonical_decimal_type("1")
+        max_text_chars = 512
+        max_restriction_members = 1024
+        canonical_objective_type = type(
+            __class__.__dataclass_fields__["objective"].default
         )
-        _fraction(
-            "max_market_concentration_fraction", self.max_market_concentration_fraction
+        canonical_automation_type = type(
+            __class__.__dataclass_fields__["automation_level"].default
         )
-        _fraction(
+
+        def canonical_text(name: str, value: object) -> str:
+            if type(value) is not str:
+                raise error_type(f"{name} must be a string")
+            if not value or value != value.strip():
+                raise error_type(f"{name} must be a non-empty canonical string")
+            if len(value) > max_text_chars:
+                raise error_type(f"{name} exceeds the canonical text size limit")
+            if "\x00" in value:
+                raise error_type(f"{name} must not contain NUL")
+            try:
+                value.encode("utf-8", errors="strict")
+            except UnicodeEncodeError as exc:
+                raise error_type(f"{name} must be valid UTF-8 text") from exc
+            return value
+
+        def exact_decimal(name: str, value: object) -> Decimal:
+            if type(value) is not canonical_decimal_type:
+                raise error_type(f"{name} must be an exact Decimal")
+            if not value.is_finite():
+                raise error_type(f"{name} must be finite")
+            return value
+
+        def fraction(name: str, value: object) -> Decimal:
+            result = exact_decimal(name, value)
+            if result < zero or result > one:
+                raise error_type(f"{name} must be between 0 and 1 inclusive")
+            return result
+
+        def nonnegative_decimal(name: str, value: object) -> Decimal:
+            result = exact_decimal(name, value)
+            if result < zero:
+                raise error_type(f"{name} must be non-negative")
+            return result
+
+        def exact_nonnegative_int(name: str, value: object) -> int:
+            if type(value) is not int:
+                raise error_type(f"{name} must be a non-boolean integer")
+            if value < 0:
+                raise error_type(f"{name} must be non-negative")
+            return value
+
+        def exact_positive_int(name: str, value: object) -> int:
+            result = exact_nonnegative_int(name, value)
+            if result == 0:
+                raise error_type(f"{name} must be positive")
+            return result
+
+        def restrictions(name: str, value: object) -> None:
+            if type(value) is not frozenset:
+                raise error_type(f"{name} must be a frozenset of strings")
+            if len(value) > max_restriction_members:
+                raise error_type(
+                    f"{name} exceeds the canonical restriction-count limit"
+                )
+            for item in value:
+                canonical_text(f"{name} member", item)
+
+        canonical_text("goal_id", self.goal_id)
+        exact_positive_int("revision", self.revision)
+        canonical_text("bankroll_id", self.bankroll_id)
+
+        currency = canonical_text("currency", self.currency)
+        if (
+            len(currency) != 3
+            or not currency.isascii()
+            or not currency.isalpha()
+            or currency != currency.upper()
+        ):
+            raise error_type("currency must be a three-letter uppercase ASCII code")
+
+        if type(self.objective) is not canonical_objective_type:
+            raise error_type("objective must be an EconomicObjective")
+
+        fraction("max_stake_fraction", self.max_stake_fraction)
+        if self.max_stake_amount is not None:
+            nonnegative_decimal("max_stake_amount", self.max_stake_amount)
+        fraction("max_session_loss_fraction", self.max_session_loss_fraction)
+        fraction("max_day_loss_fraction", self.max_day_loss_fraction)
+        fraction("max_drawdown_fraction", self.max_drawdown_fraction)
+        fraction("max_capital_at_risk_fraction", self.max_capital_at_risk_fraction)
+        fraction(
+            "max_event_concentration_fraction",
+            self.max_event_concentration_fraction,
+        )
+        fraction(
+            "max_market_concentration_fraction",
+            self.max_market_concentration_fraction,
+        )
+        fraction(
             "max_provider_concentration_fraction",
             self.max_provider_concentration_fraction,
         )
-        _fraction(
-            "max_sport_concentration_fraction", self.max_sport_concentration_fraction
+        fraction(
+            "max_sport_concentration_fraction",
+            self.max_sport_concentration_fraction,
         )
-        _nonnegative_decimal("max_turnover_fraction", self.max_turnover_fraction)
-        _fraction("max_risk_of_ruin", self.max_risk_of_ruin)
-        _fraction(
+        nonnegative_decimal("max_turnover_fraction", self.max_turnover_fraction)
+        fraction("max_risk_of_ruin", self.max_risk_of_ruin)
+        fraction(
             "max_execution_slippage_fraction",
             self.max_execution_slippage_fraction,
         )
-        _nonnegative_decimal("max_quote_age_seconds", self.max_quote_age_seconds)
-        _fraction("minimum_data_quality", self.minimum_data_quality)
+        nonnegative_decimal("max_quote_age_seconds", self.max_quote_age_seconds)
+        fraction("minimum_data_quality", self.minimum_data_quality)
 
-        _nonnegative_int("max_concurrent_positions", self.max_concurrent_positions)
-        _positive_int("max_parlay_legs", self.max_parlay_legs)
-        if not isinstance(self.automation_level, AutomationLevel):
-            raise EconomicGoalContractError(
-                "automation_level must be an AutomationLevel"
-            )
-        if not isinstance(self.emergency_stop, bool):
-            raise EconomicGoalContractError("emergency_stop must be a bool")
+        exact_nonnegative_int(
+            "max_concurrent_positions",
+            self.max_concurrent_positions,
+        )
+        exact_positive_int("max_parlay_legs", self.max_parlay_legs)
+        if type(self.automation_level) is not canonical_automation_type:
+            raise error_type("automation_level must be an AutomationLevel")
+        if type(self.emergency_stop) is not bool:
+            raise error_type("emergency_stop must be a bool")
 
-        _canonical_restrictions("blocked_sports", self.blocked_sports)
-        _canonical_restrictions("blocked_providers", self.blocked_providers)
-        _canonical_restrictions("blocked_markets", self.blocked_markets)
+        restrictions("blocked_sports", self.blocked_sports)
+        restrictions("blocked_providers", self.blocked_providers)
+        restrictions("blocked_markets", self.blocked_markets)
 
     def validate_automatic_successor(self, candidate: "EconomicGoalContract") -> None:
         """Validate a machine-proposed successor without authority expansion.
@@ -239,7 +326,11 @@ class EconomicGoalContract:
         boundary.
         """
 
-        validate_automatic_transition(self, candidate)
+        _CANONICAL_TRANSITION_VALIDATOR(self, candidate)
+
+
+_CANONICAL_CONTRACT_TYPE: Final = EconomicGoalContract
+_CANONICAL_CONTRACT_VALIDATOR: Final = EconomicGoalContract.__post_init__
 
 
 def _require_same(name: str, previous: object, candidate: object) -> None:
@@ -293,6 +384,14 @@ def _require_restrictions_not_removed(
         )
 
 
+_CANONICAL_REQUIRE_SAME: Final = _require_same
+_CANONICAL_REQUIRE_CAP_NOT_INCREASED: Final = _require_cap_not_increased
+_CANONICAL_REQUIRE_OPTIONAL_CAP_NOT_INCREASED: Final = _require_optional_cap_not_increased
+_CANONICAL_REQUIRE_FLOOR_NOT_DECREASED: Final = _require_floor_not_decreased
+_CANONICAL_REQUIRE_INT_CAP_NOT_INCREASED: Final = _require_int_cap_not_increased
+_CANONICAL_REQUIRE_RESTRICTIONS_NOT_REMOVED: Final = _require_restrictions_not_removed
+
+
 def validate_automatic_transition(
     previous: EconomicGoalContract,
     candidate: EconomicGoalContract,
@@ -305,101 +404,104 @@ def validate_automatic_transition(
     *non-expansion*, not that every revision necessarily tightens a limit.
     """
 
-    if not isinstance(previous, EconomicGoalContract) or not isinstance(
-        candidate, EconomicGoalContract
+    if (
+        type(previous) is not _CANONICAL_CONTRACT_TYPE
+        or type(candidate) is not _CANONICAL_CONTRACT_TYPE
     ):
         raise EconomicGoalContractError(
             "automatic transition requires EconomicGoalContract instances"
         )
+    _CANONICAL_CONTRACT_VALIDATOR(previous)
+    _CANONICAL_CONTRACT_VALIDATOR(candidate)
 
-    _require_same("goal_id", previous.goal_id, candidate.goal_id)
-    _require_same("bankroll_id", previous.bankroll_id, candidate.bankroll_id)
-    _require_same("currency", previous.currency, candidate.currency)
-    _require_same("objective", previous.objective, candidate.objective)
+    _CANONICAL_REQUIRE_SAME("goal_id", previous.goal_id, candidate.goal_id)
+    _CANONICAL_REQUIRE_SAME("bankroll_id", previous.bankroll_id, candidate.bankroll_id)
+    _CANONICAL_REQUIRE_SAME("currency", previous.currency, candidate.currency)
+    _CANONICAL_REQUIRE_SAME("objective", previous.objective, candidate.objective)
 
     if candidate.revision != previous.revision + 1:
         raise EconomicGoalContractError(
             "automatic transition must advance revision by exactly one"
         )
 
-    _require_cap_not_increased(
+    _CANONICAL_REQUIRE_CAP_NOT_INCREASED(
         "max_stake_fraction",
         previous.max_stake_fraction,
         candidate.max_stake_fraction,
     )
-    _require_optional_cap_not_increased(
+    _CANONICAL_REQUIRE_OPTIONAL_CAP_NOT_INCREASED(
         "max_stake_amount", previous.max_stake_amount, candidate.max_stake_amount
     )
-    _require_cap_not_increased(
+    _CANONICAL_REQUIRE_CAP_NOT_INCREASED(
         "max_session_loss_fraction",
         previous.max_session_loss_fraction,
         candidate.max_session_loss_fraction,
     )
-    _require_cap_not_increased(
+    _CANONICAL_REQUIRE_CAP_NOT_INCREASED(
         "max_day_loss_fraction",
         previous.max_day_loss_fraction,
         candidate.max_day_loss_fraction,
     )
-    _require_cap_not_increased(
+    _CANONICAL_REQUIRE_CAP_NOT_INCREASED(
         "max_drawdown_fraction",
         previous.max_drawdown_fraction,
         candidate.max_drawdown_fraction,
     )
-    _require_cap_not_increased(
+    _CANONICAL_REQUIRE_CAP_NOT_INCREASED(
         "max_capital_at_risk_fraction",
         previous.max_capital_at_risk_fraction,
         candidate.max_capital_at_risk_fraction,
     )
-    _require_cap_not_increased(
+    _CANONICAL_REQUIRE_CAP_NOT_INCREASED(
         "max_event_concentration_fraction",
         previous.max_event_concentration_fraction,
         candidate.max_event_concentration_fraction,
     )
-    _require_cap_not_increased(
+    _CANONICAL_REQUIRE_CAP_NOT_INCREASED(
         "max_market_concentration_fraction",
         previous.max_market_concentration_fraction,
         candidate.max_market_concentration_fraction,
     )
-    _require_cap_not_increased(
+    _CANONICAL_REQUIRE_CAP_NOT_INCREASED(
         "max_provider_concentration_fraction",
         previous.max_provider_concentration_fraction,
         candidate.max_provider_concentration_fraction,
     )
-    _require_cap_not_increased(
+    _CANONICAL_REQUIRE_CAP_NOT_INCREASED(
         "max_sport_concentration_fraction",
         previous.max_sport_concentration_fraction,
         candidate.max_sport_concentration_fraction,
     )
-    _require_cap_not_increased(
+    _CANONICAL_REQUIRE_CAP_NOT_INCREASED(
         "max_turnover_fraction",
         previous.max_turnover_fraction,
         candidate.max_turnover_fraction,
     )
-    _require_cap_not_increased(
+    _CANONICAL_REQUIRE_CAP_NOT_INCREASED(
         "max_risk_of_ruin", previous.max_risk_of_ruin, candidate.max_risk_of_ruin
     )
-    _require_cap_not_increased(
+    _CANONICAL_REQUIRE_CAP_NOT_INCREASED(
         "max_execution_slippage_fraction",
         previous.max_execution_slippage_fraction,
         candidate.max_execution_slippage_fraction,
     )
-    _require_cap_not_increased(
+    _CANONICAL_REQUIRE_CAP_NOT_INCREASED(
         "max_quote_age_seconds",
         previous.max_quote_age_seconds,
         candidate.max_quote_age_seconds,
     )
-    _require_floor_not_decreased(
+    _CANONICAL_REQUIRE_FLOOR_NOT_DECREASED(
         "minimum_data_quality",
         previous.minimum_data_quality,
         candidate.minimum_data_quality,
     )
 
-    _require_int_cap_not_increased(
+    _CANONICAL_REQUIRE_INT_CAP_NOT_INCREASED(
         "max_concurrent_positions",
         previous.max_concurrent_positions,
         candidate.max_concurrent_positions,
     )
-    _require_int_cap_not_increased(
+    _CANONICAL_REQUIRE_INT_CAP_NOT_INCREASED(
         "max_parlay_legs", previous.max_parlay_legs, candidate.max_parlay_legs
     )
     if candidate.automation_level > previous.automation_level:
@@ -411,12 +513,15 @@ def validate_automatic_transition(
             "automatic transition must not clear emergency_stop"
         )
 
-    _require_restrictions_not_removed(
+    _CANONICAL_REQUIRE_RESTRICTIONS_NOT_REMOVED(
         "blocked_sports", previous.blocked_sports, candidate.blocked_sports
     )
-    _require_restrictions_not_removed(
+    _CANONICAL_REQUIRE_RESTRICTIONS_NOT_REMOVED(
         "blocked_providers", previous.blocked_providers, candidate.blocked_providers
     )
-    _require_restrictions_not_removed(
+    _CANONICAL_REQUIRE_RESTRICTIONS_NOT_REMOVED(
         "blocked_markets", previous.blocked_markets, candidate.blocked_markets
     )
+
+
+_CANONICAL_TRANSITION_VALIDATOR: Final = validate_automatic_transition

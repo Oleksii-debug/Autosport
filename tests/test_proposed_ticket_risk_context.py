@@ -1,3 +1,4 @@
+from dataclasses import replace
 import tempfile
 import unittest
 from decimal import Decimal
@@ -553,6 +554,103 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
             "owner sport concentration limit cannot be proven without "
             "canonical whole-portfolio exposure evidence",
         )
+
+
+    def test_quote_received_after_proposal_is_rejected_even_with_old_provider_time(self) -> None:
+        leg = self._leg()
+        quote = replace(
+            self._quote(leg),
+            source_ts="2026-09-16T14:59:00+00:00",
+            observed_ts="2026-09-16T15:00:00+00:00",
+            ingest_ts="2026-09-16T15:00:03+00:00",
+        )
+        context = ProposedTicketRiskContext(
+            legs=(leg,),
+            quotes=(quote,),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+            proposal_ts="2026-09-16T15:00:02+00:00",
+        )
+
+        decision = self._permissive_policy(self._goal()).evaluate(
+            PaperBook("100"),
+            Decimal("1"),
+            context=context,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "quote was not locally available by proposal timestamp",
+        )
+
+    def test_inverted_local_quote_receipt_chronology_is_rejected(self) -> None:
+        leg = self._leg()
+        quote = replace(
+            self._quote(leg),
+            observed_ts="2026-09-16T15:00:01+00:00",
+            ingest_ts="2026-09-16T15:00:00+00:00",
+        )
+        context = ProposedTicketRiskContext(
+            legs=(leg,),
+            quotes=(quote,),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+            proposal_ts="2026-09-16T15:00:02+00:00",
+        )
+
+        decision = self._permissive_policy(self._goal()).evaluate(
+            PaperBook("100"),
+            Decimal("1"),
+            context=context,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "quote local receipt chronology is invalid",
+        )
+
+    def test_quote_risk_rejects_nonzero_submicrosecond_proposal_and_receipt_clocks(self) -> None:
+        leg = self._leg()
+        for field, context in (
+            (
+                "proposal",
+                ProposedTicketRiskContext(
+                    legs=(leg,),
+                    quotes=(self._quote(leg),),
+                    bankroll_id="paper-bankroll",
+                    currency="USD",
+                    proposal_ts="2026-09-16T15:00:02.0000001+00:00",
+                ),
+            ),
+            (
+                "ingest",
+                ProposedTicketRiskContext(
+                    legs=(leg,),
+                    quotes=(
+                        replace(
+                            self._quote(leg),
+                            ingest_ts="2026-09-16T15:00:01.0000001+00:00",
+                        ),
+                    ),
+                    bankroll_id="paper-bankroll",
+                    currency="USD",
+                    proposal_ts="2026-09-16T15:00:02+00:00",
+                ),
+            ),
+        ):
+            with self.subTest(field=field):
+                decision = self._permissive_policy(self._goal()).evaluate(
+                    PaperBook("100"),
+                    Decimal("1"),
+                    context=context,
+                )
+                self.assertFalse(decision.allowed)
+                self.assertEqual(
+                    decision.reason,
+                    "proposed ticket quote risk evidence is invalid",
+                )
 
 
 if __name__ == "__main__":

@@ -111,6 +111,24 @@ class BetfairStreamSessionIdentity:
         return False
 
     @property
+    def authenticated_app_key_class(self) -> str | None:
+        with self._lifecycle_lock:
+            if (
+                self._socket is None
+                or self._connection_id is None
+                or self._authenticated_identity_sha256 is None
+                or self._authenticated_app_key_class is None
+            ):
+                return None
+            try:
+                current_identity_sha256 = self._identity.identity_sha256
+            except Exception:
+                return None
+            if current_identity_sha256 != self._authenticated_identity_sha256:
+                return None
+            return self._authenticated_app_key_class
+
+    @property
     def grants_provider_write_authority(self) -> bool:
         return False
 
@@ -411,6 +429,8 @@ class BetfairStreamTlsTransport:
         self._lifecycle_lock = RLock()
         self._receive_lock = RLock()
         self._authenticated_reader_ref: ReferenceType[object] | None = None
+        self._authenticated_identity_sha256: str | None = None
+        self._authenticated_app_key_class: str | None = None
 
     def __repr__(self) -> str:
         return (
@@ -510,6 +530,8 @@ class BetfairStreamTlsTransport:
                 self._clear_receive_buffer()
                 self._connection_id = None
                 self._frame_sequence = 0
+                self._authenticated_identity_sha256 = None
+                self._authenticated_app_key_class = None
         if stale_attempt:
             _close_socket_quietly(stream)
             self._finish_connect_attempt(cancellation)
@@ -586,8 +608,14 @@ class BetfairStreamTlsTransport:
                     raise BetfairStreamTransportError(
                         "Betfair stream connection was cancelled"
                     )
+                if not lease.matches(self._identity):
+                    raise BetfairStreamAuthenticationError(
+                        "Betfair stream identity changed during authentication"
+                    )
                 self._connection_generation += 1
                 self._connection_id = connection_id
+                self._authenticated_identity_sha256 = self._identity.identity_sha256
+                self._authenticated_app_key_class = lease.app_key_class
                 self._active_connect_cancel = None
                 self._consecutive_connect_failures = 0
                 self._next_connect_monotonic = 0.0
@@ -839,6 +867,8 @@ class BetfairStreamTlsTransport:
             if self._socket is stream:
                 self._socket = None
                 self._connection_id = None
+                self._authenticated_identity_sha256 = None
+                self._authenticated_app_key_class = None
                 self._clear_receive_buffer()
             if self._active_connect_cancel is cancellation:
                 self._active_connect_cancel = None
@@ -861,6 +891,8 @@ class BetfairStreamTlsTransport:
             self._socket = None
             self._connection_id = None
             self._authenticated_reader_ref = None
+            self._authenticated_identity_sha256 = None
+            self._authenticated_app_key_class = None
             self._clear_receive_buffer()
         if stream is not None:
             _close_socket_quietly(stream)

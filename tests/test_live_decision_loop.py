@@ -6146,6 +6146,89 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             resumed.close()
 
+    def test_capture_retries_history_classification_after_dependency_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=2)
+            provider_a = self._event(sequence=1)
+            provider_b_predecessor = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-b",
+                decimal_odds=Decimal("3.00"),
+                observed_ts=(self.START + timedelta(seconds=1)).isoformat(),
+                source_id="provider-b",
+                sequence=1,
+                status="open",
+                source_ts=(self.START + timedelta(seconds=1)).isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=1)).isoformat(),
+            )
+            provider_b_future = MarketEvent(
+                event_id="event-1",
+                market_id="market-1",
+                selection_id="selection-b",
+                decimal_odds=Decimal("3.20"),
+                observed_ts=decision_time.isoformat(),
+                source_id="provider-b",
+                sequence=2,
+                status="open",
+                source_ts=decision_time.isoformat(),
+                ingest_ts=(self.START + timedelta(seconds=4)).isoformat(),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(provider_a, provider_b_predecessor, provider_b_future)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input("input-a", source_ids="provider-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            original_requires = (
+                loop.dependencies.requires_current_history_fallback
+            )
+            calls = [0]
+
+            def replace_after_classification(input_id, *, as_of):
+                result = original_requires(input_id, as_of=as_of)
+                calls[0] += 1
+                if calls[0] == 1:
+                    self.assertFalse(result)
+                    self.assertTrue(loop.dependencies.unregister("input-a"))
+                    loop.dependencies.register(
+                        "input-a",
+                        source_ids="provider-b",
+                    )
+                return result
+
+            with patch.object(
+                loop.dependencies,
+                "requires_current_history_fallback",
+                side_effect=replace_after_classification,
+            ):
+                snapshots = loop._capture_input_views(
+                    ("input-a",),
+                    decision_time,
+                    incremental=False,
+                )
+
+            self.assertGreaterEqual(calls[0], 2)
+            self.assertEqual(
+                tuple(
+                    (event.source_id, event.selection_id, event.sequence)
+                    for event in snapshots["input-a"].events
+                ),
+                (("provider-b", "selection-b", 1),),
+            )
+            self.assertEqual(
+                loop._availability_deadlines["input-a"],
+                self.START + timedelta(seconds=4),
+            )
+            loop.close()
+
     def test_multiple_future_successors_schedule_each_causal_transition(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

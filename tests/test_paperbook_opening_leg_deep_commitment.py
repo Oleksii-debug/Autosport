@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 import threading
 import time
@@ -961,3 +962,76 @@ def test_successful_save_fsyncs_destination_directory(monkeypatch, tmp_path) -> 
     assert destination.exists()
     assert calls == [tmp_path]
     monkeypatch.setattr(PaperBook, "_fsync_snapshot_directory", original)
+
+
+
+def _saved_snapshot_payload(tmp_path):
+    path = tmp_path / "schema-payload.json"
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    book.save(path)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_schema7_rejects_unknown_root_field(tmp_path) -> None:
+    payload = _saved_snapshot_payload(tmp_path)
+    payload["future_root_semantics"] = {"authority": "smuggled"}
+
+    with pytest.raises(ValueError, match="schema 7 root contains unexpected fields"):
+        PaperBook.load_bytes(json.dumps(payload).encode("utf-8"))
+
+
+def test_schema7_rejects_unknown_ticket_field(tmp_path) -> None:
+    payload = _saved_snapshot_payload(tmp_path)
+    payload["tickets"][0]["future_ticket_semantics"] = "smuggled"
+
+    with pytest.raises(ValueError, match="schema 7 ticket contains unexpected fields"):
+        PaperBook.load_bytes(json.dumps(payload).encode("utf-8"))
+
+
+def test_schema7_rejects_unknown_leg_field(tmp_path) -> None:
+    payload = _saved_snapshot_payload(tmp_path)
+    payload["tickets"][0]["legs"][0]["future_leg_semantics"] = "smuggled"
+
+    with pytest.raises(
+        ValueError, match="schema 7 ticket leg contains unexpected fields"
+    ):
+        PaperBook.load_bytes(json.dumps(payload).encode("utf-8"))
+
+
+def test_schema6_cannot_launder_schema7_exchange_side(tmp_path) -> None:
+    payload = _saved_snapshot_payload(tmp_path)
+    payload["schema_version"] = 6
+
+    with pytest.raises(
+        ValueError, match="schema 6 ticket leg contains unexpected fields"
+    ):
+        PaperBook.load_bytes(json.dumps(payload).encode("utf-8"))
+
+
+def test_legacy_snapshot_cannot_smuggle_lifecycle_semantics(tmp_path) -> None:
+    payload = _saved_snapshot_payload(tmp_path)
+    payload.pop("schema_version")
+
+    with pytest.raises(ValueError, match="legacy root contains unexpected fields"):
+        PaperBook.load_bytes(json.dumps(payload).encode("utf-8"))
+
+
+def test_schema2_cannot_smuggle_provider_semantics(tmp_path) -> None:
+    payload = _saved_snapshot_payload(tmp_path)
+    payload["schema_version"] = 2
+    payload.pop("lifecycle")
+    ticket = payload["tickets"][0]
+    ticket.pop("provider_accounts")
+    ticket.pop("settled_at")
+    ticket["legs"][0].pop("sport")
+    ticket["legs"][0].pop("exchange_side")
+
+    with pytest.raises(ValueError, match="schema 2 ticket contains unexpected fields"):
+        PaperBook.load_bytes(json.dumps(payload).encode("utf-8"))
+
+
+def test_snapshot_decimal_text_size_limit_applies_to_serialized_ingress() -> None:
+    oversized = "1" * 513
+    with pytest.raises(ValueError, match="decimal text exceeds the canonical size limit"):
+        PaperBook._parse_snapshot_decimal(oversized, "stake")

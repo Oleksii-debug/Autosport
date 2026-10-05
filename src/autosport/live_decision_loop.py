@@ -2037,6 +2037,7 @@ class PersistentLiveDecisionLoop:
             decision_time,
             expected_market_state_sha256=progress.market_state_sha256,
             max_append_generation=progress.market_append_generation,
+            health_boundaries=progress.health_boundaries,
             refresh_intents=progress.gate == _GATE_NORMAL,
         )
         intents = (
@@ -2210,6 +2211,7 @@ class PersistentLiveDecisionLoop:
         *,
         expected_market_state_sha256: str,
         max_append_generation: int | None,
+        health_boundaries: tuple[ProviderHealthReplayBoundary, ...] = (),
         refresh_intents: bool = True,
     ) -> None:
         _canonical_sha256(
@@ -2253,7 +2255,11 @@ class PersistentLiveDecisionLoop:
         finally:
             store.close()
 
-        replay_market_sha256 = self._market_state_sha256_for_events(snapshot.events)
+        replay_market_sha256 = self._market_state_sha256_for_events(
+            snapshot.events,
+            as_of=as_of,
+            health_boundaries=health_boundaries,
+        )
         if replay_market_sha256 != expected_market_state_sha256:
             raise LiveDecisionProgressError(
                 "unfinished live decision replayed market state changed across restart"
@@ -2285,6 +2291,26 @@ class PersistentLiveDecisionLoop:
                     )
                 ),
             )
+            if self._health_gate is not None:
+                boundary_map = {
+                    boundary.source_id: boundary
+                    for boundary in health_boundaries
+                }
+                source_ids = {
+                    event.source_id for event in focused.events
+                }
+                if not source_ids.issubset(boundary_map):
+                    raise LiveDecisionProgressError(
+                        "unfinished live decision lacks provider-health replay horizons"
+                    )
+                focused = self._health_gate.gate_snapshot(
+                    focused,
+                    as_of=as_of,
+                    health_boundaries={
+                        source_id: boundary_map[source_id]
+                        for source_id in source_ids
+                    },
+                )
             produced = self.intent_factory(input_id, focused)
             intents = self._validated_intents(produced)
             self._require_intents_bound_to_snapshot(intents, focused)
@@ -3155,6 +3181,7 @@ class PersistentLiveDecisionLoop:
                     decision_ts=plan.decision_ts,
                     market_state_sha256=market_state_sha256,
                     market_append_generation=durable_progress.market_append_generation,
+                    health_boundaries=durable_progress.health_boundaries,
                     decision_context_sha256=decision_context_sha256,
                     affected_input_ids=affected_input_ids,
                     registered_input_ids=durable_input_ids,
@@ -3175,6 +3202,7 @@ class PersistentLiveDecisionLoop:
                     decision_ts=plan.decision_ts,
                     market_state_sha256=market_state_sha256,
                     market_append_generation=durable_progress.market_append_generation,
+                    health_boundaries=durable_progress.health_boundaries,
                     decision_context_sha256=decision_context_sha256,
                     affected_input_ids=affected_input_ids,
                     registered_input_ids=durable_input_ids,
@@ -3275,6 +3303,7 @@ class PersistentLiveDecisionLoop:
                 decision_ts=plan.decision_ts,
                 market_state_sha256=market_state_sha256,
                 market_append_generation=durable_progress.market_append_generation,
+                health_boundaries=durable_progress.health_boundaries,
                 decision_context_sha256=decision_context_sha256,
                 affected_input_ids=affected_input_ids,
                 registered_input_ids=durable_input_ids,
@@ -3452,6 +3481,7 @@ class PersistentLiveDecisionLoop:
                     decision_ts=decision_ts,
                     market_state_sha256=market_state_sha256,
                     market_append_generation=market_append_generation,
+                    health_boundaries=self._health_boundaries_for_progress(),
                     decision_context_sha256=durable_context_sha256,
                     affected_input_ids=affected_input_ids,
                     registered_input_ids=expected_input_ids,
@@ -3517,7 +3547,9 @@ class PersistentLiveDecisionLoop:
                     )
                     durable_market_state_sha256 = (
                         self._market_state_sha256_for_events(
-                            durable_snapshot.events
+                            durable_snapshot.events,
+                            as_of=decision_time,
+                            health_boundaries=self._health_boundaries_for_progress(),
                         )
                     )
                     if durable_market_state_sha256 != market_state_sha256:
@@ -4131,7 +4163,9 @@ class PersistentLiveDecisionLoop:
             )
             if (
                 self._market_state_sha256_for_events(
-                    committed_snapshot.events
+                    committed_snapshot.events,
+                    as_of=evidence_decision_time,
+                    health_boundaries=progress.health_boundaries,
                 )
                 != progress.market_state_sha256
             ):

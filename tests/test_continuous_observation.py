@@ -929,6 +929,38 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertIn("continuous_observation=CONFIG_ERROR", rendered)
             self.assertIn("provider construction type failure", rendered)
 
+    def test_cli_fails_closed_on_authority_root_inside_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            unsafe_root = workspace / "machine-authority"
+
+            def provider_factory(*_args, **_kwargs):
+                return SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+            with patch.dict(
+                "os.environ",
+                {"AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(unsafe_root)},
+                clear=False,
+            ):
+                with patch("builtins.print") as print_mock:
+                    code = main(
+                        [
+                            str(workspace),
+                            "--enable-network-observation",
+                            "--public-preview",
+                        ],
+                        provider_factory=provider_factory,
+                    )
+
+            self.assertEqual(code, 5)
+            self.assertFalse(workspace.exists())
+            rendered = "\n".join(
+                " ".join(str(arg) for arg in call.args)
+                for call in print_mock.call_args_list
+            )
+            self.assertIn("continuous_observation=FAIL_CLOSED", rendered)
+            self.assertIn("authority root is unsafe", rendered)
+
     def test_cli_provider_factory_error_redacts_configured_secret(self):
         with tempfile.TemporaryDirectory() as tmp:
             secret = "super-secret-key"

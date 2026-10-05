@@ -673,6 +673,26 @@ class PaperBook:
         finally:
             os.close(descriptor)
 
+    @classmethod
+    def _ensure_snapshot_parent_durable(cls, directory: Path) -> None:
+        """Create missing snapshot directories and durably publish each entry."""
+        missing: list[Path] = []
+        cursor = directory
+        while not cursor.exists():
+            missing.append(cursor)
+            parent = cursor.parent
+            if parent == cursor:
+                break
+            cursor = parent
+
+        directory.mkdir(parents=True, exist_ok=True)
+
+        # mkdir(parents=True) can publish several directory entries. Persist every
+        # newly published child name in its parent before a successful save can be
+        # reported; the final snapshot rename gets its own directory fsync later.
+        for created in reversed(missing):
+            cls._fsync_snapshot_directory(created.parent)
+
     @_serialized_paperbook_operation
     def save(self, path: str | Path) -> None:
         # PaperBook and PaperTicket are intentionally mutable during a paper run.
@@ -683,7 +703,7 @@ class PaperBook:
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
         destination = self._canonical_snapshot_path(path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_snapshot_parent_durable(destination.parent)
         raw = {
             "schema_version": _PAPER_SNAPSHOT_SCHEMA_VERSION,
             "initial_bankroll": str(self.initial_bankroll),

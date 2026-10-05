@@ -561,6 +561,55 @@ def test_second_local_gate_denial_is_not_mislabeled_provider_unknown(
 
 
 
+
+def test_instance_shadowed_place_action_cannot_mint_submission_or_evidence(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+        forged_calls: list[str] = []
+
+        def forged_place_action(*args, **kwargs):
+            del args
+            forged_calls.append("forged")
+            callback = kwargs["_before_transport"]
+            callback("f" * 64)
+            raise AssertionError("shadowed place_action must never execute")
+
+        monkeypatch.setattr(client, "place_action", forged_place_action)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="shadows canonical place_action dispatch",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-shadowed-place-action",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+
+        assert forged_calls == []
+        assert transport.calls == []
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        attempt = next(
+            item
+            for item in view.attempts
+            if item.attempt.attempt_id == "attempt-shadowed-place-action"
+        )
+        assert attempt.state is AttemptState.RESERVED
+        assert attempt.submitted_at is None
+        assert attempt.submitted_request_sha256 is None
+        assert attempt.provider_evidence is None
+
+
+
 def test_unexpected_transport_exception_after_submitted_becomes_unknown() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)

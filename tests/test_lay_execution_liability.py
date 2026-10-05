@@ -771,6 +771,77 @@ class LayExecutionLiabilityTests(unittest.TestCase):
             self.assertTrue(run.completed)
             self.assertGreater(sync_calls, 0)
 
+    def test_execute_bypasses_post_import_execution_helper_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            source_action = _action(
+                "sealed-helper-graph",
+                side="LAY",
+                odds="5.00",
+                stake="10.00",
+            )
+            record = PaperExecutionEvidenceRecord(
+                action_id=source_action.action_id,
+                bookmaker_id=source_action.bookmaker_id,
+                account_id=source_action.account_id,
+                event_id=source_action.event_id,
+                market_id=source_action.market_id,
+                selection_id=source_action.selection_id,
+                side=source_action.side,
+                quote_id=source_action.quote_id,
+                outcome=PaperAttemptOutcome.ACCEPTED,
+                observed_at=STARTED_AT,
+                evidence_grade=EvidenceGrade.EMPIRICAL,
+                evidence_source="captured-paper-observation-v1",
+                accepted_odds="5.00",
+                accepted_stake="10.00",
+            )
+            registry.register(record)
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("post-import execution helper replacement executed")
+
+            targets = (
+                (paper_reality, "_snapshot_execution_plan"),
+                (paper_reality, "_snapshot_execution_config"),
+                (paper_reality, "_validate_lay_execution_surface"),
+                (paper_reality, "_verify_observation_authority"),
+                (paper_reality, "_derive_run_economics"),
+                (paper_reality, "_attempt_locked_capital"),
+                (paper_reality._impl, "_run_id"),
+                (paper_reality._impl, "_observed_attempt"),
+                (paper_reality._impl, "_require_canonical_action_surface"),
+                (paper_reality._impl, "_require_canonical_observation_surface"),
+            )
+            patches = [
+                patch.object(owner, name, forbidden)
+                for owner, name in targets
+            ]
+            for current_patch in patches:
+                current_patch.start()
+            try:
+                run = execute_paper_plan(
+                    plan=_plan(source_action),
+                    trigger_id="sealed-helper-graph",
+                    config=_config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                    observations={source_action.action_id: record.as_observation()},
+                    evidence_registry=registry,
+                )
+            finally:
+                for current_patch in reversed(patches):
+                    current_patch.stop()
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertTrue(run.completed)
+            self.assertEqual(run.attempts[0].outcome, PaperAttemptOutcome.ACCEPTED)
+            self.assertEqual(run.worst_case_exposure, Decimal("40.0000"))
+
     def test_registry_revalidates_mutated_decimal_before_durable_write(self):
         class HostileDecimal(Decimal):
             pass

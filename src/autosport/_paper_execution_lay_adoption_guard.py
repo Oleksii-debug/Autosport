@@ -705,6 +705,10 @@ def _execute_unlocked(
         raise PaperExecutionAdoptionError(
             "canonical durable execution run is unavailable after execution"
         )
+    decision_id = _exact_text(
+        prepared.execution_plan.decision_id,
+        "prepared decision_id",
+    )
     if not materialize_exposure:
         return _adoption.PaperExecutionAdoptionResult(run=run, ticket_ids=())
 

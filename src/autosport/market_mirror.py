@@ -70,7 +70,9 @@ class MarketMirror:
     @staticmethod
     def _snapshot_event(event: MarketEvent) -> MarketEvent:
         """Own an independent canonical value snapshot, including nested metadata."""
-        return MarketEvent.from_dict(event.to_dict())
+        if type(event) is not MarketEvent:
+            raise TypeError("event must be an exact MarketEvent")
+        return MarketEvent.from_dict(MarketEvent.to_dict(event))
 
     @staticmethod
     def _same_sequence_payload(left: MarketEvent, right: MarketEvent) -> bool:
@@ -107,14 +109,17 @@ class MarketMirror:
         """Normalize a focused-view selector without treating one ID as characters."""
         if values is None:
             return None
-        if isinstance(values, str):
+        if type(values) is str:
             selected = frozenset({values})
         else:
             try:
-                selected = frozenset(values)
+                materialized = tuple(values)
             except TypeError as exc:
                 raise TypeError(f"{name} must be a string or iterable of strings") from exc
-        if any(not isinstance(value, str) or not value for value in selected):
+            if any(type(value) is not str for value in materialized):
+                raise TypeError(f"{name} entries must be exact strings")
+            selected = frozenset(materialized)
+        if any(not value for value in selected):
             raise ValueError(f"{name} entries must be non-empty strings")
         return selected
 
@@ -144,12 +149,12 @@ class MarketMirror:
 
     @staticmethod
     def _decision_boundary(*, as_of: datetime, max_age: timedelta) -> tuple[datetime, timedelta]:
-        if not isinstance(as_of, datetime):
-            raise TypeError("as_of must be a datetime")
+        if type(as_of) is not datetime:
+            raise TypeError("as_of must be an exact datetime")
         if as_of.tzinfo is None or as_of.utcoffset() is None:
             raise ValueError("as_of must be timezone-aware")
-        if not isinstance(max_age, timedelta):
-            raise TypeError("max_age must be a timedelta")
+        if type(max_age) is not timedelta:
+            raise TypeError("max_age must be an exact timedelta")
         if max_age < timedelta(0):
             raise ValueError("max_age must be non-negative")
         return as_of.astimezone(timezone.utc), max_age

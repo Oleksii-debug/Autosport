@@ -69,7 +69,11 @@ The bridge must bind to the target Market Store's exact current projection befor
 
 Only publications that remain decision-eligible under the canonical authenticated subscription/freshness runtime are emitted as `status="open"` provider quotes. Loss of authority after provider 503, market suspension/closure, runner deactivation/removal, image replacement, timing/ladder/semantic epoch change, or quote removal is materialized as a strictly higher-sequence `status="closed"` tombstone using the prior durable quote identity. The same transition carries `BETFAIR_AUTHORITY_REVOKED`, so SourceHealth is degraded instead of falsely reporting a healthy successful poll while authenticated actionability has been revoked. This lets the append-only Market Store and MarketMirror revoke stale actionability without deleting audit history.
 
-Bounded transitions use `TRUNCATED_BATCH` pages when needed. Each page cursor names only the highest sequence actually returned in that page; it never advertises later transition entries that have not crossed the persistence boundary yet.
+Bounded transitions use `TRUNCATED_BATCH` pages when needed. Each page cursor names only the highest sequence actually returned in that page; it never advertises later transition entries that have not crossed the persistence boundary yet. Bridge sequence/open-state advancement is page-causal as well: planning a multi-page authenticated-frame transition does not install later pages into in-memory authority before those pages are exposed to the persistence seam.
+
+If a page exhausts the bounded SQLite retry budget without committing, the live replay wrapper invokes the bridge reset hook. The bridge rolls back only that last exposed page and restores the already-consumed authenticated-frame transition as pending work, so a retry does not reread the socket, skip an uncommitted prefix, or pretend later pages were durable. Post-commit health/subscriber failures are not rolled back; the durable page remains the exact continuation point.
+
+The bridge serializes durable binding, durable re-proof, paging, rollback and sequence/open-state mutation under one bridge-local re-entrant lock. The authenticated stream runtime retains its own transport/state locks; these layers protect different authorities.
 
 This bridge remains observation-only. It grants no order placement, account, settlement, funding, withdrawal, or real-money execution authority.
 

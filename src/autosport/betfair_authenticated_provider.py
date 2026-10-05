@@ -158,8 +158,8 @@ class BetfairAuthenticatedMarketProvider:
 
         if self._bound:
             raise RuntimeError("Betfair authenticated provider is already durably bound")
-        if not isinstance(current, Mapping):
-            raise TypeError("current must be a mapping of canonical market events")
+        if type(current) is not dict:
+            raise TypeError("current must be an exact dict of canonical market events")
 
         max_sequence = 0
         restored: dict[BetfairQuoteIdentity, ProviderQuote] = {}
@@ -170,6 +170,8 @@ class BetfairAuthenticatedMarketProvider:
                 raise TypeError("durable current values must be exact MarketEvent")
             if event.source_id != BETFAIR_STREAM_SOURCE_ID:
                 continue
+            if type(event.sequence) is not int or event.sequence < 1:
+                raise ValueError("durable Betfair bridge sequence must be a positive int")
             if event.sequence > max_sequence:
                 max_sequence = event.sequence
             identity = _identity_from_metadata(event.metadata)
@@ -210,8 +212,8 @@ class BetfairAuthenticatedMarketProvider:
 
         if not self._bound:
             raise RuntimeError("Betfair authenticated provider is not durably bound")
-        if not isinstance(current, Mapping):
-            raise TypeError("current must be a mapping of canonical market events")
+        if type(current) is not dict:
+            raise TypeError("current must be an exact dict of canonical market events")
 
         max_sequence = 0
         durable_open: dict[BetfairQuoteIdentity, int] = {}
@@ -223,6 +225,8 @@ class BetfairAuthenticatedMarketProvider:
             if event.source_id != BETFAIR_STREAM_SOURCE_ID:
                 continue
             identity = _identity_from_metadata(event.metadata)
+            if type(event.sequence) is not int or event.sequence < 1:
+                raise ValueError("durable Betfair bridge sequence must be a positive int")
             max_sequence = max(max_sequence, event.sequence)
             if event.status == "open":
                 durable_open[identity] = event.sequence

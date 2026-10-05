@@ -69,6 +69,13 @@ class ObservationWorkerMessage:
     def __post_init__(self) -> None:
         if (self.result is None) == (self.error is None):
             raise ValueError("worker message must contain exactly one of result or error")
+        if self.result is not None and type(self.result) is not ObservationResult:
+            raise TypeError("worker message result must be an exact ObservationResult")
+        if self.error is not None:
+            if type(self.error) is not str:
+                raise TypeError("worker message error must be an exact string")
+            if not self.error:
+                raise ValueError("worker message error must be non-empty")
 
 
 class OneShotObservationWorker:

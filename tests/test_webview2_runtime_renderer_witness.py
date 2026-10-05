@@ -349,6 +349,45 @@ def test_invalid_actual_runtime_identity_never_publishes_witness(
     assert controller._close_complete is True
 
 
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_observed_webview2_browser_version",
+        "_write_webview2_runtime_witness",
+    ),
+)
+def test_preentry_runtime_witness_helper_rebind_fails_before_hostile_execution(
+    monkeypatch,
+    tmp_path: Path,
+    helper_name: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    witness_path = workspace / "webview2-runtime-witness.json"
+    _install_witness_webview(monkeypatch, "154.0.2847.51", witness_path)
+    controller = AutosportWebController(workspace)
+    bridge = AutosportWebBridge(controller)
+    hostile_called = []
+
+    def hostile(*args, **kwargs):
+        hostile_called.append((args, kwargs))
+        return "999.0.0.0"
+
+    monkeypatch.setattr(windows_webview_shell, helper_name, hostile)
+
+    with pytest.raises(
+        WindowsWebViewUnavailable,
+        match="runtime witness authority changed before launch",
+    ):
+        launch_windows_shell(
+            bridge,
+            storage_path=tmp_path / "webview2",
+        )
+
+    assert hostile_called == []
+    assert witness_path.exists() is False
+
+
 def test_inflight_runtime_witness_observer_rebind_fails_closed(
     monkeypatch,
     tmp_path: Path,
@@ -439,13 +478,12 @@ def test_runtime_witness_publication_failure_rejects_privileged_document(
     controller = AutosportWebController(workspace)
     bridge = AutosportWebBridge(controller)
 
-    def fail_publication(path: Path, browser_version: str) -> None:
-        del path, browser_version
+    def fail_publication(_src, _dst) -> None:
         raise OSError("simulated durable publication failure")
 
     monkeypatch.setattr(
-        windows_webview_shell,
-        "_write_webview2_runtime_witness",
+        windows_webview_shell.os,
+        "replace",
         fail_publication,
     )
 

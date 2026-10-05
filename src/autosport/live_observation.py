@@ -57,6 +57,8 @@ def _validate_observation_ingress(
         )
     if clock is not None and not callable(clock):
         raise TypeError("clock must be callable or None")
+    if not callable(getattr(provider, "read_batch", None)):
+        raise TypeError("provider read_batch must be callable")
     source_id = getattr(provider, "source_id", None)
     if type(source_id) is not str:
         raise TypeError("provider source_id must be an exact string")

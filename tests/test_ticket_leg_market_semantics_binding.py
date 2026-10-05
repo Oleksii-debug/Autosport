@@ -302,7 +302,7 @@ def test_paperbook_opening_authority_rejects_semantics_mutation_before_save(
 
     with pytest.raises(
         ValueError,
-        match="opening economic identity changed after admission",
+        match="market_semantics_id must be canonical",
     ):
         book.save(path)
 

@@ -713,14 +713,25 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
             raise ValueError("research scenario group outcomes must be a list")
         outcomes = tuple(
             ScenarioOutcome(
-                str(outcome["quote_key"]),
+                _canonical_plan_identity(
+                    outcome["quote_key"],
+                    "research scenario outcome quote_key",
+                ),
                 Decimal(str(outcome["probability"]))
                 if outcome.get("probability") is not None
                 else None,
             )
             for outcome in outcomes_raw
         )
-        groups.append(ScenarioGroup(str(group_raw["group_id"]), outcomes))
+        groups.append(
+            ScenarioGroup(
+                _canonical_plan_identity(
+                    group_raw["group_id"],
+                    "research scenario group_id",
+                ),
+                outcomes,
+            )
+        )
 
     forecasts_raw = raw.get("forecasts")
     if not isinstance(forecasts_raw, list) or not forecasts_raw:

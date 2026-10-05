@@ -3,12 +3,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from threading import RLock
-from typing import Mapping
+from typing import Iterator, Mapping
 
 from . import _paper_execution_reality_legacy as _paper_impl
 from .domain import MarketEvent, PaperTicket, TicketLeg
@@ -822,6 +823,12 @@ class PaperExecutionAdoptionRuntime:
                 "PaperBook restart state is not the exact pre-action or "
                 "#623-authorized post-action state"
             )
+
+    @contextmanager
+    def execution_guard(self) -> Iterator[None]:
+        """Hold canonical paper-execution serialization across risk revalidation."""
+        with self._execution_lock:
+            yield
 
     def execute(
         self,

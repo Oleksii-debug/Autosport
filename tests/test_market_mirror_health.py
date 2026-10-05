@@ -361,6 +361,56 @@ class HealthGatedMirrorDecisionIndexTests(unittest.TestCase):
                 transition_order=1,
             )
 
+
+    def test_replay_boundary_rejects_hostile_transition_order_subclass(self) -> None:
+        class Order(int):
+            def __sub__(self, other):
+                raise AssertionError("hostile order arithmetic executed")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "transition_order must be a non-negative integer",
+        ):
+            ProviderHealthReplayBoundary(
+                source_id="provider-a",
+                recorded_at="2026-09-17T12:00:05+00:00",
+                transition_order=Order(1),
+            )
+
+    def test_provider_health_rejects_boundary_subclass_before_history_indexing(self) -> None:
+        class Boundary(ProviderHealthReplayBoundary):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, health_store, gate = self.build_gate(directory)
+            self.record_healthy(
+                health_store,
+                "provider-a",
+                now="2026-09-17T12:00:05+00:00",
+            )
+            hostile = Boundary(
+                source_id="provider-a",
+                recorded_at="2026-09-17T12:00:05+00:00",
+                transition_order=1,
+            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact ProviderHealthReplayBoundary",
+            ):
+                gate.provider_health(
+                    "provider-a",
+                    as_of=datetime(
+                        2026,
+                        9,
+                        17,
+                        12,
+                        0,
+                        10,
+                        tzinfo=timezone.utc,
+                    ),
+                    replay_boundary=hostile,
+                )
+
     def test_health_gate_rejects_hostile_datetime_and_timedelta_subclasses(self) -> None:
         class HostileDateTime(datetime):
             pass

@@ -809,6 +809,8 @@ class PersistentLiveDecisionLoop:
         self._risk_policy_authority = authority.risk_policy
         self._risk_policy_sha256_authority = authority.risk_policy.provenance_sha256
         self.intent_factory = intent_factory
+        self._intent_factory_authority = intent_factory
+        self._intent_factory_strategy_version_id_authority = factory_strategy_version_id
         self.intent_provenance = intent_provenance
         self._intent_provenance_authority = intent_provenance
         self._intent_provenance_sha256_authority = intent_provenance.provenance_sha256
@@ -2636,6 +2638,17 @@ class PersistentLiveDecisionLoop:
         ):
             raise LiveDecisionProgressError(
                 "risk policy semantics changed after construction"
+            )
+        if self.intent_factory is not self._intent_factory_authority:
+            raise LiveDecisionProgressError(
+                "live intent factory authority changed after construction"
+            )
+        if (
+            getattr(self.intent_factory, "strategy_version_id", None)
+            != self._intent_factory_strategy_version_id_authority
+        ):
+            raise LiveDecisionProgressError(
+                "live intent factory strategy identity changed after construction"
             )
         if self.intent_provenance is not self._intent_provenance_authority:
             raise LiveDecisionProgressError(

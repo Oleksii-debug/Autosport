@@ -64,7 +64,7 @@ def test_product_verifier_rejects_rebound_ledger_constructor_after_reopen(
                 action_id=action.action_id,
             )
 
-    assert attacker_called is True
+    assert attacker_called is False
 
 
 def test_product_verifier_rejects_rebound_store_constructor_after_reopen(
@@ -95,4 +95,72 @@ def test_product_verifier_rejects_rebound_store_constructor_after_reopen(
                 action_id=action.action_id,
             )
 
-    assert attacker_called is True
+    assert attacker_called is False
+
+def test_product_verifier_rejects_in_place_ledger_constructor_code_mutation_before_execution(
+    tmp_path: Path,
+) -> None:
+    bound, action, store, ledger, evidence = _case(None, tmp_path)
+    constructor = RealExecutionLedger.__init__
+    original_code = constructor.__code__
+    attacker_called = False
+
+    def attacker_init(self, path):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated ledger constructor must never execute")
+
+    try:
+        constructor.__code__ = attacker_init.__code__
+        with _active_runtime_profile(store.workspace) as runtime_profile:
+            with pytest.raises(
+                BetfairStandardLimitPriceBoundError,
+                match="product verifier reopen authority changed",
+            ):
+                verify_product_betfair_standard_limit_price_bound(
+                    evidence=evidence,
+                    ledger=ledger,
+                    issuance_store=store,
+                    runtime_profile=runtime_profile,
+                    execution_plan_id=bound.execution_plan.plan_id,
+                    action_id=action.action_id,
+                )
+    finally:
+        constructor.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_product_verifier_rejects_in_place_store_constructor_code_mutation_before_execution(
+    tmp_path: Path,
+) -> None:
+    bound, action, store, ledger, evidence = _case(None, tmp_path)
+    constructor = SupervisedPlanIssuanceStore.__init__
+    original_code = constructor.__code__
+    attacker_called = False
+
+    def attacker_init(self, workspace, *args, **kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated store constructor must never execute")
+
+    try:
+        constructor.__code__ = attacker_init.__code__
+        with _active_runtime_profile(store.workspace) as runtime_profile:
+            with pytest.raises(
+                BetfairStandardLimitPriceBoundError,
+                match="product verifier reopen authority changed",
+            ):
+                verify_product_betfair_standard_limit_price_bound(
+                    evidence=evidence,
+                    ledger=ledger,
+                    issuance_store=store,
+                    runtime_profile=runtime_profile,
+                    execution_plan_id=bound.execution_plan.plan_id,
+                    action_id=action.action_id,
+                )
+    finally:
+        constructor.__code__ = original_code
+
+    assert attacker_called is False
+

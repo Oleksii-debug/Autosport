@@ -5779,6 +5779,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             # only mutations are fenced while recovery is unfinished.
             loop.register_input("input-a", selection_ids="selection-a")
             self.assertEqual(loop.dependencies.input_ids, ("input-a",))
+            self.assertFalse(loop.unregister_input("missing-input"))
             with self.assertRaisesRegex(
                 LiveDecisionProgressError,
                 "cannot mutate live dependency registry while a decision is unfinished",

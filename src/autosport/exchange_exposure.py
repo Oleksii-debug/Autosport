@@ -24,9 +24,14 @@ def _from_coefficient(
     exponent: int,
     _decimal_type=Decimal,
 ) -> Decimal:
-    sign = 1 if coefficient < 0 else 0
-    digits = tuple(int(ch) for ch in str(abs(coefficient)))
-    return _decimal_type((sign, digits, exponent))
+    # Decimal(int) is exact and does not pass through Python's process-global
+    # int-to-decimal-string digit limit. Converting a large exact coefficient
+    # with str()/format() can raise before our own execution-ledger resource
+    # policy gets to decide whether the resulting money value is admissible.
+    coefficient_parts = _decimal_type(coefficient).as_tuple()
+    return _decimal_type(
+        (coefficient_parts.sign, coefficient_parts.digits, exponent)
+    )
 
 
 def _subtract_exact(

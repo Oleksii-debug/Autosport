@@ -340,8 +340,10 @@ def _issue_evidence(
     requested_stake: Decimal,
     price_ceiling_odds: Decimal,
     persistence_type: str,
+    _evidence_type=_CANONICAL_EVIDENCE_TYPE,
+    _validate=_CANONICAL_EVIDENCE_VALIDATE,
 ) -> BetfairStandardLayLimitPriceBoundEvidence:
-    item = object.__new__(BetfairStandardLayLimitPriceBoundEvidence)
+    item = object.__new__(_evidence_type)
     values = {
         "request_sha256": sha256(request_body).hexdigest(),
         "market_id": market_id,
@@ -369,12 +371,13 @@ def _issue_evidence(
     }
     for field, value in values.items():
         object.__setattr__(item, field, value)
-    _CANONICAL_EVIDENCE_VALIDATE(item)
+    _validate(item)
     return item
 
 
 def resolve_betfair_standard_lay_limit_price_bound(
     request_body: bytes,
+    _issue=_issue_evidence,
 ) -> BetfairStandardLayLimitPriceBoundEvidence:
     """Validate exact request bytes and issue the ordinary-LAY price ceiling.
 
@@ -487,7 +490,7 @@ def resolve_betfair_standard_lay_limit_price_bound(
             "only canonical LAPSE standard LIMIT requests are supported"
         )
 
-    return _issue_evidence(
+    return _issue(
         request_body=request_body,
         market_id=market_id,
         selection_id=selection_id,

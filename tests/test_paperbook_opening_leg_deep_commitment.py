@@ -1264,3 +1264,67 @@ def test_public_mutations_reject_in_place_write_authority_code_mutation(
                 book.settle(ticket.ticket_id, {leg.quote_key}, settled_at=_TS)
     finally:
         authority.__code__ = original_code
+
+
+@pytest.mark.parametrize(
+    "authority_name",
+    (
+        "_require_snapshot_candidate_opening_authority",
+        "_require_snapshot_candidate_causal_history_authority",
+    ),
+)
+def test_save_never_executes_rebound_snapshot_candidate_authority(
+    monkeypatch,
+    tmp_path,
+    authority_name: str,
+) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    attacker_calls = 0
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("rebound snapshot candidate authority executed")
+
+    monkeypatch.setattr(paper_module, authority_name, hostile)
+
+    destination = tmp_path / f"{authority_name}.json"
+    book.save(destination)
+
+    assert destination.exists()
+    assert attacker_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("authority_name", "message"),
+    (
+        (
+            "_require_snapshot_candidate_opening_authority",
+            "snapshot opening candidate authority changed",
+        ),
+        (
+            "_require_snapshot_candidate_causal_history_authority",
+            "snapshot causal candidate authority changed",
+        ),
+    ),
+)
+def test_save_rejects_in_place_snapshot_candidate_authority_code_mutation(
+    tmp_path,
+    authority_name: str,
+    message: str,
+) -> None:
+    book = PaperBook("100")
+    authority = getattr(paper_module, authority_name)
+    original_code = authority.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+    destination = tmp_path / f"{authority_name}-mutated.json"
+
+    try:
+        authority.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match=message):
+            book.save(destination)
+    finally:
+        authority.__code__ = original_code
+
+    assert not destination.exists()

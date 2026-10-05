@@ -214,6 +214,8 @@ def _make_paperbook_causal_history_authority_registry():
     guard = threading.RLock()
     require_registry_key = _require_registry_book_key_authority
     require_registry_key_code = require_registry_key.__code__
+    snapshot_for = _paperbook_causal_history_snapshot
+    snapshot_for_code = snapshot_for.__code__
 
     def require_registry_key_authority(book: object) -> None:
         if require_registry_key.__code__ is not require_registry_key_code:
@@ -221,6 +223,10 @@ def _make_paperbook_causal_history_authority_registry():
         require_registry_key(book)
         if require_registry_key.__code__ is not require_registry_key_code:
             raise ValueError("PaperBook registry key validator authority changed")
+
+    def require_snapshot_authority() -> None:
+        if snapshot_for.__code__ is not snapshot_for_code:
+            raise ValueError("PaperBook causal-history snapshot authority changed")
 
     def register_book(book: object) -> None:
         require_registry_key_authority(book)
@@ -234,13 +240,17 @@ def _make_paperbook_causal_history_authority_registry():
 
     def install_validated_snapshot(book: object) -> None:
         require_registry_key_authority(book)
-        snapshot = _paperbook_causal_history_snapshot(book)
+        require_snapshot_authority()
+        snapshot = snapshot_for(book)
+        require_snapshot_authority()
         with guard:
             authorities[book] = snapshot
 
     def require_current(book: object) -> None:
         require_registry_key_authority(book)
-        actual = _paperbook_causal_history_snapshot(book)
+        require_snapshot_authority()
+        actual = snapshot_for(book)
+        require_snapshot_authority()
         with guard:
             expected = authorities.get(book)
         if expected is None:
@@ -255,7 +265,9 @@ def _make_paperbook_causal_history_authority_registry():
     def require_candidate(source_book: object, candidate_book: object) -> None:
         require_registry_key_authority(source_book)
         require_registry_key_authority(candidate_book)
-        candidate = _paperbook_causal_history_snapshot(candidate_book)
+        require_snapshot_authority()
+        candidate = snapshot_for(candidate_book)
+        require_snapshot_authority()
         with guard:
             expected = authorities.get(source_book)
         if expected is None:

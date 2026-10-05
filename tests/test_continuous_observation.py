@@ -84,6 +84,18 @@ class ContinuousObservationTests(unittest.TestCase):
             **kwargs,
         )
 
+    def test_noncallable_provider_read_fails_before_workspace_creation(self):
+        class Provider:
+            source_id = "continuous-fixture"
+            read_batch = object()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(TypeError, "read_batch must be callable"):
+                self._run(Provider(), self._config(workspace, max_cycles=1))
+
+            self.assertFalse(workspace.exists())
+
     def test_provider_identity_substitution_fails_before_workspace_creation(self):
         class SourceId(str):
             pass

@@ -6562,6 +6562,73 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(progress["decision_id"], records[0].decision_id)
             loop.close()
 
+
+    def test_repeated_provider_failure_does_not_mint_new_decision_for_new_health_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            provider = _EmptyProvider()
+            provider.error = ProviderUnavailableError("first outage")
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=self._scientific_registry(
+                    workspace,
+                    self._strategy_version(),
+                ),
+                provider=provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+            self.assertEqual(first.status, LiveCycleStatus.PROVIDER_GAP)
+            first_progress = json.loads(
+                loop.progress_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                first_progress["health_boundaries"][0]["transition_order"],
+                1,
+            )
+
+            provider.error = ProviderUnavailableError("second outage")
+            second = loop.run_cycle()
+            self.assertEqual(second.status, LiveCycleStatus.PROVIDER_GAP)
+            records = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(first.decision_id, second.decision_id)
+            committed = json.loads(
+                loop.progress_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                committed["health_boundaries"],
+                records[0].payload["health_boundaries"],
+            )
+            self.assertEqual(
+                committed["health_boundaries"][0]["transition_order"],
+                1,
+            )
+            self.assertEqual(
+                SourceHealthStore(
+                    workspace / "source_health.json"
+                ).get("provider-a").poll_count,
+                2,
+            )
+            loop.close()
+
     def test_same_time_live_duplicate_skips_unrelated_trailing_ledger_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

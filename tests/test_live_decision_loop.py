@@ -7711,6 +7711,159 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertTrue(recovered._control_authority.read_history())
             recovered.close()
 
+    def test_dependency_registry_valid_old_rollback_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            inputs_path = workspace / PersistentLiveDecisionLoop.INPUTS_FILE_NAME
+            older_bytes = inputs_path.read_bytes()
+            first.register_input("input-b", selection_ids="selection-b")
+            self.assertNotEqual(inputs_path.read_bytes(), older_bytes)
+            first.close()
+            inputs_path.write_bytes(older_bytes)
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "dependency registry failed monotonic rollback/recovery verification",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START),
+                )
+
+    def test_dependency_registry_deletion_after_commit_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            first.close()
+            (workspace / PersistentLiveDecisionLoop.INPUTS_FILE_NAME).unlink()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "dependency registry failed monotonic rollback/recovery verification",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START),
+                )
+
+    def test_dependency_publish_before_authority_commit_recovers_exact_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            with patch.object(
+                first._inputs_authority,
+                "commit",
+                side_effect=RuntimeError("simulated loss before input authority commit"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "before input authority commit",
+                ):
+                    first.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(first.dependencies.input_ids, ())
+            first.close()
+
+            recovered = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            self.assertEqual(recovered.dependencies.input_ids, ("input-a",))
+            self.assertTrue(recovered._inputs_authority.read_history())
+            recovered.close()
+
+    def test_dependency_prepare_before_publication_aborts_to_previous_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            with patch(
+                "autosport.live_decision_loop.atomic_write_json",
+                side_effect=RuntimeError("simulated loss before input publication"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "before input publication",
+                ):
+                    first.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(first.dependencies.input_ids, ())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.INPUTS_FILE_NAME).exists()
+            )
+            first.close()
+
+            recovered = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            self.assertEqual(recovered.dependencies.input_ids, ())
+            recovered.close()
+
+    def test_valid_legacy_dependency_registry_bootstraps_monotonic_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            inputs_path = workspace / PersistentLiveDecisionLoop.INPUTS_FILE_NAME
+            inputs_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "autosport.live_decision_inputs",
+                        "schema_version": 2,
+                        "loop_id": "live-test-loop",
+                        "inputs": [
+                            {
+                                "input_id": "input-a",
+                                "source_ids": None,
+                                "sports": None,
+                                "event_ids": None,
+                                "market_ids": None,
+                                "selection_ids": ["selection-a"],
+                            }
+                        ],
+                    },
+                    sort_keys=True,
+                ) + "\n",
+                encoding="utf-8",
+            )
+
+            recovered = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            self.assertEqual(recovered.dependencies.input_ids, ("input-a",))
+            self.assertTrue(recovered._inputs_authority.read_history())
+            recovered.close()
+
     def test_durable_dependency_registry_restores_exact_selectors_without_manual_registration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

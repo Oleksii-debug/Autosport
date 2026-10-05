@@ -2324,5 +2324,43 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(actual.currency, goal.currency)
 
 
+    def test_equity_path_rejects_in_place_captured_replay_code_mutation(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(97),),
+            Decimal("10"),
+            placed_at="2026-09-21T18:50:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T18:55:00+00:00",
+        )
+        goal = self._goal()
+
+        captured = risk_reporting._CANONICAL_PAPERBOOK_DEBIT_BALANCE
+        function = captured.__func__
+        original_code = function.__code__
+
+        def hostile_debit(_cls, _balance, _amount):
+            return Decimal("999999")
+
+        try:
+            function.__code__ = hostile_debit.__code__
+            with self.assertRaisesRegex(
+                ValueError,
+                "canonical PAPER equity replay callable code changed",
+            ):
+                build_product_issued_paper_equity_path(book, goal)
+        finally:
+            function.__code__ = original_code
+
+        resolved = build_product_issued_paper_equity_path(book, goal)
+        self.assertEqual(resolved.current_equity, Decimal("90"))
+        self.assertEqual(resolved.minimum_equity, Decimal("90"))
+
+
 if __name__ == "__main__":
     unittest.main()

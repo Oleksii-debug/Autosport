@@ -2028,5 +2028,48 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(actual.historical_max_drawdown_amount, Decimal("20"))
 
 
+    def test_product_issued_equity_path_bypasses_rebound_goal_provenance_helpers(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(96),),
+            Decimal("15"),
+            placed_at="2026-09-21T18:40:00+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T18:45:00+00:00",
+        )
+        goal = self._goal()
+        expected = build_product_issued_paper_equity_path(book, goal)
+
+        with (
+            patch.object(
+                risk_reporting,
+                "provenance_for",
+                side_effect=AssertionError("rebound provenance executed"),
+            ),
+            patch.object(
+                risk_reporting,
+                "economic_goal_from_payload",
+                side_effect=AssertionError("rebound goal parser executed"),
+            ),
+            patch.object(
+                risk_reporting,
+                "economic_goal_to_payload",
+                side_effect=AssertionError("rebound goal serializer executed"),
+            ),
+        ):
+            actual = build_product_issued_paper_equity_path(book, goal)
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual.goal_id, goal.goal_id)
+        self.assertEqual(actual.goal_revision, goal.revision)
+        self.assertEqual(actual.bankroll_id, goal.bankroll_id)
+        self.assertEqual(actual.currency, goal.currency)
+
+
 if __name__ == "__main__":
     unittest.main()

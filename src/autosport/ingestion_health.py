@@ -79,6 +79,23 @@ def parse_source_timestamp(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _sync_parent_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _sync_existing_file(path: Path) -> None:
+    with path.open("rb+") as handle:
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def _validate_source_id(value: object) -> str:
     if type(value) is not str or not value or value.strip() != value:
         raise ValueError("source_id must be a non-empty trimmed string")
@@ -434,23 +451,14 @@ class SourceHealthStore:
         ).encode("utf-8")
         return hashlib.sha256(material).hexdigest()
 
-    def _sync_existing_file(self) -> None:
-        self._assert_target_shape()
-        try:
-            with self._path_authority.open("rb") as handle:
-                os.fsync(handle.fileno())
-        except OSError as exc:
-            raise RuntimeError(
-                "source health durability barrier failed"
-            ) from exc
-
     def _bootstrap_validated_authority_state(
         self,
         authority: MonotonicWorkspaceAuthority,
         observed: str,
     ) -> None:
-        self._sync_existing_file()
-        self._sync_parent_directory()
+        self._assert_target_shape()
+        _sync_existing_file(self._path_authority)
+        _sync_parent_directory(self._path_authority.parent)
         if self._current_state_sha256() != observed:
             raise MonotonicAuthorityRollbackError(
                 "source health state changed during authority bootstrap durability barrier"
@@ -488,8 +496,9 @@ class SourceHealthStore:
         pending = history[-1] if history[-1].phase is AuthorityPhase.PREPARE else None
         if pending is not None:
             if observed == pending.intended_state_sha256:
-                self._sync_existing_file()
-                self._sync_parent_directory()
+                self._assert_target_shape()
+                _sync_existing_file(self._path_authority)
+                _sync_parent_directory(self._path_authority.parent)
                 observed = self._current_state_sha256()
             authority.recover(
                 observed_state_sha256=observed,
@@ -589,14 +598,7 @@ class SourceHealthStore:
             )
 
     def _sync_parent_directory(self) -> None:
-        if os.name == "nt":
-            return
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        directory_fd = os.open(self._path_authority.parent, flags)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        _sync_parent_directory(self._path_authority.parent)
 
     def assert_persistence_authority(self) -> None:
         self._assert_persistence_authority()

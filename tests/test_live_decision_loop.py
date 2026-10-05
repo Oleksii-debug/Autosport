@@ -376,6 +376,30 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             catalog_required_history=catalog_required_history,
         )
 
+    def test_live_loop_rejects_ingestion_policy_subclass(self) -> None:
+        class Policy(IngestionPolicy):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with self.assertRaisesRegex(TypeError, "exact IngestionPolicy"):
+                PersistentLiveDecisionLoop(
+                    workspace,
+                    loop_id="live-test-loop",
+                    mode=LiveDecisionMode.PAPER,
+                    book=PaperBook("1000"),
+                    authority=self._authority(),
+                    intent_factory=_EmptyIntentFactory(),
+                    scientific_registry=self._scientific_registry(
+                        workspace,
+                        self._strategy_version(),
+                    ),
+                    provider=_EmptyProvider(),
+                    ingestion_policy=Policy(),
+                    max_quote_age=timedelta(seconds=5),
+                    clock=_ManualClock(self.START + timedelta(seconds=1)),
+                )
+
     def test_long_lived_default_observer_reconciles_cross_process_market_append(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

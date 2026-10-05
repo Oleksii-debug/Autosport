@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from autosport.betdaq_catalogue_binding import BetdaqLiveCatalogueResolver
+from autosport.betdaq_catalogue_binding import (
+    BetdaqCatalogueEvidence,
+    BetdaqLiveCatalogueResolver,
+)
 from autosport.betdaq_rate_governor import (
     BetdaqBlacklistStatus,
     BetdaqRateAdmission,
@@ -49,6 +52,20 @@ def _binding() -> BetdaqMarketBinding:
     return BetdaqMarketBinding(9001, "100", "football", MarketType.WINNER)
 
 
+def _catalogue_evidence(**overrides) -> BetdaqCatalogueEvidence:
+    values = {
+        "requested_event_classifier_ids": (100, 101),
+        "received_at": "2026-10-05T06:00:01Z",
+        "request_fingerprint": "3" * 64,
+        "response_sha256": "4" * 64,
+        "provider_call_id": "call-1",
+        "provider_created_at": "2026-10-05T06:00:00Z",
+        "rate_admission_receipts": ("5" * 64,),
+    }
+    values.update(overrides)
+    return BetdaqCatalogueEvidence(**values)
+
+
 class _ReusedAdmissionTransport:
     def __init__(self) -> None:
         self.calls = 0
@@ -87,3 +104,18 @@ def test_catalogue_retry_rejects_missing_rate_admission() -> None:
         match="requires canonical BetdaqRateAdmission",
     ):
         _resolver(transport).resolve([_binding()])
+
+
+def test_catalogue_evidence_requires_canonical_root_order() -> None:
+    with pytest.raises(ValueError, match="sorted unique canonical provider ids"):
+        _catalogue_evidence(requested_event_classifier_ids=(101, 100))
+
+
+def test_catalogue_evidence_requires_trimmed_provider_call_id() -> None:
+    with pytest.raises(ValueError, match="trimmed non-empty str"):
+        _catalogue_evidence(provider_call_id=" call-1 ")
+
+
+def test_catalogue_evidence_rejects_provider_time_after_receipt() -> None:
+    with pytest.raises(ValueError, match="cannot follow catalogue receipt"):
+        _catalogue_evidence(provider_created_at="2026-10-05T06:00:02Z")

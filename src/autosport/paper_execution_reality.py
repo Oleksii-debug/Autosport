@@ -854,6 +854,12 @@ def execute_paper_plan(
         observations = {}
     if not isinstance(observations, Mapping):
         raise TypeError("observations must be a mapping")
+    try:
+        observations = dict(observations)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("observations must be a stable mapping") from exc
+    if any(type(action_id) is not str for action_id in observations):
+        raise TypeError("observation keys must be exact str action ids")
     if type(suspended_action_ids) is not frozenset or any(
         type(item) is not str for item in suspended_action_ids
     ):
@@ -865,12 +871,9 @@ def execute_paper_plan(
         raise PaperExecutionStateError(
             "suspended_action_ids contain action outside execution plan"
         )
-    if observations and not isinstance(
-        evidence_registry,
-        PaperExecutionEvidenceRegistry,
-    ):
+    if observations and type(evidence_registry) is not PaperExecutionEvidenceRegistry:
         raise PaperExecutionStateError(
-            "configured/empirical observations require a durable evidence registry"
+            "configured/empirical observations require the exact durable evidence registry authority"
         )
 
     observation_evidence_ids: dict[str, str] = {}

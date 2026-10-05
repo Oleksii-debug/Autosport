@@ -102,6 +102,24 @@ class ResearchStrategyRuntimeTests(unittest.TestCase):
         }
 
 
+
+    def test_research_preflight_preserves_last_causal_sequence_when_newer_arrives_late(self):
+        dataset = load_dataset(Path("examples/tt_demo"))
+        events = list(dataset.load_market_events())
+        trigger = next(event for event in events if event.sequence == 4)
+        observed = datetime.fromisoformat(
+            trigger.observed_ts.replace("Z", "+00:00")
+        )
+        future_delivery = replace(
+            trigger,
+            sequence=trigger.sequence + 1,
+            decimal_odds=trigger.decimal_odds + Decimal("0.10"),
+            ingest_ts=(observed + timedelta(seconds=1)).isoformat(),
+        )
+        plan = ResearchStrategyPlan.from_dict(self._plan_dict())
+
+        plan.preflight(events + [future_delivery])
+
     def test_research_preflight_rejects_trigger_received_after_decision_cutoff(self):
         dataset = load_dataset(Path("examples/tt_demo"))
         events = list(dataset.load_market_events())

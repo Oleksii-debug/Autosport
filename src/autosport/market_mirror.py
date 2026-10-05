@@ -311,8 +311,8 @@ class MarketMirror:
         but valid provider observations may still be retained in history for audit;
         ``apply`` then keeps the live source-local projection monotonic.
         """
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("store must be an exact SQLiteMarketStore")
         if not isinstance(event, MarketEvent):
             raise TypeError("event must be a MarketEvent")
 
@@ -655,8 +655,8 @@ class MarketMirror:
         history but does not create a replay cutoff or a second durable authority.
         """
 
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("store must be an exact SQLiteMarketStore")
         boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
         selected_sources = cls._selector(source_ids, name="source_ids")
         selected_sports = cls._selector(sports, name="sports")
@@ -701,8 +701,8 @@ class MarketMirror:
         reconstructed mirror then applies the same canonical
         status/freshness/selectors contract as a live active_view.
         """
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("store must be an exact SQLiteMarketStore")
         boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
 
         # Validate and materialize every request selector before issuing the durable
@@ -766,8 +766,8 @@ class MarketMirror:
         decision-causal; generation-zero migration rows stay visible through view() and
         snapshot() but are excluded from active decision views.
         """
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("store must be an exact SQLiteMarketStore")
         return cls._from_proven_history(
             store.events_with_append_generation()
         )

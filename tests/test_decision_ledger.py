@@ -10,6 +10,7 @@ from pathlib import Path
 from autosport.decision_ledger import (
     ECONOMIC_DECISION_KIND,
     ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY,
+    MATERIAL_ACTION_ID_PAYLOAD_KEY,
     DecisionLedgerIntegrityError,
     DecisionRecord,
     JsonlDecisionLedger,
@@ -86,6 +87,56 @@ class DecisionLedgerTests(unittest.TestCase):
             self.assertNotIn("result", envelope["record"])
             self.assertNotIn("outcome", envelope["record"])
             self.assertEqual(ledger.verify_integrity(), 1)
+
+    def test_append_economic_rejects_duplicate_material_action_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            goal = self._economic_goal()
+            ledger = JsonlDecisionLedger(path)
+            first = replace(
+                self._economic_record(decision_id="decision-a"),
+                payload={
+                    "x": 1,
+                    MATERIAL_ACTION_ID_PAYLOAD_KEY: "material-action-1",
+                },
+            )
+            second = replace(
+                self._economic_record(decision_id="decision-b"),
+                payload={
+                    "x": 2,
+                    MATERIAL_ACTION_ID_PAYLOAD_KEY: "material-action-1",
+                },
+            )
+
+            ledger.append_economic(first, goal)
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "material_action_id already exists",
+            ):
+                ledger.append_economic(second, goal)
+
+            records = ledger.verified_records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].decision_id, "decision-a")
+
+    def test_append_economic_rejects_invalid_material_action_identity_before_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            record = replace(
+                self._economic_record(decision_id="invalid-material-action"),
+                payload={"x": 1, MATERIAL_ACTION_ID_PAYLOAD_KEY: "   "},
+            )
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "material_action_id is invalid",
+            ):
+                JsonlDecisionLedger(path).append_economic(
+                    record,
+                    self._economic_goal(),
+                )
+
+            self.assertFalse(path.exists())
 
     def test_append_economic_binds_goal_provenance_and_restart_verifies(self):
         with tempfile.TemporaryDirectory() as tmp:

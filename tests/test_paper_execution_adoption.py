@@ -210,6 +210,27 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                     decision_id="decision-lay",
                 )
 
+    def test_constructor_rejects_model_config_subclass_before_access(self):
+        class HostileConfig(PaperExecutionModelConfig):
+            def __getattribute__(self, name):
+                if name not in {"__class__"}:
+                    raise AssertionError("hostile config attributes must not be read")
+                return super().__getattribute__(name)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hostile = object.__new__(HostileConfig)
+            with self.assertRaisesRegex(
+                TypeError,
+                "config must be exact PaperExecutionModelConfig",
+            ):
+                PaperExecutionAdoptionRuntime(
+                    book=PaperBook("100.00"),
+                    ledger=PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl"),
+                    config=hostile,
+                    max_quote_age=__import__("datetime").timedelta(seconds=5),
+                    paper_book_path=Path(tmp) / "paper-book.json",
+                )
+
     def test_constructor_rejects_paper_execution_ledger_subclass_before_access(self):
         class HostileLedger(PaperExecutionLedger):
             def __getattribute__(self, name):

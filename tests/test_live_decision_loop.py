@@ -5534,6 +5534,50 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     clock=_ManualClock(self.START),
                 )
 
+    def test_provider_gap_rejects_registry_change_after_snapshot_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [ProviderUnavailableError("provider unavailable")],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            original_market_sha = loop._market_state_sha256
+            mutated = [False]
+
+            def mutate_registry_after_gap_capture():
+                value = original_market_sha()
+                if not mutated[0]:
+                    mutated[0] = True
+                    self.assertTrue(loop.unregister_input("input-a"))
+                    loop.register_input(
+                        "input-a",
+                        selection_ids="selection-b",
+                    )
+                return value
+
+            with (
+                patch.object(
+                    loop,
+                    "_market_state_sha256",
+                    side_effect=mutate_registry_after_gap_capture,
+                ),
+                self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "registry changed after snapshot capture",
+                ),
+            ):
+                loop.run_cycle()
+
+            self.assertFalse(loop.progress_path.exists())
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            loop.close()
+
     def test_provider_gap_persists_zero_and_forces_rebuild_on_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

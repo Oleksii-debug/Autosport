@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import threading
 import time
@@ -220,6 +221,16 @@ def _dataset_identity_order_key(event: MarketEvent) -> tuple[datetime, int, str]
 
 
 def _iso_datetime(value: str, *, field_name: str = "observed_ts") -> datetime:
+    if type(value) is not str or not value or value.strip() != value:
+        raise ValueError(f"invalid replay {field_name}: {value}")
+    for match in re.finditer(r"[.,]([0-9]+)", value):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(
+                f"replay {field_name} precision finer than microseconds is unsupported"
+            )
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
@@ -232,15 +243,19 @@ def _iso_datetime(value: str, *, field_name: str = "observed_ts") -> datetime:
 def _event_available_datetime(event: MarketEvent) -> datetime:
     """Return the first instant when a replay callback may know this event.
 
-    Live decisions cannot consume an event before either its local observation
-    instant or its durable ingestion/receipt instant.  Using the later clock
-    prevents a late-arriving older observation from being replayed into the
-    strategy before the live system could have received it.
+    Live decisions cannot consume an event before its provider/source clock,
+    local observation instant, or durable ingestion/receipt instant. Using the
+    latest of the three prevents provider-future or late-arriving observations
+    from becoming strategy-visible before the causal system could know them.
     """
 
     observed = _iso_datetime(event.observed_ts, field_name="observed_ts")
     ingested = _iso_datetime(event.ingest_ts, field_name="ingest_ts")
-    return max(observed, ingested)
+    sourced = _iso_datetime(
+        event.source_ts or event.observed_ts,
+        field_name="source_ts",
+    )
+    return max(sourced, observed, ingested)
 
 
 def _replay_order_key(event: MarketEvent) -> tuple[datetime, datetime, int, str]:

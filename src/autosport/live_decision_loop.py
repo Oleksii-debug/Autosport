@@ -803,6 +803,10 @@ class PersistentLiveDecisionLoop:
         self.decision_ledger = decision_ledger or JsonlDecisionLedger(
             self.workspace / "decisions.jsonl"
         )
+        if self.decision_ledger.path != self.workspace / "decisions.jsonl":
+            raise ValueError(
+                "decision_ledger must use the canonical live workspace Decision Ledger"
+            )
         if paper_execution is not None:
             if not isinstance(paper_execution, PaperExecutionAdoptionRuntime):
                 raise TypeError(

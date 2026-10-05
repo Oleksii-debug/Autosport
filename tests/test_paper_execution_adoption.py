@@ -208,6 +208,25 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                     decision_id="decision-lay",
                 )
 
+    def test_constructor_rejects_timedelta_subclass_before_comparison(self):
+        class HostileTimedelta(timedelta):
+            def __le__(self, _other):
+                raise AssertionError("hostile timedelta comparison must not execute")
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with self.assertRaisesRegex(
+                TypeError,
+                "max_quote_age must be an exact timedelta",
+            ):
+                PaperExecutionAdoptionRuntime(
+                    book=PaperBook("1000"),
+                    ledger=PaperExecutionLedger(workspace / "paper-execution.jsonl"),
+                    config=self._config(),
+                    max_quote_age=HostileTimedelta(seconds=5),
+                    paper_book_path=workspace / "paper_book.json",
+                )
+
     def test_execute_with_clock_rejects_datetime_subclass_before_hooks(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

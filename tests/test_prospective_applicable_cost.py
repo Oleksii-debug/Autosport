@@ -615,3 +615,36 @@ def test_resolver_validates_plan_identity_elements_before_hostile_equality():
             object.__setattr__(plan, "intent_sha256s", original)
 
     assert attacker_called is False
+
+
+
+def test_slippage_source_digest_ignores_mutable_evidence_id_property(
+    monkeypatch,
+    tmp_path,
+):
+    bound, _approval, _issuance_store, _issued = _issue(monkeypatch, tmp_path)
+    action = bound.execution_plan.actions[0]
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+    canonical_evidence_id = evidence.evidence_id
+    closure = inspect.getclosurevars(
+        subject.resolve_prospective_applicable_costs_with_betfair_standard_limit
+    )
+    sealed_digest = closure.nonlocals["slippage_evidence_id"]
+    attacker_called = False
+
+    def attacker_property(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        return "f" * 64
+
+    monkeypatch.setattr(
+        type(evidence),
+        "evidence_id",
+        property(attacker_property),
+    )
+
+    assert sealed_digest(evidence) == canonical_evidence_id
+    assert attacker_called is False

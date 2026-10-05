@@ -186,6 +186,64 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertFalse(workspace.exists())
             self.assertEqual(provider.calls, 0)
 
+    def test_falsy_stop_event_is_not_replaced_by_default_event(self):
+        class FalsyStopEvent:
+            def __bool__(self):
+                return False
+
+            def is_set(self):
+                return True
+
+            def wait(self, _seconds):
+                raise AssertionError("wait must not run when stop is already requested")
+
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_continuous_observation(
+                provider,
+                self._config(Path(tmp), max_cycles=1),
+                stop_event=FalsyStopEvent(),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                reporter=None,
+            )
+
+            self.assertEqual(result.stop_reason, "operator_stop")
+            self.assertEqual(provider.calls, 0)
+
+    def test_falsy_waiter_is_not_replaced_by_stop_event_wait(self):
+        calls = []
+
+        class FalsyWaiter:
+            def __bool__(self):
+                return False
+
+            def __call__(self, seconds):
+                calls.append(seconds)
+                return True
+
+        provider = SequenceProvider(
+            [
+                _batch(_quote(), cursor="first"),
+                _batch(_quote(sequence=2), cursor="must-not-run"),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_continuous_observation(
+                provider,
+                self._config(Path(tmp), max_cycles=2),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                waiter=FalsyWaiter(),
+                reporter=None,
+            )
+
+            self.assertEqual(result.stop_reason, "operator_stop")
+            self.assertEqual(provider.calls, 1)
+            self.assertEqual(calls, [1.0])
+
     def test_provider_identity_substitution_fails_before_workspace_creation(self):
         class SourceId(str):
             pass

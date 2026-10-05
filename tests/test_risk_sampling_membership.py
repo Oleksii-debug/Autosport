@@ -1,10 +1,12 @@
 import json
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 from autosport.risk_sampling_membership import (
     RiskSamplingMembershipError,
+    inspect_fixed_n_risk_evaluation_spec,
     inspect_fixed_n_risk_membership_structure,
     resolve_fixed_n_risk_membership,
 )
@@ -37,6 +39,26 @@ class RiskSamplingMembershipTests(unittest.TestCase):
             "risk_method": "CLOPPER_PEARSON_ONE_SIDED",
             "dependence_qualification": "SEPARATE_REQUIRED",
         }
+        payload.update(overrides)
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def _design_v2(self, **overrides):
+        payload = json.loads(self._design())
+        payload.update(
+            {
+                "kind": "autosport-risk-fixed-n-run-membership-v2",
+                "confidence_level": "0.95",
+                "ruin_threshold": "0",
+                "risk_target_scope": "FROZEN_STAKE_POLICY",
+                "initial_capital_state_sha256": "5" * 64,
+                "stake_policy_sha256": "6" * 64,
+            }
+        )
         payload.update(overrides)
         return json.dumps(
             payload,
@@ -126,6 +148,81 @@ class RiskSamplingMembershipTests(unittest.TestCase):
             self.assertFalse(first.iid_qualified)
             self.assertEqual(first.dataset_manifest_sha256, self.MANIFEST_SHA)
             self.assertEqual(len(first.design_sha256), 64)
+
+    def test_v2_resolves_exact_pre_registered_statistical_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._registry(Path(tmp), design=self._design_v2())
+            membership = inspect_fixed_n_risk_membership_structure(
+                path,
+                research_protocol_id=self.PROTOCOL_ID,
+                dataset_snapshot_id=self.DATASET_ID,
+            )
+            spec = inspect_fixed_n_risk_evaluation_spec(
+                path,
+                research_protocol_id=self.PROTOCOL_ID,
+                dataset_snapshot_id=self.DATASET_ID,
+            )
+
+            self.assertEqual(spec.design_sha256, membership.design_sha256)
+            self.assertEqual(spec.planned_run_ids, membership.planned_run_ids)
+            self.assertEqual(spec.confidence_level, Decimal("0.95"))
+            self.assertEqual(spec.ruin_threshold, Decimal("0"))
+            self.assertEqual(spec.risk_target_scope, "FROZEN_STAKE_POLICY")
+            self.assertEqual(spec.initial_capital_state_sha256, "5" * 64)
+            self.assertEqual(spec.stake_policy_sha256, "6" * 64)
+            self.assertFalse(spec.product_preoutcome_chronology_proven)
+            self.assertFalse(spec.iid_qualified)
+            self.assertFalse(spec.grants_real_money_authority)
+
+    def test_v1_membership_cannot_mint_statistical_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._registry(Path(tmp), design=self._design())
+            with self.assertRaisesRegex(
+                RiskSamplingMembershipError,
+                "requires v2 fixed-N statistical preregistration",
+            ):
+                inspect_fixed_n_risk_evaluation_spec(
+                    path,
+                    research_protocol_id=self.PROTOCOL_ID,
+                    dataset_snapshot_id=self.DATASET_ID,
+                )
+
+    def test_v2_rejects_unfrozen_or_noncanonical_statistical_parameters(self):
+        cases = (
+            (self._design_v2(confidence_level="1"), "strictly between"),
+            (self._design_v2(confidence_level="0"), "strictly between"),
+            (self._design_v2(confidence_level="0.950"), "canonical decimal text"),
+            (
+                self._design_v2(confidence_level="1e100000000"),
+                "exceeds supported canonical size",
+            ),
+            (self._design_v2(ruin_threshold="-0"), "canonical decimal text"),
+            (
+                self._design_v2(ruin_threshold="1e100000000"),
+                "exceeds supported canonical size",
+            ),
+            (
+                self._design_v2(risk_target_scope="CALLER_CANDIDATE"),
+                "FROZEN_STAKE_POLICY",
+            ),
+            (
+                self._design_v2(initial_capital_state_sha256="not-a-sha"),
+                "initial_capital_state_sha256",
+            ),
+            (
+                self._design_v2(stake_policy_sha256="A" * 64),
+                "stake_policy_sha256",
+            ),
+        )
+        for design, message in cases:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as tmp:
+                path = self._registry(Path(tmp), design=design)
+                with self.assertRaisesRegex(RiskSamplingMembershipError, message):
+                    inspect_fixed_n_risk_membership_structure(
+                        path,
+                        research_protocol_id=self.PROTOCOL_ID,
+                        dataset_snapshot_id=self.DATASET_ID,
+                    )
 
     def test_unknown_protocol_cannot_be_replaced_by_caller_assertion(self):
         with tempfile.TemporaryDirectory() as tmp:

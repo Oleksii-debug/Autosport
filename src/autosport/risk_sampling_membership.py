@@ -4,16 +4,20 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 from .scientific_registry import RegistryEntry, ScientificRegistry
 
 
-_DESIGN_KIND = "autosport-risk-fixed-n-run-membership-v1"
+_DESIGN_KIND_V1 = "autosport-risk-fixed-n-run-membership-v1"
+_DESIGN_KIND_V2 = "autosport-risk-fixed-n-run-membership-v2"
+_SUPPORTED_DESIGN_KINDS = frozenset({_DESIGN_KIND_V1, _DESIGN_KIND_V2})
 _RISK_METHOD = "CLOPPER_PEARSON_ONE_SIDED"
 _DEPENDENCE_STATUS = "SEPARATE_REQUIRED"
-_REQUIRED_DESIGN_FIELDS = frozenset(
+_RISK_TARGET_SCOPE = "FROZEN_STAKE_POLICY"
+_COMMON_DESIGN_FIELDS = frozenset(
     {
         "kind",
         "dataset_snapshot_id",
@@ -22,6 +26,16 @@ _REQUIRED_DESIGN_FIELDS = frozenset(
         "sampling_frame_sha256",
         "risk_method",
         "dependence_qualification",
+    }
+)
+_REQUIRED_DESIGN_FIELDS_V1 = _COMMON_DESIGN_FIELDS
+_REQUIRED_DESIGN_FIELDS_V2 = _COMMON_DESIGN_FIELDS | frozenset(
+    {
+        "confidence_level",
+        "ruin_threshold",
+        "risk_target_scope",
+        "initial_capital_state_sha256",
+        "stake_policy_sha256",
     }
 )
 _HEX = frozenset("0123456789abcdef")
@@ -76,6 +90,42 @@ def _reject_nonfinite(value: str) -> None:
     )
 
 
+def _canonical_decimal_text(value: object, name: str) -> str:
+    text = _canonical_text(value, name)
+    if len(text) > 128:
+        raise RiskSamplingMembershipError(f"{name} exceeds supported canonical size")
+    try:
+        parsed = Decimal(text)
+    except InvalidOperation as exc:
+        raise RiskSamplingMembershipError(f"{name} must be an exact decimal string") from exc
+    if not parsed.is_finite():
+        raise RiskSamplingMembershipError(f"{name} must be finite")
+    if parsed.is_zero():
+        canonical_length = 1
+    else:
+        decimal_tuple = parsed.as_tuple()
+        exponent = int(decimal_tuple.exponent)
+        digits = len(decimal_tuple.digits)
+        sign = 1 if decimal_tuple.sign else 0
+        if exponent >= 0:
+            canonical_length = sign + digits + exponent
+        elif digits + exponent > 0:
+            canonical_length = sign + digits + 1
+        else:
+            canonical_length = sign + 2 - exponent
+    if canonical_length > 128:
+        raise RiskSamplingMembershipError(f"{name} exceeds supported canonical size")
+    if parsed.is_zero():
+        canonical = "0"
+    else:
+        canonical = format(parsed, "f")
+        if "." in canonical:
+            canonical = canonical.rstrip("0").rstrip(".")
+    if text != canonical:
+        raise RiskSamplingMembershipError(f"{name} must use canonical decimal text")
+    return text
+
+
 def _parse_design(text: object) -> tuple[dict[str, Any], str]:
     raw = _canonical_text(text, "binding.evaluation_design")
     try:
@@ -88,7 +138,18 @@ def _parse_design(text: object) -> tuple[dict[str, Any], str]:
         raise RiskSamplingMembershipError(
             "binding.evaluation_design must be canonical JSON"
         ) from exc
-    if type(payload) is not dict or set(payload) != _REQUIRED_DESIGN_FIELDS:
+    if type(payload) is not dict:
+        raise RiskSamplingMembershipError(
+            "fixed-N evaluation design fields do not match the supported schema"
+        )
+    kind = payload.get("kind")
+    if kind == _DESIGN_KIND_V1:
+        expected = _REQUIRED_DESIGN_FIELDS_V1
+    elif kind == _DESIGN_KIND_V2:
+        expected = _REQUIRED_DESIGN_FIELDS_V2
+    else:
+        raise RiskSamplingMembershipError("fixed-N evaluation design kind is unsupported")
+    if set(payload) != expected:
         raise RiskSamplingMembershipError(
             "fixed-N evaluation design fields do not match the supported schema"
         )
@@ -103,6 +164,38 @@ def _parse_design(text: object) -> tuple[dict[str, Any], str]:
         raise RiskSamplingMembershipError(
             "binding.evaluation_design must use canonical JSON serialization"
         )
+    if kind == _DESIGN_KIND_V2:
+        confidence = Decimal(
+            _canonical_decimal_text(
+                payload.get("confidence_level"),
+                "fixed-N confidence_level",
+            )
+        )
+        if confidence <= 0 or confidence >= 1:
+            raise RiskSamplingMembershipError(
+                "fixed-N confidence_level must be strictly between 0 and 1"
+            )
+        _canonical_decimal_text(
+            payload.get("ruin_threshold"),
+            "fixed-N ruin_threshold",
+        )
+        if payload.get("risk_target_scope") != _RISK_TARGET_SCOPE:
+            raise RiskSamplingMembershipError(
+                "fixed-N risk target scope must be FROZEN_STAKE_POLICY"
+            )
+        for field_name in (
+            "initial_capital_state_sha256",
+            "stake_policy_sha256",
+        ):
+            raw_sha = _canonical_text(
+                payload.get(field_name),
+                f"fixed-N {field_name}",
+            )
+            if raw_sha != raw_sha.lower():
+                raise RiskSamplingMembershipError(
+                    f"fixed-N {field_name} must use lowercase SHA-256 hex"
+                )
+            _sha256(raw_sha, f"fixed-N {field_name}")
     return payload, hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -156,6 +249,112 @@ class ResolvedFixedNRiskMembership:
     def iid_qualified(self) -> bool:
         """Membership uniqueness is deliberately not an IID/dependence proof."""
         return False
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedFixedNRiskEvaluationSpec:
+    """Structurally frozen statistical policy for a fixed-N risk experiment.
+
+    ScientificRegistry structure proves exact preregistration content and append
+    order but is not itself a non-backdateable product chronology authority.
+    Positive pre-outcome authority must be composed with the product membership
+    publication/randomization receipts before this specification can drive a
+    product-issued estimator.
+    """
+
+    research_protocol_id: str
+    protocol_sha256: str
+    design_sha256: str
+    dataset_snapshot_id: str
+    dataset_manifest_sha256: str
+    planned_run_ids: tuple[str, ...]
+    confidence_level: Decimal
+    ruin_threshold: Decimal
+    risk_target_scope: str
+    initial_capital_state_sha256: str
+    stake_policy_sha256: str
+    precommitted_at: str
+    outcome_reveal_after: str
+
+    @property
+    def planned_n(self) -> int:
+        return len(self.planned_run_ids)
+
+    @property
+    def product_preoutcome_chronology_proven(self) -> bool:
+        return False
+
+    @property
+    def iid_qualified(self) -> bool:
+        return False
+
+    @property
+    def grants_real_money_authority(self) -> bool:
+        return False
+
+
+def inspect_fixed_n_risk_evaluation_spec(
+    registry_path: str | Path,
+    *,
+    research_protocol_id: str,
+    dataset_snapshot_id: str,
+) -> ResolvedFixedNRiskEvaluationSpec:
+    """Resolve v2 statistical policy without upgrading it to product authority."""
+
+    membership = inspect_fixed_n_risk_membership_structure(
+        registry_path,
+        research_protocol_id=research_protocol_id,
+        dataset_snapshot_id=dataset_snapshot_id,
+    )
+    registry = ScientificRegistry(registry_path)
+    protocol = _entry(registry, "ResearchProtocol", membership.research_protocol_id)
+    binding = protocol.payload.get("binding")
+    if type(binding) is not dict:
+        raise RiskSamplingMembershipError(
+            "ResearchProtocol binding is missing or invalid"
+        )
+    design, design_sha256 = _parse_design(binding.get("evaluation_design"))
+    if design.get("kind") != _DESIGN_KIND_V2:
+        raise RiskSamplingMembershipError(
+            "product risk evaluation requires v2 fixed-N statistical preregistration"
+        )
+    if design_sha256 != membership.design_sha256:
+        raise RiskSamplingMembershipError(
+            "risk evaluation specification differs from fixed-N membership design"
+        )
+    confidence = Decimal(
+        _canonical_decimal_text(
+            design.get("confidence_level"),
+            "fixed-N confidence_level",
+        )
+    )
+    threshold = Decimal(
+        _canonical_decimal_text(
+            design.get("ruin_threshold"),
+            "fixed-N ruin_threshold",
+        )
+    )
+    return ResolvedFixedNRiskEvaluationSpec(
+        research_protocol_id=membership.research_protocol_id,
+        protocol_sha256=membership.protocol_sha256,
+        design_sha256=membership.design_sha256,
+        dataset_snapshot_id=membership.dataset_snapshot_id,
+        dataset_manifest_sha256=membership.dataset_manifest_sha256,
+        planned_run_ids=membership.planned_run_ids,
+        confidence_level=confidence,
+        ruin_threshold=threshold,
+        risk_target_scope=_RISK_TARGET_SCOPE,
+        initial_capital_state_sha256=_sha256(
+            design.get("initial_capital_state_sha256"),
+            "fixed-N initial_capital_state_sha256",
+        ),
+        stake_policy_sha256=_sha256(
+            design.get("stake_policy_sha256"),
+            "fixed-N stake_policy_sha256",
+        ),
+        precommitted_at=membership.precommitted_at,
+        outcome_reveal_after=membership.outcome_reveal_after,
+    )
 
 
 def inspect_fixed_n_risk_membership_structure(
@@ -240,7 +439,7 @@ def inspect_fixed_n_risk_membership_structure(
         )
 
     design, design_sha256 = _parse_design(binding.get("evaluation_design"))
-    if design.get("kind") != _DESIGN_KIND:
+    if design.get("kind") not in _SUPPORTED_DESIGN_KINDS:
         raise RiskSamplingMembershipError("fixed-N evaluation design kind is unsupported")
     if design.get("dataset_snapshot_id") != dataset_id:
         raise RiskSamplingMembershipError(

@@ -5,8 +5,9 @@ from decimal import Decimal
 from pathlib import Path
 
 from autosport.decision_ledger import JsonlDecisionLedger
-from autosport.domain import TicketLeg
+from autosport.domain import MarketEvent, TicketLeg
 from autosport.integrity import sha256_file
+from autosport.replay import ReplayEngine, ReplayExecutionReceipt
 from autosport.paper import PaperBook
 from autosport.run_registry import RunRegistry
 from autosport.run_transaction import RunTransaction, RunTransactionError
@@ -14,7 +15,12 @@ from autosport.run_transaction import RunTransaction, RunTransactionError
 
 class RunTransactionTerminalCompletionTests(unittest.TestCase):
     @staticmethod
-    def _prepare_canonical_commit(root: Path):
+    def _prepare_canonical_commit(
+        root: Path,
+        sampling_draw_admission_receipt_sha256: str | None = None,
+        summary_overrides: dict[str, object] | None = None,
+        replay_execution_receipt: ReplayExecutionReceipt | None = None,
+    ):
         registry = RunRegistry.initialize_pristine(root / "run_registry.json")
         book_path = root / "paper_book.json"
         PaperBook("10000").save(book_path)
@@ -34,6 +40,9 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
             run_id,
             base_paper_book_sha256=base_book_hash,
             base_decision_ledger_sha256=base_ledger_hash,
+            sampling_draw_admission_receipt_sha256=(
+                sampling_draw_admission_receipt_sha256
+            ),
         )
         tx = RunTransaction.start(
             root,
@@ -44,6 +53,9 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
             strategy_id=strategy_id,
             base_paper_book_sha256=base_book_hash,
             base_decision_ledger_sha256=base_ledger_hash,
+            sampling_draw_admission_receipt_sha256=(
+                sampling_draw_admission_receipt_sha256
+            ),
         )
         staged_book = PaperBook.load(book_path)
         staged_book.open_ticket(
@@ -62,16 +74,20 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
             placed_at="2000-01-01T00:00:00+00:00",
         )
         tx.stage_outputs(staged_book, ledger.path)
+        summary_payload = {
+            "schema_version": 2,
+            "run_id": run_id,
+            "experiment_key": experiment_key,
+            "market_sha256": market_sha256,
+            "sealed_results_sha256": results_sha256,
+            "strategy_id": strategy_id,
+            "real_money_execution": False,
+        }
+        if summary_overrides:
+            summary_payload.update(summary_overrides)
         summary = tx.precommit(
-            {
-                "schema_version": 2,
-                "run_id": run_id,
-                "experiment_key": experiment_key,
-                "market_sha256": market_sha256,
-                "sealed_results_sha256": results_sha256,
-                "strategy_id": strategy_id,
-                "real_money_execution": False,
-            }
+            summary_payload,
+            replay_execution_receipt=replay_execution_receipt,
         )
         summary_path = tx.commit()
         return tx, registry, experiment_key, summary, summary_path
@@ -94,6 +110,242 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(detached.manifest_path.read_text(encoding="utf-8"))["phase"],
                 "completed",
+            )
+
+    def test_draw_admission_binding_survives_terminal_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            admission = "d" * 64
+            tx, registry, key, summary, summary_path = self._prepare_canonical_commit(
+                root,
+                admission,
+            )
+
+            self.assertEqual(
+                registry.get(key)["sampling_draw_admission_receipt_sha256"],
+                admission,
+            )
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                manifest["sampling_draw_admission_receipt_sha256"],
+                admission,
+            )
+            self.assertEqual(
+                summary["sampling_draw_admission_receipt_sha256"],
+                admission,
+            )
+
+            registry.reconcile_completed_summary(
+                key,
+                summary_path,
+                root / "paper_book.json",
+            )
+            detached = RunTransaction(root, tx.run_id)
+            detached.mark_registry_completed()
+            verified, _sha = registry.verified_completed_summary_for_run(tx.run_id)
+            self.assertEqual(
+                verified["sampling_draw_admission_receipt_sha256"],
+                admission,
+            )
+
+    @staticmethod
+    def _product_replay_receipt(
+        *,
+        run_id: str = "terminal-completion-run",
+    ) -> ReplayExecutionReceipt:
+        event = MarketEvent.from_dict(
+            {
+                "event_id": "receipt-event",
+                "market_id": "winner",
+                "selection_id": "home",
+                "decimal_odds": "2.0",
+                "observed_ts": "2026-01-01T00:00:00+00:00",
+                "source_id": "receipt-source",
+                "sequence": 1,
+            }
+        )
+        receipt = ReplayEngine([event]).run(
+            lambda _event: None,
+            run_id=run_id,
+        ).execution_receipt
+        assert type(receipt) is ReplayExecutionReceipt
+        return receipt
+
+    def test_replay_payload_evidence_survives_terminal_readback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            receipt = self._product_replay_receipt()
+            tx, registry, key, summary, summary_path = self._prepare_canonical_commit(
+                root,
+                replay_execution_receipt=receipt,
+            )
+            registry.reconcile_completed_summary(
+                key,
+                summary_path,
+                root / "paper_book.json",
+            )
+            RunTransaction(root, tx.run_id).mark_registry_completed()
+            verified, _sha = registry.verified_completed_summary_for_run(tx.run_id)
+
+            expected = {
+                "replay_dataset_hash": receipt.dataset_hash,
+                "event_count": receipt.event_count,
+                "replay_input_event_payload_sequence_sha256": (
+                    receipt.input_event_payload_sequence_sha256
+                ),
+                "replay_consumed_event_payload_sequence_sha256": (
+                    receipt.consumed_event_payload_sequence_sha256
+                ),
+                "replay_applied_event_payload_sequence_sha256": (
+                    receipt.applied_event_payload_sequence_sha256
+                ),
+                "replay_consumed_event_payload_multiset_sha256": (
+                    receipt.consumed_event_payload_multiset_sha256
+                ),
+                "replay_execution_receipt_sha256": receipt.receipt_sha256,
+            }
+            for field_name, expected_value in expected.items():
+                self.assertEqual(summary[field_name], expected_value)
+                self.assertEqual(verified[field_name], expected_value)
+
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                manifest["replay_execution_receipt_sha256"],
+                receipt.receipt_sha256,
+            )
+
+    def test_precommit_rejects_caller_minted_replay_hashes_without_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "requires product-issued ReplayExecutionReceipt",
+            ):
+                self._prepare_canonical_commit(
+                    Path(tmp),
+                    summary_overrides={
+                        "event_count": 1,
+                        "replay_dataset_hash": "0" * 64,
+                        "replay_input_event_payload_sequence_sha256": "1" * 64,
+                        "replay_consumed_event_payload_sequence_sha256": "2" * 64,
+                        "replay_applied_event_payload_sequence_sha256": "3" * 64,
+                        "replay_consumed_event_payload_multiset_sha256": "4" * 64,
+                    },
+                )
+
+    def test_precommit_rejects_replay_receipt_for_different_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt = self._product_replay_receipt(run_id="different-run")
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "run identity mismatch",
+            ):
+                self._prepare_canonical_commit(
+                    Path(tmp),
+                    replay_execution_receipt=receipt,
+                )
+
+    def test_precommit_rejects_caller_replay_evidence_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt = self._product_replay_receipt()
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "caller replay evidence differs",
+            ):
+                self._prepare_canonical_commit(
+                    Path(tmp),
+                    summary_overrides={
+                        "replay_consumed_event_payload_multiset_sha256": "0" * 64,
+                    },
+                    replay_execution_receipt=receipt,
+                )
+
+    def test_transaction_start_rejects_draw_admission_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
+            book_path = root / "paper_book.json"
+            PaperBook("10000").save(book_path)
+            ledger = JsonlDecisionLedger(root / "decisions.jsonl")
+            ledger.path.touch()
+
+            market_sha256 = "a" * 64
+            results_sha256 = "b" * 64
+            strategy_id = "baseline-v1"
+            run_id = "draw-admission-mismatch"
+            base_book_hash = sha256_file(book_path)
+            base_ledger_hash = sha256_file(ledger.path)
+            key = registry.begin(
+                market_sha256,
+                results_sha256,
+                strategy_id,
+                run_id,
+                base_paper_book_sha256=base_book_hash,
+                base_decision_ledger_sha256=base_ledger_hash,
+                sampling_draw_admission_receipt_sha256="d" * 64,
+            )
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "sampling draw-admission binding mismatch",
+            ):
+                RunTransaction.start(
+                    root,
+                    run_id=run_id,
+                    experiment_key=key,
+                    market_sha256=market_sha256,
+                    results_sha256=results_sha256,
+                    strategy_id=strategy_id,
+                    base_paper_book_sha256=base_book_hash,
+                    base_decision_ledger_sha256=base_ledger_hash,
+                    sampling_draw_admission_receipt_sha256="e" * 64,
+                )
+
+            self.assertFalse(
+                (root / RunTransaction.ROOT_NAME / run_id).exists()
+            )
+
+    def test_transaction_start_rejects_omitted_bound_draw_admission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = RunRegistry.initialize_pristine(root / "run_registry.json")
+            book_path = root / "paper_book.json"
+            PaperBook("10000").save(book_path)
+            ledger = JsonlDecisionLedger(root / "decisions.jsonl")
+            ledger.path.touch()
+
+            market_sha256 = "a" * 64
+            results_sha256 = "b" * 64
+            strategy_id = "baseline-v1"
+            run_id = "draw-admission-omitted"
+            base_book_hash = sha256_file(book_path)
+            base_ledger_hash = sha256_file(ledger.path)
+            key = registry.begin(
+                market_sha256,
+                results_sha256,
+                strategy_id,
+                run_id,
+                base_paper_book_sha256=base_book_hash,
+                base_decision_ledger_sha256=base_ledger_hash,
+                sampling_draw_admission_receipt_sha256="d" * 64,
+            )
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "sampling draw-admission binding mismatch",
+            ):
+                RunTransaction.start(
+                    root,
+                    run_id=run_id,
+                    experiment_key=key,
+                    market_sha256=market_sha256,
+                    results_sha256=results_sha256,
+                    strategy_id=strategy_id,
+                    base_paper_book_sha256=base_book_hash,
+                    base_decision_ledger_sha256=base_ledger_hash,
+                )
+
+            self.assertFalse(
+                (root / RunTransaction.ROOT_NAME / run_id).exists()
             )
 
     def test_detached_completion_rejects_in_progress_registry_identity(self):

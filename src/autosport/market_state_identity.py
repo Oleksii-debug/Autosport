@@ -25,6 +25,7 @@ _LOCAL_ACQUISITION_METADATA_FIELDS = frozenset(
         "product_acquisition_sequence",
         "response_sha256",
         "snapshot_fingerprint_sha256",
+        "sequence_authority_id",
     }
 )
 

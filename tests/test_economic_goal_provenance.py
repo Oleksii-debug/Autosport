@@ -102,6 +102,27 @@ def test_provenance_fails_closed_after_contract_tampering() -> None:
         verify_provenance(tampered, evidence)
 
 
+def test_verify_provenance_rejects_non_contract_before_attribute_access() -> None:
+    import autosport.economic_goal_provenance as provenance
+
+    evidence = provenance.provenance_for(_goal())
+
+    class Hostile:
+        @property
+        def goal_id(self):
+            raise AssertionError("hostile goal_id accessed")
+
+        @property
+        def revision(self):
+            raise AssertionError("hostile revision accessed")
+
+        @property
+        def bankroll_id(self):
+            raise AssertionError("hostile bankroll_id accessed")
+
+    with pytest.raises(EconomicGoalContractError):
+        provenance.verify_provenance(Hostile(), evidence)
+
 def test_provenance_rejects_identity_rebinding() -> None:
     goal = _goal()
     evidence = provenance_for(goal)

@@ -20,6 +20,8 @@ from decimal import Decimal
 
 from . import betfair_standard_limit_price_bound as _price_bound_module
 from . import real_execution_ledger as _ledger_module
+from . import supervised_plan_issuance as _issuance_module
+from . import monotonic_workspace_authority as _monotonic_module
 from .betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundError,
     BetfairStandardLimitPriceBoundEvidence,
@@ -216,6 +218,50 @@ def _build_product_verifier():
     issuance_load_locked_code = issuance_load_locked.__code__
     issuance_authority = issuance_store_cls._authority
     issuance_authority_code = issuance_authority.__code__
+    issuance_path = issuance_store_cls._path
+    issuance_path_code = issuance_path.__code__
+    issuance_plan_file_name = _issuance_module._plan_file_name
+    issuance_plan_file_name_code = issuance_plan_file_name.__code__
+    issuance_exact_keys = _issuance_module._exact_keys
+    issuance_exact_keys_code = issuance_exact_keys.__code__
+    issuance_text = _issuance_module._text
+    issuance_text_code = issuance_text.__code__
+    issuance_sha = _issuance_module._sha
+    issuance_sha_code = issuance_sha.__code__
+    issuance_digest = _issuance_module._digest
+    issuance_digest_code = issuance_digest.__code__
+    issuance_decode_approval = _issuance_module._decode_approval
+    issuance_decode_approval_code = issuance_decode_approval.__code__
+    issuance_decode_bound = _issuance_module._decode_bound
+    issuance_decode_bound_code = issuance_decode_bound.__code__
+    issuance_provider_request = _issuance_module._provider_request_payload
+    issuance_provider_request_code = issuance_provider_request.__code__
+    issuance_strict_json_loads = _issuance_module.strict_json_loads
+    issuance_strict_json_loads_code = issuance_strict_json_loads.__code__
+    issuance_durable_path_lock = _issuance_module.durable_path_lock
+    issuance_hash_constructor = _issuance_module.hashlib.sha256
+    issuance_workspace_lock_cls = _issuance_module.WorkspaceEconomicLock
+    monotonic_cls = _issuance_module.MonotonicWorkspaceAuthority
+    monotonic_init = monotonic_cls.__init__
+    monotonic_init_code = monotonic_init.__code__
+    monotonic_recover = monotonic_cls.recover
+    monotonic_recover_code = monotonic_recover.__code__
+    monotonic_load_bound_history = monotonic_cls._load_bound_history
+    monotonic_load_bound_history_code = monotonic_load_bound_history.__code__
+    monotonic_load_history = monotonic_cls._load_history
+    monotonic_load_history_code = monotonic_load_history.__code__
+    monotonic_decode_record = monotonic_cls._decode_record
+    monotonic_decode_record_code = monotonic_decode_record.__code__
+    monotonic_validate_namespace = monotonic_cls._validate_namespace_marker
+    monotonic_validate_namespace_code = monotonic_validate_namespace.__code__
+    monotonic_strict_json_loads = _monotonic_module.strict_json_loads
+    monotonic_strict_json_loads_code = monotonic_strict_json_loads.__code__
+    monotonic_record_hash = _monotonic_module._record_hash
+    monotonic_record_hash_code = monotonic_record_hash.__code__
+    monotonic_digest = _monotonic_module._digest
+    monotonic_digest_code = monotonic_digest.__code__
+    monotonic_text = _monotonic_module._text
+    monotonic_text_code = monotonic_text.__code__
     ledger_saga = ledger_cls.saga
     ledger_saga_code = ledger_saga.__code__
     ledger_approval_active = ledger_cls.supervised_approval_is_active
@@ -288,6 +334,50 @@ def _build_product_verifier():
             or issuance_load_locked.__code__ is not issuance_load_locked_code
             or issuance_store_cls._authority is not issuance_authority
             or issuance_authority.__code__ is not issuance_authority_code
+            or issuance_store_cls._path is not issuance_path
+            or issuance_path.__code__ is not issuance_path_code
+            or _issuance_module._plan_file_name is not issuance_plan_file_name
+            or issuance_plan_file_name.__code__ is not issuance_plan_file_name_code
+            or _issuance_module._exact_keys is not issuance_exact_keys
+            or issuance_exact_keys.__code__ is not issuance_exact_keys_code
+            or _issuance_module._text is not issuance_text
+            or issuance_text.__code__ is not issuance_text_code
+            or _issuance_module._sha is not issuance_sha
+            or issuance_sha.__code__ is not issuance_sha_code
+            or _issuance_module._digest is not issuance_digest
+            or issuance_digest.__code__ is not issuance_digest_code
+            or _issuance_module._decode_approval is not issuance_decode_approval
+            or issuance_decode_approval.__code__ is not issuance_decode_approval_code
+            or _issuance_module._decode_bound is not issuance_decode_bound
+            or issuance_decode_bound.__code__ is not issuance_decode_bound_code
+            or _issuance_module._provider_request_payload is not issuance_provider_request
+            or issuance_provider_request.__code__ is not issuance_provider_request_code
+            or _issuance_module.strict_json_loads is not issuance_strict_json_loads
+            or issuance_strict_json_loads.__code__ is not issuance_strict_json_loads_code
+            or _issuance_module.durable_path_lock is not issuance_durable_path_lock
+            or _issuance_module.hashlib.sha256 is not issuance_hash_constructor
+            or _issuance_module.WorkspaceEconomicLock is not issuance_workspace_lock_cls
+            or _issuance_module.MonotonicWorkspaceAuthority is not monotonic_cls
+            or monotonic_cls.__init__ is not monotonic_init
+            or monotonic_init.__code__ is not monotonic_init_code
+            or monotonic_cls.recover is not monotonic_recover
+            or monotonic_recover.__code__ is not monotonic_recover_code
+            or monotonic_cls._load_bound_history is not monotonic_load_bound_history
+            or monotonic_load_bound_history.__code__ is not monotonic_load_bound_history_code
+            or monotonic_cls._load_history is not monotonic_load_history
+            or monotonic_load_history.__code__ is not monotonic_load_history_code
+            or monotonic_cls._decode_record is not monotonic_decode_record
+            or monotonic_decode_record.__code__ is not monotonic_decode_record_code
+            or monotonic_cls._validate_namespace_marker is not monotonic_validate_namespace
+            or monotonic_validate_namespace.__code__ is not monotonic_validate_namespace_code
+            or _monotonic_module.strict_json_loads is not monotonic_strict_json_loads
+            or monotonic_strict_json_loads.__code__ is not monotonic_strict_json_loads_code
+            or _monotonic_module._record_hash is not monotonic_record_hash
+            or monotonic_record_hash.__code__ is not monotonic_record_hash_code
+            or _monotonic_module._digest is not monotonic_digest
+            or monotonic_digest.__code__ is not monotonic_digest_code
+            or _monotonic_module._text is not monotonic_text
+            or monotonic_text.__code__ is not monotonic_text_code
             or ledger_cls.saga is not ledger_saga
             or ledger_saga.__code__ is not ledger_saga_code
             or ledger_cls.supervised_approval_is_active is not ledger_approval_active

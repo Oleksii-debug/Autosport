@@ -5752,6 +5752,106 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertFalse(loop.progress_path.exists())
             loop.close()
 
+    def test_same_selector_reincarnation_during_pending_preaction_blocks_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            original_shadow = loop.authority.risk_policy._shadow_book_for_allocation
+            mutated = [False]
+
+            def shadow_then_reincarnate(book):
+                shadow = original_shadow(book)
+                if not mutated[0]:
+                    mutated[0] = True
+                    self.assertTrue(loop.dependencies.unregister("input-a"))
+                    loop.dependencies.register(
+                        "input-a",
+                        selection_ids="selection-a",
+                    )
+                return shadow
+
+            with (
+                patch.object(
+                    loop.authority.risk_policy,
+                    "_shadow_book_for_allocation",
+                    side_effect=shadow_then_reincarnate,
+                ),
+                self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "focused dependency registry changed concurrently before pending publication",
+                ),
+            ):
+                loop.run_cycle()
+
+            self.assertTrue(mutated[0])
+            self.assertFalse(loop.progress_path.exists())
+            self.assertEqual(
+                JsonlDecisionLedger(
+                    workspace / "decisions.jsonl"
+                ).verified_records(),
+                (),
+            )
+            loop.close()
+
+    def test_selector_replacement_during_pending_preaction_blocks_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            original_shadow = loop.authority.risk_policy._shadow_book_for_allocation
+            mutated = [False]
+
+            def shadow_then_replace(book):
+                shadow = original_shadow(book)
+                if not mutated[0]:
+                    mutated[0] = True
+                    self.assertTrue(loop.dependencies.unregister("input-a"))
+                    loop.dependencies.register(
+                        "input-a",
+                        selection_ids="selection-b",
+                    )
+                return shadow
+
+            with (
+                patch.object(
+                    loop.authority.risk_policy,
+                    "_shadow_book_for_allocation",
+                    side_effect=shadow_then_replace,
+                ),
+                self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "focused dependency registry changed concurrently before pending publication",
+                ),
+            ):
+                loop.run_cycle()
+
+            self.assertTrue(mutated[0])
+            self.assertFalse(loop.progress_path.exists())
+            self.assertEqual(
+                JsonlDecisionLedger(
+                    workspace / "decisions.jsonl"
+                ).verified_records(),
+                (),
+            )
+            loop.close()
+
     def test_registry_change_after_snapshot_capture_blocks_pending_publication(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

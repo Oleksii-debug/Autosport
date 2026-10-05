@@ -99,7 +99,7 @@ def _durable_open_quote(
         raise ValueError("durable Betfair bridge open reconstruction requires open status")
     if event.metadata.get("durable_disposition") != "open":
         raise ValueError("durable Betfair bridge open disposition metadata mismatch")
-    if identity.price is None or event.decimal_odds != identity.price:
+    if identity.price is not None and event.decimal_odds != identity.price:
         raise ValueError("durable Betfair bridge odds do not match quote identity")
 
     return ProviderQuote(
@@ -254,7 +254,7 @@ class BetfairAuthenticatedMarketProvider:
                     raise ValueError(
                         "durable Betfair bridge closed exchange-side identity mismatch"
                     )
-                if identity.price is None or event.decimal_odds != identity.price:
+                if identity.price is not None and event.decimal_odds != identity.price:
                     raise ValueError(
                         "durable Betfair bridge closed odds do not match quote identity"
                     )
@@ -326,7 +326,7 @@ class BetfairAuthenticatedMarketProvider:
                     raise ValueError(
                         "durable Betfair bridge closed exchange-side identity mismatch"
                     )
-                if identity.price is None or event.decimal_odds != identity.price:
+                if identity.price is not None and event.decimal_odds != identity.price:
                     raise ValueError(
                         "durable Betfair bridge closed odds do not match quote identity"
                     )

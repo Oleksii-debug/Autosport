@@ -24,6 +24,14 @@ _MAX_SNAPSHOT_BATCHES = 256
 _MAX_BATCH_ATTEMPTS = 2
 
 
+def _exception_text(exc: BaseException) -> str:
+    try:
+        detail = str(exc)
+    except BaseException:
+        detail = "<unprintable exception>"
+    return f"{type(exc).__name__}: {detail}"
+
+
 def _validate_observation_ingress(
     provider: MarketProvider,
     *,
@@ -153,7 +161,7 @@ class OneShotObservationWorker:
         # an ordinary setup failure returns True and publishes one terminal error.
         self._thread = None
         self._messages.put(
-            ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+            ObservationWorkerMessage(error=_exception_text(exc))
         )
 
     def _release_unstarted_slot(self) -> None:
@@ -180,7 +188,7 @@ class OneShotObservationWorker:
             # not terminate the GUI process. Publish a terminal failure so poll()
             # clears the single-flight state instead of leaving live observation
             # permanently busy after the worker thread has already died.
-            message = ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+            message = ObservationWorkerMessage(error=_exception_text(exc))
         self._messages.put(message)
 
     def poll(self) -> ObservationWorkerMessage | None:

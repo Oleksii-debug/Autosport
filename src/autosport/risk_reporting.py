@@ -18,11 +18,11 @@ from pathlib import Path
 
 from .domain import TicketStatus
 from .economic_goal import EconomicGoalContract
-from .economic_goal_provenance import _CANONICAL_GOAL_PROVENANCE
+from .economic_goal_provenance import provenance_for
 from .economic_goal_store import (
     EconomicGoalStore,
-    _CANONICAL_GOAL_FROM_PAYLOAD,
-    _CANONICAL_GOAL_TO_PAYLOAD,
+    economic_goal_from_payload,
+    economic_goal_to_payload,
 )
 from .paper import (
     PaperBook,

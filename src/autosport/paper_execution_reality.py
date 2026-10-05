@@ -270,7 +270,9 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             raise PaperExecutionIntegrityError(
                 "evidence record changed outside canonical construction authority"
             )
-        super().register_observation_evidence(record)
+        # Persist the reconstructed snapshot, never the caller-owned object that
+        # may be mutated after validation.
+        super().register_observation_evidence(canonical_record)
 
     def resolve_observation_evidence(
         self,
@@ -420,6 +422,9 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             raise PaperExecutionIntegrityError(
                 "attempt changed outside canonical construction authority"
             )
+        # Continue exclusively from the reconstructed snapshot so the durable
+        # write cannot race a caller mutating the original frozen dataclass.
+        attempt = canonical_attempt
 
         def mutate() -> None:
             self._ensure_existing_path_durable()

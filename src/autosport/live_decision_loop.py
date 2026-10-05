@@ -2424,9 +2424,46 @@ class PersistentLiveDecisionLoop:
                         "focused dependency changed continuously during snapshot capture"
                     )
 
+                if self._health_gate is not None:
+                    replay_boundaries = None
+                    if (
+                        self._progress is not None
+                        and self._progress.phase
+                        in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+                    ):
+                        _, progress_time = _canonical_timestamp(
+                            "persisted decision_ts",
+                            self._progress.decision_ts,
+                        )
+                        if progress_time == as_of.astimezone(timezone.utc):
+                            available = {
+                                boundary.source_id: boundary
+                                for boundary in self._progress.health_boundaries
+                            }
+                            source_ids = {
+                                event.source_id for event in snapshot.events
+                            }
+                            if not source_ids.issubset(available):
+                                raise LiveDecisionProgressError(
+                                    "unfinished live decision lacks exact provider-health horizons"
+                                )
+                            replay_boundaries = {
+                                source_id: available[source_id]
+                                for source_id in source_ids
+                            }
+                    snapshot = self._health_gate.gate_snapshot(
+                        snapshot,
+                        as_of=as_of,
+                        health_boundaries=replay_boundaries,
+                    )
+                    self._input_health_boundaries[input_id] = (
+                        snapshot.health_boundaries
+                    )
+                else:
+                    self._input_health_boundaries[input_id] = ()
                 snapshots[input_id] = snapshot
-                self._input_market_sha256[input_id] = _canonical_json_sha256(
-                    [event.to_dict() for event in snapshot.events]
+                self._input_market_sha256[input_id] = (
+                    self._snapshot_state_sha256(snapshot)
                 )
                 self._record_freshness_deadline(input_id, snapshot)
                 self._set_availability_deadline(
@@ -5143,6 +5180,36 @@ class PersistentLiveDecisionLoop:
                 "cannot verify persisted live decision progress"
             ) from exc
 
+    @staticmethod
+    def _snapshot_state_sha256(snapshot: MirrorSnapshot) -> str:
+        if isinstance(snapshot, HealthGatedMirrorSnapshot):
+            return _canonical_json_sha256(
+                {
+                    "events": [event.to_dict() for event in snapshot.events],
+                    "health_boundaries": [
+                        boundary.to_dict()
+                        for boundary in snapshot.health_boundaries
+                    ],
+                }
+            )
+        return _canonical_json_sha256(
+            [event.to_dict() for event in snapshot.events]
+        )
+
+    def _health_boundaries_for_progress(
+        self,
+    ) -> tuple[ProviderHealthReplayBoundary, ...]:
+        by_source: dict[str, ProviderHealthReplayBoundary] = {}
+        for boundaries in self._input_health_boundaries.values():
+            for boundary in boundaries:
+                previous = by_source.get(boundary.source_id)
+                if previous is not None and previous != boundary:
+                    raise LiveDecisionProgressError(
+                        "provider-health horizon diverged across focused inputs"
+                    )
+                by_source[boundary.source_id] = boundary
+        return tuple(by_source[source_id] for source_id in sorted(by_source))
+
     def _market_state_sha256(self) -> str:
         payload: list[dict[str, str]] = []
         for input_id in self.dependencies.input_ids:
@@ -5155,12 +5222,21 @@ class PersistentLiveDecisionLoop:
             payload.append({"input_id": input_id, "sha256": digest})
         return _canonical_json_sha256(payload)
 
-    def _market_state_sha256_for_events(self, events) -> str:
+    def _market_state_sha256_for_events(
+        self,
+        events,
+        *,
+        as_of: datetime | None = None,
+        health_boundaries: tuple[ProviderHealthReplayBoundary, ...] = (),
+    ) -> str:
         event_tuple = tuple(events)
+        boundary_map = {
+            boundary.source_id: boundary for boundary in health_boundaries
+        }
         input_hashes: dict[str, str] = {}
         for input_id, spec in self._input_specs.items():
-            payload = [
-                event.to_dict()
+            selected = tuple(
+                event
                 for event in event_tuple
                 if (
                     (spec.source_ids is None or event.source_id in spec.source_ids)
@@ -5172,8 +5248,30 @@ class PersistentLiveDecisionLoop:
                         or event.selection_id in spec.selection_ids
                     )
                 )
-            ]
-            input_hashes[input_id] = _canonical_json_sha256(payload)
+            )
+            snapshot: MirrorSnapshot = MirrorSnapshot(
+                revision=0,
+                events=selected,
+            )
+            if self._health_gate is not None:
+                if as_of is None:
+                    raise LiveDecisionProgressError(
+                        "health-gated market reconstruction requires decision time"
+                    )
+                source_ids = {event.source_id for event in selected}
+                if not source_ids.issubset(boundary_map):
+                    raise LiveDecisionProgressError(
+                        "health-gated market reconstruction lacks replay horizons"
+                    )
+                snapshot = self._health_gate.gate_snapshot(
+                    snapshot,
+                    as_of=as_of,
+                    health_boundaries={
+                        source_id: boundary_map[source_id]
+                        for source_id in source_ids
+                    },
+                )
+            input_hashes[input_id] = self._snapshot_state_sha256(snapshot)
         return _canonical_json_sha256(
             [
                 {"input_id": input_id, "sha256": input_hashes[input_id]}

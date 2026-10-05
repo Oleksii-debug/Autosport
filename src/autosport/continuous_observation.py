@@ -287,8 +287,8 @@ def run_continuous_observation(
     only after bounded backoff. Local durability or ambiguous committed-health errors
     stop the run immediately rather than replaying an uncertain durable boundary.
     """
-    if not hasattr(provider, "read_batch"):
-        raise TypeError("provider must satisfy MarketProvider")
+    if not callable(getattr(provider, "read_batch", None)):
+        raise TypeError("provider read_batch must be callable")
     provider_source_id = getattr(provider, "source_id", None)
     if type(provider_source_id) is not str:
         raise TypeError("provider source_id must be an exact string")

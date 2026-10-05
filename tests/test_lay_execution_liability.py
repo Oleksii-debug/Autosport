@@ -1144,6 +1144,47 @@ class _HostileExchangeSide(str):
         return super().__eq__(other)
 
 
+class PaperExecutionLedgerDispatchAuthorityTests(unittest.TestCase):
+    def test_execute_bypasses_instance_state_machine_method_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            current = _action(
+                "ledger-instance-dispatch",
+                side="BACK",
+                odds="2.00",
+                stake="10.00",
+            )
+            hostile_calls = 0
+
+            def forbidden(*_args, **_kwargs):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("instance ledger state-machine override executed")
+
+            ledger.reserve_run = forbidden
+            ledger.load_run = forbidden
+            ledger.record_attempt = forbidden
+            ledger.complete_run = forbidden
+            try:
+                result = execute_paper_plan(
+                    plan=_plan(current),
+                    trigger_id="ledger-instance-dispatch",
+                    config=_config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                )
+            finally:
+                ledger.__dict__.pop("reserve_run", None)
+                ledger.__dict__.pop("load_run", None)
+                ledger.__dict__.pop("record_attempt", None)
+                ledger.__dict__.pop("complete_run", None)
+
+            self.assertEqual(hostile_calls, 0)
+            self.assertTrue(result.completed)
+            self.assertEqual(result.worst_case_exposure, Decimal("10.00"))
+            self.assertEqual(result.attempts[0].outcome, PaperAttemptOutcome.ACCEPTED)
+
+
 class PaperBookLayEconomicsTests(unittest.TestCase):
     @staticmethod
     def _lay_leg() -> TicketLeg:

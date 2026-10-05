@@ -1,5 +1,8 @@
 from decimal import Decimal, localcontext
 
+import pytest
+
+import autosport.exchange_exposure as exchange_exposure
 from autosport.exchange_exposure import locked_capital_for_exchange_side
 
 
@@ -17,3 +20,40 @@ def test_lay_liability_is_independent_of_ambient_decimal_precision() -> None:
         )
 
     assert actual == expected
+
+
+def test_lay_liability_ignores_module_helper_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        exchange_exposure,
+        "_multiply_exact",
+        lambda left, right: Decimal("0"),
+    )
+
+    assert locked_capital_for_exchange_side(
+        stake=Decimal("10"),
+        odds=Decimal("5"),
+        exchange_side="LAY",
+    ) == Decimal("40")
+
+
+def test_lay_liability_rejects_captured_helper_code_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forged_multiply(left: Decimal, right: Decimal) -> Decimal:
+        del left, right
+        return Decimal("0")
+
+    monkeypatch.setattr(
+        exchange_exposure._multiply_exact,
+        "__code__",
+        forged_multiply.__code__,
+    )
+
+    with pytest.raises(ValueError, match="arithmetic authority drifted"):
+        locked_capital_for_exchange_side(
+            stake=Decimal("10"),
+            odds=Decimal("5"),
+            exchange_side="LAY",
+        )

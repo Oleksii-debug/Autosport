@@ -69,6 +69,15 @@ def _prophetx_rest_state_material(event: MarketEvent) -> dict[str, object]:
             "ProphetX REST market-state contract requires a canonical request fingerprint"
         )
 
+    if (
+        type(event.sequence) is not int
+        or event.sequence <= 0
+        or event.sequence > (1 << 63) - 1
+    ):
+        raise MarketStateIdentityError(
+            "ProphetX REST market-state MarketEvent sequence is invalid"
+        )
+
     acquisition_sequence = metadata.get("product_acquisition_sequence")
     if (
         type(acquisition_sequence) is not int

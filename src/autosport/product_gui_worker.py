@@ -242,6 +242,41 @@ def _runtime_builder(
 _CANONICAL_RUNTIME_BUILDER = _PROFILED_RUNTIME_BUILDER
 
 
+def _require_runtime_status_identity(
+    status: object,
+    *,
+    expected_source_id: str | None,
+) -> ContinuousSessionStatus:
+    if type(status) is not ContinuousSessionStatus:
+        raise ProductEntrypointError(
+            "product runtime returned a non-canonical session status"
+        )
+    if (
+        expected_source_id is not None
+        and status.source_id != expected_source_id
+    ):
+        raise ProductEntrypointError(
+            "product runtime session status changed configured source identity"
+        )
+    return status
+
+
+def _require_runtime_tick_identity(
+    tick: object,
+    *,
+    expected_source_id: str | None,
+) -> ContinuousTickResult:
+    if type(tick) is not ContinuousTickResult:
+        raise ProductEntrypointError(
+            "product runtime returned a non-canonical tick result"
+        )
+    if expected_source_id is not None and tick.source_id != expected_source_id:
+        raise ProductEntrypointError(
+            "product runtime tick changed configured source identity"
+        )
+    return tick
+
+
 def _safe_error_type(exc: BaseException) -> str:
     """Return a bounded identifier only; exception detail never crosses to the UI."""
 
@@ -526,9 +561,15 @@ class ProductGuiWorker:
             # A STOP requested while construction was in flight must win before START.
             if self._stop_event.is_set():
                 stop_reason = self._stop_reason
-                stopped_status = runtime.stop(stop_reason)
+                stopped_status = _require_runtime_status_identity(
+                    runtime.stop(stop_reason),
+                    expected_source_id=expected_source_id,
+                )
             else:
-                started_status = runtime.start()
+                started_status = _require_runtime_status_identity(
+                    runtime.start(),
+                    expected_source_id=expected_source_id,
+                )
                 if expected_source_id is not None:
                     # Serialize STOP acceptance and trusted-profile issuance through the
                     # worker lifecycle lock. This gives the two operations one ordering:
@@ -549,7 +590,10 @@ class ProductGuiWorker:
 
                 while not self._stop_event.is_set():
                     try:
-                        tick = runtime.tick()
+                        tick = _require_runtime_tick_identity(
+                            runtime.tick(),
+                            expected_source_id=expected_source_id,
+                        )
                     except SessionStoppedError:
                         if not self._stop_event.is_set():
                             raise
@@ -561,7 +605,10 @@ class ProductGuiWorker:
                         break
 
                 stop_reason = self._stop_reason
-                stopped_status = runtime.stop(stop_reason)
+                stopped_status = _require_runtime_status_identity(
+                    runtime.stop(stop_reason),
+                    expected_source_id=expected_source_id,
+                )
         except BaseException as exc:
             terminal_error = exc
             # Compensation is based on possession of a canonical runtime, not on

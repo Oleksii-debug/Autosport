@@ -25,7 +25,7 @@ from autosport.event_lifecycle import (
     ContinuousEventLifecycle,
     EventPhase,
 )
-from autosport.ingestion_health import IngestionPolicy
+from autosport.ingestion_health import IngestionPolicy, SourceHealthStore
 from autosport.live_decision_loop import (
     LiveCycleStatus,
     LiveDecisionMode,
@@ -4860,10 +4860,28 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 first.run_cycle()
 
             pending = json.loads(first.progress_path.read_text(encoding="utf-8"))
-            self.assertEqual(pending["schema_version"], 2)
+            self.assertEqual(pending["schema_version"], 3)
             self.assertEqual(pending["phase"], "pending")
             self.assertEqual(pending["market_append_generation"], 1)
+            self.assertEqual(len(pending["health_boundaries"]), 1)
+            self.assertEqual(
+                pending["health_boundaries"][0]["source_id"],
+                "provider-a",
+            )
+            self.assertEqual(
+                pending["health_boundaries"][0]["transition_order"],
+                1,
+            )
             first.close()
+
+            # Append a later source-local health transition with the exact same
+            # evidence timestamp. Recovery must replay the persisted order-1
+            # horizon rather than letting order-2 rewrite the pending decision.
+            SourceHealthStore(workspace / "source_health.json").record_failure(
+                "provider-a",
+                now=(self.START + timedelta(seconds=1)).isoformat(),
+                error=ConnectionError("equal-time later health failure"),
+            )
 
             peer_store = SQLiteMarketStore(workspace / "market.db")
             try:

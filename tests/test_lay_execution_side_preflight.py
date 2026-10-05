@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from autosport.paper_execution_reality import (
     PaperExecutionLedger,
     PaperExecutionModelConfig,
     PaperExecutionStateError,
+    RecoveryDecision,
     execute_paper_plan,
 )
 from autosport.real_execution_ledger import ExecutionAction, ExecutionPlan
@@ -160,6 +162,54 @@ def test_direct_reserve_rejects_mapping_subclass_before_durable_write() -> None:
                 config=current_config,
                 started_at=STARTED_AT,
                 observation_evidence_ids=HostileEvidenceMap(),
+            )
+
+        assert ledger.events() == []
+
+
+def test_direct_complete_rejects_list_pending_ids_before_ledger_read() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+
+        with pytest.raises(TypeError, match="pending_action_ids.*tuple"):
+            ledger.complete_run(
+                run_id="direct-complete-list",
+                pending_action_ids=[],
+                recovery_decision=RecoveryDecision.NO_EXPOSURE,
+                worst_case_exposure=Decimal("0"),
+            )
+
+        assert ledger.events() == []
+
+
+def test_direct_complete_rejects_string_exposure_before_ledger_read() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+
+        with pytest.raises(TypeError, match="worst_case_exposure.*exact Decimal"):
+            ledger.complete_run(
+                run_id="direct-complete-string-exposure",
+                pending_action_ids=(),
+                recovery_decision=RecoveryDecision.NO_EXPOSURE,
+                worst_case_exposure="0",
+            )
+
+        assert ledger.events() == []
+
+
+def test_direct_complete_rejects_decimal_subclass_before_ledger_read() -> None:
+    class HostileDecimal(Decimal):
+        pass
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+
+        with pytest.raises(TypeError, match="worst_case_exposure.*exact Decimal"):
+            ledger.complete_run(
+                run_id="direct-complete-decimal-subclass",
+                pending_action_ids=(),
+                recovery_decision=RecoveryDecision.NO_EXPOSURE,
+                worst_case_exposure=HostileDecimal("0"),
             )
 
         assert ledger.events() == []

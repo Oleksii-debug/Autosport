@@ -275,3 +275,67 @@ def test_product_verifier_rejects_reopened_store_directory_redirection(
                 action_id=action.action_id,
             )
 
+
+
+def test_product_verifier_rejects_path_resolve_rebinding_before_execution(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    bound, action, store, ledger, evidence = _case(monkeypatch, tmp_path)
+    path_type = type(Path("."))
+    attacker_called = False
+
+    def attacker_resolve(self, *args, **kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound Path.resolve must never execute")
+
+    with _active_runtime_profile(store.workspace) as runtime_profile:
+        monkeypatch.setattr(path_type, "resolve", attacker_resolve)
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="product verifier reopen authority changed",
+        ):
+            verify_product_betfair_standard_limit_price_bound(
+                evidence=evidence,
+                ledger=ledger,
+                issuance_store=store,
+                runtime_profile=runtime_profile,
+                execution_plan_id=bound.execution_plan.plan_id,
+                action_id=action.action_id,
+            )
+
+    assert attacker_called is False
+
+
+def test_product_verifier_rejects_in_place_path_resolve_code_mutation_before_execution(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    bound, action, store, ledger, evidence = _case(monkeypatch, tmp_path)
+    resolver = type(Path(".")).resolve
+    original_code = resolver.__code__
+    attacker_called = False
+
+    def attacker_resolve(self, *args, **kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated Path.resolve must never execute")
+
+    try:
+        resolver.__code__ = attacker_resolve.__code__
+        with _active_runtime_profile(store.workspace) as runtime_profile:
+            with pytest.raises(
+                BetfairStandardLimitPriceBoundError,
+                match="product verifier reopen authority changed",
+            ):
+                verify_product_betfair_standard_limit_price_bound(
+                    evidence=evidence,
+                    ledger=ledger,
+                    issuance_store=store,
+                    runtime_profile=runtime_profile,
+                    execution_plan_id=bound.execution_plan.plan_id,
+                    action_id=action.action_id,
+                )
+    finally:
+        resolver.__code__ = original_code
+
+    assert attacker_called is False

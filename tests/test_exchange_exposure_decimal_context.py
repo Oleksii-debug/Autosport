@@ -62,6 +62,35 @@ def test_lay_locked_capital_accepts_each_exact_domain_vocabulary(
     ) == Decimal("40")
 
 
+def test_lay_liability_rejects_oversized_decimal_input_before_bigint_scaling() -> None:
+    with pytest.raises(ValueError, match="resource limit"):
+        locked_capital_for_exchange_side(
+            stake=Decimal("10"),
+            odds=Decimal("1E+9000"),
+            exchange_side="LAY",
+        )
+
+
+def test_lay_liability_rejects_output_resource_amplification() -> None:
+    # Each input is individually inside the execution-ledger 8192-character
+    # resource policy, but their liability product is not.
+    with pytest.raises(ValueError, match="resource limit"):
+        locked_capital_for_exchange_side(
+            stake=Decimal("1E+5000"),
+            odds=Decimal("1E+4000"),
+            exchange_side="LAY",
+        )
+
+
+def test_back_exposure_uses_the_same_decimal_resource_policy() -> None:
+    with pytest.raises(ValueError, match="resource limit"):
+        locked_capital_for_exchange_side(
+            stake=Decimal("1E+9000"),
+            odds=Decimal("2"),
+            exchange_side="BACK",
+        )
+
+
 def test_liability_api_exposes_no_authority_override_kwargs() -> None:
     with pytest.raises(TypeError):
         locked_capital_for_exchange_side(

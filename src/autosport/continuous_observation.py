@@ -417,6 +417,19 @@ def run_continuous_observation(
             raise TypeError("waiter must return bool")
         return value
 
+    def wait_provider_backoff(seconds: float) -> bool:
+        """Wait a provider retry delay without trusting an injected waiter to sleep."""
+        if waiter is None:
+            return wait_once(seconds)
+        before = read_monotonic()
+        stopped = wait_once(seconds)
+        if stopped:
+            return True
+        after = read_monotonic()
+        if after - before < seconds:
+            raise RuntimeError("waiter returned before provider backoff elapsed")
+        return False
+
     root.mkdir(parents=True, exist_ok=True)
     previous = _read_previous_status(status_path)
     previous_run_id = previous.get("run_id") if previous else None
@@ -499,7 +512,7 @@ def run_continuous_observation(
                         restart_backoff_remaining,
                         remaining_runtime,
                     )
-                    if wait_once(startup_wait):
+                    if wait_provider_backoff(startup_wait):
                         terminal_reason = "operator_stop"
                         enter_loop = False
                     elif startup_wait >= remaining_runtime:
@@ -581,7 +594,7 @@ def run_continuous_observation(
                     ),
                     remaining,
                 )
-                if wait_once(backoff):
+                if wait_provider_backoff(backoff):
                     terminal_reason = "operator_stop"
                     break
                 continue

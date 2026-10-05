@@ -533,17 +533,16 @@ class FocusedMirrorDependencyIndex:
             ),
         )
 
-    def decision_state_from_proven_history(
+    def _decision_state_for_dependency(
         self,
-        input_id: str,
+        dependency: FocusedMirrorDependency,
         events_with_generation: tuple[tuple[MarketEvent, int], ...],
         *,
         as_of: datetime,
         max_age: timedelta,
     ) -> tuple[MirrorSnapshot, datetime | None]:
-        """Resolve one input from a caller-owned snapshot already proven by storage."""
+        """Resolve one dependency from a caller-owned storage-proven snapshot."""
 
-        dependency = self._dependency(input_id)
         boundary, age_limit = MarketMirror._decision_boundary(
             as_of=as_of,
             max_age=max_age,
@@ -626,6 +625,26 @@ class FocusedMirrorDependencyIndex:
             ):
                 return snapshot, available_at
         return snapshot, None
+
+    def decision_state_from_proven_history(
+        self,
+        input_id: str,
+        events_with_generation: tuple[tuple[MarketEvent, int], ...],
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+    ) -> tuple[MirrorSnapshot, datetime | None]:
+        """Resolve one input from a caller-owned snapshot already proven by storage."""
+
+        return self._stable_dependency_read(
+            input_id,
+            lambda dependency: self._decision_state_for_dependency(
+                dependency,
+                events_with_generation,
+                as_of=as_of,
+                max_age=max_age,
+            ),
+        )
 
     def current_history_decision_state(
         self,

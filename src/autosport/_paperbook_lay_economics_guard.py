@@ -134,6 +134,34 @@ def _validate_exact_ticket_provenance(
     return canonical_sources, canonical_accounts, canonical_bankroll, canonical_currency
 
 
+def _validate_exact_lifecycle_entry(entry: object):
+    if type(entry) is not tuple or len(entry) != 4:
+        raise ValueError("PaperBook lifecycle entries must be canonical tuples")
+    action, ticket_id, winners, voids = entry
+    if type(action) is not str or action not in {"open", "settle"}:
+        raise ValueError("PaperBook lifecycle action must be open or settle")
+    _require_exact_text(ticket_id, "lifecycle ticket_id")
+    if type(winners) is not tuple or type(voids) is not tuple:
+        raise ValueError(
+            "PaperBook lifecycle settlement keys must be canonical tuples"
+        )
+    for values, label in (
+        (winners, "winning_quote_keys"),
+        (voids, "void_quote_keys"),
+    ):
+        for value in values:
+            _require_exact_text(value, f"lifecycle {label}")
+        if values != tuple(sorted(values)) or len(values) != len(set(values)):
+            raise ValueError(
+                f"PaperBook lifecycle {label} must be sorted and unique"
+            )
+    if action == "open" and (winners or voids):
+        raise ValueError(
+            "PaperBook lifecycle open action cannot contain settlement keys"
+        )
+    return action, ticket_id, winners, voids
+
+
 def _paperbook_operation_context(book: _paper.PaperBook):
     """Reuse canonical PaperBook serialization when that authority is installed."""
     require_lock = getattr(_paper, "_require_paperbook_operation_lock", None)
@@ -465,9 +493,8 @@ def _validate_lifecycle_reachability(cls, book: _paper.PaperBook) -> None:
     open_order: list[str] = []
 
     for raw_entry in book._lifecycle:
-        action, ticket_id, winners_raw, voids_raw = _ORIGINAL_VALIDATE_LIFECYCLE_ENTRY(
-            _paper.PaperBook,
-            raw_entry,
+        action, ticket_id, winners_raw, voids_raw = _validate_exact_lifecycle_entry(
+            raw_entry
         )
         ticket = book.tickets.get(ticket_id)
         if ticket is None:

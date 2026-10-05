@@ -120,6 +120,44 @@ def test_trusted_package_launcher_rejects_mutated_import_before_execution(tmp_pa
     assert not marker.exists()
 
 
+def test_trusted_package_launcher_rejects_mutated_release_lock_before_execution(
+    tmp_path: Path,
+) -> None:
+    launcher = _trusted_package_launcher_source()
+    root = tmp_path / "trusted-package-source"
+    manifest = _write_snapshot(root)
+    marker = tmp_path / "marker.txt"
+    hostile_marker = tmp_path / "hostile-lock.txt"
+    imported_module = root / "src" / "autosport" / "workspace_lock.py"
+    imported_module.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(hostile_marker)!r}).write_text('executed', encoding='utf-8')\n"
+        "def _open_read_only_descriptor(path):\n"
+        "    return 99\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            launcher,
+            str(root),
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+            str(marker),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert "trusted package source SHA-256 mismatch" in completed.stderr
+    assert not hostile_marker.exists()
+    assert not marker.exists()
+
+
 def test_windows_build_materializes_exact_package_consumer_after_final_source_gate() -> None:
     script = _BUILD_SCRIPT.read_text(encoding="utf-8")
 

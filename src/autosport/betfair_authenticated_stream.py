@@ -456,6 +456,7 @@ class BetfairAuthenticatedStreamFreshnessRuntime:
             self._require_current_connection()
             frame = self._transport.read_authenticated_frame()
             frame.assert_transport_issued()
+            frame.assert_receive_clock_authority(_MONOTONIC_NS)
             _require_same_connection(
                 frame,
                 self._subscription.connection_id,

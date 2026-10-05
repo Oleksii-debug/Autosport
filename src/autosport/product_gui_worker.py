@@ -349,7 +349,12 @@ class ProductGuiMessage:
     stop_reason: str | None = None
 
     def __post_init__(self) -> None:
-        if self.kind not in {"STARTED", "TICK", "STOPPED", "ERROR"}:
+        if type(self.kind) is not str or self.kind not in {
+            "STARTED",
+            "TICK",
+            "STOPPED",
+            "ERROR",
+        }:
             raise ValueError("unsupported product GUI message kind")
         payload_count = sum(
             value is not None
@@ -357,13 +362,33 @@ class ProductGuiMessage:
         )
         if payload_count != 1:
             raise ValueError("product GUI message must contain exactly one payload")
+        if self.status is not None and type(self.status) is not ContinuousSessionStatus:
+            raise ValueError("status payload must be exact ContinuousSessionStatus")
+        if self.tick is not None and type(self.tick) is not ContinuousTickResult:
+            raise ValueError("tick payload must be exact ContinuousTickResult")
         if self.kind in {"STARTED", "STOPPED"} and self.status is None:
             raise ValueError("status message requires ContinuousSessionStatus")
         if self.kind == "TICK" and self.tick is None:
             raise ValueError("tick message requires ContinuousTickResult")
-        if self.kind == "ERROR" and self.error_type is None:
-            raise ValueError("error message requires error_type")
-        if self.kind != "STOPPED" and self.stop_reason is not None:
+        if self.kind == "ERROR":
+            if (
+                type(self.error_type) is not str
+                or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", self.error_type)
+                is None
+            ):
+                raise ValueError("error message requires bounded error_type")
+        elif self.error_type is not None:
+            raise ValueError("error_type is valid only for ERROR messages")
+        if self.kind == "STOPPED":
+            if (
+                type(self.stop_reason) is not str
+                or not self.stop_reason
+                or len(self.stop_reason) > 64
+                or re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*", self.stop_reason)
+                is None
+            ):
+                raise ValueError("STOPPED message requires canonical stop_reason")
+        elif self.stop_reason is not None:
             raise ValueError("stop_reason is valid only for STOPPED messages")
 
 

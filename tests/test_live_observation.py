@@ -1227,6 +1227,29 @@ class LiveObservationTests(unittest.TestCase):
                 tuple(reversed(canonical.current_quotes)),
             )
 
+    def test_observation_result_snapshots_mutable_quote_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        original = canonical.current_quotes[0]
+        payload = original.to_dict()
+        payload["metadata"] = {"nested": {"origin": "caller"}}
+        mutable = MarketEvent.from_dict(payload)
+        result = ObservationResult(
+            canonical.stats,
+            canonical.health,
+            (mutable,),
+        )
+
+        mutable.metadata["nested"]["origin"] = "mutated-after-result"
+        mutable.metadata["caller_only"] = True
+
+        self.assertEqual(
+            result.current_quotes[0].metadata,
+            {"nested": {"origin": "caller"}},
+        )
+        self.assertNotIn("caller_only", result.current_quotes[0].metadata)
+
     def test_worker_rejects_noncallable_task_before_claiming_slot(self):
         worker = OneShotObservationWorker()
 

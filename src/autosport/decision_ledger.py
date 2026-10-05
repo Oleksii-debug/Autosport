@@ -316,7 +316,7 @@ class JsonlDecisionLedger:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._path_authority = self.path
-        self._absolute_path_authority = self.path.absolute()
+        self._absolute_path_authority = self.path.resolve(strict=False)
         self._writer_lock_path_authority = self._absolute_path_authority.with_name(
             self._absolute_path_authority.name + ".writer.lock"
         )
@@ -327,7 +327,7 @@ class JsonlDecisionLedger:
     def _assert_persistence_authority(self) -> None:
         if (
             self.path != self._path_authority
-            or self.path.absolute() != self._absolute_path_authority
+            or self.path.resolve(strict=False) != self._absolute_path_authority
             or self._writer_lock_path_authority
             != self._absolute_path_authority.with_name(
                 self._absolute_path_authority.name + ".writer.lock"

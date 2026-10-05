@@ -236,6 +236,27 @@ def _build_product_verifier():
     issuance_decode_bound_code = issuance_decode_bound.__code__
     issuance_provider_request = _issuance_module._provider_request_payload
     issuance_provider_request_code = issuance_provider_request.__code__
+    issuance_provider_resolver = _issuance_module.resolve_betfair_standard_limit_price_bound
+    issuance_provider_resolver_code = issuance_provider_resolver.__code__
+    issuance_decode_execution_plan = _issuance_module._decode_execution_plan
+    issuance_decode_execution_plan_code = issuance_decode_execution_plan.__code__
+    issuance_execution_action_cls = _issuance_module.ExecutionAction
+    issuance_execution_plan_cls = _issuance_module.ExecutionPlan
+    issuance_supervised_approval_cls = _issuance_module.SupervisedApproval
+    issuance_approval_state_cls = _issuance_module.ApprovalState
+    issuance_profile_binding_cls = _issuance_module.ProfileBinding
+    issuance_constraint_cls = _issuance_module.ExecutionLegConstraint
+    issuance_bound_cls = _issuance_module.BoundSupervisedExecutionPlan
+    issuance_decimal_cls = _issuance_module.Decimal
+    issuance_schema = _issuance_module._SCHEMA
+    issuance_schema_version = _issuance_module._SCHEMA_VERSION
+    issuance_authority_domain = _issuance_module._AUTHORITY_DOMAIN
+    issuance_directory_name = _issuance_module._DIRECTORY
+    issuance_root_keys = _issuance_module._ROOT_KEYS
+    issuance_body_keys = _issuance_module._ISSUANCE_KEYS
+    issuance_bound_keys = _issuance_module._BOUND_KEYS
+    issuance_approval_keys = _issuance_module._APPROVAL_KEYS
+    issuance_provider_request_keys = _issuance_module._PROVIDER_REQUEST_KEYS
     issuance_strict_json_loads = _issuance_module.strict_json_loads
     issuance_strict_json_loads_code = issuance_strict_json_loads.__code__
     issuance_durable_path_lock = _issuance_module.durable_path_lock
@@ -352,6 +373,27 @@ def _build_product_verifier():
             or issuance_decode_bound.__code__ is not issuance_decode_bound_code
             or _issuance_module._provider_request_payload is not issuance_provider_request
             or issuance_provider_request.__code__ is not issuance_provider_request_code
+            or _issuance_module.resolve_betfair_standard_limit_price_bound is not issuance_provider_resolver
+            or issuance_provider_resolver.__code__ is not issuance_provider_resolver_code
+            or _issuance_module._decode_execution_plan is not issuance_decode_execution_plan
+            or issuance_decode_execution_plan.__code__ is not issuance_decode_execution_plan_code
+            or _issuance_module.ExecutionAction is not issuance_execution_action_cls
+            or _issuance_module.ExecutionPlan is not issuance_execution_plan_cls
+            or _issuance_module.SupervisedApproval is not issuance_supervised_approval_cls
+            or _issuance_module.ApprovalState is not issuance_approval_state_cls
+            or _issuance_module.ProfileBinding is not issuance_profile_binding_cls
+            or _issuance_module.ExecutionLegConstraint is not issuance_constraint_cls
+            or _issuance_module.BoundSupervisedExecutionPlan is not issuance_bound_cls
+            or _issuance_module.Decimal is not issuance_decimal_cls
+            or _issuance_module._SCHEMA != issuance_schema
+            or _issuance_module._SCHEMA_VERSION != issuance_schema_version
+            or _issuance_module._AUTHORITY_DOMAIN != issuance_authority_domain
+            or _issuance_module._DIRECTORY != issuance_directory_name
+            or _issuance_module._ROOT_KEYS is not issuance_root_keys
+            or _issuance_module._ISSUANCE_KEYS is not issuance_body_keys
+            or _issuance_module._BOUND_KEYS is not issuance_bound_keys
+            or _issuance_module._APPROVAL_KEYS is not issuance_approval_keys
+            or _issuance_module._PROVIDER_REQUEST_KEYS is not issuance_provider_request_keys
             or _issuance_module.strict_json_loads is not issuance_strict_json_loads
             or issuance_strict_json_loads.__code__ is not issuance_strict_json_loads_code
             or _issuance_module.durable_path_lock is not issuance_durable_path_lock

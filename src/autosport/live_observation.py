@@ -83,6 +83,8 @@ class OneShotObservationWorker:
             return self._busy
 
     def start(self, task: ObservationTask) -> bool:
+        if not callable(task):
+            raise TypeError("observation task must be callable")
         with self._lock:
             if self._busy:
                 return False

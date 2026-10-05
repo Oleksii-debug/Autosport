@@ -541,6 +541,71 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.close()
 
+
+    def test_committed_health_horizon_tamper_conflicts_with_decision_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=self._scientific_registry(
+                    workspace,
+                    self._strategy_version(),
+                ),
+                provider=_EmptyProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertEqual(record.payload["schema_version"], 3)
+            self.assertEqual(
+                record.payload["health_boundaries"][0]["source_id"],
+                "provider-a",
+            )
+            loop.close()
+
+            progress_path = workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            progress["health_boundaries"][0]["transition_order"] = 0
+            progress["health_boundaries"][0]["recorded_at"] = None
+            progress_path.write_text(
+                json.dumps(progress, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(
+                (DecisionLedgerIntegrityError, LiveDecisionProgressError)
+            ):
+                PersistentLiveDecisionLoop(
+                    workspace,
+                    loop_id="live-test-loop",
+                    mode=LiveDecisionMode.PAPER,
+                    book=PaperBook("1000"),
+                    authority=self._authority(),
+                    intent_factory=_EmptyIntentFactory(),
+                    scientific_registry=self._scientific_registry(
+                        workspace,
+                        self._strategy_version(),
+                    ),
+                    provider=_EmptyProvider(),
+                    max_quote_age=timedelta(seconds=5),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                )
+
     def test_default_observer_reconciles_peer_append_committed_during_provider_io(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

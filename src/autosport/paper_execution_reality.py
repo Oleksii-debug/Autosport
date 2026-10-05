@@ -432,7 +432,9 @@ def _synthetic_attempt(
     started_at: str,
     suspended: bool,
 ) -> PaperLegAttempt:
-    if action.side != "BACK":
+    if action.side != "BACK" and not (
+        action.side == "LAY" and suspended
+    ):
         raise PaperExecutionStateError(
             "synthetic PAPER exposure model supports BACK only; non-BACK must use "
             "explicit empirical execution evidence"
@@ -545,6 +547,7 @@ def _validate_lay_execution_surface(
     *,
     plan: ExecutionPlan,
     observations: Mapping[str, ObservedPaperExecution],
+    suspended_action_ids: frozenset[str],
 ) -> None:
     for action in plan.actions:
         if action.side not in {"BACK", "LAY"}:
@@ -564,6 +567,8 @@ def _validate_lay_execution_surface(
     action = lay_actions[0]
     observation = observations.get(action.action_id)
     if observation is None:
+        if action.action_id in suspended_action_ids:
+            return
         raise PaperExecutionStateError(
             "LAY PAPER execution requires explicit empirical execution evidence"
         )
@@ -626,7 +631,11 @@ def execute_paper_plan(
         )
         observation_evidence_ids[action_id] = observation.evidence_id
 
-    _validate_lay_execution_surface(plan=plan, observations=observations)
+    _validate_lay_execution_surface(
+        plan=plan,
+        observations=observations,
+        suspended_action_ids=suspended_action_ids,
+    )
 
     run_id = _impl._run_id(plan, trigger_id, config)
     ledger.reserve_run(

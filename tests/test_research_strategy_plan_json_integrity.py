@@ -128,5 +128,18 @@ class ResearchStrategyPlanJsonIntegrityTests(unittest.TestCase):
         self.assertEqual(plan.source_sha256, expected)
 
 
+    def test_direct_plan_constructor_rejects_uppercase_source_digest_alias(self):
+        plan = ResearchStrategyPlan.from_path(_PACKAGED_PLAN)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "lowercase SHA-256 hex digest",
+        ):
+            ResearchStrategyPlan(
+                plan.instructions,
+                plan.source_sha256.upper(),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

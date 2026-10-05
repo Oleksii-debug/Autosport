@@ -57,7 +57,7 @@ def _source_health_authority_key(
 
 
 def parse_source_timestamp(value: str) -> datetime:
-    if not isinstance(value, str) or not value or value.strip() != value:
+    if type(value) is not str or not value or value.strip() != value:
         raise ValueError("provider source timestamp must be a non-empty trimmed string")
     # datetime.fromisoformat() silently discards non-zero precision beyond
     # microseconds. That is not acceptable for source-health or causal as-of
@@ -80,24 +80,26 @@ def parse_source_timestamp(value: str) -> datetime:
 
 
 def _validate_source_id(value: object) -> str:
-    if not isinstance(value, str) or not value or value.strip() != value:
+    if type(value) is not str or not value or value.strip() != value:
         raise ValueError("source_id must be a non-empty trimmed string")
     return value
 
 
 def _validate_nonnegative_count(name: str, value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if type(value) is not int or value < 0:
         raise ValueError(f"{name} must be a non-negative integer")
     return value
 
 
 def _validate_quality_flags(value: object) -> tuple[str, ...]:
-    if not isinstance(value, tuple):
-        raise ValueError("quality_flags must be a tuple of strings")
+    if type(value) is not tuple:
+        raise ValueError("quality_flags must be an exact tuple of strings")
     seen: set[str] = set()
     for flag in value:
-        if not isinstance(flag, str) or not flag or flag.strip() != flag:
-            raise ValueError("quality_flags must contain non-empty trimmed strings")
+        if type(flag) is not str or not flag or flag.strip() != flag:
+            raise ValueError(
+                "quality_flags must contain exact non-empty trimmed strings"
+            )
         if flag in seen:
             raise ValueError("quality_flags must not contain duplicates")
         seen.add(flag)
@@ -167,7 +169,7 @@ class SourceHealthState:
 
     def validate(self) -> None:
         _validate_source_id(self.source_id)
-        if not isinstance(self.status, str) or self.status not in _ALLOWED_HEALTH_STATUSES:
+        if type(self.status) is not str or self.status not in _ALLOWED_HEALTH_STATUSES:
             raise ValueError("invalid source health status")
         for field_name in _COUNTER_FIELDS:
             _validate_nonnegative_count(field_name, getattr(self, field_name))
@@ -186,7 +188,7 @@ class SourceHealthState:
                 )
         else:
             if (
-                not isinstance(self.last_failure_kind, str)
+                type(self.last_failure_kind) is not str
                 or self.last_failure_kind not in _ALLOWED_FAILURE_KINDS
             ):
                 raise ValueError("invalid source health failure kind")
@@ -207,8 +209,10 @@ class SourceHealthState:
 
         for field_name in ("last_error", "last_cursor"):
             value = getattr(self, field_name)
-            if value is not None and not isinstance(value, str):
-                raise ValueError(f"{field_name} must be a string or null")
+            if value is not None and type(value) is not str:
+                raise ValueError(
+                    f"{field_name} must be an exact string or null"
+                )
 
         _validate_quality_flags(self.quality_flags)
 
@@ -628,8 +632,8 @@ class SourceHealthStore:
 
     @staticmethod
     def _as_of(value: datetime) -> datetime:
-        if not isinstance(value, datetime):
-            raise TypeError("as_of must be a datetime")
+        if type(value) is not datetime:
+            raise TypeError("as_of must be an exact datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("as_of must be timezone-aware")
         return value.astimezone(timezone.utc)
@@ -769,14 +773,25 @@ class SourceHealthStore:
         quality_flags: tuple[str, ...],
     ) -> SourceHealthState:
         """Apply one success only if the durable state still equals expected_before."""
-        if not isinstance(expected_before, SourceHealthState):
-            raise TypeError("expected_before must be SourceHealthState")
+        if type(expected_before) is not SourceHealthState:
+            raise TypeError("expected_before must be exact SourceHealthState")
         expected_before.validate()
+        expected_snapshot = self._state_from_payload(
+            self._payload(expected_before),
+            normalize_failed_flags=False,
+        )
+        ambiguous_snapshot: SourceHealthState | None = None
         if ambiguous_after is not None:
-            if not isinstance(ambiguous_after, SourceHealthState):
-                raise TypeError("ambiguous_after must be SourceHealthState or null")
+            if type(ambiguous_after) is not SourceHealthState:
+                raise TypeError(
+                    "ambiguous_after must be exact SourceHealthState or null"
+                )
             ambiguous_after.validate()
-            if ambiguous_after.source_id != expected_before.source_id:
+            ambiguous_snapshot = self._state_from_payload(
+                self._payload(ambiguous_after),
+                normalize_failed_flags=False,
+            )
+            if ambiguous_snapshot.source_id != expected_snapshot.source_id:
                 raise ValueError("ambiguous_after source_id must match expected_before")
         self._validate_success_update(
             received=received,
@@ -787,13 +802,13 @@ class SourceHealthStore:
 
         with self._writer_guard():
             self._recover_current_for_write()
-            current = self.get(expected_before.source_id)
-            if ambiguous_after is not None and current == ambiguous_after:
+            current = self.get(expected_snapshot.source_id)
+            if ambiguous_snapshot is not None and current == ambiguous_snapshot:
                 raise RuntimeError(
                     "source health matches the expected post-state but this outcome "
                     "cannot prove it performed that durable mutation; refusing ambiguous retry"
                 )
-            if current != expected_before:
+            if current != expected_snapshot:
                 raise RuntimeError(
                     "source health changed since the committed ingestion outcome; "
                     "refusing ambiguous retry"

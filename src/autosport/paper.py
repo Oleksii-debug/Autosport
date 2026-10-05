@@ -589,6 +589,9 @@ def _seal_paperbook_open_transition_authority(method):
     ticket_id_factory_code = ticket_id_factory.__code__
     placed_at_now = utc_now_iso
     placed_at_now_code = placed_at_now.__code__
+    ticket_type = PaperTicket
+    ticket_init = ticket_type.__init__
+    ticket_init_code = ticket_init.__code__
 
     def issue_ticket_id() -> str:
         if ticket_id_factory.__code__ is not ticket_id_factory_code:
@@ -605,6 +608,14 @@ def _seal_paperbook_open_transition_authority(method):
         if placed_at_now.__code__ is not placed_at_now_code:
             raise ValueError("PaperBook placed_at clock authority changed")
         return timestamp
+
+    def build_ticket(**kwargs) -> PaperTicket:
+        if ticket_type.__init__ is not ticket_init or ticket_init.__code__ is not ticket_init_code:
+            raise ValueError("PaperBook ticket constructor authority changed")
+        ticket = ticket_type(**kwargs)
+        if ticket_type.__init__ is not ticket_init or ticket_init.__code__ is not ticket_init_code:
+            raise ValueError("PaperBook ticket constructor authority changed")
+        return ticket
 
     def record_opening(book: object, ticket: PaperTicket) -> None:
         if opening_record.__code__ is not opening_record_code:
@@ -632,6 +643,8 @@ def _seal_paperbook_open_transition_authority(method):
             raise ValueError("PaperBook ticket id authority changed")
         if placed_at_now.__code__ is not placed_at_now_code:
             raise ValueError("PaperBook placed_at clock authority changed")
+        if ticket_type.__init__ is not ticket_init or ticket_init.__code__ is not ticket_init_code:
+            raise ValueError("PaperBook ticket constructor authority changed")
         result = method(
             self,
             *args,
@@ -639,6 +652,7 @@ def _seal_paperbook_open_transition_authority(method):
             _causal_open_advance=advance_open,
             _ticket_id_factory=issue_ticket_id,
             _placed_at_now=current_timestamp,
+            _ticket_factory=build_ticket,
             **kwargs,
         )
         if method.__code__ is not method_code:
@@ -979,6 +993,7 @@ class PaperBook:
         _causal_open_advance=None,
         _ticket_id_factory=None,
         _placed_at_now=None,
+        _ticket_factory=None,
     ) -> PaperTicket:
         amount = self._canonical_decimal_input(stake, "stake")
         new_balance = self._debit_balance(self.balance, amount)
@@ -1008,7 +1023,7 @@ class PaperBook:
         quote_keys = [leg.quote_key for leg in ticket_legs]
         if len(quote_keys) != len(set(quote_keys)):
             raise ValueError("ticket contains duplicate quote_key leg")
-        ticket = PaperTicket(
+        ticket = _ticket_factory(
             ticket_id=_ticket_id_factory(),
             stake=amount,
             legs=ticket_legs,

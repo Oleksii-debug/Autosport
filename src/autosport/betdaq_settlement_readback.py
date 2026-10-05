@@ -893,6 +893,47 @@ def coalesce_posting_replays(
     return tuple(seen[identity] for identity in order)
 
 
+def _request_xml(
+    credentials: _account.BetdaqCredentials,
+    method: str,
+    attributes: dict[str, str],
+) -> bytes:
+    _, external_ns, soap11_ns, _ = _canonical_economic_protocol_authority()
+    ET.register_namespace("soap", soap11_ns)
+    envelope = ET.Element(f"{{{soap11_ns}}}Envelope")
+    header = ET.SubElement(envelope, f"{{{soap11_ns}}}Header")
+    ET.SubElement(
+        header,
+        f"{{{external_ns}}}ExternalApiHeader",
+        {
+            "version": credentials.version,
+            "languageCode": credentials.language_code,
+            "username": credentials.username,
+            "password": credentials.password,
+            "applicationIdentifier": credentials.application_identifier,
+        },
+    )
+    body = ET.SubElement(envelope, f"{{{soap11_ns}}}Body")
+    method_element = ET.SubElement(body, f"{{{external_ns}}}{method}")
+    if method == "GetOrderDetails":
+        request_name = "getOrderDetailsRequest"
+    elif method == "ListAccountPostings":
+        request_name = "listAccountPostingsRequest"
+    elif method == "ListAccountPostingsById":
+        request_name = "listAccountPostingsByIdRequest"
+    else:
+        raise BetdaqEconomicReadbackError(
+            "method is outside economic READ request-element allowlist"
+        )
+    ET.SubElement(
+        method_element,
+        f"{{{external_ns}}}{request_name}",
+        attributes,
+    )
+    return ET.tostring(envelope, encoding="utf-8", xml_declaration=True)
+
+
+
 def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
     """Parse generated BETDAQ SOAP results without inventing ReturnStatus."""
     _, external_ns, soap11_ns, soap12_ns = _canonical_economic_protocol_authority()
@@ -1479,46 +1520,6 @@ class BetdaqEconomicReadbackClient:
             account_context_id=context_before.session_context_id,
         )
         return result, evidence
-
-
-def _request_xml(
-    credentials: _account.BetdaqCredentials,
-    method: str,
-    attributes: dict[str, str],
-) -> bytes:
-    _, external_ns, soap11_ns, _ = _canonical_economic_protocol_authority()
-    ET.register_namespace("soap", soap11_ns)
-    envelope = ET.Element(f"{{{soap11_ns}}}Envelope")
-    header = ET.SubElement(envelope, f"{{{soap11_ns}}}Header")
-    ET.SubElement(
-        header,
-        f"{{{external_ns}}}ExternalApiHeader",
-        {
-            "version": credentials.version,
-            "languageCode": credentials.language_code,
-            "username": credentials.username,
-            "password": credentials.password,
-            "applicationIdentifier": credentials.application_identifier,
-        },
-    )
-    body = ET.SubElement(envelope, f"{{{soap11_ns}}}Body")
-    method_element = ET.SubElement(body, f"{{{external_ns}}}{method}")
-    if method == "GetOrderDetails":
-        request_name = "getOrderDetailsRequest"
-    elif method == "ListAccountPostings":
-        request_name = "listAccountPostingsRequest"
-    elif method == "ListAccountPostingsById":
-        request_name = "listAccountPostingsByIdRequest"
-    else:
-        raise BetdaqEconomicReadbackError(
-            "method is outside economic READ request-element allowlist"
-        )
-    ET.SubElement(
-        method_element,
-        f"{{{external_ns}}}{request_name}",
-        attributes,
-    )
-    return ET.tostring(envelope, encoding="utf-8", xml_declaration=True)
 
 
 def _split_tag(tag: str) -> tuple[str, str]:

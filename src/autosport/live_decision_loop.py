@@ -30,6 +30,11 @@ from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .live_observation import poll_open_market_store_once
 from .market_mirror import MarketMirror, MirrorSnapshot
+from .market_mirror_health import (
+    HealthGatedMirrorDecisionIndex,
+    HealthGatedMirrorSnapshot,
+    ProviderHealthReplayBoundary,
+)
 from .monotonic_workspace_authority import (
     AuthorityPhase,
     MonotonicWorkspaceAuthority,
@@ -142,7 +147,7 @@ PostAppendHook = Callable[[], None]
 
 
 _PROGRESS_SCHEMA = "autosport.live_decision_progress"
-_PROGRESS_VERSION = 2
+_PROGRESS_VERSION = 3
 _PROGRESS_KEYS = frozenset(
     {
         "schema",
@@ -152,6 +157,7 @@ _PROGRESS_KEYS = frozenset(
         "decision_ts",
         "market_state_sha256",
         "market_append_generation",
+        "health_boundaries",
         "decision_context_sha256",
         "affected_input_ids",
         "registered_input_ids",
@@ -161,7 +167,8 @@ _PROGRESS_KEYS = frozenset(
         "gate",
     }
 )
-_PROGRESS_KEYS_V1 = _PROGRESS_KEYS - {"market_append_generation"}
+_PROGRESS_KEYS_V2 = _PROGRESS_KEYS - {"health_boundaries"}
+_PROGRESS_KEYS_V1 = _PROGRESS_KEYS_V2 - {"market_append_generation"}
 _PHASE_PENDING = "pending"
 _PHASE_APPEND_PENDING = "append_pending"
 _PHASE_COMMITTED = "committed"
@@ -447,7 +454,23 @@ class _Control:
             )
         if raw["schema"] != _CONTROL_SCHEMA or raw["schema_version"] != _CONTROL_VERSION:
             raise LiveDecisionProgressError("unsupported live decision control schema")
+        health_boundaries_raw = (
+            [] if schema_version in {1, 2} else raw["health_boundaries"]
+        )
+        if type(health_boundaries_raw) is not list:
+            raise LiveDecisionProgressError(
+                "health_boundaries must be a JSON array"
+            )
         try:
+            health_boundaries = tuple(
+                sorted(
+                    (
+                        ProviderHealthReplayBoundary.from_dict(value)
+                        for value in health_boundaries_raw
+                    ),
+                    key=lambda value: value.source_id,
+                )
+            )
             return cls(
                 loop_id=raw["loop_id"],
                 state=LiveControlState(raw["state"]),
@@ -571,6 +594,7 @@ class _Progress:
     decision_ts: str
     market_state_sha256: str
     market_append_generation: int | None
+    health_boundaries: tuple[ProviderHealthReplayBoundary, ...]
     decision_context_sha256: str
     affected_input_ids: tuple[str, ...]
     registered_input_ids: tuple[str, ...]
@@ -589,6 +613,15 @@ class _Progress:
         ):
             raise LiveDecisionProgressError(
                 "market_append_generation must be a non-negative int or null"
+            )
+        if type(self.health_boundaries) is not tuple:
+            raise LiveDecisionProgressError("health_boundaries must be a tuple")
+        health_source_ids = tuple(
+            boundary.source_id for boundary in self.health_boundaries
+        )
+        if health_source_ids != tuple(sorted(set(health_source_ids))):
+            raise LiveDecisionProgressError(
+                "health_boundaries must be sorted and unique by source_id"
             )
         _canonical_sha256("decision_context_sha256", self.decision_context_sha256)
         if self.phase not in {
@@ -655,6 +688,9 @@ class _Progress:
             "decision_ts": self.decision_ts,
             "market_state_sha256": self.market_state_sha256,
             "market_append_generation": self.market_append_generation,
+            "health_boundaries": [
+                boundary.to_dict() for boundary in self.health_boundaries
+            ],
             "decision_context_sha256": self.decision_context_sha256,
             "affected_input_ids": list(self.affected_input_ids),
             "registered_input_ids": list(self.registered_input_ids),
@@ -674,6 +710,8 @@ class _Progress:
         expected_keys = (
             _PROGRESS_KEYS
             if type(schema_version) is int and schema_version == _PROGRESS_VERSION
+            else _PROGRESS_KEYS_V2
+            if type(schema_version) is int and schema_version == 2
             else _PROGRESS_KEYS_V1
             if type(schema_version) is int and schema_version == 1
             else None
@@ -707,6 +745,7 @@ class _Progress:
                     if schema_version == 1
                     else raw["market_append_generation"]
                 ),
+                health_boundaries=health_boundaries,
                 decision_context_sha256=raw["decision_context_sha256"],
                 affected_input_ids=tuple(input_ids),
                 registered_input_ids=tuple(registered_ids),

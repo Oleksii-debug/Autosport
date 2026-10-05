@@ -961,14 +961,19 @@ class PersistentLiveDecisionLoop:
         self._clock_authority = self.clock
         self._last_clock_time = provenance_as_of
         self.post_append_hook = post_append_hook
-        if catalog_lifecycle is not None and not isinstance(
-            catalog_lifecycle, ContinuousEventLifecycle
+        if (
+            catalog_lifecycle is not None
+            and type(catalog_lifecycle) is not ContinuousEventLifecycle
         ):
-            raise TypeError("catalog_lifecycle must be ContinuousEventLifecycle or None")
+            raise TypeError(
+                "catalog_lifecycle must be an exact ContinuousEventLifecycle or None"
+            )
         if catalog_fetch_page is not None and not callable(catalog_fetch_page):
             raise TypeError("catalog_fetch_page must be callable or None")
         if catalog_source_id is not None:
             catalog_source_id = _canonical_text("catalog_source_id", catalog_source_id)
+        if type(catalog_required_history) is not timedelta:
+            raise TypeError("catalog_required_history must be an exact timedelta")
         if catalog_required_history < timedelta(0):
             raise ValueError("catalog_required_history must be non-negative")
         if (catalog_lifecycle is None) != (catalog_fetch_page is None):

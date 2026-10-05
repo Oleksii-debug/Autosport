@@ -209,6 +209,11 @@ class ObservationResult:
             raise TypeError(
                 "observation current_quotes must contain exact MarketEvent values"
             )
+        for event in self.current_quotes:
+            if MarketEvent.from_dict(event.to_dict()) != event:
+                raise ValueError(
+                    "observation current quote must retain canonical MarketEvent semantics"
+                )
         if self.stats.source_id != self.health.source_id:
             raise ValueError(
                 "observation stats and health must belong to the same source"

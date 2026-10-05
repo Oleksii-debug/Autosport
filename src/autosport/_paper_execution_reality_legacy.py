@@ -1477,6 +1477,31 @@ def _require_canonical_action_surface(action: ExecutionAction) -> None:
             )
 
 
+    try:
+        canonical = ExecutionAction(
+            action_id=action.action_id,
+            bookmaker_id=action.bookmaker_id,
+            account_id=action.account_id,
+            event_id=action.event_id,
+            market_id=action.market_id,
+            selection_id=action.selection_id,
+            side=action.side,
+            requested_odds=action.requested_odds,
+            requested_stake=action.requested_stake,
+            quote_id=action.quote_id,
+            quote_observed_at=action.quote_observed_at,
+            expires_at=action.expires_at,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionStateError(
+            "execution action no longer satisfies canonical value invariants"
+        ) from exc
+    if canonical != action:
+        raise PaperExecutionStateError(
+            "execution action changed outside canonical construction authority"
+        )
+
+
 def _verify_observation_authority(
     *,
     action: ExecutionAction,

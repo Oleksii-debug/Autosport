@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import autosport.storage as storage_module
 from autosport.domain import MarketEvent
-from autosport.ingestion_health import SourceHealthStore
+from autosport.ingestion_health import IngestionPolicy, SourceHealthStore
 from autosport.live_observation import (
     OneShotObservationWorker,
     observe_workspace_once,
@@ -161,6 +161,126 @@ class LiveObservationTests(unittest.TestCase):
                 self.assertFalse(observer_root.exists())
             finally:
                 hostile_store.close()
+                store.close()
+
+    def test_workspace_observer_rejects_invalid_max_items_before_workspace_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "invalid-max-items"
+
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                observe_workspace_once(
+                    root,
+                    self._provider(),
+                    max_items=0,
+                    clock=lambda: _RECEIVE_TIME,
+                )
+
+            self.assertFalse(root.exists())
+
+    def test_workspace_observer_rejects_policy_subclass_before_workspace_creation(self):
+        class Policy(IngestionPolicy):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "invalid-policy"
+
+            with self.assertRaisesRegex(TypeError, "exact IngestionPolicy"):
+                observe_workspace_once(
+                    root,
+                    self._provider(),
+                    max_items=10,
+                    policy=Policy(),
+                    clock=lambda: _RECEIVE_TIME,
+                )
+
+            self.assertFalse(root.exists())
+
+    def test_workspace_observer_rejects_noncallable_clock_before_workspace_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "invalid-clock"
+
+            with self.assertRaisesRegex(TypeError, "clock must be callable"):
+                observe_workspace_once(
+                    root,
+                    self._provider(),
+                    max_items=10,
+                    clock="not-a-clock",
+                )
+
+            self.assertFalse(root.exists())
+
+    def test_workspace_observer_rejects_provider_identity_before_workspace_creation(self):
+        class Text(str):
+            pass
+
+        class Provider:
+            source_id = Text("live-fixture")
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider read executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "invalid-provider"
+
+            with self.assertRaisesRegex(TypeError, "exact string"):
+                observe_workspace_once(
+                    root,
+                    Provider(),
+                    max_items=10,
+                    clock=lambda: _RECEIVE_TIME,
+                )
+
+            self.assertFalse(root.exists())
+
+    def test_workspace_observer_rejects_backpressure_overflow_before_workspace_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "invalid-backpressure"
+            policy = IngestionPolicy(max_batch_size=1)
+
+            with self.assertRaisesRegex(ValueError, "exceeds backpressure limit"):
+                observe_workspace_once(
+                    root,
+                    self._provider(),
+                    max_items=2,
+                    policy=policy,
+                    clock=lambda: _RECEIVE_TIME,
+                )
+
+            self.assertFalse(root.exists())
+
+    def test_open_store_poll_rejects_invalid_controls_before_provider_read(self):
+        class ExplosiveProvider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider read executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+                health_store = SourceHealthStore(root / "source_health.json")
+                with self.assertRaisesRegex(ValueError, "positive integer"):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        ExplosiveProvider(),
+                        mirror_updates=updates,
+                        max_items=0,
+                    )
+                with self.assertRaisesRegex(TypeError, "clock must be callable"):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        ExplosiveProvider(),
+                        mirror_updates=updates,
+                        max_items=1,
+                        clock="not-a-clock",
+                    )
+                self.assertEqual(store.events(), ())
+                self.assertEqual(updates.mirror.view().events, ())
+            finally:
                 store.close()
 
     def test_open_store_poll_rejects_batch_source_identity_mismatch_before_persistence(self):

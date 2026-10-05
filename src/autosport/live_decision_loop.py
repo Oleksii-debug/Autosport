@@ -1555,9 +1555,18 @@ class PersistentLiveDecisionLoop:
             freshness_expired_inputs or availability_reached_inputs
         )
 
-        registered_input_ids = self.dependencies.input_ids
+        registered_dependencies = self.dependencies.registry_snapshot()
+        registered_input_ids = tuple(
+            dependency.input_id for dependency in registered_dependencies
+        )
         expected_input_specs = tuple(self._input_specs.values())
-        if tuple(spec.input_id for spec in expected_input_specs) != registered_input_ids:
+        if (
+            tuple(
+                _InputSpec.from_dependency(dependency)
+                for dependency in registered_dependencies
+            )
+            != expected_input_specs
+        ):
             raise LiveDecisionProgressError(
                 "live dependency registry diverged before snapshot capture"
             )
@@ -1585,7 +1594,11 @@ class PersistentLiveDecisionLoop:
             and self._progress.market_state_sha256 == current_market_sha
             and self._progress.registered_input_ids == registered_input_ids
             and tuple(self._input_specs.values()) == expected_input_specs
-            and self.dependencies.input_ids == registered_input_ids
+            and tuple(
+                _InputSpec.from_dependency(dependency)
+                for dependency in self.dependencies.registry_snapshot()
+            )
+            == expected_input_specs
             and not batch_affected
             and not batch.full_refresh_required
             and not freshness_expired
@@ -2311,9 +2324,18 @@ class PersistentLiveDecisionLoop:
         exc: Exception,
     ) -> LiveCycleResult:
         decision_ts = now.isoformat()
-        affected = self.dependencies.input_ids
+        registered_dependencies = self.dependencies.registry_snapshot()
+        affected = tuple(
+            dependency.input_id for dependency in registered_dependencies
+        )
         expected_input_specs = tuple(self._input_specs.values())
-        if tuple(spec.input_id for spec in expected_input_specs) != affected:
+        if (
+            tuple(
+                _InputSpec.from_dependency(dependency)
+                for dependency in registered_dependencies
+            )
+            != expected_input_specs
+        ):
             raise LiveDecisionProgressError(
                 "live dependency registry diverged before provider-gap snapshot capture"
             )
@@ -2716,7 +2738,14 @@ class PersistentLiveDecisionLoop:
                 expected_input_ids = tuple(
                     spec.input_id for spec in bound_input_specs
                 )
-                if self.dependencies.input_ids != expected_input_ids:
+                current_dependencies = self.dependencies.registry_snapshot()
+                if (
+                    tuple(
+                        _InputSpec.from_dependency(dependency)
+                        for dependency in current_dependencies
+                    )
+                    != bound_input_specs
+                ):
                     raise LiveDecisionProgressError(
                         "focused dependency registry changed after snapshot capture"
                     )

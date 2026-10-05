@@ -8278,5 +8278,64 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             loop.close()
 
 
+    def test_restart_recovers_pending_after_transient_same_selector_reincarnation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            refresh = loop._refresh_intents_from_snapshots
+
+            def refresh_then_reincarnate(snapshots):
+                refresh(snapshots)
+                self.assertTrue(loop.dependencies.unregister("input-a"))
+                loop.dependencies.register(
+                    "input-a",
+                    selection_ids="selection-a",
+                )
+
+            with patch.object(
+                loop,
+                "_refresh_intents_from_snapshots",
+                side_effect=refresh_then_reincarnate,
+            ):
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "changed before durable ledger publication",
+                ):
+                    loop.run_cycle()
+            self.assertEqual(
+                json.loads(loop.progress_path.read_text(encoding="utf-8"))["phase"],
+                "pending",
+            )
+            loop.close()
+
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            result = resumed.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            committed = json.loads(
+                resumed.progress_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(committed["phase"], "committed")
+            self.assertEqual(
+                resumed.dependencies.registry_snapshot()[0].selection_ids,
+                frozenset({"selection-a"}),
+            )
+            resumed.close()
+
+
 if __name__ == "__main__":
     unittest.main()

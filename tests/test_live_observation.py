@@ -206,6 +206,68 @@ class LiveObservationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_open_store_poll_rejects_provider_source_id_subclass_before_read(self):
+        class Text(str):
+            pass
+
+        class Provider:
+            source_id = Text("live-fixture")
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider read executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+                health_store = SourceHealthStore(root / "source_health.json")
+                with self.assertRaisesRegex(TypeError, "exact string"):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        Provider(),
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: _RECEIVE_TIME,
+                    )
+                self.assertEqual(store.events(), ())
+                self.assertEqual(updates.mirror.view().events, ())
+            finally:
+                store.close()
+
+    def test_open_store_poll_rejects_substituted_batch_before_batch_property_access(self):
+        class HostileBatch:
+            @property
+            def source_id(self):
+                raise AssertionError("hostile batch source_id accessed")
+
+        class Provider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000):
+                return HostileBatch()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+                health_store = SourceHealthStore(root / "source_health.json")
+                with self.assertRaisesRegex(TypeError, "exact ProviderBatch"):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        Provider(),
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: _RECEIVE_TIME,
+                    )
+                self.assertEqual(store.events(), ())
+                self.assertEqual(updates.mirror.view().events, ())
+            finally:
+                store.close()
+
     def test_open_store_poll_rejects_provider_source_mutation_during_read_before_persistence(self):
         class MutatingProvider:
             def __init__(self) -> None:

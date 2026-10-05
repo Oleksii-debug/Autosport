@@ -30,6 +30,11 @@ from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .live_observation import poll_open_market_store_once
 from .market_mirror import MarketMirror, MirrorSnapshot
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependency,
@@ -166,6 +171,7 @@ _SHA256_HEX = frozenset("0123456789abcdef")
 _CONTROL_SCHEMA = "autosport.live_decision_control"
 _CONTROL_VERSION = 1
 _CONTROL_KEYS = frozenset({"schema", "schema_version", "loop_id", "state"})
+_CONTROL_AUTHORITY_DOMAIN = "autosport.live-decision-control.v1"
 _INPUTS_SCHEMA = "autosport.live_decision_inputs"
 _INPUTS_VERSION = 2
 _INPUTS_KEYS = frozenset({"schema", "schema_version", "loop_id", "inputs"})
@@ -927,6 +933,13 @@ class PersistentLiveDecisionLoop:
         self._progress_path_authority = self.progress_path
         self._pre_action_book_path_authority = self.pre_action_book_path
         self._control_path_authority = self.control_path
+        self._control_authority = MonotonicWorkspaceAuthority(
+            workspace=self._workspace_authority.resolve(strict=False),
+            domain=_CONTROL_AUTHORITY_DOMAIN,
+            key=self.loop_id,
+        )
+        self._control_authority_object = self._control_authority
+        self._control_authority_namespace = self._control_authority.namespace_sha256
         self._progress = self._load_progress()
         if self._progress is not None and self._progress.loop_id != self.loop_id:
             raise LiveDecisionProgressError(
@@ -1132,7 +1145,8 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "unfinished live decision requires exact durable dependency registry"
             )
-        durable_control = self._load_control()
+        with WorkspaceEconomicLock(self.workspace):
+            durable_control = self._load_control()
         if durable_control is None:
             durable_control = _Control(self.loop_id, LiveControlState.RUNNING)
         elif durable_control.loop_id != self.loop_id:
@@ -2613,6 +2627,16 @@ class PersistentLiveDecisionLoop:
         if self.control_path != self._control_path_authority:
             raise LiveDecisionProgressError(
                 "live control path authority changed after construction"
+            )
+        if (
+            self._control_authority is not self._control_authority_object
+            or self._control_authority.namespace_sha256
+            != self._control_authority_namespace
+            or self._control_authority.domain != _CONTROL_AUTHORITY_DOMAIN
+            or self._control_authority.key != self._loop_id_authority
+        ):
+            raise LiveDecisionProgressError(
+                "live control monotonic authority changed after construction"
             )
         if self.inputs_path != self._inputs_path_authority:
             raise LiveDecisionProgressError(
@@ -4734,6 +4758,118 @@ class PersistentLiveDecisionLoop:
                 "committed live progress is not the latest durable live decision"
             )
 
+    @staticmethod
+    def _control_state_sha256(control: _Control | None) -> str | None:
+        if control is None:
+            return None
+        return _canonical_json_sha256(control.to_dict())
+
+    def _control_transition_binding(
+        self,
+        *,
+        previous_state_sha256: str | None,
+        candidate: _Control,
+        kind: str,
+    ) -> str:
+        return _canonical_json_sha256(
+            {
+                "schema": "autosport.live_decision_control_transition",
+                "schema_version": 1,
+                "kind": kind,
+                "loop_id": self.loop_id,
+                "previous_state_sha256": previous_state_sha256,
+                "intended_state_sha256": self._control_state_sha256(candidate),
+                "state": candidate.state.value,
+            }
+        )
+
+    @staticmethod
+    def _control_tx_id(binding_sha256: str) -> str:
+        return f"live-control-{binding_sha256}"
+
+    def _read_control_file(self) -> _Control | None:
+        if not self.control_path.exists():
+            return None
+        try:
+            text = self.control_path.read_text(encoding="utf-8")
+            raw = strict_json_loads(text)
+            return _Control.from_dict(raw)
+        except (OSError, TypeError, ValueError) as exc:
+            raise LiveDecisionProgressError(
+                "cannot verify persisted live decision control"
+            ) from exc
+
+    def _load_control(self) -> _Control | None:
+        control = self._read_control_file()
+        if control is not None and control.loop_id != self.loop_id:
+            raise LiveDecisionProgressError(
+                "persisted live control belongs to a different loop_id"
+            )
+        observed = self._control_state_sha256(control)
+        try:
+            history = self._control_authority.read_history()
+            if not history:
+                if control is None:
+                    return None
+                binding = self._control_transition_binding(
+                    previous_state_sha256=None,
+                    candidate=control,
+                    kind="BOOTSTRAP",
+                )
+                tx_id = self._control_tx_id(binding)
+                self._control_authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=observed,
+                    semantic_binding_sha256=binding,
+                )
+                self._control_authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed,
+                    semantic_binding_sha256=binding,
+                )
+                return control
+
+            pending = history[-1] if history[-1].phase is AuthorityPhase.PREPARE else None
+            if pending is not None and observed == pending.intended_state_sha256:
+                if control is None:
+                    raise LiveDecisionProgressError(
+                        "prepared live control authority has no durable control bytes"
+                    )
+                kind = (
+                    "BOOTSTRAP"
+                    if pending.previous_committed_generation == 0
+                    and pending.previous_committed_state_sha256 is None
+                    else "TRANSITION"
+                )
+                binding = self._control_transition_binding(
+                    previous_state_sha256=pending.previous_committed_state_sha256,
+                    candidate=control,
+                    kind=kind,
+                )
+                tx_id = self._control_tx_id(binding)
+                if (
+                    tx_id != pending.tx_id
+                    or binding != pending.semantic_binding_sha256
+                ):
+                    raise LiveDecisionProgressError(
+                        "prepared live control authority conflicts with durable control semantics"
+                    )
+                self._control_authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=tx_id,
+                    semantic_binding_sha256=binding,
+                )
+            else:
+                self._control_authority.recover(
+                    observed_state_sha256=observed,
+                )
+            return control
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise LiveDecisionProgressError(
+                "live decision control failed monotonic rollback/recovery verification"
+            ) from exc
+
     def _persist_control(self, state: LiveControlState) -> None:
         candidate = _Control(self.loop_id, state)
         with WorkspaceEconomicLock(self.workspace):
@@ -4748,20 +4884,42 @@ class PersistentLiveDecisionLoop:
                     and state is not LiveControlState.STOPPED
                 ):
                     raise RuntimeError("durable STOP cannot be cleared by this loop")
-            atomic_write_json(self.control_path, candidate.to_dict())
-        self._control = candidate
+            if durable == candidate:
+                self._control = candidate
+                return
 
-    def _load_control(self) -> _Control | None:
-        if not self.control_path.exists():
-            return None
-        try:
-            text = self.control_path.read_text(encoding="utf-8")
-            raw = strict_json_loads(text)
-            return _Control.from_dict(raw)
-        except (OSError, TypeError, ValueError) as exc:
-            raise LiveDecisionProgressError(
-                "cannot verify persisted live decision control"
-            ) from exc
+            observed = self._control_state_sha256(durable)
+            intended = self._control_state_sha256(candidate)
+            assert intended is not None
+            binding = self._control_transition_binding(
+                previous_state_sha256=observed,
+                candidate=candidate,
+                kind="TRANSITION",
+            )
+            tx_id = self._control_tx_id(binding)
+            try:
+                self._control_authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed,
+                    intended_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
+                atomic_write_json(self.control_path, candidate.to_dict())
+                published = self._read_control_file()
+                if published != candidate:
+                    raise LiveDecisionProgressError(
+                        "live control publication changed before monotonic commit"
+                    )
+                self._control_authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise LiveDecisionProgressError(
+                    "live decision control monotonic publication failed"
+                ) from exc
+        self._control = candidate
 
     def _load_progress(self) -> _Progress | None:
         if not self.progress_path.exists():

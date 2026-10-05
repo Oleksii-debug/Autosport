@@ -5086,6 +5086,94 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             resumed.close()
 
+
+    def test_legacy_v2_pending_default_provider_replays_without_retroactive_health_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seed_store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                MarketEventBus(seed_store).publish_many((self._event(sequence=1),))
+            finally:
+                seed_store.close()
+
+            def fail_after_pending(input_id, snapshot):
+                del input_id, snapshot
+                raise RuntimeError("simulated legacy pending process loss")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            strategy = self._strategy_version()
+            registry = self._scientific_registry(workspace, strategy)
+            first = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=fail_after_pending,
+                scientific_registry=registry,
+                provider=_EmptyProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "legacy pending process loss",
+            ):
+                first.run_cycle()
+
+            progress_path = workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(progress["schema_version"], 3)
+            self.assertTrue(progress["health_boundaries"])
+            progress["schema_version"] = 2
+            del progress["health_boundaries"]
+            progress_path.write_text(
+                json.dumps(progress, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            first.close()
+
+            SourceHealthStore(workspace / "source_health.json").record_failure(
+                "provider-a",
+                now=(self.START + timedelta(seconds=1)).isoformat(),
+                error=ConnectionError("later health evidence unavailable to legacy pending"),
+            )
+
+            factory = _EmptyIntentFactory()
+            resumed_provider = _EmptyProvider()
+            resumed = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=registry,
+                provider=resumed_provider,
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            recovered = resumed.run_cycle()
+
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(resumed_provider.calls, 0)
+            self.assertEqual(
+                factory.calls[-1],
+                ("input-a", (("selection-a", 1, "open"),)),
+            )
+            committed = json.loads(
+                resumed.progress_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(committed["schema_version"], 3)
+            self.assertIsNone(committed["health_boundaries"])
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertEqual(record.payload["schema_version"], 3)
+            self.assertIsNone(record.payload["health_boundaries"])
+            resumed.close()
+
     def test_pending_publication_holds_market_append_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

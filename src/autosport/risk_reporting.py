@@ -59,6 +59,29 @@ _CANONICAL_GOAL_PROVENANCE = provenance_for
 _CANONICAL_GOAL_FROM_PAYLOAD = economic_goal_from_payload
 _CANONICAL_GOAL_TO_PAYLOAD = economic_goal_to_payload
 _CANONICAL_PAPERBOOK_LOAD = PaperBook.load
+_CANONICAL_PAPERBOOK_DURABLE_LOAD_SURFACE = tuple(
+    (name, PaperBook.__dict__[name])
+    for name in (
+        "load_bytes",
+        "_from_raw_snapshot",
+        "_parse_snapshot_decimal",
+        "_required_snapshot_field",
+        "_parse_snapshot_legs",
+        "_parse_snapshot_provider_accounts",
+        "_parse_snapshot_status",
+        "_parse_lifecycle",
+        "_parse_lifecycle_key_list",
+        "_validate_loaded_state",
+        "_validate_lifecycle_entry",
+        "_validate_lifecycle_reachability",
+        "_validate_placed_at",
+        "_validate_settled_at",
+        "_validate_ticket_provenance",
+        "_validate_ticket_leg",
+        "_require_canonical_text",
+        "_require_finite",
+    )
+)
 _CANONICAL_ECONOMIC_GOAL_STORE = EconomicGoalStore
 _CANONICAL_ECONOMIC_GOAL_STORE_LOAD = EconomicGoalStore.load
 
@@ -842,6 +865,12 @@ def _same_canonical_paperbook_state(left: PaperBook, right: PaperBook) -> bool:
     )
 
 
+def _require_canonical_paperbook_durable_load_surface() -> None:
+    for name, descriptor in _CANONICAL_PAPERBOOK_DURABLE_LOAD_SURFACE:
+        if PaperBook.__dict__.get(name) is not descriptor:
+            raise ValueError("canonical PaperBook durable loader authority is unavailable")
+
+
 def _durable_source_pair(
     *,
     paper_book_path: str,
@@ -869,7 +898,9 @@ def _durable_source_pair(
     store = _CANONICAL_ECONOMIC_GOAL_STORE(workspace_path)
     goal_before = _CANONICAL_ECONOMIC_GOAL_STORE_LOAD(store)
     goal_before_provenance = _CANONICAL_GOAL_PROVENANCE(goal_before)
+    _require_canonical_paperbook_durable_load_surface()
     book = _CANONICAL_PAPERBOOK_LOAD(paper_path)
+    _require_canonical_paperbook_durable_load_surface()
     goal_after = _CANONICAL_ECONOMIC_GOAL_STORE_LOAD(store)
     if _CANONICAL_GOAL_PROVENANCE(goal_after) != goal_before_provenance:
         raise ValueError("durable economic goal changed during equity-path resolution")
@@ -877,7 +908,9 @@ def _durable_source_pair(
     before_state = _CANONICAL_RISK_PORTFOLIO_SHA256(book)
     if before_state is None:
         raise ValueError("durable PaperBook cannot issue canonical equity-path evidence")
+    _require_canonical_paperbook_durable_load_surface()
     book_after = _CANONICAL_PAPERBOOK_LOAD(paper_path)
+    _require_canonical_paperbook_durable_load_surface()
     after_state = _CANONICAL_RISK_PORTFOLIO_SHA256(book_after)
     if (
         after_state is None

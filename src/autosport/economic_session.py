@@ -83,6 +83,15 @@ class EconomicSessionMismatchError(EconomicSessionError):
     pass
 
 
+
+def _is_sha256(value: object, *, _hex=_HEX) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in _hex for character in value)
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ProductEconomicSession:
     workspace_instance_id: str
@@ -150,13 +159,6 @@ class ProductEconomicSession:
     def real_money_execution_authorized(self) -> bool:
         return False
 
-
-def _is_sha256(value: object, *, _hex=_HEX) -> bool:
-    return (
-        type(value) is str
-        and len(value) == 64
-        and all(character in _hex for character in value)
-    )
 
 
 def _is_transition_id(value: object, *, _hex=_HEX) -> bool:

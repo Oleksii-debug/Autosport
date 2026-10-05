@@ -121,6 +121,32 @@ def _mcm(
     return json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
 
 
+def _delta_mcm(
+    *,
+    request_id: int = 7,
+    pt: int | None = None,
+    clk: str = "c2",
+    price: float = 2.1,
+) -> bytes:
+    if pt is None:
+        pt = time.time_ns() // 1_000_000
+    payload = {
+        "op": "mcm",
+        "id": request_id,
+        "clk": clk,
+        "pt": pt,
+        "mc": [
+            {
+                "id": "1.A",
+                "img": False,
+                "con": False,
+                "rc": [{"id": 1, "hc": 0, "ltp": price}],
+            }
+        ],
+    }
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
+
+
 def _transport(
     monkeypatch: pytest.MonkeyPatch,
     tail: bytes,
@@ -227,6 +253,53 @@ def test_authenticated_subscription_to_freshness_is_product_issued_and_read_only
     assert not subscription.grants_provider_write_authority
     assert not subscription.grants_execution_authority
     assert not subscription.real_money_authorized
+
+
+def test_coalesced_buffered_second_frame_retains_original_socket_ingress_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autosport import betfair_authenticated_stream as auth
+
+    base_pt = time.time_ns() // 1_000_000
+    first = _mcm(pt=base_pt)
+    second = _delta_mcm(pt=base_pt + 1)
+    ingress_ns = [1_000_000_000]
+
+    def fake_monotonic_ns() -> int:
+        return ingress_ns[0]
+
+    monkeypatch.setattr(stream, "_MONOTONIC_NS", fake_monotonic_ns)
+    monkeypatch.setattr(auth, "_MONOTONIC_NS", fake_monotonic_ns)
+    monkeypatch.setattr(stream.time, "monotonic_ns", fake_monotonic_ns)
+
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status() + first + second,
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+
+    first_evidence = runtime.read_and_ingest()
+    assert len(first_evidence) == 1
+    first_received_ns = runtime._transport_by_identity[_identity()][2]
+
+    ingress_ns[0] += 15_000_000_000
+    second_evidence = runtime.read_and_ingest()
+    assert len(second_evidence) == 1
+    second_received_ns = runtime._transport_by_identity[_identity()][2]
+
+    assert first_received_ns == second_received_ns == 1_000_000_000
+
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert (
+        decision.verdict
+        is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    )
+    assert "consumer lag exceeds max_age_ms" in decision.reason
+    assert not decision.decision_eligible
 
 
 def test_authenticated_freshness_rejects_local_consumer_lag(

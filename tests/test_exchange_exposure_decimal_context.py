@@ -22,6 +22,32 @@ def test_lay_liability_is_independent_of_ambient_decimal_precision() -> None:
     assert actual == expected
 
 
+@pytest.mark.parametrize(
+    "exchange_side",
+    ("lay", " Lay ", "BACK ", " back", "LAY\t", "BACK\n"),
+)
+def test_exposure_boundary_rejects_noncanonical_exchange_side(
+    exchange_side: str,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="exact canonical BACK or LAY",
+    ):
+        locked_capital_for_exchange_side(
+            stake=Decimal("10"),
+            odds=Decimal("5"),
+            exchange_side=exchange_side,
+        )
+
+
+def test_back_locked_capital_requires_exact_canonical_side() -> None:
+    assert locked_capital_for_exchange_side(
+        stake=Decimal("10"),
+        odds=Decimal("5"),
+        exchange_side="BACK",
+    ) == Decimal("10")
+
+
 def test_lay_liability_ignores_module_helper_rebinding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

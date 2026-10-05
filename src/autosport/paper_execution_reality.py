@@ -25,6 +25,8 @@ PaperExecutionEvidenceRecord = _impl.PaperExecutionEvidenceRecord
 ObservedPaperExecution = _impl.ObservedPaperExecution
 PaperLegAttempt = _impl.PaperLegAttempt
 PaperExecutionRun = _impl.PaperExecutionRun
+_EVIDENCE_RECORD_TO_DICT = PaperExecutionEvidenceRecord.to_dict
+_EVIDENCE_RECORD_FROM_DICT = PaperExecutionEvidenceRecord.from_dict
 _LegacyPaperExecutionEvidenceRegistry = _impl.PaperExecutionEvidenceRegistry
 _IMPL_TEXT = _impl._text
 _IMPL_TIMESTAMP = _impl._timestamp
@@ -445,9 +447,20 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             raise PaperExecutionIntegrityError(
                 "evidence record changed outside canonical construction authority"
             )
-        # Persist the reconstructed snapshot, never the caller-owned object that
-        # may be mutated after validation.
-        _LEGACY_LEDGER_REGISTER_OBSERVATION_EVIDENCE(self, canonical_record)
+        # Persist the reconstructed snapshot through this class's sealed append
+        # authority. Do not re-enter the mutable legacy class method graph.
+        payload = {
+            "evidence_id": canonical_record.evidence_id,
+            "evidence_sha256": canonical_record.evidence_sha256,
+            "record": _EVIDENCE_RECORD_TO_DICT(canonical_record),
+        }
+        _CANONICAL_LEDGER_APPEND_EVENT(
+            self,
+            event_type="OBSERVATION_EVIDENCE_REGISTERED",
+            run_id=canonical_record.evidence_id,
+            key=f"evidence:{canonical_record.evidence_id}",
+            payload=payload,
+        )
 
     def resolve_observation_evidence(
         self,
@@ -457,7 +470,27 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             raise TypeError("ledger must be exact PaperExecutionLedger")
         _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY(self)
         evidence_id = _IMPL_TEXT(evidence_id, "evidence_id")
-        return _LEGACY_LEDGER_RESOLVE_OBSERVATION_EVIDENCE(self, evidence_id)
+        matches = [
+            event
+            for event in _CANONICAL_LEDGER_EVENTS(self)
+            if event["event_type"] == "OBSERVATION_EVIDENCE_REGISTERED"
+            and event["payload"].get("evidence_id") == evidence_id
+        ]
+        if len(matches) != 1:
+            raise PaperExecutionStateError(
+                "observed execution evidence is unknown to durable registry"
+            )
+        payload = matches[0]["payload"]
+        if set(payload) != {"evidence_id", "evidence_sha256", "record"}:
+            raise PaperExecutionIntegrityError(
+                "registered evidence payload schema is invalid"
+            )
+        record = _EVIDENCE_RECORD_FROM_DICT(payload["record"])
+        if payload["evidence_id"] != record.evidence_id:
+            raise PaperExecutionIntegrityError("registered evidence id mismatch")
+        if payload["evidence_sha256"] != record.evidence_sha256:
+            raise PaperExecutionIntegrityError("registered evidence digest mismatch")
+        return record
 
     def reserve_run(
         self,

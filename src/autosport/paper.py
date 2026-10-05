@@ -1108,6 +1108,10 @@ class PaperBook:
                 raise ValueError("PaperBook snapshot lifecycle entry must be an object")
             action = item.get("action")
             ticket_id = item.get("ticket_id")
+            if type(action) is not str:
+                raise ValueError(
+                    "PaperBook snapshot lifecycle action must be canonical text"
+                )
             if action == "open":
                 if set(item) != {"action", "ticket_id"}:
                     raise ValueError("PaperBook snapshot open lifecycle entry has unexpected fields")
@@ -1149,7 +1153,7 @@ class PaperBook:
 
     @classmethod
     def _parse_snapshot_decimal(cls, value: object, label: str) -> Decimal:
-        if not isinstance(value, str) or not value or value.strip() != value:
+        if type(value) is not str or not value or value.strip() != value:
             raise ValueError(
                 f"PaperBook snapshot {label} must be a non-empty trimmed decimal string"
             )
@@ -1246,9 +1250,9 @@ class PaperBook:
 
     @staticmethod
     def _parse_snapshot_status(value: object, ticket_id: str) -> TicketStatus:
-        if not isinstance(value, str):
+        if type(value) is not str:
             raise ValueError(
-                f"PaperBook snapshot status for ticket {ticket_id} must be a string"
+                f"PaperBook snapshot status for ticket {ticket_id} must be a canonical string"
             )
         try:
             return TicketStatus(value)

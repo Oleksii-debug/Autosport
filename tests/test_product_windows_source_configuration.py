@@ -605,3 +605,47 @@ def test_python_factory_text_cannot_be_saved_as_operator_source(tmp_path: Path) 
 
     save.assert_not_called()
     assert "пошкоджена" in surface.product_status.value
+
+
+def _stopped_message(reason: str) -> ProductGuiMessage:
+    return ProductGuiMessage(
+        kind="STOPPED",
+        status=ContinuousSessionStatus(
+            session_id="session-1",
+            source_id="parlayapi:table_tennis",
+            state=SessionState.STOPPED,
+            cycles_completed=2,
+            last_success_at="2026-10-05T00:00:00+00:00",
+            last_error_code=None,
+            last_full_refresh_at=None,
+            settlement_evidence=(),
+        ),
+        stop_reason=reason,
+    )
+
+
+@pytest.mark.parametrize(
+    ("reason", "localized"),
+    [
+        ("operator_stop", "запит оператора"),
+        ("app_close", "закриття програми"),
+        ("source_identity_mismatch", "невідповідність джерела"),
+        ("future_reason", "безпечне завершення"),
+    ],
+)
+def test_stopped_status_localizes_reason_without_machine_id(
+    tmp_path: Path,
+    reason: str,
+    localized: str,
+) -> None:
+    surface = _start_surface(tmp_path)
+    surface._product_last_stop = None
+
+    ProductWindowsAutosportApp._apply_product_message(
+        surface,
+        _stopped_message(reason),
+    )
+
+    assert localized in surface.product_status.value
+    assert reason not in surface.product_status.value
+    assert surface._product_last_stop is not None

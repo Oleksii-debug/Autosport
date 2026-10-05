@@ -904,6 +904,19 @@ def test_operation_lock_registration_ignores_rebound_threading_module(
     assert attacker_calls == 0
 
 
+def test_operation_lock_registration_rejects_in_place_lock_factory_mutation() -> None:
+    factory = paper_module.threading.RLock
+    original_code = factory.__code__
+    hostile = _hostile_function_with_freevars(len(original_code.co_freevars))
+
+    try:
+        factory.__code__ = hostile.__code__
+        with pytest.raises(ValueError, match="operation lock factory authority changed"):
+            PaperBook("100")
+    finally:
+        factory.__code__ = original_code
+
+
 @pytest.mark.parametrize(
     "guarded_callable",
     (

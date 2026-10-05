@@ -103,6 +103,15 @@ def _mcm(
 ) -> bytes:
     if pt is None:
         pt = time.time_ns() // 1_000_000
+    runner_changes = runners or [{"id": 1, "hc": 0, "ltp": 2.0}]
+    runner_definitions = [
+        {
+            "id": item["id"],
+            "hc": item.get("hc", 0),
+            "status": "ACTIVE",
+        }
+        for item in runner_changes
+    ]
     payload = {
         "op": "mcm",
         "id": request_id,
@@ -117,9 +126,11 @@ def _mcm(
                 "id": "1.A",
                 "img": True,
                 "con": False,
-                "marketDefinition": {"status": "OPEN"},
-                "rc": runners
-                or [{"id": 1, "hc": 0, "ltp": 2.0}],
+                "marketDefinition": {
+                    "status": "OPEN",
+                    "runners": runner_definitions,
+                },
+                "rc": runner_changes,
             }
         ],
     }
@@ -172,6 +183,41 @@ def _market_status_mcm(
                 "img": False,
                 "con": False,
                 "marketDefinition": {"status": status},
+                "rc": [],
+            }
+        ],
+    }
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\r\n"
+
+
+def _runner_status_mcm(
+    status: str,
+    *,
+    pt: int | None = None,
+    clk: str = "c-runner",
+) -> bytes:
+    if pt is None:
+        pt = time.time_ns() // 1_000_000
+    payload = {
+        "op": "mcm",
+        "id": 7,
+        "clk": clk,
+        "pt": pt,
+        "mc": [
+            {
+                "id": "1.A",
+                "img": False,
+                "con": False,
+                "marketDefinition": {
+                    "status": "OPEN",
+                    "runners": [
+                        {
+                            "id": 1,
+                            "hc": 0,
+                            "status": status,
+                        }
+                    ],
+                },
                 "rc": [],
             }
         ],
@@ -1209,6 +1255,73 @@ def test_market_reopen_requires_quote_from_new_open_epoch(
     )
     assert reopened_without_quote.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
     assert not reopened_without_quote.decision_eligible
+
+    runtime.read_and_ingest()
+    refreshed = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert refreshed.decision_eligible
+
+
+def test_runner_removal_revokes_previously_fresh_quote_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(pt=publish_time_ms)
+        + _runner_status_mcm("REMOVED", pt=publish_time_ms + 1, clk="c2"),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+    decision = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert decision.decision_eligible
+
+    runtime.read_and_ingest()
+
+    assert not decision.decision_eligible
+    removed = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert removed.verdict is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    assert "runner status is not authoritatively ACTIVE" in removed.reason
+    assert not removed.decision_eligible
+
+
+def test_runner_reactivation_requires_quote_from_new_active_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_time_ms = time.time_ns() // 1_000_000
+    transport, _ = _transport(
+        monkeypatch,
+        _subscription_status()
+        + _mcm(pt=publish_time_ms)
+        + _runner_status_mcm("REMOVED", pt=publish_time_ms + 1, clk="c2")
+        + _runner_status_mcm("ACTIVE", pt=publish_time_ms + 2, clk="c3")
+        + _delta_mcm(pt=publish_time_ms + 3, clk="c4", price=2.2),
+    )
+    subscription = _open(transport)
+    runtime = BetfairAuthenticatedStreamFreshnessRuntime(transport, subscription)
+    runtime.read_and_ingest()
+    runtime.read_and_ingest()
+    runtime.read_and_ingest()
+
+    reactivated_without_quote = runtime.evaluate(
+        _identity(),
+        policy=BetfairStreamFreshnessPolicy(max_age_ms=10_000),
+    )
+    assert (
+        reactivated_without_quote.verdict
+        is BetfairAuthenticatedFreshnessVerdict.NOT_AUTHORIZED
+    )
+    assert not reactivated_without_quote.decision_eligible
 
     runtime.read_and_ingest()
     refreshed = runtime.evaluate(

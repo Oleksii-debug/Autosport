@@ -19,6 +19,7 @@ from pathlib import Path
 from .domain import TicketStatus
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
+from . import economic_goal_store as _economic_goal_store
 from .economic_goal_store import (
     EconomicGoalStore,
     economic_goal_from_payload,
@@ -85,6 +86,11 @@ _CANONICAL_PAPERBOOK_DURABLE_LOAD_SURFACE = tuple(
 _CANONICAL_ECONOMIC_GOAL_STORE = EconomicGoalStore
 _CANONICAL_ECONOMIC_GOAL_STORE_INIT = EconomicGoalStore.__dict__["__init__"]
 _CANONICAL_ECONOMIC_GOAL_STORE_LOAD = EconomicGoalStore.load
+_CANONICAL_ECONOMIC_GOAL_STORE_FILE_NAME = EconomicGoalStore.FILE_NAME
+_CANONICAL_ECONOMIC_GOAL_STORE_MODULE_PATH = _economic_goal_store.Path
+_CANONICAL_ECONOMIC_GOAL_FROM_JSON = _economic_goal_store.economic_goal_from_json
+_CANONICAL_GOAL_STORE_PATH_TYPE = type(_CANONICAL_ECONOMIC_GOAL_STORE_MODULE_PATH("."))
+_CANONICAL_GOAL_STORE_PATH_READ_TEXT = _CANONICAL_GOAL_STORE_PATH_TYPE.read_text
 _CANONICAL_PATH = Path
 _CANONICAL_PATH_TYPE = type(Path("."))
 _CANONICAL_PATH_NEW = _CANONICAL_PATH.__new__
@@ -137,6 +143,8 @@ _CANONICAL_DURABLE_RESOLVER_CODE_WITNESSES = tuple(
         _CANONICAL_PAPERBOOK_LOAD,
         _CANONICAL_ECONOMIC_GOAL_STORE_INIT,
         _CANONICAL_ECONOMIC_GOAL_STORE_LOAD,
+        _CANONICAL_ECONOMIC_GOAL_FROM_JSON,
+        _CANONICAL_GOAL_STORE_PATH_READ_TEXT,
         _CANONICAL_PATH_NEW,
         _CANONICAL_PATH_IS_ABSOLUTE,
         _CANONICAL_PATH_TRUEDIV,
@@ -163,8 +171,16 @@ def _require_canonical_durable_resolver_code_authority() -> None:
     if (
         _CANONICAL_ECONOMIC_GOAL_STORE.__dict__.get("__init__")
         is not _CANONICAL_ECONOMIC_GOAL_STORE_INIT
+        or _CANONICAL_ECONOMIC_GOAL_STORE.FILE_NAME
+        != _CANONICAL_ECONOMIC_GOAL_STORE_FILE_NAME
+        or _economic_goal_store.Path
+        is not _CANONICAL_ECONOMIC_GOAL_STORE_MODULE_PATH
+        or _economic_goal_store.economic_goal_from_json
+        is not _CANONICAL_ECONOMIC_GOAL_FROM_JSON
+        or _CANONICAL_GOAL_STORE_PATH_TYPE.read_text
+        is not _CANONICAL_GOAL_STORE_PATH_READ_TEXT
     ):
-        raise ValueError("canonical durable equity resolver constructor changed")
+        raise ValueError("canonical durable economic-goal store authority changed")
     for authority, expected_code in _CANONICAL_DURABLE_RESOLVER_CODE_WITNESSES:
         if _captured_callable_code(authority) is not expected_code:
             raise ValueError("canonical durable equity resolver callable code changed")

@@ -563,3 +563,40 @@ def test_runtime_workspace_identity_drift_quarantines_both_workspaces(
     )
     assert controller.product_worker.stop_reasons == ["runtime_error"]
     assert "віднов" in controller.product_runtime_status.casefold()
+
+
+def test_clean_stop_retires_current_run_identity_for_next_session(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        SimpleNamespace(
+            kind="STOPPED",
+            status=_runtime_status(cycles_completed=3),
+            tick=None,
+            stop_reason="operator_stop",
+            error_type=None,
+        ),
+    )
+    controller._product_runtime_identity = (
+        tmp_path,
+        "session-1",
+        "source-1",
+    )
+    controller._refresh_economic_projection = lambda: None
+
+    controller._poll_workers()
+
+    assert controller._product_runtime_identity is None
+    assert tmp_path not in controller._recovery_required_workspaces
+
+    assert controller._bind_product_runtime_identity(
+        workspace=tmp_path,
+        session_id="session-2",
+        source_id="source-2",
+    )
+    assert controller._product_runtime_identity == (
+        tmp_path,
+        "session-2",
+        "source-2",
+    )

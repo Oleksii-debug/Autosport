@@ -2084,15 +2084,12 @@ class RealExecutionLedger:
         attempt_id: str,
         submitted_at: str | None = None,
         *,
-        submitted_request_sha256: str | None = None,
+        request_sha256: str | None = None,
     ) -> None:
         actual_submitted_at = submitted_at or _now()
         submitted_time = _timestamp(actual_submitted_at, "submitted_at")
-        if submitted_request_sha256 is not None:
-            _sha256_text(
-                submitted_request_sha256,
-                "submitted_request_sha256",
-            )
+        if request_sha256 is not None:
+            _sha256_text(request_sha256, "request_sha256")
 
         def operation() -> None:
             events = self._events()
@@ -2109,12 +2106,9 @@ class RealExecutionLedger:
                         "attempt has multiple submission facts"
                     )
                 existing_digest = submitted_events[0]["payload"].get("request_sha256")
-                if (
-                    submitted_request_sha256 is not None
-                    and existing_digest != submitted_request_sha256
-                ):
+                if request_sha256 is not None and existing_digest != request_sha256:
                     raise ExecutionIdentityConflict(
-                        "attempt already has a different submitted request digest"
+                        "attempt already submitted with different request identity"
                     )
                 return
             if state != AttemptState.RESERVED:
@@ -2146,8 +2140,8 @@ class RealExecutionLedger:
                 {
                     "submitted_at": actual_submitted_at,
                     **(
-                        {"request_sha256": submitted_request_sha256}
-                        if submitted_request_sha256 is not None
+                        {"request_sha256": request_sha256}
+                        if request_sha256 is not None
                         else {}
                     ),
                 },

@@ -399,6 +399,9 @@ def observe_workspace_once(
     from that mirror rather than maintaining a second ad-hoc live quote dictionary.
     """
 
+    if mirror_updates is not None and type(mirror_updates) is not BoundedMirrorInvalidationBuffer:
+        raise TypeError("mirror_updates must be an exact BoundedMirrorInvalidationBuffer")
+
     root = Path(workspace)
     root.mkdir(parents=True, exist_ok=True)
     store = SQLiteMarketStore(root / "market.db")
@@ -408,8 +411,6 @@ def observe_workspace_once(
             mirror = MarketMirror.from_store(store)
             mirror_updates = BoundedMirrorInvalidationBuffer(mirror)
         else:
-            if not isinstance(mirror_updates, BoundedMirrorInvalidationBuffer):
-                raise TypeError("mirror_updates must be a BoundedMirrorInvalidationBuffer")
             mirror = mirror_updates.mirror
             # Reconcile the non-durable mirror from independently proven canonical
             # append history at each observation boundary. Preserve generation-zero

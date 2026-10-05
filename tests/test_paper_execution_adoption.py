@@ -1089,5 +1089,38 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 runtime.expected_run_id(capability, "trigger-1")
 
 
+
+    def test_expected_run_id_rejects_runtime_authority_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            capability = prepared(runtime, action("a1"))
+            runtime.config = config()
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "model authority changed",
+            ):
+                runtime.expected_run_id(capability, "trigger-1")
+
+    def test_recovery_book_check_rejects_runtime_authority_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            capability = prepared(runtime, action("a1"))
+            pre_action = PaperBook(str(book.initial_bankroll))
+            runtime.max_quote_age = __import__("datetime").timedelta(seconds=500)
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "quote-age authority changed",
+            ):
+                runtime.assert_recoverable_book_state(
+                    pre_action_book=pre_action,
+                    prepared=capability,
+                    trigger_id="trigger-1",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

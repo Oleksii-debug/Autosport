@@ -707,9 +707,9 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             raise PaperExecutionIntegrityError("run needs exactly one reservation")
         expected_reserve = {
             "trigger_id": trigger_id,
-            "plan_id": plan.plan_id,
-            "plan_fingerprint": plan.fingerprint,
-            "model_fingerprint": config.fingerprint,
+            "plan_id": plan_id,
+            "plan_fingerprint": plan_fingerprint,
+            "model_fingerprint": model_fingerprint,
             "started_at": started_at,
             "action_ids": list(action_ids),
             "observation_evidence_ids": observation_evidence_ids,

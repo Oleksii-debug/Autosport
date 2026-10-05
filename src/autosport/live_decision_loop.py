@@ -2608,8 +2608,9 @@ class PersistentLiveDecisionLoop:
         with (
             WorkspaceEconomicLock(self.workspace),
             execution_guard,
-            self.dependencies.registry_state_guard() as focused_dependency_state,
+            self.dependencies.registry_mutation_guard(),
         ):
+            focused_dependency_state = self.dependencies.registry_state_snapshot()
             if (
                 decision_context_sha256_override is None
                 and self._decision_context_sha256() != decision_context_sha256
@@ -2983,7 +2984,8 @@ class PersistentLiveDecisionLoop:
                 # publication itself.  The earlier snapshot proves what was captured,
                 # while this final guard prevents a direct index replacement/reincarnation
                 # from crossing the atomic progress commit after validation.
-                with self.dependencies.registry_state_guard() as focused_state:
+                with self.dependencies.registry_mutation_guard():
+                    focused_state = self.dependencies.registry_state_snapshot()
                     guarded_input_specs = tuple(
                         _InputSpec.from_dependency(dependency)
                         for dependency, _revision in focused_state
@@ -3109,7 +3111,8 @@ class PersistentLiveDecisionLoop:
                 raise LiveDecisionProgressError(
                     "live dependency registry changed concurrently"
                 )
-            with self.dependencies.registry_state_guard() as focused_state:
+            with self.dependencies.registry_mutation_guard():
+                focused_state = self.dependencies.registry_state_snapshot()
                 focused_candidate = tuple(
                     _InputSpec.from_dependency(dependency)
                     for dependency, _revision in focused_state

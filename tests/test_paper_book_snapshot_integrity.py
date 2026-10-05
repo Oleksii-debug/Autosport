@@ -451,13 +451,14 @@ class PaperBookSnapshotIntegrityTests(unittest.TestCase):
         root = Path(self._tmp.name)
         destination = root / "new-parent" / "nested" / "snapshot.json"
         events: list[tuple[str, Path | None]] = []
+        original_replace = os.replace
 
         def record_directory_fsync(directory: Path) -> None:
             events.append(("directory-fsync", directory))
 
         def record_replace(source: object, target: object) -> None:
             events.append(("replace", None))
-            os.replace(source, target)
+            original_replace(source, target)
 
         with (
             patch.object(

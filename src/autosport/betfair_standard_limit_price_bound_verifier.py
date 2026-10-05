@@ -275,8 +275,21 @@ def _build_product_verifier():
     issuance_strict_json_loads = _issuance_module.strict_json_loads
     issuance_strict_json_loads_code = issuance_strict_json_loads.__code__
     issuance_durable_path_lock = _issuance_module.durable_path_lock
+    issuance_durable_path_lock_code = issuance_durable_path_lock.__code__
+    issuance_durable_path_lock_body = issuance_durable_path_lock.__wrapped__
+    issuance_durable_path_lock_body_code = issuance_durable_path_lock_body.__code__
     issuance_hash_constructor = _issuance_module.hashlib.sha256
     issuance_workspace_lock_cls = _issuance_module.WorkspaceEconomicLock
+    issuance_workspace_lock_init = issuance_workspace_lock_cls.__init__
+    issuance_workspace_lock_init_code = issuance_workspace_lock_init.__code__
+    issuance_workspace_lock_enter = issuance_workspace_lock_cls.__enter__
+    issuance_workspace_lock_enter_code = issuance_workspace_lock_enter.__code__
+    issuance_workspace_lock_exit = issuance_workspace_lock_cls.__exit__
+    issuance_workspace_lock_exit_code = issuance_workspace_lock_exit.__code__
+    issuance_workspace_lock_acquire = issuance_workspace_lock_cls.acquire
+    issuance_workspace_lock_acquire_code = issuance_workspace_lock_acquire.__code__
+    issuance_workspace_lock_release = issuance_workspace_lock_cls.release
+    issuance_workspace_lock_release_code = issuance_workspace_lock_release.__code__
     monotonic_cls = _issuance_module.MonotonicWorkspaceAuthority
     monotonic_init = monotonic_cls.__init__
     monotonic_init_code = monotonic_init.__code__
@@ -475,8 +488,21 @@ def _build_product_verifier():
             or _issuance_module.strict_json_loads is not issuance_strict_json_loads
             or issuance_strict_json_loads.__code__ is not issuance_strict_json_loads_code
             or _issuance_module.durable_path_lock is not issuance_durable_path_lock
+            or issuance_durable_path_lock.__code__ is not issuance_durable_path_lock_code
+            or issuance_durable_path_lock.__wrapped__ is not issuance_durable_path_lock_body
+            or issuance_durable_path_lock_body.__code__ is not issuance_durable_path_lock_body_code
             or _issuance_module.hashlib.sha256 is not issuance_hash_constructor
             or _issuance_module.WorkspaceEconomicLock is not issuance_workspace_lock_cls
+            or issuance_workspace_lock_cls.__init__ is not issuance_workspace_lock_init
+            or issuance_workspace_lock_init.__code__ is not issuance_workspace_lock_init_code
+            or issuance_workspace_lock_cls.__enter__ is not issuance_workspace_lock_enter
+            or issuance_workspace_lock_enter.__code__ is not issuance_workspace_lock_enter_code
+            or issuance_workspace_lock_cls.__exit__ is not issuance_workspace_lock_exit
+            or issuance_workspace_lock_exit.__code__ is not issuance_workspace_lock_exit_code
+            or issuance_workspace_lock_cls.acquire is not issuance_workspace_lock_acquire
+            or issuance_workspace_lock_acquire.__code__ is not issuance_workspace_lock_acquire_code
+            or issuance_workspace_lock_cls.release is not issuance_workspace_lock_release
+            or issuance_workspace_lock_release.__code__ is not issuance_workspace_lock_release_code
             or _issuance_module.MonotonicWorkspaceAuthority is not monotonic_cls
             or monotonic_cls.__init__ is not monotonic_init
             or monotonic_init.__code__ is not monotonic_init_code

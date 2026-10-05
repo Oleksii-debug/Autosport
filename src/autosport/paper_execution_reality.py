@@ -173,7 +173,7 @@ def _derive_run_economics(
             }:
                 known_exposure = _decimal_add_exact(
                     known_exposure,
-                    _attempt_locked_capital(attempt),
+                    _CANONICAL_ATTEMPT_LOCKED_CAPITAL(attempt),
                 )
                 worst_case = max(worst_case, known_exposure)
             elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
@@ -181,7 +181,7 @@ def _derive_run_economics(
                     worst_case,
                     _decimal_add_exact(
                         known_exposure,
-                        _unknown_exposure_increment(attempt),
+                        _CANONICAL_UNKNOWN_EXPOSURE_INCREMENT(attempt),
                     ),
                 )
         except ValueError as exc:
@@ -255,8 +255,8 @@ def _canonical_run_reservation_inputs(
     started_at: str,
     observation_evidence_ids: Mapping[str, str],
 ) -> tuple[str, str, tuple[str, ...], dict[str, str], str, str, str]:
-    plan = _snapshot_execution_plan(plan)
-    config = _snapshot_execution_config(config)
+    plan = _CANONICAL_SNAPSHOT_EXECUTION_PLAN(plan)
+    config = _CANONICAL_SNAPSHOT_EXECUTION_CONFIG(config)
     run_id = _IMPL_TEXT(run_id, "run_id")
     trigger_id = _IMPL_TEXT(trigger_id, "trigger_id")
     _IMPL_TIMESTAMP(started_at, "started_at")
@@ -658,7 +658,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     "cannot record attempt after durable run completion"
                 )
             reservation_payload = reservations[0]["payload"]
-            _require_durable_attempt_evidence_binding(
+            _CANONICAL_REQUIRE_DURABLE_ATTEMPT_EVIDENCE_BINDING(
                 events=events,
                 reservation_payload=reservation_payload,
                 attempt=attempt,
@@ -681,7 +681,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     key=lambda item: item.sequence,
                 )
             )
-            _derive_run_economics(tuple(action_ids_raw), existing_attempts)
+            _CANONICAL_DERIVE_RUN_ECONOMICS(tuple(action_ids_raw), existing_attempts)
             if (
                 reservation_payload.get("plan_id") != attempt.plan_id
                 or reservation_payload.get("model_fingerprint")
@@ -843,12 +843,12 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 )
             )
             for durable_attempt in attempts:
-                _require_durable_attempt_evidence_binding(
+                _CANONICAL_REQUIRE_DURABLE_ATTEMPT_EVIDENCE_BINDING(
                     events=events,
                     reservation_payload=reservations[0]["payload"],
                     attempt=durable_attempt,
                 )
-            derived = _derive_run_economics(tuple(action_ids_raw), attempts)
+            derived = _CANONICAL_DERIVE_RUN_ECONOMICS(tuple(action_ids_raw), attempts)
             if not derived.can_complete:
                 raise PaperExecutionStateError(
                     "run cannot complete before a terminal outcome or all actions ACCEPTED"
@@ -979,12 +979,12 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             else events
         )
         for durable_attempt in attempts:
-            _require_durable_attempt_evidence_binding(
+            _CANONICAL_REQUIRE_DURABLE_ATTEMPT_EVIDENCE_BINDING(
                 events=evidence_events,
                 reservation_payload=durable_reserve,
                 attempt=durable_attempt,
             )
-        derived = _derive_run_economics(
+        derived = _CANONICAL_DERIVE_RUN_ECONOMICS(
             action_ids,
             attempts,
         )
@@ -1515,6 +1515,15 @@ def _validate_lay_execution_surface(
 
 
 
+_CANONICAL_DERIVE_RUN_ECONOMICS = _derive_run_economics
+_CANONICAL_REQUIRE_DURABLE_ATTEMPT_EVIDENCE_BINDING = _require_durable_attempt_evidence_binding
+_CANONICAL_ATTEMPT_LOCKED_CAPITAL = _attempt_locked_capital
+_CANONICAL_UNKNOWN_EXPOSURE_INCREMENT = _unknown_exposure_increment
+_CANONICAL_SNAPSHOT_EXECUTION_PLAN = _snapshot_execution_plan
+_CANONICAL_SNAPSHOT_EXECUTION_CONFIG = _snapshot_execution_config
+_CANONICAL_VALIDATE_LAY_EXECUTION_SURFACE = _validate_lay_execution_surface
+_CANONICAL_VERIFY_OBSERVATION_AUTHORITY = _verify_observation_authority
+_CANONICAL_SYNTHETIC_ATTEMPT = _synthetic_attempt
 _CANONICAL_LEDGER_REQUIRE_STORAGE_AUTHORITY = PaperExecutionLedger._require_storage_authority
 _CANONICAL_LEDGER_RESERVE_RUN = PaperExecutionLedger.reserve_run
 _CANONICAL_LEDGER_LOAD_RUN = PaperExecutionLedger.load_run
@@ -1543,8 +1552,8 @@ def execute_paper_plan(
     suspended_action_ids: frozenset[str] = frozenset(),
 ) -> PaperExecutionRun:
     """Execute/resume one PAPER/SHADOW run without provider writes or real money."""
-    plan = _snapshot_execution_plan(plan)
-    config = _snapshot_execution_config(config)
+    plan = _CANONICAL_SNAPSHOT_EXECUTION_PLAN(plan)
+    config = _CANONICAL_SNAPSHOT_EXECUTION_CONFIG(config)
     if type(ledger) is not PaperExecutionLedger:
         raise TypeError("ledger must be exact PaperExecutionLedger")
     trigger_id = _IMPL_TEXT(trigger_id, "trigger_id")
@@ -1584,7 +1593,7 @@ def execute_paper_plan(
     canonical_observations: dict[str, ObservedPaperExecution] = {}
     for action_id, observation in observations.items():
         assert evidence_registry is not None
-        record = _verify_observation_authority(
+        record = _CANONICAL_VERIFY_OBSERVATION_AUTHORITY(
             action=action_by_id[action_id],
             observation=observation,
             registry=evidence_registry,
@@ -1598,7 +1607,7 @@ def execute_paper_plan(
         observation_evidence_ids[action_id] = record.evidence_id
     observations = canonical_observations
 
-    _validate_lay_execution_surface(
+    _CANONICAL_VALIDATE_LAY_EXECUTION_SURFACE(
         plan=plan,
         observations=observations,
         suspended_action_ids=suspended_action_ids,
@@ -1678,7 +1687,7 @@ def execute_paper_plan(
         assert prior.outcome is PaperAttemptOutcome.ACCEPTED
         known_exposure = _decimal_add_exact(
             known_exposure,
-            _attempt_locked_capital(prior),
+            _CANONICAL_ATTEMPT_LOCKED_CAPITAL(prior),
         )
         worst_case_exposure = max(worst_case_exposure, known_exposure)
 
@@ -1696,7 +1705,7 @@ def execute_paper_plan(
                 started_at=started_at,
             )
         else:
-            attempt = _synthetic_attempt(
+            attempt = _CANONICAL_SYNTHETIC_ATTEMPT(
                 run_id=run_id,
                 plan=plan,
                 action=action,
@@ -1714,7 +1723,7 @@ def execute_paper_plan(
         }:
             known_exposure = _decimal_add_exact(
                 known_exposure,
-                _attempt_locked_capital(attempt),
+                _CANONICAL_ATTEMPT_LOCKED_CAPITAL(attempt),
             )
             worst_case_exposure = max(worst_case_exposure, known_exposure)
         elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
@@ -1722,7 +1731,7 @@ def execute_paper_plan(
                 worst_case_exposure,
                 _decimal_add_exact(
                     known_exposure,
-                    _unknown_exposure_increment(attempt),
+                    _CANONICAL_UNKNOWN_EXPOSURE_INCREMENT(attempt),
                 ),
             )
 

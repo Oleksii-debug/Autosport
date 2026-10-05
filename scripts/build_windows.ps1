@@ -1016,11 +1016,12 @@ if ($LASTEXITCODE -ne 0) { throw "Bound keyboard evidence verification exited $L
 python $sourceVerifier --verify-artifact $boundRestartRecoveryAudit --expected-sha256 $restartRecoverySha256
 if ($LASTEXITCODE -ne 0) { throw "Bound restart/recovery evidence verification exited $LASTEXITCODE" }
 
-# Derive the three package-consumer identities from exact Git objects before the
+# Derive the four package-consumer identities from exact Git objects before the
 # archive is materialized. The isolated package launcher later hashes the bytes
 # it compiles/executes against this immutable in-memory oracle.
 $trustedPackagePathsJson = ConvertTo-Json -Compress -InputObject @(
   'scripts/package_windows.py',
+  'src/autosport/workspace_lock.py',
   'src/autosport/release_package.py',
   'src/autosport/data_tool_package.py'
 )
@@ -1034,7 +1035,7 @@ $trustedPackageManifestJson = [string]$trustedPackageManifestLines[0]
 # imported or executed by the package assembly process.
 $trustedPackageArchive = Join-Path $boundArtifactRoot 'trusted-package-source.zip'
 $trustedPackageRoot = Join-Path $boundArtifactRoot 'trusted-package-source'
-& $gitExecutable archive --format=zip "--output=$trustedPackageArchive" $sourceSha -- scripts/package_windows.py src/autosport/release_package.py src/autosport/data_tool_package.py
+& $gitExecutable archive --format=zip "--output=$trustedPackageArchive" $sourceSha -- scripts/package_windows.py src/autosport/workspace_lock.py src/autosport/release_package.py src/autosport/data_tool_package.py
 if ($LASTEXITCODE -ne 0) { throw "Exact package source archive exited $LASTEXITCODE" }
 if (Test-Path $trustedPackageRoot) { Remove-Item -LiteralPath $trustedPackageRoot -Recurse -Force }
 New-Item -ItemType Directory -Path $trustedPackageRoot | Out-Null

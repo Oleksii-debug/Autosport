@@ -186,5 +186,71 @@ class ResearchStrategyPlanJsonIntegrityTests(unittest.TestCase):
             )
 
 
+    def test_plan_rejects_numeric_forecast_identity_and_timestamp_coercion(self):
+        for field, value in (
+            ("model_id", 123),
+            ("forecast_id", True),
+            ("generated_at", 123),
+            ("market_snapshot_hash", 123),
+        ):
+            with self.subTest(field=field):
+                raw = json.loads(_PACKAGED_PLAN.read_text(encoding="utf-8"))
+                raw["decisions"][0]["forecasts"][0][field] = value
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "ForecastRecord .* must be non-empty canonical text",
+                ):
+                    ResearchStrategyPlan.from_dict(raw)
+
+    def test_plan_rejects_nonobject_forecast_provenance(self):
+        raw = json.loads(_PACKAGED_PLAN.read_text(encoding="utf-8"))
+        raw["decisions"][0]["forecasts"][0]["provenance"] = [
+            ["source", "coerced"]
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "ForecastRecord provenance must be a JSON object",
+        ):
+            ResearchStrategyPlan.from_dict(raw)
+
+    def test_plan_rejects_numeric_research_evidence_identity_and_hash_coercion(self):
+        for field, value in (
+            ("evidence_id", 123),
+            ("source_id", True),
+            ("observed_at", 123),
+            ("content_sha256", 123),
+            ("market_snapshot_hash", 123),
+        ):
+            with self.subTest(field=field):
+                raw = json.loads(_PACKAGED_PLAN.read_text(encoding="utf-8"))
+                raw["decisions"][0]["evidence"][0][field] = value
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "ResearchEvidence .* must be non-empty canonical text",
+                ):
+                    ResearchStrategyPlan.from_dict(raw)
+
+    def test_plan_rejects_numeric_risk_evidence_provenance_coercion(self):
+        raw = json.loads(_PACKAGED_PLAN.read_text(encoding="utf-8"))
+        risk = raw["decisions"][0].get("risk_of_ruin_evidence")
+        if risk is None:
+            self.skipTest("packaged research plan has no risk_of_ruin_evidence")
+        for field, value in (
+            ("evidence_id", 123),
+            ("producer_identity", True),
+            ("causal_cutoff", 123),
+            ("base_portfolio_sha256", 123),
+        ):
+            with self.subTest(field=field):
+                mutated = json.loads(_PACKAGED_PLAN.read_text(encoding="utf-8"))
+                mutated["decisions"][0]["risk_of_ruin_evidence"][field] = value
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "research risk .* must be non-empty canonical text",
+                ):
+                    ResearchStrategyPlan.from_dict(mutated)
+
+
 if __name__ == "__main__":
     unittest.main()

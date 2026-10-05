@@ -925,6 +925,19 @@ class LiveObservationTests(unittest.TestCase):
         self.assertIsNone(worker._thread)
         self.assertIsNone(worker.poll())
 
+    def test_worker_rejects_non_observation_result_as_terminal_error(self):
+        worker = OneShotObservationWorker()
+
+        self.assertTrue(worker.start(lambda: object()))
+
+        message = self._wait_for_message(worker)
+        self.assertIsNone(message.result)
+        self.assertEqual(
+            message.error,
+            "TypeError: observation task must return an exact ObservationResult",
+        )
+        self.assertFalse(worker.busy)
+
     def test_worker_refuses_second_start_until_terminal_message_is_consumed(self):
         # Build the real observation result outside the worker timing window. This
         # test owns the worker single-flight/message-consumption contract; SQLite

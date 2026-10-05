@@ -3,6 +3,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import get_type_hints
 
 from autosport.domain import MarketEvent
 from autosport.ingestion_health import SourceHealthStore
@@ -133,6 +134,10 @@ class ProviderHealthReplayBoundaryTests(unittest.TestCase):
             self.assertEqual(health.replay_boundary.transition_order, 0)
             self.assertIsNone(health.replay_boundary.recorded_at)
 
+
+    def test_health_gate_type_hints_resolve_runtime_mapping_contract(self) -> None:
+        hints = get_type_hints(HealthGatedMirrorDecisionIndex.gate_snapshot)
+        self.assertIn("health_boundaries", hints)
 
     def test_health_boundary_round_trip_is_canonical(self) -> None:
         boundary = ProviderHealthReplayBoundary(

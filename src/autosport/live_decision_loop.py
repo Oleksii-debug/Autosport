@@ -759,6 +759,7 @@ class PersistentLiveDecisionLoop:
         self.workspace.mkdir(parents=True, exist_ok=True)
         self._workspace_authority = self.workspace
         self.loop_id = _canonical_text("loop_id", loop_id)
+        self._loop_id_authority = self.loop_id
         if not isinstance(mode, LiveDecisionMode):
             raise TypeError("mode must be LiveDecisionMode")
         if not isinstance(book, PaperBook):
@@ -2553,6 +2554,10 @@ class PersistentLiveDecisionLoop:
         if self.workspace != self._workspace_authority:
             raise LiveDecisionProgressError(
                 "live workspace persistence authority changed after construction"
+            )
+        if self.loop_id != self._loop_id_authority:
+            raise LiveDecisionProgressError(
+                "live loop identity authority changed after construction"
             )
         if self.mode is not self._configured_mode:
             raise LiveDecisionProgressError(

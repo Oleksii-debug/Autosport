@@ -37,7 +37,11 @@ def _build_product_entrypoint():
     canonical_profile_type = _runtime_profile.TrustedRuntimeCodeProfile
     canonical_profile_error = _runtime_profile.TrustedRuntimeCodeProfileError
     canonical_store_type = SupervisedPlanIssuanceStore
+    canonical_store_init = canonical_store_type.__init__
+    canonical_store_init_code = canonical_store_init.__code__
     canonical_ledger_type = RealExecutionLedger
+    canonical_ledger_init = canonical_ledger_type.__init__
+    canonical_ledger_init_code = canonical_ledger_init.__code__
     path_factory = Path
 
     def authority_graph_unchanged() -> bool:
@@ -153,11 +157,16 @@ def _build_product_entrypoint():
             )
 
         # Re-open through canonical classes instead of trusting mutable caller
-        # object state. The issuance authority root is deliberately re-selected
-        # by the product from its canonical workspace rather than inherited from
-        # the caller-provided handle.
-        canonical_store = canonical_store_type(workspace)
-        canonical_ledger = canonical_ledger_type(ledger_path)
+        # object state. Witness constructor authority before invoking either
+        # constructor so hostile mutation fails before attacker code executes.
+        if not reopen_graph_unchanged():
+            raise BetfairStandardLimitPriceBoundError(
+                "canonical Betfair product verifier reopen authority changed"
+            )
+        canonical_store = canonical_store_type.__new__(canonical_store_type)
+        canonical_store_init(canonical_store, workspace)
+        canonical_ledger = canonical_ledger_type.__new__(canonical_ledger_type)
+        canonical_ledger_init(canonical_ledger, ledger_path)
         if not reopen_graph_unchanged():
             raise BetfairStandardLimitPriceBoundError(
                 "canonical Betfair product verifier reopen authority changed"

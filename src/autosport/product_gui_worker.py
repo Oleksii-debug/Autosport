@@ -506,8 +506,13 @@ class ProductGuiWorker:
         return True
 
     def request_stop(self, reason: str = "operator_stop") -> bool:
-        if type(reason) is not str or not reason or reason.strip() != reason:
-            raise ValueError("stop reason must be a non-empty trimmed string")
+        if (
+            type(reason) is not str
+            or not reason
+            or len(reason) > 64
+            or re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*", reason) is None
+        ):
+            raise ValueError("stop reason must be a canonical bounded identifier")
         runtime: AutonomousProductRuntime | None
         resolved_reason: str
         with self._lock:

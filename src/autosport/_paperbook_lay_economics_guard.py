@@ -184,11 +184,8 @@ def _paperbook_operation_context(book: _paper.PaperBook):
 
 
 def _canonical_open_legs(legs):
-    """Preserve the canonical exact-container ingress once PaperBook provides it."""
-    if hasattr(_paper.PaperBook, "_canonical_decimal_input") and type(legs) not in {
-        list,
-        tuple,
-    }:
+    """Reject caller-controlled iteration before any LAY economic authority read."""
+    if type(legs) not in {list, tuple}:
         raise ValueError("ticket legs must be an exact list or tuple")
     return tuple(legs)
 
@@ -196,8 +193,17 @@ def _canonical_open_legs(legs):
 def _canonical_open_stake(book: _paper.PaperBook, stake) -> Decimal:
     parser = getattr(_paper.PaperBook, "_canonical_decimal_input", None)
     if parser is not None:
-        return parser(stake, "stake")
+        amount = parser(stake, "stake")
+        if type(amount) is not Decimal:
+            raise ValueError("canonical stake parser must return exact Decimal")
+        return amount
+    if type(stake) not in {Decimal, str, int, float}:
+        raise TypeError(
+            "stake must be an exact Decimal, str, int, or float"
+        )
     amount = Decimal(str(stake))
+    if type(amount) is not Decimal:
+        raise ValueError("stake normalization must produce exact Decimal")
     _ORIGINAL_REQUIRE_FINITE(amount, "stake")
     return amount
 

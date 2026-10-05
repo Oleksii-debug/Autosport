@@ -2,6 +2,7 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.paper as paper_module
 from autosport.domain import TicketLeg
 from autosport.paper import PaperBook
 
@@ -242,3 +243,45 @@ def test_settlement_witness_key_rejected_before_rehash() -> None:
         _ = book.committed_stake
 
     assert _HostileSettlementKey.hash_calls == 0
+
+
+def test_opening_registry_ignores_rebound_commitment_module_dispatch(monkeypatch) -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    attacker_called = False
+
+    def hostile_commitment(_ticket):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound opening commitment executed")
+
+    monkeypatch.setattr(paper_module, "_ticket_opening_commitment", hostile_commitment)
+
+    assert book.committed_stake == Decimal("10")
+    assert attacker_called is False
+
+
+def test_opening_registry_rejects_in_place_commitment_code_mutation_before_execution() -> None:
+    book = PaperBook("100")
+    book.open_ticket([_leg()], "10", placed_at=_TS)
+    commitment = paper_module._ticket_opening_commitment
+    original_code = commitment.__code__
+    attacker_called = False
+
+    def hostile_commitment(_ticket):
+        nonlocal attacker_called
+        attacker_called = True
+        return ()
+
+    try:
+        commitment.__code__ = hostile_commitment.__code__
+        with pytest.raises(
+            ValueError,
+            match="opening commitment authority changed",
+        ):
+            _ = book.committed_stake
+    finally:
+        commitment.__code__ = original_code
+
+    assert attacker_called is False
+    assert book.balance == Decimal("90")

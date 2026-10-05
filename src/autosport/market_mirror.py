@@ -482,15 +482,26 @@ class MarketMirror:
     def view_for_keys(
         self,
         keys: Iterable[tuple[str, str]],
+        *,
+        _causal_only: bool = False,
     ) -> MirrorSnapshot:
-        """Return one coherent latest-event view for explicit source/quote keys."""
+        """Return one coherent latest-event view for explicit source/quote keys.
+
+        _causal_only is an internal authority fence for routing consumers that
+        must not treat sealed generation-zero/audit-only state as live decision truth.
+        Both raw and causal projections capture one mirror revision under the same
+        lock and remain bounded to the requested identities.
+        """
         normalized = self._quote_key_set(keys)
+        if type(_causal_only) is not bool:
+            raise TypeError("_causal_only must be a bool")
         with self._lock:
             revision = self._revision
             events = tuple(
                 self._snapshot_event(self._latest[key])
                 for key in sorted(normalized)
                 if key in self._latest
+                and (not _causal_only or key in self._decision_causal_keys)
             )
         return MirrorSnapshot(revision=revision, events=events)
 

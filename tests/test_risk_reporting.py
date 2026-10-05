@@ -2472,5 +2472,56 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(resolved.current_equity, Decimal("100"))
 
 
+    def test_durable_resolver_rejects_rebound_path_methods_before_execution(self) -> None:
+        book = PaperBook("100")
+        goal = self._goal()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            paper_path = workspace / "paper_book.json"
+            book.save(paper_path)
+            EconomicGoalStore(workspace).initialize_owner(goal)
+
+            for name in ("is_absolute", "__truediv__", "__str__", "__fspath__"):
+                with self.subTest(path_method=name):
+                    with patch.object(
+                        risk_reporting._CANONICAL_PATH_TYPE,
+                        name,
+                        side_effect=AssertionError(
+                            f"rebound Path method {name} must never execute"
+                        ),
+                    ):
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "canonical durable equity resolver path dispatch changed",
+                        ):
+                            resolve_durable_product_issued_paper_equity_path(
+                                paper_book_path=str(paper_path),
+                                workspace=str(workspace),
+                            )
+
+            with patch.object(
+                risk_reporting._CANONICAL_PATH,
+                "__new__",
+                side_effect=AssertionError("rebound Path constructor must never execute"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "canonical durable equity resolver path dispatch changed",
+                ):
+                    resolve_durable_product_issued_paper_equity_path(
+                        paper_book_path=str(paper_path),
+                        workspace=str(workspace),
+                    )
+
+            resolved = resolve_durable_product_issued_paper_equity_path(
+                paper_book_path=str(paper_path),
+                workspace=str(workspace),
+            )
+
+        self.assertEqual(resolved.initial_equity, Decimal("100"))
+        self.assertEqual(resolved.current_equity, Decimal("100"))
+
+
 if __name__ == "__main__":
     unittest.main()

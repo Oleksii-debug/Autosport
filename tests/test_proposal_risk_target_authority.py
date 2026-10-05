@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -22,6 +23,22 @@ from autosport.proposal_risk_target_authority import (
     issue_product_proposal_risk_target,
     resolve_product_proposal_risk_target,
 )
+from autosport.proposal_risk_evaluation_precommit_authority import (
+    ProductProposalRiskEvaluationPrecommit,
+    ProductProposalRiskEvaluationPrecommitError,
+    issue_product_proposal_risk_evaluation_precommit,
+    resolve_product_proposal_risk_evaluation_precommit,
+)
+from autosport.risk_membership_publication import publish_fixed_n_membership_structure
+from autosport.risk_randomization_precommit import issue_risk_randomization_precommit
+from autosport.risk_sampling_membership import inspect_fixed_n_risk_membership_structure
+from autosport.run_registry import RunRegistry
+from autosport.scientific_registry import (
+    DatasetSnapshot,
+    ResearchProtocol,
+    ScientificRegistry,
+)
+from autosport.strategy_experiment import ScientificProtocolBinding
 import autosport.risk as risk_module
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 
@@ -128,6 +145,312 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
             contexts=self._contexts(),
         )
 
+    def _science_state(self):
+        protocol_id = "proposal-risk-fixed-n-protocol-v2"
+        dataset_id = "proposal-risk-fixed-n-dataset-v2"
+        dataset_manifest_sha = "3" * 64
+        frame_sha = "4" * 64
+        capital_sha = "5" * 64
+        stake_sha = "6" * 64
+        horizon_sha = "7" * 64
+        members = ("proposal-run-001", "proposal-run-002", "proposal-run-003")
+        cutoff = "2026-09-01T00:00:00+00:00"
+        dataset_available = "2026-09-02T00:00:00+00:00"
+        frozen_at = "2026-09-02T12:00:00+00:00"
+        protocol_available = "2026-09-02T12:05:00+00:00"
+        outcome_reveal_after = "2026-09-10T00:00:00+00:00"
+
+        design = json.dumps(
+            {
+                "kind": "autosport-risk-fixed-n-run-membership-v2",
+                "dataset_snapshot_id": dataset_id,
+                "planned_run_ids": list(members),
+                "planned_n": len(members),
+                "sampling_frame_sha256": frame_sha,
+                "risk_method": "CLOPPER_PEARSON_ONE_SIDED",
+                "dependence_qualification": "SEPARATE_REQUIRED",
+                "confidence_level": "0.95",
+                "ruin_threshold": "0",
+                "risk_target_scope": "FROZEN_STAKE_POLICY",
+                "initial_capital_state_sha256": capital_sha,
+                "stake_policy_sha256": stake_sha,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        binding = ScientificProtocolBinding(
+            research_protocol_id=protocol_id,
+            research_question_id="proposal-risk-question",
+            research_question_sha256="c" * 64,
+            hypothesis_id="proposal-risk-hypothesis",
+            hypothesis_sha256="d" * 64,
+            inclusion_criteria="exact frozen run cohort",
+            exclusion_criteria="no post-freeze cohort edits",
+            lawful_source_requirements="canonical product evidence only",
+            causal_cutoff=cutoff,
+            evaluation_design=design,
+            feature_set_version="proposal-risk-path-v2",
+            uncertainty_method="one-sided exact Clopper-Pearson",
+            multiple_comparison_control="separate familywise authority required",
+            robustness_checks=("restart re-resolution",),
+            random_seed_policy="product randomization precommit",
+            stopping_rule="fixed N; no early stopping",
+            promotion_rule="risk evidence only; no direct promotion",
+            expected_artifacts=("target-specific risk-path observations",),
+            code_config_sha256="e" * 64,
+            frozen_at_utc=frozen_at,
+        )
+
+        RunRegistry.initialize_pristine(self.workspace / "run_registry.json")
+        registry = ScientificRegistry.initialize_pristine(
+            self.workspace / "scientific_registry.json"
+        )
+        registry.append(
+            DatasetSnapshot(
+                dataset_snapshot_id=dataset_id,
+                manifest_sha256=dataset_manifest_sha,
+                source_identity="canonical-proposal-risk-run-cohort",
+                license_identity="internal-product-evidence",
+                causal_cutoff=cutoff,
+                available_at_utc=dataset_available,
+                outcome_reveal_after=outcome_reveal_after,
+            )
+        )
+        registry.append(
+            ResearchProtocol(
+                binding=binding,
+                source_sha256="f" * 64,
+                environment_sha256="1" * 64,
+                dataset_manifest_sha256=dataset_manifest_sha,
+                available_at_utc=protocol_available,
+            )
+        )
+        membership = inspect_fixed_n_risk_membership_structure(
+            registry.path,
+            research_protocol_id=protocol_id,
+            dataset_snapshot_id=dataset_id,
+        )
+        publish_fixed_n_membership_structure(
+            registry.path,
+            workspace=self.workspace,
+            research_protocol_id=protocol_id,
+            dataset_snapshot_id=dataset_id,
+            authority_root=self.authority_root,
+        )
+        issued_randomization = issue_risk_randomization_precommit(
+            registry.path,
+            workspace=self.workspace,
+            research_protocol_id=protocol_id,
+            dataset_snapshot_id=dataset_id,
+            experiment_id="proposal-iid-risk-exp-v2",
+            authority_root=self.authority_root,
+        )
+        manifest = json.dumps(
+            {
+                "kind": "autosport-risk-iid-resample-with-replacement-v1",
+                "experiment_id": "proposal-iid-risk-exp-v2",
+                "membership_design_sha256": membership.design_sha256,
+                "membership_protocol_record_sha256": membership.protocol_record_sha256,
+                "membership_dataset_record_sha256": membership.dataset_record_sha256,
+                "membership_causal_cutoff": membership.causal_cutoff,
+                "membership_precommitted_at": membership.precommitted_at,
+                "membership_outcome_reveal_after": membership.outcome_reveal_after,
+                "research_protocol_id": membership.research_protocol_id,
+                "protocol_sha256": membership.protocol_sha256,
+                "dataset_snapshot_id": membership.dataset_snapshot_id,
+                "dataset_manifest_sha256": membership.dataset_manifest_sha256,
+                "sampling_frame_sha256": membership.sampling_frame_sha256,
+                "initial_capital_state_sha256": capital_sha,
+                "stake_policy_sha256": stake_sha,
+                "horizon_sha256": horizon_sha,
+                "sampler_kind": "IID_RESAMPLE_WITH_REPLACEMENT_V1",
+                "with_replacement": True,
+                "rng_algorithm": "PCG64",
+                "rng_version": "numpy-compatible-contract-v1",
+                "randomization_root_sha256": (
+                    issued_randomization.randomization_root_sha256
+                ),
+                "planned_n": len(members),
+                "planned_member_ids": list(members),
+                "stopping_rule": "FIXED_N_NO_EARLY_STOP",
+                "risk_scope": "SIMULATOR_DISTRIBUTION_ONLY",
+                "randomization_authority": "PRODUCT_PRECOMMIT_REQUIRED",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return membership, registry.path, manifest
+
+    def test_product_issues_and_reresolves_target_science_join_without_result_authority(
+        self,
+    ) -> None:
+        membership, registry_path, manifest = self._science_state()
+        target = self._issue()
+
+        joined = issue_product_proposal_risk_evaluation_precommit(
+            self.workspace,
+            target_sha256=target.target_sha256,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            authority_root=self.authority_root,
+        )
+
+        self.assertIs(type(joined), ProductProposalRiskEvaluationPrecommit)
+        self.assertTrue(joined.binding_identity_proven)
+        self.assertTrue(joined.proposal_target_identity_proven)
+        self.assertTrue(joined.scientific_precommit_proven)
+        self.assertTrue(joined.scientific_preoutcome_chronology_proven)
+        self.assertTrue(joined.proposal_target_bound_after_scientific_precommit)
+        self.assertFalse(joined.scientific_precommit_proves_proposal_execution_scope)
+        self.assertFalse(joined.proposal_target_counterfactual_execution_proven)
+        self.assertFalse(joined.risk_upper_bound_for_target)
+        self.assertFalse(joined.grants_ticket_authority)
+        self.assertFalse(joined.grants_real_money_authority)
+        self.assertEqual(joined.target_sha256, target.target_sha256)
+        self.assertEqual(joined.target_decision_ts, self.DECISION_TS)
+        self.assertEqual(
+            joined.membership_protocol_record_sha256,
+            membership.protocol_record_sha256,
+        )
+        self.assertEqual(
+            joined.membership_dataset_record_sha256,
+            membership.dataset_record_sha256,
+        )
+        self.assertEqual(
+            joined.membership_precommitted_at,
+            membership.precommitted_at,
+        )
+        self.assertEqual(
+            joined.membership_outcome_reveal_after,
+            membership.outcome_reveal_after,
+        )
+        self.assertEqual(
+            joined.scientific_risk_target_scope,
+            "FROZEN_STAKE_POLICY",
+        )
+        self.assertEqual(joined.scientific_stake_policy_sha256, "6" * 64)
+        self.assertEqual(
+            joined.scientific_initial_capital_state_sha256,
+            "5" * 64,
+        )
+        self.assertEqual(
+            joined.proposal_evaluation_scope,
+            "EXACT_PROPOSAL_TARGET_FIXED_STAKE_VECTOR_COUNTERFACTUAL_V1",
+        )
+
+        # This proposal is intentionally later than the historical cohort reveal.
+        # That is lawful for a newly bound counterfactual target; it must not be
+        # relabeled as evidence that the target was already executed on that cohort.
+        self.assertGreater(
+            joined.target_decision_ts,
+            joined.membership_outcome_reveal_after,
+        )
+
+        resolved = resolve_product_proposal_risk_evaluation_precommit(
+            self.workspace,
+            binding_sha256=joined.binding_sha256,
+            target_sha256=target.target_sha256,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            authority_root=self.authority_root,
+        )
+        self.assertEqual(resolved, joined)
+
+        retried = issue_product_proposal_risk_evaluation_precommit(
+            self.workspace,
+            target_sha256=target.target_sha256,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            authority_root=self.authority_root,
+        )
+        self.assertEqual(retried, joined)
+
+        records = JsonlDecisionLedger(
+            self.workspace / "decisions.jsonl"
+        ).verified_records()
+        join_records = [
+            record
+            for record in records
+            if record.action == "PROPOSAL_RISK_EVALUATION_PRECOMMIT"
+        ]
+        self.assertEqual(len(join_records), 1)
+        payload = join_records[0].payload
+        self.assertNotIn("upper_bound", payload)
+        self.assertNotIn("ruin_count", payload)
+        self.assertNotIn("result_sha256", payload)
+        self.assertIs(payload["scientific_preoutcome_chronology_proven"], True)
+        self.assertIs(
+            payload["proposal_target_bound_after_scientific_precommit"],
+            True,
+        )
+        self.assertIs(
+            payload["scientific_precommit_proves_proposal_execution_scope"],
+            False,
+        )
+        self.assertIs(payload["proposal_target_counterfactual_execution_proven"], False)
+        self.assertIs(payload["risk_upper_bound_for_target"], False)
+
+    def test_deleted_join_record_cannot_be_recreated_from_target_and_science(self) -> None:
+        membership, registry_path, manifest = self._science_state()
+        target = self._issue()
+        joined = issue_product_proposal_risk_evaluation_precommit(
+            self.workspace,
+            target_sha256=target.target_sha256,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            authority_root=self.authority_root,
+        )
+
+        ledger_path = self.workspace / "decisions.jsonl"
+        lines = ledger_path.read_bytes().splitlines(keepends=True)
+        self.assertGreaterEqual(len(lines), 2)
+        ledger_path.write_bytes(b"".join(lines[:-1]))
+
+        with self.assertRaisesRegex(
+            ProductProposalRiskEvaluationPrecommitError,
+            "missing from the canonical Decision Ledger",
+        ):
+            resolve_product_proposal_risk_evaluation_precommit(
+                self.workspace,
+                binding_sha256=joined.binding_sha256,
+                target_sha256=target.target_sha256,
+                membership=membership,
+                registry_path=registry_path,
+                sampling_manifest_json=manifest,
+                authority_root=self.authority_root,
+            )
+
+    def test_scientific_registry_tamper_invalidates_join_after_restart(self) -> None:
+        membership, registry_path, manifest = self._science_state()
+        target = self._issue()
+        joined = issue_product_proposal_risk_evaluation_precommit(
+            self.workspace,
+            target_sha256=target.target_sha256,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            authority_root=self.authority_root,
+        )
+
+        registry_path.write_text("{}", encoding="utf-8")
+
+        with self.assertRaises(ProductProposalRiskEvaluationPrecommitError):
+            resolve_product_proposal_risk_evaluation_precommit(
+                self.workspace,
+                binding_sha256=joined.binding_sha256,
+                target_sha256=target.target_sha256,
+                membership=membership,
+                registry_path=registry_path,
+                sampling_manifest_json=manifest,
+                authority_root=self.authority_root,
+            )
+
     def test_native_path_workspace_is_accepted_without_subclass_widening(self) -> None:
         self.assertIs(type(self.workspace), proposal_target_authority._PATH_TYPE)
         self.assertEqual(
@@ -231,8 +554,16 @@ class ProductProposalRiskTargetTests(unittest.TestCase):
         self.assertEqual(issued.bankroll_id, self.goal.bankroll_id)
         self.assertEqual(issued.currency, self.goal.currency)
         self.assertEqual(len(issued.candidate_sha256s), 2)
+        self.assertEqual(issued.candidate_contexts, self._contexts())
         self.assertEqual(len(issued.evaluated_stakes), 2)
         self.assertTrue(any(stake > 0 for stake in issued.evaluated_stakes))
+        self.assertTrue(
+            all(
+                context.risk_of_ruin_upper_bound is None
+                and context.risk_of_ruin_evidence is None
+                for context in issued.candidate_contexts
+            )
+        )
 
         resolved = resolve_product_proposal_risk_target(
             self.workspace, issued.target_sha256

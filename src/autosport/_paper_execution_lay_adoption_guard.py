@@ -671,6 +671,10 @@ def _execute_unlocked(
         suspended_action_ids=suspended_action_ids,
     )
     self._require_minted(prepared)
+    decision_id = _exact_text(
+        prepared.execution_plan.decision_id,
+        "prepared decision_id",
+    )
     if run.run_id != expected_run_id:
         raise PaperExecutionAdoptionError(
             "canonical execution returned unexpected run identity"
@@ -704,8 +708,12 @@ def _execute_unlocked(
     _preflight_materialization_batch(
         self,
         accepted_attempts,
-        decision_id=prepared.execution_plan.decision_id,
+        decision_id=decision_id,
     )
+    # Detached preflight executes domain callbacks. Re-prove the complete minted
+    # authority before the first live economic mutation and retain the pinned
+    # post-run decision identity for all ticket provenance.
+    self._require_minted(prepared)
 
     ticket_ids: list[str] = []
     materialization_book = self.book
@@ -718,7 +726,7 @@ def _execute_unlocked(
                 attempt=attempt,
                 action=action,
                 binding=binding,
-                decision_id=prepared.execution_plan.decision_id,
+                decision_id=decision_id,
             )
             ticket_ids.append(ticket.ticket_id)
 

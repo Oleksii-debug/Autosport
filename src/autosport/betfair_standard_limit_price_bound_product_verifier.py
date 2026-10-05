@@ -35,6 +35,7 @@ def _build_product_entrypoint():
     )
     canonical_require_runtime_code = canonical_require_runtime.__code__
     canonical_profile_type = _runtime_profile.TrustedRuntimeCodeProfile
+    canonical_profile_workspace = canonical_profile_type.workspace
     canonical_profile_error = _runtime_profile.TrustedRuntimeCodeProfileError
     profile_field_descriptors = tuple(
         (name, getattr(canonical_profile_type, name))
@@ -68,6 +69,7 @@ def _build_product_entrypoint():
             is canonical_require_runtime
             and canonical_require_runtime.__code__ is canonical_require_runtime_code
             and _runtime_profile.TrustedRuntimeCodeProfile is canonical_profile_type
+            and canonical_profile_type.workspace is canonical_profile_workspace
             and _runtime_profile.TrustedRuntimeCodeProfileError is canonical_profile_error
             and all(
                 getattr(canonical_profile_type, name, None) is descriptor
@@ -132,13 +134,22 @@ def _build_product_entrypoint():
         """
 
         profile = require_runtime(runtime_profile)
+        if not authority_graph_unchanged():
+            raise BetfairStandardLimitPriceBoundError(
+                "canonical Betfair product verifier authority changed"
+            )
+        profile_workspace = object.__getattribute__(profile, "workspace")
+        if type(profile_workspace) is not str:
+            raise BetfairStandardLimitPriceBoundError(
+                "canonical product runtime workspace is invalid"
+            )
         try:
-            workspace = path_factory(profile.workspace).resolve(strict=False)
+            workspace = path_factory(profile_workspace).resolve(strict=False)
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             raise BetfairStandardLimitPriceBoundError(
                 "canonical product runtime workspace is invalid"
             ) from exc
-        if str(workspace) != profile.workspace:
+        if str(workspace) != profile_workspace:
             raise BetfairStandardLimitPriceBoundError(
                 "canonical product runtime workspace is invalid"
             )

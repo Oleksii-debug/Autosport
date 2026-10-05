@@ -17,7 +17,9 @@ _TICKET_STATUS_TYPE = TicketStatus
 _LOCALCONTEXT = localcontext
 
 _ORIGINAL_LOCKED_CAPITAL = locked_capital_for_exchange_side
+_ORIGINAL_LOCKED_CAPITAL_CODE = _ORIGINAL_LOCKED_CAPITAL.__code__
 _ORIGINAL_DECIMAL_RESOURCE_BOUND = _validate_decimal_text_resource_bound
+_ORIGINAL_DECIMAL_RESOURCE_BOUND_CODE = _ORIGINAL_DECIMAL_RESOURCE_BOUND.__code__
 
 _ORIGINAL_OPEN_TICKET = _paper.PaperBook.open_ticket
 _ORIGINAL_SETTLE = _paper.PaperBook.settle
@@ -56,12 +58,16 @@ def _require_exact_decimal(value: object, label: str) -> Decimal:
         raise ValueError(f"PaperBook {label} must be an exact Decimal")
     if not value.is_finite():
         raise ValueError(f"PaperBook snapshot contains non-finite {label}")
+    if _ORIGINAL_DECIMAL_RESOURCE_BOUND.__code__ is not _ORIGINAL_DECIMAL_RESOURCE_BOUND_CODE:
+        raise ValueError("PaperBook canonical Decimal resource authority changed")
     try:
         _ORIGINAL_DECIMAL_RESOURCE_BOUND(value)
     except ValueError as exc:
         raise ValueError(
             f"PaperBook {label} exceeds canonical Decimal resource bounds"
         ) from exc
+    if _ORIGINAL_DECIMAL_RESOURCE_BOUND.__code__ is not _ORIGINAL_DECIMAL_RESOURCE_BOUND_CODE:
+        raise ValueError("PaperBook canonical Decimal resource authority changed")
     return value
 
 
@@ -270,11 +276,16 @@ def _require_supported_ticket_shape(ticket: PaperTicket) -> None:
 def _locked_capital_for_ticket(ticket: PaperTicket) -> Decimal:
     _require_supported_ticket_shape(ticket)
     if len(ticket.legs) == 1 and _is_lay_leg(ticket.legs[0]):
-        return _ORIGINAL_LOCKED_CAPITAL(
+        if _ORIGINAL_LOCKED_CAPITAL.__code__ is not _ORIGINAL_LOCKED_CAPITAL_CODE:
+            raise ValueError("PaperBook canonical LAY liability authority changed")
+        locked_capital = _ORIGINAL_LOCKED_CAPITAL(
             stake=ticket.stake,
             odds=ticket.legs[0].locked_odds,
             exchange_side="LAY",
         )
+        if _ORIGINAL_LOCKED_CAPITAL.__code__ is not _ORIGINAL_LOCKED_CAPITAL_CODE:
+            raise ValueError("PaperBook canonical LAY liability authority changed")
+        return locked_capital
     return ticket.stake
 
 
@@ -384,11 +395,15 @@ def _open_ticket_unlocked(
     amount = _canonical_open_stake(self, stake)
     if amount <= 0:
         raise ValueError("stake must be positive")
+    if _ORIGINAL_LOCKED_CAPITAL.__code__ is not _ORIGINAL_LOCKED_CAPITAL_CODE:
+        raise ValueError("PaperBook canonical LAY liability authority changed")
     locked_capital = _ORIGINAL_LOCKED_CAPITAL(
         stake=amount,
         odds=leg.locked_odds,
         exchange_side="LAY",
     )
+    if _ORIGINAL_LOCKED_CAPITAL.__code__ is not _ORIGINAL_LOCKED_CAPITAL_CODE:
+        raise ValueError("PaperBook canonical LAY liability authority changed")
     new_balance = _ORIGINAL_DEBIT_BALANCE(_paper.PaperBook, self.balance, locked_capital)
 
     ticket_placed_at = _validate_exact_timestamp(
